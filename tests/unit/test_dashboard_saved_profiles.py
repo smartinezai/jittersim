@@ -148,6 +148,7 @@ def program(body):
 
     return (
         BASE_PRELUDE
+        + script_between("function profileOptionLabels(", "function renderConnectedDevices(")
         + script_between("const privateDataPanelIds =", "function setDashboardUnlocked(")
         + script_between("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
         + script_between("function optionalNumber(", "function timeToMinute(")

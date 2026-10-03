@@ -259,7 +259,7 @@ const impairmentHelp = {
   delay:'Adds this much waiting time in this direction. 100 ms upload plus 100 ms download adds roughly 200 ms to a round trip. 0 adds no delay.',
   jitter:'Varies the waiting time from packet to packet. 20 ms produces an uneven connection. 0 keeps the delay steady. This differs from periodically rerolling the profile.',
   loss:'Drops this percentage of packets on average. 1% loses about 1 in 100 packets. 0 loses none and 100% prevents traffic in this direction.',
-  bandwidth:'Limits speed in this direction. 1000 kbit/s is 1 Mbit/s. Leave blank for no JitterSim speed limit. Real network speed can still be lower.',
+  bandwidth:'Limits speed in this direction. 1000 kbit/s is 1 Mbit/s. Leave blank for no speed limit from the Pi. Real network speed can still be lower.',
   reorder:'Lets this percentage of packets arrive out of order when delay is present. It can exercise recovery in an app. 0 keeps packets in order.',
   duplicate:'Sends an extra copy of this percentage of packets. 0 sends no duplicates.',
   corrupt:'Changes data in this percentage of packets. Receivers may discard damaged packets. 0 leaves the contents unchanged.'

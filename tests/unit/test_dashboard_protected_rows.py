@@ -33,7 +33,7 @@ ENABLED = {
     "disableApply": False,
     "disableGroupSelect": False,
     "disableGroupButton": False,
-    "protectionLabel": "Make unaffected",
+    "protectionLabel": "Protect",
 }
 
 CASES = {
@@ -48,7 +48,7 @@ CASES = {
             "disableApply": True,
             "disableGroupSelect": True,
             "disableGroupButton": True,
-            "protectionLabel": "Remove protection",
+            "protectionLabel": "Stop protecting",
         },
     ),
     "normal_row_is_unchanged_and_nothing_is_disabled": (NORMAL, CONTEXT, ENABLED),
@@ -125,7 +125,7 @@ CASES = {
             "disableApply": True,
             "disableGroupSelect": True,
             "disableGroupButton": True,
-            "protectionLabel": "Remove protection",
+            "protectionLabel": "Stop protecting",
         },
     ),
     "protected_row_without_an_address_still_looks_protected": (
@@ -139,7 +139,7 @@ CASES = {
             "disableApply": True,
             "disableGroupSelect": True,
             "disableGroupButton": True,
-            "protectionLabel": "Remove protection",
+            "protectionLabel": "Stop protecting",
         },
     ),
     "protected_row_stays_disabled_whatever_the_context_says": (
@@ -153,7 +153,7 @@ CASES = {
             "disableApply": True,
             "disableGroupSelect": True,
             "disableGroupButton": True,
-            "protectionLabel": "Remove protection",
+            "protectionLabel": "Stop protecting",
         },
     ),
 }

@@ -10,7 +10,7 @@ from jittersim.config.storage import ConfigRepository
 from jittersim.networking.helper import HelperClientError
 from tests.unit.test_api import FakeHelper
 
-RESET_MESSAGE = "Network is reset. Choose Start with saved settings to start impact checks."
+RESET_MESSAGE = "Network is reset. Choose Start to start impact checks."
 NO_HELPER_MESSAGE = "Impact needs the Pi helper."
 OUT_OF_DATE_MESSAGE = "The networking helper is out of date. Update it to see the impact check."
 UNREADABLE_MESSAGE = "Impact could not be read right now."
@@ -110,7 +110,7 @@ class ImpactApiTests(unittest.TestCase):
             [
                 ("lab", "Sam's phone", "Device"),
                 ("lab", "Sam's phone", "Device"),
-                ("general-profile", "General profile", "General profile"),
+                ("general-profile", "Everyone", "Everyone"),
                 ("quota:video-cap", "Service quota video-cap", "Service quota"),
                 ("assignment:browse-1", "Browser service profile browse-1", "Browser service profile"),
                 ("servicelist:streaming", "Service list Streaming", "Service list"),
@@ -300,7 +300,7 @@ class ImpactApiTests(unittest.TestCase):
             )
 
         self.assertEqual(name("lab"), ("Sam's phone", "Device"))
-        self.assertEqual(name("general-profile"), ("General profile", "General profile"))
+        self.assertEqual(name("general-profile"), ("Everyone", "Everyone"))
         self.assertEqual(name("quota:q1"), ("Service quota q1", "Service quota"))
         self.assertEqual(name("assignment:a1"), ("Browser service profile a1", "Browser service profile"))
         self.assertEqual(name("servicelist:streaming"), ("Service list Streaming", "Service list"))

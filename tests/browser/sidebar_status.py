@@ -8,7 +8,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
-from tests.browser.phone import is_phone, open_status, sidebar_control
+from tests.browser.phone import close_controls, is_phone, open_controls, open_status, sidebar_control
 
 MAC_ADDRESS = "02:00:00:00:00:01"
 CLIENT_NAME = "Fixture laptop"
@@ -55,12 +55,104 @@ def wait_for_automatic_token_check(page):
     show_status(page)
 
 
+def check_one_message(page, width, height):
+    """A result is said once: in the toast, which is small, in a corner and leaves on its own."""
+
+    toast = page.locator("#toast")
+    expect(toast).to_be_visible()
+    expect(toast).to_contain_text("Token accepted")
+    # The message line keeps the text for scripts but shows nothing and says nothing.
+    expect(page.locator("#message")).to_be_hidden()
+    assert page.locator("#message").get_attribute("aria-hidden") == "true"
+    announcing = page.evaluate(
+        """() => [...document.querySelectorAll(
+          '[role="status"], [role="alert"], [aria-live="polite"], [aria-live="assertive"]')]
+          .filter((node) => !node.closest('[hidden]') && node.getAttribute('aria-hidden') !== 'true'
+                  && node.textContent.includes('Token accepted')).map((node) => node.id)"""
+    )
+    assert announcing == ["action-announcer"], announcing
+    box = toast.bounding_box()
+    assert box["width"] <= 22 * 16 + 1, box
+    assert box["x"] >= 0 and box["y"] >= 0 and box["x"] + box["width"] <= width, box
+    if not is_phone(page):
+        assert height - (box["y"] + box["height"]) <= 17, box
+    expect(toast.get_by_role("button", name="Dismiss message")).to_be_visible()
+    expect(toast).to_be_hidden(timeout=9000)
+
+    # A result must not hide the control currently being used by keyboard.
+    page.evaluate("showToast('Keyboard notification check', 'success')")
+    dismiss = toast.get_by_role("button", name="Dismiss message")
+    dismiss.focus()
+    page.wait_for_timeout(6500)
+    expect(toast).to_be_visible()
+    expect(dismiss).to_be_focused()
+    page.locator("#page-devices").focus()
+    page.mouse.move(0, 0)
+    expect(toast).to_be_hidden(timeout=9000)
+    expect(page.locator("#page-devices")).to_be_focused()
+
+    page.evaluate("document.activeElement.blur(); showToast('Automatic sign-in result', 'success')")
+    dismiss.focus()
+    page.keyboard.press("Enter")
+    expect(toast).to_be_hidden()
+    expect(page.locator("#brand-title")).to_be_focused()
+
+    # Deliberate keyboard dismissal returns to a usable target even if the source disappears.
+    for unavailable in (None, "hidden", "removed"):
+        page.evaluate("""(unavailable) => {
+          const source = document.createElement('button');
+          source.id = 'notification-source'; source.textContent = 'Source';
+          document.body.appendChild(source); source.focus();
+          showToast('Persistent recovery hint', 'error');
+          if (unavailable === 'hidden') source.hidden = true;
+          if (unavailable === 'removed') source.remove();
+        }""", unavailable)
+        dismiss.focus()
+        page.wait_for_timeout(16000 if unavailable is None else 50)
+        expect(toast).to_be_visible()
+        page.keyboard.press("Enter")
+        expect(toast).to_be_hidden()
+        expect(page.locator("#notification-source" if unavailable is None else "#brand-title")).to_be_focused()
+        page.evaluate("document.getElementById('notification-source')?.remove()")
+
+    if is_phone(page):
+        page.evaluate("showToast('Persistent recovery message', 'error')")
+        open_controls(page)
+        expect(toast).to_be_hidden()
+        hidden_dismiss = page.locator('#toast-dismiss')
+        hidden_dismiss.evaluate("node => node.focus()")
+        assert not hidden_dismiss.evaluate("node => node === document.activeElement")
+        expect(page.locator('#action-announcer')).to_have_text('Persistent recovery message')
+        close_controls(page)
+        expect(toast).to_be_visible()
+        expect(toast).to_contain_text('Persistent recovery message')
+        page.evaluate("showToast('Recovery instructions. '.repeat(200), 'error')")
+        message = page.locator("#toast-message")
+        assert message.evaluate("node => node.scrollHeight > node.clientHeight")
+        expect(dismiss).to_be_visible()
+        rect = message.bounding_box()
+        session = page.context.new_cdp_session(page)
+        start_y, end_y = rect["y"] + rect["height"] - 12, rect["y"] + 12
+        touch = {"x": rect["x"] + rect["width"] / 2, "y": start_y}
+        session.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [touch]})
+        for step in range(1, 6):
+            touch["y"] = start_y + (end_y - start_y) * step / 5
+            session.send("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [touch]})
+            page.wait_for_timeout(20)
+        session.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        page.wait_for_function("document.getElementById('toast-message').scrollTop > 0")
+        session.detach()
+        page.screenshot(path=f"test-results/sidebar-long-recovery-{width}.png")
+        dismiss.click()
+        expect(toast).to_be_hidden()
+
+
 def check_width(browser, width, height):
     # a fresh fixture for each width so that each run starts before the first Apply
     process, port = start_fixture()
     try:
         base = f"http://127.0.0.1:{port}"
-        context = browser.new_context(viewport={"width": width, "height": height})
+        context = browser.new_context(viewport={"width": width, "height": height}, has_touch=width < 769)
         page = context.new_page()
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
@@ -100,10 +192,11 @@ def check_width(browser, width, height):
         )
         page.reload()
         wait_for_automatic_token_check(page)
+        check_one_message(page, width, height)
 
         # signed in with nothing applied yet
         expect(status).to_be_visible()
-        expect(page.locator("#status-general")).to_have_text("General profile: none")
+        expect(page.locator("#status-general")).to_have_text("Everyone: none")
         expect(devices_line(page)).to_have_text("Not running")
         expect(page.locator("#status-lists")).to_be_hidden()
         # nothing to open when there is no list of devices
@@ -117,7 +210,7 @@ def check_width(browser, width, height):
         page.locator("#general-profile-select").select_option("slow")
         page.locator("#general-profile-apply").click()
         expect(page.locator("#status-general")).to_have_text(
-            f"General profile: {PROFILE_NAME} · active"
+            f"Everyone: {PROFILE_NAME} · active"
         )
         expect(devices_line(page)).to_have_text("1 device affected")
         page.locator("#status-devices-summary").click()
@@ -167,7 +260,7 @@ def check_width(browser, width, height):
         wait_for_automatic_token_check(page)
         expect(page.locator("#general-profile-status")).to_contain_text("Saved: " + PROFILE_NAME)
         expect(page.locator("#status-general")).to_have_text(
-            f"General profile: {PROFILE_NAME} · active"
+            f"Everyone: {PROFILE_NAME} · active"
         )
         expect(devices_line(page)).to_have_text("1 device affected")
         page.unroute("**/api/state", state_route)
@@ -188,20 +281,20 @@ def check_width(browser, width, height):
         post("/api/reset", {})
         expect(devices_line(page)).to_have_text("Profiles off", timeout=9000)
         expect(page.locator("#status-general")).to_have_text(
-            f"General profile: {PROFILE_NAME} · paused"
+            f"Everyone: {PROFILE_NAME} · paused"
         )
         expect(page.locator("#status-lists")).to_be_hidden()
         post("/api/apply", {})
         expect(devices_line(page)).to_have_text("No connected device is affected", timeout=9000)
         expect(page.locator("#status-general")).to_have_text(
-            f"General profile: {PROFILE_NAME} · active"
+            f"Everyone: {PROFILE_NAME} · active"
         )
 
         # turning every profile off
         page.locator("#panic-button").click()
         expect(devices_line(page)).to_have_text("Profiles off")
         expect(page.locator("#status-general")).to_have_text(
-            f"General profile: {PROFILE_NAME} · paused"
+            f"Everyone: {PROFILE_NAME} · paused"
         )
         page.reload()
         wait_for_automatic_token_check(page)

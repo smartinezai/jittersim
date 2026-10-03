@@ -105,7 +105,9 @@ def test_the_controls_toggle_sits_at_the_end_of_the_bar():
 def test_the_page_and_its_messages_keep_clear_of_the_bar():
     assert "var(--phone-bar-height)" in phone(".content")["padding"]
     assert "var(--phone-bar-height)" in phone("html")["scroll-padding-bottom"]
-    assert phone(".toast")["bottom"] == "auto" and "0.75rem" in phone(".toast")["top"]
+    assert phone(".toast")["top"] == "auto"
+    assert "--phone-bar-height" in phone(".toast")["bottom"]
+    assert phone(".toast")["width"] == "min(22rem, calc(100vw - 1.5rem))"
     tip = phone(".sidebar .sidebar-action-row .help-icon::after")
     assert tip["bottom"] == "calc(var(--phone-bar-height) + 0.75rem)"
     narrow = re.search(r"@media \(max-width: 700px\) \{([^@]*?)\n\}", CSS).group(1)
@@ -362,9 +364,9 @@ def test_smooth_scrolling_only_without_reduced_motion():
 
 @NEEDS_NODE
 @pytest.mark.parametrize("general,devices,expected", [
-    ("General profile: Slow · active", "1 device affected", "General: Slow · active · 1 device affected"),
-    ("General profile: none", "Not running", "General: none · Not running"),
-    ("General profile: none", "", "General: none"),
+    ("Everyone: Slow · active", "1 device affected", "Everyone: Slow · active · 1 device affected"),
+    ("Everyone: none", "Not running", "Everyone: none · Not running"),
+    ("Everyone: none", "", "Everyone: none"),
     ("", "Profiles off", "Profiles off"),
 ])
 def test_the_status_strip_is_one_line_of_the_status(general, devices, expected):
@@ -468,7 +470,7 @@ def test_the_strip_follows_the_status_block():
     result = run_node(
         "const seen = [];\n"
         "syncStatusStrip(); seen.push([statusStrip.hidden, stripText.textContent]);\n"
-        "statusBlock.hidden = false; general.textContent = 'General profile: Slow · active';\n"
+        "statusBlock.hidden = false; general.textContent = 'Everyone: Slow · active';\n"
         "general.classes.add('status-on'); plain.hidden = true; summary.textContent = '2 devices affected';\n"
         "syncStatusStrip();\n"
         "seen.push([statusStrip.hidden, stripText.textContent, statusStrip.classes.has('status-on')]);\n"
@@ -480,7 +482,7 @@ def test_the_strip_follows_the_status_block():
     )
     assert result == [
         [True, ""],
-        [False, "General: Slow · active · 2 devices affected", True],
+        [False, "Everyone: Slow · active · 2 devices affected", True],
         "true",
         [True, "false", False],
     ]

@@ -3,6 +3,7 @@
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -15,8 +16,11 @@ def served_functions():
     def block(start, end):
         return script[script.index(start) : script.index(end, script.index(start))]
 
+    reconnect = Path(__file__).resolve().parents[2] / "src/jittersim/api/reconnect.js"
     return (
-        block("const privateDataPanelIds =", "function setDashboardUnlocked(")
+        reconnect.read_text() + "\n"
+        + "hideWifiBanner = () => {}; showWifiBanner = () => {}; resumeWifiChangeNotice = async () => {};\n"
+        + block("const privateDataPanelIds =", "function setDashboardUnlocked(")
         + block("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
         + block("let helperConfigured =", "let profiles =")
         + block("async function request(", "const adminTokenHelp =")
@@ -89,7 +93,10 @@ function setDashboardUnlocked() {}
 async function refresh() {refreshCalls++}
 async function loadTrafficSettings() {}
 async function startTrafficSampling() {}
-async function fetch(path, options) {networkCalls.push({path, options}); return await network()}
+async function fetch(path, options) {
+  if (path === "/api/wifi-operation/request-id") return {ok:true,json:async()=>({request_id:"fixture-request"})};
+  networkCalls.push({path, options}); return await network();
+}
 function deferred() {
   let resolve;
   const promise = new Promise(done => {resolve = done});
@@ -113,8 +120,8 @@ function rememberNote(kind) {
   return element(kind === "admin" ? "remember-admin-token-note" : "remember-router-password-note")
     .textContent;
 }
-function untilNote(expires) {
-  return "Remembered until " + rememberedUntil(expires) + ".";
+function untilNote(expires, long) {
+  return "Remembered until " + rememberedUntil(expires, long) + ".";
 }
 function savedEntry(key) {
   return JSON.parse(storage.get(key));
@@ -123,6 +130,37 @@ function savedEntry(key) {
 
 
 CASES = {
+    "old_router_failure_keeps_new_credential_status": r"""
+      helperConfigured = true;
+      enter("admin-token", "fixture token");
+      adminTokenVerified = true;
+      enter("router-admin-password", "fixture password");
+      const pending = deferred(); network = () => pending.promise;
+      const running = routerAction("/api/router/wifi", {enabled:true}, "Changing", element("router-wifi-toggle"));
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(networkCalls.length, 1);
+      enter("router-admin-password", "replacement password");
+      element("router-action-message").textContent = "New action state";
+      element("credential-router-status").textContent = "New credential state";
+      pending.resolve({ok:false,status:502,json:async()=>({error:"old failure"})});
+      await running;
+      assert.equal(element("router-action-message").textContent, "New action state");
+      assert.equal(element("credential-router-status").textContent, "New credential state");
+      assert.equal(routerWifiError, "");
+      assert.equal(routerActionPending, false);
+    """,
+    "lost_diagnostics_keeps_token_and_does_not_reject_it": r"""
+      enter("admin-token", "fixture token");
+      await checkAdminToken();
+      tick("remember-admin-token", true);
+      recheckTokenWhenPiAnswers = () => {};
+      toolResult = {ok:false,message:LOST_CONNECTION_TEXT,connectionLost:true};
+      await checkAdminToken();
+      assert.equal(adminTokenRejected, false);
+      assert.equal(adminTokenVerified, false);
+      assert.equal(element("admin-token").value, "fixture token");
+      assert.equal(savedEntry(ADMIN_KEY).value, "fixture token");
+    """,
     "router_switch_tracks_confirmed_state_and_expires": r"""
       helperConfigured = true;
       enter("admin-token", "fixture token");
@@ -252,6 +290,7 @@ CASES = {
       for (const id of ["sync-router-ap", "router-wifi-toggle"])
         assert.equal(element(id).disabled, true);
       await routerAction("/api/router/wifi", {enabled:true}, "Enabling", element("router-wifi-toggle"));
+      await new Promise(resolve => setImmediate(resolve));
       assert.equal(networkCalls.length, 1);
       enter("router-admin-password", "");
       enter("router-admin-password", "fixture password");
@@ -283,7 +322,7 @@ CASES = {
       assert.equal(networkCalls[0].options.method, "POST");
       assert.equal(networkCalls[0].options.headers.Authorization, "Bearer fixture token");
       assert.deepEqual(
-        JSON.parse(networkCalls[0].options.body), {admin_password:"fixture password", background:true});
+        JSON.parse(networkCalls[0].options.body), {admin_password:"fixture password", background:true, request_id:"fixture-request"});
       assert.equal(element("router-credential-state").textContent, "Accepted");
       assert.equal(element("router-credential-state").className, "credential-state accepted");
       assert.match(element("credential-router-status").textContent, /accepted.*nothing.*changed/i);
@@ -639,6 +678,99 @@ CASES = {
       assert.deepEqual(savedEntry(ADMIN_KEY), {value: "fixture token", expires: clock + DAY});
       assert.equal(rememberNote("admin"), untilNote(clock + DAY));
     """,
+    "the_token_can_be_remembered_for_7_or_30_days_and_the_choice_stays_in_this_browser": r"""
+      const CHOICE_KEY = "jittersim.remembered.duration";
+      element("remember-admin-duration").value = "168";
+      element("remember-admin-duration").dispatchEvent(new Event("change"));
+      assert.equal(storage.get(CHOICE_KEY), "168");
+      assert.equal(storage.has(ADMIN_KEY), false);  // nothing is saved until a token is ticked
+      tick("remember-admin-token", true);
+      assert.match(element("remember-admin-token-note").textContent, /for 7 days once accepted/);
+      enter("admin-token", "fixture token");
+      await clickCheckToken();
+      assert.deepEqual(
+        savedEntry(ADMIN_KEY), {value: "fixture token", expires: clock + 7 * DAY, hours: 168});
+      // A remembered token starts its new time now when the choice changes.
+      clock += DAY;
+      element("remember-admin-duration").value = "720";
+      element("remember-admin-duration").dispatchEvent(new Event("change"));
+      assert.equal(storage.get(CHOICE_KEY), "720");
+      assert.deepEqual(
+        savedEntry(ADMIN_KEY), {value: "fixture token", expires: clock + 30 * DAY, hours: 720});
+      // Back to 24 hours: the entry has the shape every earlier version saved.
+      element("remember-admin-duration").value = "24";
+      element("remember-admin-duration").dispatchEvent(new Event("change"));
+      assert.deepEqual(savedEntry(ADMIN_KEY), {value: "fixture token", expires: clock + DAY});
+      // The router password stays at 24 hours whatever the token uses.
+      element("remember-admin-duration").value = "720";
+      tick("remember-router-password", true);
+      enter("router-admin-password", "fixture password");
+      network = async () => ({ok: true, json: async () => ({result: {ok: true}})});
+      await checkRouterPassword();
+      assert.deepEqual(savedEntry(ROUTER_KEY), {value: "fixture password", expires: clock + DAY});
+    """,
+    "a_page_start_shows_the_saved_hours_or_the_last_choice_and_the_note_names_them": r"""
+      const CHOICE_KEY = "jittersim.remembered.duration";
+      storage.set(CHOICE_KEY, "168");
+      await restoreRememberedCredentials();
+      assert.equal(element("remember-admin-duration").value, "168");
+      const ends = clock + 3 * DAY;
+      storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: ends, hours: 720}));
+      await restoreRememberedCredentials();
+      assert.equal(element("remember-admin-duration").value, "720");
+      assert.equal(rememberNote("admin"), untilNote(ends, true));
+      clock = ends;
+      syncRememberedCredentials();
+      assert.equal(storage.has(ADMIN_KEY), false);
+      assert.equal(rememberNote("admin"), "Forgot the saved token after 30 days.");
+      // A choice that is not on the list falls back to 24 hours.
+      element("remember-admin-duration").value = "9999";
+      tick("remember-admin-token", true);
+      assert.deepEqual(savedEntry(ADMIN_KEY), {value: "saved token", expires: clock + DAY});
+    """,
+    "a_token_that_still_needs_this_device_to_be_allowed_is_announced_and_replaces_the_working_message": r"""
+      loadDashboardAccess = async () => ({allowed: false, can_register: true});
+      enter("admin-token", "fixture token");
+      await clickCheckToken();
+      // The status line is not a live region any more, so the toast is the only announcement.
+      assert.deepEqual(messages.at(-1), {text: "Token accepted. Choose Allow this device.", kind: "info"});
+      assert.notEqual(messages.at(-1).kind, "working");
+      loadDashboardAccess = async () => ({allowed: false, can_register: false});
+      await clickCheckToken();
+      assert.match(messages.at(-1).text, /^Token accepted but device verification is pending/);
+      assert.equal(messages.at(-1).kind, "info");
+    """,
+    "a_token_remembered_for_longer_than_a_day_names_the_day_it_ends": r"""
+      const ends = clock + 3 * DAY;
+      storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: ends, hours: 168}));
+      await restoreRememberedCredentials();
+      const day = new Date(ends).toLocaleString("en-GB", {day: "numeric", month: "short"});
+      assert.ok(rememberNote("admin").includes(day), rememberNote("admin") + " should name " + day);
+      // A token kept for 24 hours still shows only the weekday and the time.
+      storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: clock + 4 * HOUR}));
+      await restoreRememberedCredentials();
+      assert.ok(!rememberNote("admin").includes(day), rememberNote("admin"));
+      assert.equal(rememberNote("admin"), untilNote(clock + 4 * HOUR));
+    """,
+    "a_shorter_choice_cuts_a_saved_token_at_once_even_before_it_is_checked_again": r"""
+      storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: clock + 20 * DAY, hours: 720}));
+      await restoreRememberedCredentials();
+      assert.equal(element("remember-admin-duration").value, "720");
+      // The person is typing another token, so the saved one is not checked again.
+      enter("admin-token", "another token");
+      element("remember-admin-duration").value = "168";
+      element("remember-admin-duration").dispatchEvent(new Event("change"));
+      assert.deepEqual(
+        savedEntry(ADMIN_KEY), {value: "saved token", expires: clock + 7 * DAY, hours: 168});
+      // Choosing a longer time never extends a token that was not checked again.
+      element("remember-admin-duration").value = "720";
+      element("remember-admin-duration").dispatchEvent(new Event("change"));
+      assert.deepEqual(
+        savedEntry(ADMIN_KEY), {value: "saved token", expires: clock + 7 * DAY, hours: 168});
+      element("remember-admin-duration").value = "24";
+      element("remember-admin-duration").dispatchEvent(new Event("change"));
+      assert.deepEqual(savedEntry(ADMIN_KEY), {value: "saved token", expires: clock + DAY});
+    """,
     "the_check_on_load_and_other_buttons_keep_the_end_time": r"""
       const ends = clock + 4 * HOUR;  // saved 20 hours ago
       storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: ends}));
@@ -828,13 +960,19 @@ def test_remember_choices_are_offered_for_both_credentials_and_start_off():
         box = re.search(rf'<input[^>]*id="remember-{name}"[^>]*>', panel).group(0)
         assert 'type="checkbox"' in box
         assert "checked" not in box
+        # The token offers 24 hours, 7 days and 30 days. The router password keeps 24 hours.
         assert re.search(
-            rf'<label[^>]*>\s*<input[^>]*id="remember-{name}"[^>]*>\s*Remember for 24 hours',
+            rf'<label[^>]*>\s*<input[^>]*id="remember-{name}"[^>]*>\s*Remember for'
+            + (r"\s*<select" if name == "admin-token" else " 24 hours"),
             panel,
         )
         note = re.search(rf'<p[^>]*id="remember-{name}-note"[^>]*>', panel).group(0)
         assert 'role="status"' in note
     assert "Kept in this page only unless you choose Remember" in panel
+    choice = re.search(r'<select[^>]*id="remember-admin-duration"[^>]*>(.*?)</select>', panel, re.DOTALL)
+    assert re.findall(r'<option value="(\d+)"( selected)?>([^<]*)</option>', choice.group(1)) == [
+        ("24", " selected", "24 hours"), ("168", "", "7 days"), ("720", "", "30 days")]
+    assert "Longer is less safe on a shared computer" in panel
 
 
 def test_remembered_credentials_are_restored_once_at_the_end_of_startup():
@@ -867,17 +1005,19 @@ function element(id) {
   return nodes.get(id);
 }
 async function request() {throw failure}
+function isConnectionLost(error) {return error.connectionLost === true}
 async function loadRandomWebsiteAnalytics() {}
 """
         + real
         + r"""
 (async () => {
   failure = Object.assign(new Error("unauthorized"), {status: 401});
-  assert.deepEqual(await loadAdminTools(), {ok: false, message: "unauthorized", status: 401});
-  failure = new Error("Failed to fetch");
+  assert.deepEqual(await loadAdminTools(), {ok: false, message: "unauthorized", status: 401, connectionLost:false});
+  failure = Object.assign(new Error("Lost connection"), {connectionLost:true});
   const network = await loadAdminTools();
   assert.equal(network.ok, false);
   assert.equal(network.status, undefined);
+  assert.equal(network.connectionLost, true);
   console.log("CASE-COMPLETE");
 })().catch(error => {console.error(error); process.exitCode = 1});
 """

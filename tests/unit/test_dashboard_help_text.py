@@ -221,7 +221,7 @@ NAME_SENTENCES = ("is what people read", "are what people read")
 # the list and the device form's Profile ID points at a profile saved on another card.
 OTHER_SENTENCES = {
     "schedule-id": ("schedule list", "list below"),
-    "device-profile": ("in parentheses after the name",),
+    "device-profile": ("share a name",),
 }
 CHARACTER_RULE = "Use only lowercase letters and digits and hyphens and underscores."
 

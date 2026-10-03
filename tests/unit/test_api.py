@@ -355,8 +355,8 @@ def local_time_zone(name: str):
 EXPECTED_PAGE_HEADINGS = {
     None: ["Credentials", "Dashboard access"],
     "page-devices": [
-        "Getting started", "General profile", "Connected clients", "Saved devices",
-        "Everyone else", "Unaffected by profiles",
+        "Getting started", "Everyone", "Connected clients", "Saved devices",
+        "Everyone else", "Protected devices",
     ],
     "page-profiles": ["Saved profiles", "Save profile", "Assign a device", "Group devices"],
     "page-schedules": [
@@ -2872,7 +2872,7 @@ class ControlServerTests(unittest.TestCase):
         # message, which says so.
         assign = DASHBOARD_HTML.split("async function applyProfileToDevice(", 1)[1]
         self.assertIn("result.message", assign.split("\n    }\n", 1)[0])
-        self.assertIn("Start with saved settings", json.loads(body)["message"])
+        self.assertIn("Start", json.loads(body)["message"])
 
     def test_profile_assignment_rejects_a_neighbor_without_verified_association(self) -> None:
         class UnverifiedHelper(FakeHelper):
@@ -3310,10 +3310,10 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(
             labels,
             [
-                "Unaffected",
+                "Protected",
                 "Saved device: Slow",
                 "Normal connection",
-                "Saved device: Slow (also on the unaffected list)",
+                "Saved device: Slow (also on the protected list)",
                 "Everyone else: 3G",
                 "Everyone else: Slow",
             ],
@@ -3536,7 +3536,7 @@ class ControlServerTests(unittest.TestCase):
 
     def test_the_step_editor_keeps_one_step_and_numbers_them(self) -> None:
         result = self._run_dashboard_functions(
-            ["scenarioStepRow", "renumberScenarioSteps"],
+            ["profileOptionLabels", "scenarioStepRow", "renumberScenarioSteps"],
             "function updateScenarioDuration() {}\n"
             "const profiles = [{id: 'slow', name: 'Slow'}];\n"
             "const node = (tag) => ({tag: tag, children: [], className: '', value: '',\n"
@@ -3580,7 +3580,7 @@ class ControlServerTests(unittest.TestCase):
 
     def test_rebuilt_profile_menus_keep_the_steps_being_edited(self) -> None:
         result = self._run_dashboard_functions(
-            ["loadProfiles", "followProfileMenus"],
+            ["profileOptionLabels", "loadProfiles", "followProfileMenus"],
             "let profiles = [];\n"
             "let profilesLoaded = false;\n"
             "function renderSidebarStatus() {}\n"
@@ -3817,14 +3817,14 @@ class ControlServerTests(unittest.TestCase):
             messages,
             [
                 "Saved.",
-                "Saved. The network is reset, so choose Start with saved settings to use it.",
+                "Saved. The network is reset, so choose Start to use it.",
                 "Saved. It takes effect when the dashboard runs in hardware mode.",
             ],
         )
 
     def test_dashboard_profile_menus_keep_the_everyone_else_choice(self) -> None:
         values = self._run_dashboard_functions(
-            ["loadProfiles", "followProfileMenus"],
+            ["profileOptionLabels", "loadProfiles", "followProfileMenus"],
             "let profiles = [];\n"
             "let profilesLoaded = false;\n"
             "function renderSidebarStatus() {}\n"
@@ -3885,8 +3885,8 @@ class ControlServerTests(unittest.TestCase):
             [
                 None,
                 [
-                    ["Everyone else", "Test Wi-Fi clients that aren't saved or unaffected"],
-                    ["Any address", "1 unaffected"],
+                    ["Everyone else", "Test Wi-Fi clients that aren't saved or protected"],
+                    ["Any address", "1 protected"],
                     ["3G", "Saved profile"],
                     ["Degraded", "upload: delay 100 ms"],
                 ],
@@ -4420,11 +4420,10 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("Shared group data limit", DASHBOARD_HTML)
         self.assertIn("/api/groups", DASHBOARD_HTML)
         self.assertIn("/api/group-data-limits", DASHBOARD_HTML)
-        self.assertIn("Start with saved settings", DASHBOARD_HTML)
+        self.assertIn("Start", DASHBOARD_HTML)
         self.assertNotIn("Apply current configuration", DASHBOARD_HTML)
         self.assertIn("Reset network", DASHBOARD_HTML)
         self.assertIn("setButtonBusy(event.submitter, true)", DASHBOARD_HTML)
-        self.assertIn("if (submitButton) setButtonBusy(submitButton, false);", DASHBOARD_HTML)
         self.assertIn("Dashboard refresh failed:", DASHBOARD_HTML)
         self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
         self.assertIn(
@@ -4432,7 +4431,7 @@ class ControlServerTests(unittest.TestCase):
             "      await checkAdminToken();\n",
             DASHBOARD_HTML,
         )
-        self.assertIn('id="toast" class="toast" role="status"', DASHBOARD_HTML)
+        self.assertIn('id="action-announcer" class="action-announcer" role="status"', DASHBOARD_HTML)
         self.assertIn(
             'element("toast-dismiss").addEventListener("click", dismissToast)',
             DASHBOARD_HTML,
@@ -5873,15 +5872,25 @@ class ControlServerTests(unittest.TestCase):
 
     def test_updates_the_local_test_access_point_without_returning_password(self) -> None:
         self.server.helper_client = FakeHelper()
+        self.server.wifi_operations.delay = 0
 
         status, _, body = self.server.write_response_for(
             "/api/access-point",
-            {"ssid": "JitterSim-Test", "password": "test-password-123"},
+            {"ssid": "JitterSim-Test", "password": "test-password-123",
+             "request_id": json.loads(self.server.response_for("/api/wifi-operation/request-id")[2])["request_id"]},
         )
 
-        self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["result"]["action"], "configure-ap")
+        # The Wi-Fi restarts after this answer, so the answer only accepts the change.
+        self.assertEqual(status, 202)
         self.assertNotIn("test-password-123", body.decode("utf-8"))
+        deadline = time.monotonic() + 5
+        while self.server.wifi_operations.busy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        _, _, stored = self.server.response_for(
+            "/api/wifi-operation", query="id=" + json.loads(body)["operation_id"])
+        operation = json.loads(stored)["operation"]
+        self.assertEqual((operation["state"], operation["ssid"]), ("succeeded", "JitterSim-Test"))
+        self.assertNotIn("test-password-123", stored.decode("utf-8"))
 
     def test_can_promote_an_observed_domain_to_a_profile_or_global_block(self) -> None:
         status, _, body = self.server.write_response_for(
@@ -6271,7 +6280,7 @@ class ControlServerTests(unittest.TestCase):
         self,
     ) -> None:
         # The success message tells the user to start again after Reset or Panic. The scheduler
-        # is paused then and a saved change waits for the Start with saved settings button.
+        # is paused then and a saved change waits for the Start button.
         helper, scheduler = self._scheduled_server()
 
         self.server.write_response_for(
@@ -6295,7 +6304,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(len(helper.plans), applied)
 
     def test_an_active_scheduler_applies_a_removed_block_on_its_next_tick(self) -> None:
-        # The success message says a change applies on its own while JitterSim is running.
+        # The success message says a change applies on its own while profiles are running.
         helper, scheduler = self._scheduled_server()
         blocked = IPv4Address("203.0.113.9")
         kept = IPv4Address("203.0.113.10")
@@ -7334,7 +7343,7 @@ class ControlServerTests(unittest.TestCase):
                 )
 
                 self.assertEqual(status, 409, body)
-                self.assertIn("unaffected by profiles", json.loads(body)["error"])
+                self.assertIn("protected from profiles", json.loads(body)["error"])
                 self.assertIsNone(self.repository.get_device_by_mac_address("dc:1e:d5:3e:97:4c"))
                 self.assertIsNone(self.repository.get_device_group("lab"))
 
@@ -7355,7 +7364,7 @@ class ControlServerTests(unittest.TestCase):
                 )
 
                 self.assertEqual(status, 409, body)
-                self.assertIn("unaffected by profiles", json.loads(body)["error"])
+                self.assertIn("protected from profiles", json.loads(body)["error"])
                 self.assertIsNone(self.repository.get_device_by_mac_address("dc:1e:d5:3e:97:4c"))
                 self.assertEqual(
                     self.repository.get_device_group("family").device_ids, ("alice",)
@@ -7388,7 +7397,7 @@ class ControlServerTests(unittest.TestCase):
                 )
 
                 self.assertEqual(status, 409, body)
-                self.assertIn("unaffected by profiles", json.loads(body)["error"])
+                self.assertIn("protected from profiles", json.loads(body)["error"])
                 self.assertIsNone(self.repository.get_device_by_mac_address("aa:bb:cc:dd:ee:02"))
                 self.assertIsNone(self.repository.get_device_by_mac_address("dc:1e:d5:3e:97:4c"))
                 self.assertIsNone(self.repository.get_device_group("lab"))

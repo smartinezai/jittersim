@@ -326,7 +326,7 @@ def wait_for_content(page, name):
     elif name == "traffic":
         expect(page.locator("#traffic-status")).to_have_text(re.compile(
             r"^(Sampling live traffic every 2 seconds\.|No counters yet\. "
-            r"Assign a profile and choose Start with saved settings\.)$"))
+            r"Assign a profile and choose Start\.)$"))
     elif name == "access":
         expect(page.locator("#access-summary")).to_have_attribute(
             "data-state", re.compile(r"^(applied|pending|error)$"))

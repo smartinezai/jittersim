@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import select
 import socket
 import sqlite3
@@ -17,6 +18,7 @@ import socketserver
 import ssl
 import threading
 import time
+import uuid
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
@@ -44,7 +46,7 @@ from jittersim.config.device_names import (
     saved_device_title,
 )
 from jittersim.config.domain_labels import group_domain, label_domain, seen_with
-from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
+from jittersim.config.exemptions import AddressMove, UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
     MAX_LISTED_DOMAINS,
     AccessOptions,
@@ -119,7 +121,7 @@ from jittersim.engine.scenarios import active_scenario_runs
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
 from jittersim.engine.website import describe_timed_out_names
-from jittersim.networking.applier import MAX_PROTECTED_MACS
+from jittersim.networking.applier import MAX_PROTECTED_MACS, _validate_access_point_settings
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
     WIFI_DETAILS_MISSING_MESSAGE,
@@ -134,6 +136,7 @@ from jittersim.networking.router import (
 )
 from jittersim.networking.wifi_security import SECURITY_MODES
 from jittersim.api.router_operations import RouterOperations
+from jittersim.api.wifi_operations import WifiOperations, WifiOutcome, valid_request_id, issue_request_id
 from jittersim.engine.timeline import overlapping_schedules
 
 LOGGER = logging.getLogger(__name__)
@@ -221,6 +224,8 @@ WRITE_PATHS = frozenset(
         "/api/reset",
         "/api/dashboard-access/register-self",
         "/api/dashboard-access/remove",
+        "/api/dashboard-access/move",
+        "/api/dashboard-access/move-undo",
     )
 )
 # A signed release sent over HTTPS when the Mac cannot use SSH (see handle_release_upload).
@@ -238,6 +243,43 @@ ACTION_PATHS = frozenset(
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
 # Panic runs ahead of other writes: it never waits for the write lock of an apply in flight.
 PRIORITY_WRITE_PATHS = frozenset(("/api/normal-access",))
+# The product name shown after the token is accepted. The public page never carries it.
+PRODUCT_NAME = "JitterSim"
+PRODUCT_COMMAND = "jittersim"
+DEFAULT_ACCESS_POINT_SSID = "JitterSim"
+
+
+def _neutral_icon() -> bytes:
+    """A 16 by 16 icon file with a plain dark square and a light dot and no name in it."""
+
+    import struct
+    import zlib
+
+    size = 16
+    rows = []
+    for y in range(size):
+        row = bytearray([0])
+        for x in range(size):
+            inside = (x - 7.5) ** 2 + (y - 7.5) ** 2 <= 22
+            row += bytes((112, 183, 255, 255) if inside else (11, 18, 32, 255))
+        rows.append(bytes(row))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"".join(rows)))
+        + chunk(b"IEND", b"")
+    )
+    directory = struct.pack("<HHH", 0, 1, 1)
+    entry = struct.pack("<BBBBHHII", size, size, 0, 0, 1, 32, len(png), 6 + 16)
+    return directory + entry + png
+
+
+NEUTRAL_ICON = _neutral_icon()
 
 
 # Raw string: JavaScript escapes such as "\n" must reach the browser unchanged.
@@ -246,7 +288,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>jittersim</title>
+  <title>Sign in</title>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
   <style>
     :root {
       color-scheme: dark;
@@ -292,6 +335,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .badge.hardware { border-color: #2c9d73; background: #10372d; color: #8de2bc; }
     .badge.configuration { border-color: #a77b31; background: #3b2a12; color: #f5ca78; }
     .badge.pending { color: #a8b8ce; }
+    .address-move label { display: block; margin: 0.6rem 0; }
     .notice {
       margin-bottom: 1rem;
       padding: 0.8rem 1rem;
@@ -356,6 +400,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .action-message.success { background: #123b31; color: #8de2bc; }
     .action-message.error { background: #45222c; color: #ffb0b0; }
     .action-message.working { background: #3b2d15; color: #f5ca78; }
+    .action-announcer { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
     .toast {
       position: fixed;
       bottom: 1rem;
@@ -365,8 +410,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       grid-template-columns: auto minmax(0, 1fr) auto;
       align-items: center;
       gap: 0.75rem;
-      width: min(34rem, calc(100vw - 2rem));
-      padding: 0.85rem 1rem;
+      width: min(22rem, calc(100vw - 2rem));
+      max-height: 40vh;
+      overflow-y: auto;
+      padding: 0.7rem 0.85rem;
       border: 1px solid #46627f;
       border-left: 0.3rem solid #70b7ff;
       border-radius: 0.7rem;
@@ -374,6 +421,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       color: #dcecff;
       box-shadow: 0 0.9rem 2rem rgba(0, 0, 0, 0.4);
     }
+    #toast-message { max-height: calc(40vh - 2rem); overflow-y: auto; overscroll-behavior: contain; }
     .toast[hidden] { display: none; }
     .toast.success { border-color: #2c9d73; border-left-color: #70d7a9; background: #123b31; }
     .toast.error { border-color: #a9565d; border-left-color: #ff8585; background: #45222c; }
@@ -388,6 +436,23 @@ DASHBOARD_HTML = r"""<!doctype html>
       animation: toast-spin 0.8s linear infinite;
     }
     .toast button { margin: 0; padding: 0.25rem 0.45rem; }
+    .wifi-change-banner {
+      margin: 0 0 1rem; padding: 0.9rem 1.1rem;
+      border: 1px solid #46627f; border-left: 0.3rem solid #f5ca78; border-radius: 0.7rem;
+      background: #102238; color: #dcecff;
+    }
+    .wifi-change-banner[hidden] { display: none; }
+    .wifi-change-banner p { margin: 0.35rem 0 0; font-size: 0.9rem; }
+    .wifi-change-banner.success { border-color: #2c9d73; border-left-color: #70d7a9; background: #123b31; }
+    .wifi-change-banner.error { border-color: #a9565d; border-left-color: #ff8585; background: #45222c; }
+    .wifi-change-banner.warning { border-left-color: #f5ca78; }
+    .wifi-change-banner.working strong::after {
+      display: inline-block; width: 0.7rem; height: 0.7rem; margin-left: 0.6rem;
+      border: 2px solid #f5ca78; border-right-color: transparent; border-radius: 50%;
+      content: ""; animation: toast-spin 0.8s linear infinite;
+    }
+    .wifi-change-actions { margin-top: 0.7rem; }
+    .wifi-change-actions button { margin: 0; padding: 0.3rem 0.8rem; }
     button[aria-busy="true"] { position: relative; }
     button[aria-busy="true"]::after {
       display: inline-block;
@@ -748,7 +813,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     .credential-help pre { margin-top: 0.6rem; min-height: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
     .credential-note { margin: 0.65rem 0 0; color: #c7d7eb; font-size: 0.82rem; }
     .remember-choice { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.65rem; }
-    .remember-choice input { width: auto; margin: 0; padding: 0; }
+    .remember-choice input, .remember-choice select { width: auto; margin: 0; }
+    .remember-choice input { padding: 0; }
     .remember-note:empty { display: none; }
     :root { --sidebar-bg: #0e1a2b; --line: #263b55; --muted: #a8b8ce; --accent: #70b7ff; }
     .app { display: grid; grid-template-columns: 15.5rem minmax(0, 1fr); min-height: 100dvh; }
@@ -1028,7 +1094,8 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body class="dashboard-locked">
-  <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden>
+  <div id="action-announcer" class="action-announcer" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div id="toast" class="toast" hidden>
     <span id="toast-icon" class="toast-icon" aria-hidden="true"></span>
     <span id="toast-message"></span>
     <button id="toast-dismiss" type="button" aria-label="Dismiss message">Dismiss</button>
@@ -1046,14 +1113,20 @@ DASHBOARD_HTML = r"""<!doctype html>
       <input id="admin-token" type="password" autocomplete="off" aria-describedby="token-check-status">
     </label>
     <label class="remember-choice">
-      <input id="remember-admin-token" type="checkbox" autocomplete="off"> Remember for 24 hours
+      <input id="remember-admin-token" type="checkbox" autocomplete="off"> Remember for
+      <select id="remember-admin-duration" autocomplete="off" aria-label="How long to remember the token">
+        <option value="24" selected>24 hours</option>
+        <option value="168">7 days</option>
+        <option value="720">30 days</option>
+      </select>
     </label>
     <p id="remember-admin-token-note" class="credential-note remember-note" role="status"></p>
     <div class="credential-actions">
       <button id="check-admin-token" class="primary" type="button">Check token</button>
       <button id="clear-admin-token" type="button">Clear token</button>
     </div>
-    <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Enter the token and choose Check token to load diagnostics.</p>
+    <p id="token-check-status" class="token-check-status" aria-live="off">Enter the token and choose Check token to load diagnostics.</p>
+    <p id="remember-length-note" class="credential-note">Longer is less safe on a shared computer: anyone who can use this browser can open the dashboard until the time is up. Choose Clear token to forget it sooner.</p>
     <details class="credential-help">
       <summary>How to get the admin token</summary>
       <pre id="admin-token-help"></pre>
@@ -1078,9 +1151,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
   </section>
   <div class="app">
-  <aside class="sidebar" aria-label="JitterSim">
+  <aside class="sidebar" id="brand-sidebar" aria-label="Network lab">
     <div class="sidebar-brand">
-      <h1>JitterSim</h1>
+      <h1 id="brand-title">Network lab</h1>
       <span id="mode-badge" class="badge pending">Checking mode...</span>
     </div>
     <nav class="sidebar-nav" aria-label="Sections">
@@ -1125,17 +1198,17 @@ DASHBOARD_HTML = r"""<!doctype html>
         </div>
         <div class="sidebar-actions">
           <div class="sidebar-action-row">
-            <button id="apply-button" class="primary" type="button">Start with saved settings</button>
-            <span class="help-icon" tabindex="0" role="img" aria-label="Start or re-apply saved settings help" data-help="Starts JitterSim with everything you saved: device and group profiles and schedules and limits and service lists and access rules. Then saved changes apply on their own within a few seconds. Reset or Panic stops the profiles. Protected devices stay untouched.">?</span>
+            <button id="apply-button" class="primary" type="button">Start</button>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Start help" data-help="Starts everything you saved: device and group profiles and schedules and limits and service lists and access rules. Then saved changes apply on their own within a few seconds. Reset or Panic stops the profiles. Protected devices stay untouched.">?</span>
           </div>
           <p id="apply-summary" class="apply-summary" aria-live="polite" hidden></p>
           <div class="sidebar-action-row">
             <button id="reset-button" class="danger" type="button">Reset network</button>
-            <span class="help-icon" tabindex="0" role="img" aria-label="Reset network help" data-help="Stops the profiles and removes their rules from the Pi so devices run normally. Household blocking of devices and sites stays on. Your saved settings are kept. Choose Start with saved settings to run them again.">?</span>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Reset network help" data-help="Stops the profiles and removes their rules from the Pi so devices run normally. Household blocking of devices and sites stays on. Your saved settings are kept. Choose Start to run them again.">?</span>
           </div>
         </div>
         <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
-        <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
+        <p id="message" class="action-message" aria-live="off" aria-hidden="true" hidden>Ready.</p>
         <div class="safety-bar">
           <button id="panic-button" class="danger panic-button" type="button"
             title="Turn off all profiles and household blocking now. Your saved settings are kept.">
@@ -1167,14 +1240,34 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
   </aside>
   <main class="content" id="content">
+  <section class="notice address-move" id="address-move-card" aria-label="New address for one of your devices" hidden>
+    <p id="address-move-text" role="status"></p>
+    <label>Which device was it?
+      <select id="address-move-picker"></select>
+    </label>
+    <div class="connected-actions">
+      <button id="address-move-confirm" type="button">Yes, move it to this device</button>
+      <button id="address-move-dismiss" type="button">No, this is another device</button>
+    </div>
+    <p class="form-note">The old address is kept and marked as replaced. You can undo this under Dashboard access.</p>
+  </section>
   <section class="card" id="dashboard-access-panel" aria-labelledby="dashboard-access-title">
     <h2 id="dashboard-access-title">Dashboard access</h2>
     <p id="dashboard-access-status" role="status">Open Admin token and choose Check token to sign in.</p>
     <label>Device name (optional)<input id="dashboard-access-name" maxlength="64" autocomplete="off"></label>
     <button id="allow-dashboard-device" type="button" disabled>Allow this device</button>
     <p>Saved access keeps this dashboard usable during tests. Internet traffic still follows profiles.
-      A changed private Wi-Fi address needs registration again. The admin token is always required.</p>
+      A changed private Wi-Fi address needs a one-click move to the new address. The admin token is always required.</p>
+    <p id="address-type-note" class="form-note" hidden></p>
+    <details id="address-help" hidden>
+      <summary>Keep this device's Wi-Fi address from changing</summary>
+      <p class="form-note">On a Mac: System Settings, Wi-Fi, this network, Details, Private Wi-Fi address, Fixed.
+        On an iPhone or iPad: Settings, Wi-Fi, the (i) beside this network, Private Wi-Fi Address, Fixed.
+        On Android: Settings, Wi-Fi, this network, Privacy, Use device MAC.
+        A fixed address stays the same on this network, so saved access and protection keep working.</p>
+    </details>
     <div id="dashboard-access-list" hidden></div>
+    <div id="address-move-replaced" hidden></div>
   </section>
   <div id="private-dashboard" hidden>
   <p id="mode-notice" class="notice" role="status">Checking control mode...</p>
@@ -1184,8 +1277,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     <ol id="getting-started-steps" class="getting-started-steps"></ol>
   </section>
   <section class="card" aria-labelledby="general-profile-title">
-    <h2 id="general-profile-title">General profile</h2>
-    <p>Apply a saved profile to every device on JitterSim Wi-Fi except those in Unaffected by profiles. New arrivals are included.</p>
+    <h2 id="general-profile-title">Everyone</h2>
+    <p>Apply a saved profile to every device on the test Wi-Fi except Protected devices. New arrivals are included.</p>
     <div class="fields">
       <label>Saved profile
         <select id="general-profile-select" aria-describedby="general-profile-note" disabled>
@@ -1195,9 +1288,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
     <div class="action-buttons">
       <button id="general-profile-apply" class="primary" type="button" disabled>Apply to all</button>
-      <button id="general-profile-stop" type="button" disabled>Stop general profile</button>
+      <button id="general-profile-stop" type="button" disabled>Stop for everyone</button>
     </div>
-    <p id="general-profile-status" role="status" aria-live="polite">Check the admin token to view the general profile.</p>
+    <p id="general-profile-status" role="status" aria-live="polite">Check the admin token to view the profile for everyone.</p>
     <p id="general-profile-note" class="form-note">The speed limit is shared only by affected devices. Protected devices bypass it completely. Stopping this profile resumes saved device rules. Panic turns all profiles off.</p>
   </section>
   <section class="card connected-card">
@@ -1224,8 +1317,8 @@ DASHBOARD_HTML = r"""<!doctype html>
   <section class="card" data-collapse="open">
       <h2>Everyone else</h2>
       <p class="form-note">Choose a profile for every test Wi-Fi client that isn't a saved
-        device or on the unaffected list. They share one connection, so a speed limit in
-        this profile is shared by all of them. A general profile covers everyone else too,
+        device or on the protected list. They share one connection, so a speed limit in
+        this profile is shared by all of them. A profile set for Everyone covers these clients too,
         so the two cannot be used at the same time.</p>
       <form id="everyone-else-form">
         <div class="fields">
@@ -1238,10 +1331,10 @@ DASHBOARD_HTML = r"""<!doctype html>
         <button type="submit">Save everyone-else profile</button>
       </form>
     </section>
-  <section class="card connected-card" data-collapse="closed" aria-labelledby="unaffected-title">
+  <section class="card connected-card" data-collapse="closed" data-card-key="unaffected-by-profiles" aria-labelledby="unaffected-title">
     <div class="section-heading">
       <div>
-        <h2 id="unaffected-title">Unaffected by profiles</h2>
+        <h2 id="unaffected-title">Protected devices</h2>
         <p>Saved protection stays active when a device disconnects or changes IP. Global access rules still apply.</p>
       </div>
     </div>
@@ -1264,7 +1357,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <button type="submit">Save protection</button>
       </form>
     </details>
-    <p class="form-note">Use “Make unaffected” beside a connected device to add it without typing an address. If a device changes its private Wi-Fi MAC, add its new address.</p>
+    <p class="form-note">Use “Protect” beside a connected device to add it without typing an address. If a device changes its private Wi-Fi MAC, add its new address.</p>
   </section>
   </section><!-- /page:devices -->
   <section class="page" id="page-profiles" data-page="profiles" aria-label="Profiles" tabindex="-1" hidden>
@@ -1348,7 +1441,7 @@ DASHBOARD_HTML = r"""<!doctype html>
             <label><span class="field-label">Outage length (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage length help" data-help="How long a selected outage lasts before the device is allowed to use the network again.">?</span></span>
               <input id="profile-outage-duration" type="number" min="0" value="0">
             </label>
-            <label><span class="field-label">Outage check interval (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage interval help" data-help="How often JitterSim checks whether to start a new outage. Set this to 0 to use the reroll interval.">?</span></span>
+            <label><span class="field-label">Outage check interval (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage interval help" data-help="How often the Pi checks whether to start a new outage. Set this to 0 to use the reroll interval.">?</span></span>
               <input id="profile-outage-interval" type="number" min="0" value="0">
             </label>
             <label><span class="field-label">Random seed (optional)<span class="help-icon" tabindex="0" role="img" aria-label="Random seed help" data-help="Makes the random changes repeat exactly. The same seed gives a device or a service list the same values in the same order every time. Leaving it empty is the same as 0. Pick another number for a different pattern.">?</span></span>
@@ -1508,7 +1601,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           <label>Reserved IPv4 address
             <input id="device-ip" required placeholder="192.168.50.10">
           </label>
-          <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Device profile ID help" data-help="The ID of a profile you already saved. It is the code you typed as Profile ID when saving that profile. Profile menus show it in parentheses after the name.">?</span></span> <input id="device-profile" required></label>
+          <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Device profile ID help" data-help="The ID of a profile you already saved. It is the code you typed as Profile ID when saving that profile. Profile menus show the name, and add the code only when two profiles share a name.">?</span></span> <input id="device-profile" required></label>
           <label>MAC address (optional)
             <input id="device-mac" placeholder="aa:bb:cc:dd:ee:ff">
           </label>
@@ -1610,7 +1703,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <label>Scenario <select id="scenario-start-scenario" required></select></label>
         <label>Applies to <select id="scenario-start-target" required></select></label>
       </div>
-      <p class="form-note">Choose Start with saved settings before starting a scenario. Its clock starts
+      <p class="form-note">Choose Start before starting a scenario. Its clock starts
         when you press Start. A running scenario takes over from schedules, as a timer does.
         For a device, starting a timer or a scenario replaces the other and a device's own
         timer or scenario wins over its group's. Data limits still win.</p>
@@ -1803,7 +1896,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         </label>
         <button type="button" id="service-list-add-observed">Add to hostnames</button>
       </div>
-      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device or general profile. Devices in Unaffected by profiles are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's random variation and random outages apply to the whole list: all affected devices get the same new values and the same outages. During an outage the listed services are unreachable while the Pi's DNS and the dashboard and other sites keep working. The profile's website list is not used for service lists.</p>
+      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device profile or the profile for Everyone. Protected devices are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's random variation and random outages apply to the whole list: all affected devices get the same new values and the same outages. During an outage the listed services are unreachable while the Pi's DNS and the dashboard and other sites keep working. The profile's website list is not used for service lists.</p>
       <button class="primary" type="submit">Save service list</button>
     </form>
     <div id="service-list-list" class="quota-list" aria-live="polite">Enter the admin token to view service lists.</div>
@@ -1958,9 +2051,9 @@ DASHBOARD_HTML = r"""<!doctype html>
   <section class="page" id="page-router" data-page="router" aria-label="Router and Wi-Fi" tabindex="-1" hidden>
     <section class="card wifi-name-card">
     <h2>Wi-Fi name</h2>
-    <p>Restore the Pi's test network name to JitterSim. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts. Use management access.</p>
+    <p>Restore the Pi's test network name to its default. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts. Use management access.</p>
     <button id="reset-wifi-name" type="button" disabled aria-describedby="wifi-reset-status">
-      <span>Reset Wi-Fi name</span><span class="credential-state">Restore JitterSim</span>
+      <span>Reset Wi-Fi name</span><span class="credential-state">Restore default</span>
     </button>
     <p id="wifi-reset-status" class="credential-state" role="status" aria-live="polite">Keep password and security</p>
   </section>
@@ -1985,7 +2078,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <form id="access-point-form">
       <div class="fields">
         <label>Test network name (SSID)
-          <input id="access-point-ssid" value="JitterSim" maxlength="32" required>
+          <input id="access-point-ssid" value="" maxlength="32" required>
         </label>
         <label>Test network password
           <input id="access-point-password" type="password" minlength="8" maxlength="63" autocomplete="new-password" required>
@@ -1994,7 +2087,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p class="policy-note">These values configure the Pi with WPA3. To keep the router's security type use Copy router Wi-Fi to Pi. To join the copied network use the router's Wi-Fi password. The password is not saved in the dashboard database.</p>
       <button type="submit">Use these values on the Pi</button>
     </form>
-    <p class="policy-note">To restore the JitterSim name without changing the password, use Reset Wi-Fi name above.</p>
+    <p class="policy-note">To restore the default name without changing the password, use Reset Wi-Fi name above.</p>
   </section>
   <section class="card" data-collapse="open">
     <div class="section-heading">
@@ -2045,14 +2138,14 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="traffic-metric"><span>Upload packet rate</span><strong id="traffic-upload-packets">—</strong></div>
       <div class="traffic-metric"><span>Download packet rate</span><strong id="traffic-download-packets">—</strong></div>
       <div class="traffic-metric">
-        <span>Dropped by JitterSim</span><strong id="traffic-drop-rate">—</strong>
+        <span>Dropped by the Pi</span><strong id="traffic-drop-rate">—</strong>
       </div>
       <div class="traffic-metric">
-        <span>Waiting in JitterSim</span><strong id="traffic-queued">—</strong>
+        <span>Waiting on the Pi</span><strong id="traffic-queued">—</strong>
       </div>
     </div>
     <div class="traffic-chart-wrap">
-      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
+      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at the Pi with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
       <div class="traffic-legend" aria-label="Graph legend">
         <button type="button" data-traffic-series="upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
         <button type="button" data-traffic-series="download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
@@ -2064,9 +2157,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p id="traffic-chart-detail" class="traffic-chart-detail">Hover a line or focus its legend label to inspect it. Click or tap a label to keep it highlighted. Escape clears the highlight.</p>
     </div>
     <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
-    <p class="traffic-note">Dropped and waiting show packets JitterSim itself discarded or is still
+    <p class="traffic-note">Dropped and waiting show packets the Pi itself discarded or is still
       delaying, in both directions.</p>
-    <p class="traffic-note">Solid lines show traffic counted at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show ISP plan references. Dotted lines show applied profile limits. Profile limits describe the default queue. Service-specific queues may use different limits. The ISP plan is shared with household traffic and is not a live measurement of spare capacity. Only assigned devices are included. Check the admin token to start. Sampling pauses when this tab is hidden.</p>
+    <p class="traffic-note">Solid lines show traffic counted at the Pi before its queues. They do not show the speed a device receives. Dashed lines show ISP plan references. Dotted lines show applied profile limits. Profile limits describe the default queue. Service-specific queues may use different limits. The ISP plan is shared with household traffic and is not a live measurement of spare capacity. Only assigned devices are included. Check the admin token to start. Sampling pauses when this tab is hidden.</p>
   </section>
   <section class="card observations-card" data-collapse="closed">
     <div class="section-heading">
@@ -2128,7 +2221,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       aria-label="Round-trip time of every reply in each run">
       Round-trip chart of the added runs.</canvas>
     <p class="traffic-note">On a device connected to the test Wi-Fi, run
-      <code>jittersim measure --label normal</code>, change the device's profile here, run it again
+      <code id="measure-command">the measure command</code>, change the device's profile here, run it again
       with another label, then add both files. Comparison files stay in this browser. Attaching them to a test session saves a copy on the Pi.</p>
   </section>
   </section><!-- /page:measurements -->
@@ -2349,11 +2442,11 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     syncScheduleDays();
 
-    async function request(path, method, body) {
+    async function request(path, method, body, options = {}) {
       const headers = {};
       const token = element("admin-token").value.trim();
       const tokenRevision = adminTokenRevision;
-      if (method === "GET" && path !== "/api/health" && !adminTokenVerified && !adminTokenChecking) {
+      if (method === "GET" && path !== "/api/health" && path !== "/api/wifi-operation/request-id" && !adminTokenVerified && !adminTokenChecking) {
         throw new Error("Token changed. Choose Check token to load.");
       }
       if (method !== "GET" && !token) {
@@ -2364,25 +2457,44 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       if (token) headers.Authorization = "Bearer " + token;
       if (body !== undefined) headers["Content-Type"] = "application/json";
-      const submitButton = pendingFormSubmitButton;
+      const submitButton = method === "GET" ? null : pendingFormSubmitButton;
       const submitForm = submitButton && submitButton.form;
+      const submitOwner = {};
+      if (submitButton) submitButton.requestOwner = submitOwner;
       // The workflow helpers live in a separate file that the server adds to the page.
       const drafts = typeof formDrafts === "undefined" ? null : formDrafts;
       const submittedDraft = submitForm && drafts ? drafts.get(submitForm.id) : null;
-      pendingFormSubmitButton = null;
+      if (method !== "GET") pendingFormSubmitButton = null;
+      const controller = new AbortController();
+      const abortRequest = () => controller.abort();
+      if (options.signal) {
+        if (options.signal.aborted) controller.abort();
+        else options.signal.addEventListener("abort", abortRequest, {once: true});
+      }
+      const timeout = setTimeout(abortRequest, options.timeoutMs || (method === "GET" ? 30000 : 210000));
       try {
-        const response = await fetch(path, {
-          method: method,
-          headers: headers,
-          body: body === undefined ? undefined : JSON.stringify(body),
-          cache: "no-store"
-        });
-        const data = await response.json();
-        if (method === "GET" && tokenRevision !== adminTokenRevision) {
+        let response;
+        let data;
+        try {
+          response = await fetch(path, {
+            method: method,
+            headers: headers,
+            body: body === undefined ? undefined : JSON.stringify(body),
+            cache: "no-store",
+            signal: controller.signal
+          });
+          data = await response.json();
+        } catch (networkError) {
+          // A dropped Wi-Fi shows up here. Say so plainly and keep the sign-in untouched.
+          throw typeof lostConnectionError === "function" ? lostConnectionError(networkError) : networkError;
+        }
+        if (tokenRevision !== adminTokenRevision) {
           throw new Error("Token changed. Choose Check token to load.");
         }
         if (!response.ok) {
-          if (data.registration_required) lockDashboardAccess(data.error);
+          // Just after a Wi-Fi restart the Pi may not have matched this Mac to its connection yet.
+          const waitingForRejoin = data.registration_required && typeof wifiReconnectActive === "function" && wifiReconnectActive();
+          if (data.registration_required && !waitingForRejoin) lockDashboardAccess(data.error);
           const applyHint = data.error === "network helper apply failed" &&
             typeof data.hint === "string"
             ? "Network helper apply failed. " + data.hint
@@ -2391,9 +2503,10 @@ DASHBOARD_HTML = r"""<!doctype html>
           error.status = response.status;
           error.code = data.code;
           error.profile = data.profile;
+          if (waitingForRejoin) error.transient = true;
           throw error;
         }
-        if (submitForm && drafts && drafts.get(submitForm.id) === submittedDraft) {
+        if (response.status !== 202 && submitForm && drafts && drafts.get(submitForm.id) === submittedDraft) {
           drafts.delete(submitForm.id);
           const formNote = submitForm.querySelector(".form-error");
           if (formNote) formNote.remove();
@@ -2402,11 +2515,16 @@ DASHBOARD_HTML = r"""<!doctype html>
         if (method === "GET" && typeof recordRead === "function") recordRead(path, null);
         return data;
       } catch (error) {
-        if (method === "GET" && typeof recordRead === "function") recordRead(path, error);
-        if (typeof formError === "function") formError(submitForm, error.message);
+        if (tokenRevision === adminTokenRevision && method === "GET" && typeof recordRead === "function") recordRead(path, error);
+        if (tokenRevision === adminTokenRevision && typeof formError === "function") formError(submitForm, error.message);
         throw error;
       } finally {
-        if (submitButton) setButtonBusy(submitButton, false);
+        clearTimeout(timeout);
+        if (options.signal) options.signal.removeEventListener("abort", abortRequest);
+        if (submitButton && submitButton.requestOwner === submitOwner) {
+          delete submitButton.requestOwner;
+          setButtonBusy(submitButton, false);
+        }
       }
     }
 
@@ -2417,11 +2535,48 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     const adminTokenHelp = element("admin-token-help");
 
+    // Nothing here may name the product: this text shows before anyone has signed in. The setup
+    // notes hold the exact command.
     adminTokenHelp.textContent =
-      "On your Mac, run this command:\n" +
-      "ssh -t -i ~/.ssh/jittersim_ed25519 jittersim@" + window.location.hostname +
-      " \"sudo sed -n 's/^JITTERSIM_ADMIN_TOKEN=//p' /etc/jittersim/control.env\"\n" +
-      "Copy the output into this field. Keep the token private.";
+      "The token is stored on the Pi. The setup notes show how to read it there.\n" +
+      "Copy it into this field. Keep the token private.";
+
+    // The product name, the command name and the default Wi-Fi name come from a private route
+    // after the token is accepted. Until then the page stays neutral.
+    let brandInfo = null;
+    let brandRequestSerial = 0;
+
+    function applyBrand(signedIn) {
+      const name = signedIn && brandInfo ? brandInfo.name : "";
+      document.title = name || "Sign in";
+      element("brand-title").textContent = name || "Network lab";
+      element("brand-sidebar").setAttribute("aria-label", name || "Network lab");
+      element("measure-command").textContent = signedIn && brandInfo
+        ? brandInfo.command + " measure --label normal" : "the measure command";
+      const ssid = element("access-point-ssid");
+      if (signedIn && brandInfo && !ssid.value && document.activeElement !== ssid) {
+        ssid.value = brandInfo.default_ssid;
+      }
+      if (!signedIn) {
+        if (brandInfo && ssid.value === brandInfo.default_ssid) ssid.value = "";
+        brandInfo = null;
+        brandRequestSerial += 1;
+      }
+    }
+
+    async function loadBrand() {
+      const tokenRevision = adminTokenRevision;
+      const serial = ++brandRequestSerial;
+      try {
+        const data = await request("/api/brand", "GET");
+        if (serial !== brandRequestSerial || tokenRevision !== adminTokenRevision) return;
+        brandInfo = data;
+        applyBrand(adminTokenVerified);
+      } catch (error) {
+        if (serial !== brandRequestSerial || tokenRevision !== adminTokenRevision) return;
+        applyBrand(false);
+      }
+    }
 
     const privateDataPanelIds = [
       "profiles-json", "devices-json", "plan", "state", "policies",
@@ -2434,6 +2589,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function setDashboardUnlocked(allowed) {
       element("private-dashboard").hidden = !allowed;
       element("dashboard-access-list").hidden = !allowed;
+      if (typeof applyBrand === "function") applyBrand(allowed);
       document.body.classList.toggle("dashboard-locked", !allowed);
     }
 
@@ -2441,10 +2597,175 @@ DASHBOARD_HTML = r"""<!doctype html>
       adminTokenVerified = false;
       setDashboardUnlocked(false);
       element("dashboard-access-list").replaceChildren();
+      clearAddressMovePanels();
       element("dashboard-access-status").textContent = message;
       setPrivateDataPanels(message);
       stopTrafficSampling(message);
     }
+
+    const addressMoveDismissed = new Set();
+    let addressMoveOffer = null;
+    let addressTokenRevision = null;
+    let addressUiGeneration = 0;
+
+    function clearAddressMovePanels() {
+      addressUiGeneration += 1;
+      addressTokenRevision = null;
+      addressMoveOffer = null;
+      addressMoveDismissed.clear();
+      ["address-move-card", "address-type-note", "address-move-replaced", "address-help"]
+        .forEach((id) => { element(id).hidden = true; });
+      element("address-move-picker").replaceChildren();
+      setButtonBusy(element("address-move-confirm"), false);
+      element("address-move-replaced").replaceChildren();
+      element("address-move-text").textContent = "";
+      element("address-type-note").textContent = "";
+    }
+
+    function beginAddressChange() {
+      if (!addressResponseCurrent(adminTokenRevision, addressUiGeneration)) return null;
+      adminTokenRevision += 1;
+      addressTokenRevision = adminTokenRevision;
+      if (typeof cancelWifiRecovery === "function") cancelWifiRecovery();
+      adminTokenVerified = false;
+      adminTokenChecking = false;
+      setDashboardUnlocked(false);
+      stopTrafficSampling("Device access is changing. Checking again after the saved change.");
+      return {revision: adminTokenRevision, generation: addressUiGeneration};
+    }
+
+    function addressResponseCurrent(revision, generation) {
+      return revision === adminTokenRevision && generation === addressUiGeneration &&
+        addressTokenRevision === revision && !adminTokenRejected && !adminTokenRefused &&
+        Boolean(element("admin-token").value.trim());
+    }
+
+    privateDataLockHooks.push(() => {
+      if (addressTokenRevision !== adminTokenRevision || adminTokenRejected || adminTokenRefused ||
+          !element("admin-token").value.trim()) clearAddressMovePanels();
+    });
+
+
+    function addressMoveSentence(candidate, current) {
+      const needsAllow = !current.registered && candidate.registered;
+      const needsProtect = !current.protected && candidate.protected;
+      return "This looks like a new address for one of your devices. " + (
+        needsAllow && needsProtect ? "Allow this device and keep it protected?"
+        : needsAllow ? "Allow this device?" : "Keep this device protected?");
+    }
+
+    function renderAddressMoves(data) {
+      addressMoveOffer = data;
+      const current = data.current;
+      const note = element("address-type-note");
+      note.hidden = !current;
+      if (current) {
+        note.textContent = current.private_address
+          ? "This device uses a private Wi-Fi address (" + current.mac_address + "). It can change, and a changed address is not recognised until you move it here."
+          : "This device uses a fixed Wi-Fi address (" + current.mac_address + ").";
+      }
+      const card = element("address-move-card");
+      const candidates = current ? data.candidates : [];
+      card.hidden = !data.offer || !candidates.length || addressMoveDismissed.has(current.mac_address);
+      if (!card.hidden) {
+        const picker = element("address-move-picker");
+        const previous = picker.value;
+        picker.replaceChildren();
+        candidates.forEach((candidate) => {
+          const option = document.createElement("option");
+          option.value = candidate.mac_address;
+          option.textContent = candidate.name + " (" + [
+            candidate.registered ? "allowed" : null, candidate.protected ? "protected" : null
+          ].filter(Boolean).join(" and ") + ")";
+          picker.appendChild(option);
+        });
+        if (candidates.some((candidate) => candidate.mac_address === previous)) picker.value = previous;
+        const showSentence = () => {
+          const chosen = candidates.find((candidate) => candidate.mac_address === picker.value) || candidates[0];
+          element("address-move-text").textContent = addressMoveSentence(chosen, current);
+        };
+        picker.onchange = showSentence;
+        showSentence();
+      }
+      const replaced = element("address-move-replaced");
+      replaced.replaceChildren();
+      replaced.hidden = !data.replaced.length;
+      if (!replaced.hidden) {
+        const heading = document.createElement("h3");
+        heading.textContent = "Replaced addresses";
+        replaced.appendChild(heading);
+        data.replaced.forEach((move) => {
+          const row = document.createElement("p");
+          const label = document.createElement("span");
+          label.textContent = move.name + (move.recovery_required ? " · needs recovery from " : " · replaced ") + move.old_mac + " ";
+          const undo = document.createElement("button");
+          undo.type = "button";
+          undo.textContent = move.recovery_required ? "Finish reversing move" : "Undo";
+          undo.addEventListener("click", async () => {
+            if (!window.confirm("Reverse the move for " + move.name + "? Access or protection that came " +
+                "from this move will return to " + move.old_mac + " if it has not changed since then.")) return;
+            const change = beginAddressChange();
+            if (!change) return;
+            const {revision, generation} = change;
+            setButtonBusy(undo, true);
+            try {
+              await request("/api/dashboard-access/move-undo", "POST", {from_mac: move.old_mac});
+              if (!addressResponseCurrent(revision, generation)) return;
+              showMessage("Move undone. " + move.name + " uses its old address again.", "success");
+              await checkAdminToken();
+            } catch (error) {
+              if (!addressResponseCurrent(revision, generation)) return;
+              await checkAdminToken();
+              if (revision === adminTokenRevision) showMessage(error.message, "error");
+            } finally {
+              if (addressResponseCurrent(revision, generation)) setButtonBusy(undo, false);
+            }
+          });
+          row.append(label, undo);
+          replaced.appendChild(row);
+        });
+      }
+    }
+
+    async function loadAddressMoves() {
+      const revision = adminTokenRevision;
+      const generation = addressUiGeneration;
+      try {
+        const data = await request("/api/dashboard-access/moves", "GET");
+        if (addressResponseCurrent(revision, generation)) renderAddressMoves(data);
+      } catch (error) {
+        if (addressResponseCurrent(revision, generation)) clearAddressMovePanels();
+      }
+    }
+
+    element("address-move-dismiss").addEventListener("click", () => {
+      if (addressMoveOffer && addressMoveOffer.current) addressMoveDismissed.add(addressMoveOffer.current.mac_address);
+      element("address-move-card").hidden = true;
+    });
+
+    element("address-move-confirm").addEventListener("click", async () => {
+      const button = element("address-move-confirm");
+      const picker = element("address-move-picker");
+      const change = beginAddressChange();
+      if (!change) return;
+      const {revision, generation} = change;
+      const name = picker.selectedOptions.length ? picker.selectedOptions[0].textContent : "the device";
+      setButtonBusy(button, true);
+      try {
+        await request("/api/dashboard-access/move", "POST", {from_mac: picker.value});
+        if (!addressResponseCurrent(revision, generation)) return;
+        showMessage("Moved. This device now takes over " + name + ". You can undo this under Dashboard access.", "success");
+        await checkAdminToken();
+      } catch (error) {
+        if (!addressResponseCurrent(revision, generation)) return;
+        await checkAdminToken();
+        if (revision !== adminTokenRevision) return;
+        element("address-move-text").textContent = error.message;
+        showMessage(error.message, "error");
+      } finally {
+        if (addressResponseCurrent(revision, generation)) setButtonBusy(button, false);
+      }
+    });
 
     async function loadDashboardAccess() {
       const data = await request("/api/dashboard-access/status", "GET");
@@ -2454,6 +2775,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         : data.can_register ? "Token accepted. Choose Allow this device to save dashboard access."
         : "Token accepted but this device could not be verified. Wait a few seconds and check again.";
       setDashboardUnlocked(data.allowed);
+      addressTokenRevision = adminTokenRevision;
+      element("address-help").hidden = false;
+      await loadAddressMoves();
       return data;
     }
 
@@ -2466,7 +2790,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         data.devices.forEach((device) => {
           const row = document.createElement("p");
           const label = document.createElement("span");
-          label.textContent = (device.name || "Device") + " · " + device.mac_address + " ";
+          label.textContent = (device.name || "Device") + " · " + device.mac_address +
+            (device.replaced_by ? " · replaced by " + device.replaced_by : "") + " ";
           const remove = document.createElement("button");
           remove.type = "button";
           remove.textContent = "Remove";
@@ -2565,7 +2890,12 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     let credentialOpener = null;
 
-    const REMEMBER_MS = 24 * 60 * 60 * 1000;
+    const REMEMBER_HOUR_MS = 60 * 60 * 1000;
+
+    // The hours a token can be remembered for. The router password always keeps 24 hours.
+    const REMEMBER_CHOICES = { 24: "24 hours", 168: "7 days", 720: "30 days" };
+
+    const REMEMBER_CHOICE_KEY = "jittersim.remembered.duration";
 
     const REMEMBERED = {
       admin: {
@@ -2702,12 +3032,25 @@ DASHBOARD_HTML = r"""<!doctype html>
       return null;
     }
 
+    // The hours a person chose to remember the token for. Anything else means 24.
+    function rememberHours(kind) {
+      if (kind !== "admin") return 24;
+      const hours = Number(element("remember-admin-duration").value);
+      return REMEMBER_CHOICES[hours] ? hours : 24;
+    }
+
+    // An entry for 24 hours keeps the shape it always had. A longer one adds its hours so the
+    // note that says when it ended can name them.
+    function savedHours(saved) {
+      return saved && REMEMBER_CHOICES[saved.hours] ? saved.hours : 24;
+    }
+
     function saveCredential(kind, value) {
       try {
-        window.localStorage.setItem(
-          REMEMBERED[kind].key,
-          JSON.stringify({ value: value, expires: Date.now() + REMEMBER_MS })
-        );
+        const hours = rememberHours(kind);
+        const entry = { value: value, expires: Date.now() + hours * REMEMBER_HOUR_MS };
+        if (hours !== 24) entry.hours = hours;
+        window.localStorage.setItem(REMEMBERED[kind].key, JSON.stringify(entry));
         return true;
       } catch (error) {
         return false;
@@ -2722,10 +3065,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
-    function rememberedUntil(expires) {
-      return new Date(expires).toLocaleString(
-        "en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" }
-      );
+    // Longer than a day needs the date too: a weekday alone could mean this week or next month.
+    function rememberedUntil(expires, long) {
+      const options = long
+        ? { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }
+        : { weekday: "short", hour: "2-digit", minute: "2-digit" };
+      return new Date(expires).toLocaleString("en-GB", options);
     }
 
     // renew names the credential a person has just checked again. If it was accepted its
@@ -2742,11 +3087,11 @@ DASHBOARD_HTML = r"""<!doctype html>
         let saved = savedCredential(kind);
         let note = "";
         if (saved && saved.expires <= Date.now()) {
+          expiredNotice[kind] = REMEMBER_CHOICES[savedHours(saved)];
           forgetCredential(kind);
           saved = null;
           ownedRemembered[kind] = null;
           box.checked = false;
-          expiredNotice[kind] = true;
         } else if (!box.checked || !value) {
           if (saved && saved.value === ownedRemembered[kind]) {
             forgetCredential(kind);
@@ -2769,11 +3114,11 @@ DASHBOARD_HTML = r"""<!doctype html>
           }
         }
         if (!note && !box.checked && expiredNotice[kind]) {
-          note = "Forgot the saved " + config.noun + " after 24 hours.";
+          note = "Forgot the saved " + config.noun + " after " + expiredNotice[kind] + ".";
         } else if (!note && box.checked) {
           note = saved && saved.value === value
-            ? "Remembered until " + rememberedUntil(saved.expires) + "."
-            : "Will be remembered for 24 hours once accepted.";
+            ? "Remembered until " + rememberedUntil(saved.expires, savedHours(saved) > 24) + "."
+            : "Will be remembered for " + REMEMBER_CHOICES[rememberHours(kind)] + " once accepted.";
         }
         element(config.note).textContent = note;
       }
@@ -2781,12 +3126,20 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function restoreRememberedCredentials() {
       let restoredAdmin = false;
+      // The last choice made in this browser. A saved token below shows its own hours instead.
+      try {
+        const choice = Number(window.localStorage.getItem(REMEMBER_CHOICE_KEY));
+        if (REMEMBER_CHOICES[choice]) element("remember-admin-duration").value = String(choice);
+      } catch (error) {
+        // Storage is blocked, so the default of 24 hours stays.
+      }
       for (const kind of Object.keys(REMEMBERED)) {
         const config = REMEMBERED[kind];
         const saved = savedCredential(kind);
         if (saved && saved.expires > Date.now()) {
           element(config.input).value = saved.value;
           element(config.box).checked = true;
+          if (kind === "admin") element("remember-admin-duration").value = String(savedHours(saved));
           ownedRemembered[kind] = saved.value;
           if (kind === "admin") restoredAdmin = true;
         } else if (!saved) {
@@ -2804,6 +3157,24 @@ DASHBOARD_HTML = r"""<!doctype html>
         expiredNotice[kind] = false;
         updateCredentialStatus();
       });
+    });
+
+    // The choice belongs to this browser. A token that is remembered already starts its new time now.
+    element("remember-admin-duration").addEventListener("change", () => {
+      try {
+        window.localStorage.setItem(REMEMBER_CHOICE_KEY, String(rememberHours("admin")));
+      } catch (error) {
+        // The choice is used for this visit only.
+      }
+      expiredNotice.admin = false;
+      // A shorter time cuts what is saved at once, even if the token is not checked again.
+      // A longer one only counts once the token has been accepted.
+      const saved = savedCredential("admin");
+      if (
+        saved && saved.value === ownedRemembered.admin &&
+        saved.expires > Date.now() + rememberHours("admin") * REMEMBER_HOUR_MS
+      ) saveCredential("admin", saved.value);
+      syncRememberedCredentials("admin");
     });
 
     window.addEventListener("storage", (event) => {
@@ -2927,7 +3298,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         setButtonBusy(pendingFormSubmitButton, false);
         pendingFormSubmitButton = null;
       }
-      if (kind) showToast(message, kind);
+      // The toast is the one place a result shows and the one place a screen reader announces it.
+      // The message line above stays only as the last text for scripts and tests.
+      showToast(message, kind || "info");
     }
 
     function resetTrafficHistory() {
@@ -3396,7 +3769,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("traffic-profile-status").textContent = selectedDevice === "@all"
         ? "Select one device to see its applied default queue limit. Service-specific limits are not shown."
         : !data.profile_limits_available
-          ? "No plan is running yet. Choose Start with saved settings to see current default queue limits."
+          ? "No plan is running yet. Choose Start to see current default queue limits."
           : !profileAvailable
             ? "The selected device has no applied default queue limits available."
             : deviceLimits.upload_kbit === null && deviceLimits.download_kbit === null
@@ -3432,7 +3805,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const queueTotals = selectedQueueTotals(counters.queues);
         if (!totals) {
           resetTrafficHistory();
-          element("traffic-status").textContent = "No counters yet. Assign a profile and choose Start with saved settings.";
+          element("traffic-status").textContent = "No counters yet. Assign a profile and choose Start.";
           return;
         }
         const sampledAt = performance.now();
@@ -3521,34 +3894,59 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     let toastTimer = null;
+    let toastDismissDelay = 0;
+    let toastReturnFocus = null;
+
+    function cancelToastDismissal() {
+      if (toastTimer !== null) window.clearTimeout(toastTimer);
+      toastTimer = null;
+    }
+
+    function scheduleToastDismissal() {
+      cancelToastDismissal();
+      const toast = element("toast");
+      if (!toastDismissDelay || toast.hidden || toast.contains(document.activeElement) || toast.matches(":hover")) return;
+      toastTimer = window.setTimeout(() => {
+        toastTimer = null;
+        if (!toast.contains(document.activeElement) && !toast.matches(":hover")) toast.hidden = true;
+      }, toastDismissDelay);
+    }
 
     function showToast(message, kind) {
       const toast = element("toast");
       const icon = element("toast-icon");
-      if (toastTimer !== null) {
-        window.clearTimeout(toastTimer);
-        toastTimer = null;
-      }
+      cancelToastDismissal();
+      if (!toast.contains(document.activeElement)) toastReturnFocus = document.activeElement;
       element("toast-message").textContent = message;
       toast.className = "toast " + (kind || "working");
-      toast.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
+      const announcer = element("action-announcer");
+      announcer.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
+      announcer.textContent = message;
       icon.textContent = kind === "success" ? "✓" : kind === "error" ? "!" : "";
       toast.hidden = false;
-      if (kind === "success") {
-        toastTimer = window.setTimeout(() => {
-          toast.hidden = true;
-          toastTimer = null;
-        }, 6000);
-      }
+      toastDismissDelay = kind === "working" || kind === "error" ? 0 : 6000;
+      scheduleToastDismissal();
     }
 
     function dismissToast() {
-      if (toastTimer !== null) {
-        window.clearTimeout(toastTimer);
-        toastTimer = null;
+      cancelToastDismissal();
+      const toast = element("toast");
+      const focused = toast.contains(document.activeElement);
+      toast.hidden = true;
+      if (focused) {
+        const target = toastReturnFocus && toastReturnFocus.isConnected &&
+          !toastReturnFocus.disabled && toastReturnFocus.getClientRects().length &&
+          (toastReturnFocus.tabIndex >= 0 || toastReturnFocus.hasAttribute("tabindex") || toastReturnFocus.isContentEditable)
+          ? toastReturnFocus : element("brand-title");
+        if (!target.hasAttribute("tabindex") && target === element("brand-title")) target.setAttribute("tabindex", "-1");
+        target.focus({preventScroll: true});
       }
-      element("toast").hidden = true;
     }
+
+    element("toast").addEventListener("pointerenter", cancelToastDismissal);
+    element("toast").addEventListener("pointerleave", scheduleToastDismissal);
+    element("toast").addEventListener("focusin", cancelToastDismissal);
+    element("toast").addEventListener("focusout", () => window.setTimeout(scheduleToastDismissal, 0));
 
     document.addEventListener("submit", (event) => {
       const label = event.submitter ? event.submitter.textContent.trim() : "Save";
@@ -3563,6 +3961,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }, true);
 
     let wifiResetPending = false;
+    let wifiChangePending = false;
 
     function renderMode(data) {
       helperConfigured = data.helper_configured;
@@ -4023,12 +4422,12 @@ DASHBOARD_HTML = r"""<!doctype html>
         (generalState.active === true || state === "unknown");
       const generalName = generalProfile ? generalProfile.name || generalProfile.id : "";
 
-      let general = {text: "General profile: none", tone: "muted"};
+      let general = {text: "Everyone: none", tone: "muted"};
       if (generalProfile) {
         general = generalInEffect
-          ? {text: "General profile: " + generalName + " · active", tone: "on"}
+          ? {text: "Everyone: " + generalName + " · active", tone: "on"}
           : {
-              text: "General profile: " + generalName + " · " +
+              text: "Everyone: " + generalName + " · " +
                 (state === "reset" ? "paused" : "saved, not applied"),
               tone: "muted"
             };
@@ -4187,7 +4586,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const parts = [];
       if (input.generalProfileName) {
         // The server runs the enabled service lists together with the general profile.
-        parts.push('General profile "' + input.generalProfileName + '" for every unprotected device');
+        parts.push('Profile "' + input.generalProfileName + '" for every unprotected device');
       } else {
         if (input.devices > 0) {
           parts.push(count(input.devices, "device", "devices") + " with a profile");
@@ -4220,7 +4619,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function startedText(input, wasRunning) {
-      const lead = wasRunning ? "Re-applied" : "Started";
+      const lead = "Started";
       if (hasProfilesOrLists(input)) return lead + ": " + applySummary(input) + ".";
       const sentences = [lead + "."];
       if (input.protected > 0) sentences.push(protectedDevicesText(input.protected) + ".");
@@ -4252,7 +4651,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           return {text: "Off. No traffic shaping is running.", tone: "muted"};
         }
         if (state === "unknown") {
-          return {text: "JitterSim is not running. Choose Start with saved settings.", tone: "pending"};
+          return {text: "Nothing is running. Choose Start.", tone: "pending"};
         }
         if (state === "error") {
           return options.lastAction === "reset"
@@ -4269,10 +4668,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       return {text: "State unknown.", tone: "muted"};
     }
 
+    // One word for one idea: Start both begins the saved settings and applies them again.
     function applyButtonLabel(state, running) {
-      const keepsRunning = state === "applied" || state === "unknown" || state === "error" ||
-        state === "applying" || state === "resetting";
-      return running === true && keepsRunning ? "Re-apply saved settings" : "Start with saved settings";
+      return "Start";
     }
 
     function currentApplyLabel() {
@@ -4363,7 +4761,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         disableApply,
         disableGroupSelect,
         disableGroupButton,
-        protectionLabel: protectedRow ? "Remove protection" : "Make unaffected"
+        protectionLabel: protectedRow ? "Stop protecting" : "Protect"
       };
     }
 
@@ -4373,7 +4771,15 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     const connectedRowHooks = [];
 
+    function profileOptionLabels(items) {
+      const counts = new Map();
+      items.forEach((profile) => counts.set(profile.name, (counts.get(profile.name) || 0) + 1));
+      return new Map(items.map((profile) => [profile.id, counts.get(profile.name) > 1
+        ? profile.name + " (" + profile.id + ")" : profile.name]));
+    }
+
     function renderConnectedDevices(data) {
+      const profileLabels = profileOptionLabels(profiles);
       lastConnectedDevices = data;
       const container = element("connected-devices");
       const count = element("connected-count");
@@ -4446,7 +4852,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const details = document.createElement("div");
         const address = document.createElement("p");
         address.className = "connected-address";
-        address.textContent = device.display_name || "Unnamed client";
+        address.textContent = device.display_name || device.ipv4_address || device.mac_address;
         const metadata = document.createElement("p");
         metadata.className = "connected-meta";
         const metadataParts = [device.ipv4_address || "IP address pending", device.mac_address];
@@ -4462,11 +4868,15 @@ DASHBOARD_HTML = r"""<!doctype html>
         );
         const assignmentInfo = document.createElement("p");
         assignmentInfo.className = "connected-meta";
-        assignmentInfo.textContent = device.unaffected ? "Unaffected by all profiles and quotas · Traffic is not monitored" :
-          device.general_profile_name ? "General profile: " + device.general_profile_name +
-            " · Shared speed limit · Saved device rules paused" :
-          "Base profile: " + (device.assigned_profile_id || "Unassigned") +
-          (device.group_name ? " · Group: " + device.group_name + (device.group_profile_id ? " (override: " + device.group_profile_id + ")" : "") : "");
+        const savedProfileName = (id) => {
+          const found = profiles.find((candidate) => candidate.id === id);
+          return found ? found.name : id;
+        };
+        assignmentInfo.textContent = device.unaffected ? "Protected from all profiles and quotas · Traffic is not monitored" :
+          device.general_profile_name ? "Same as everyone: " + device.general_profile_name +
+            " · Shared speed limit" :
+          "Profile: " + (device.assigned_profile_id ? savedProfileName(device.assigned_profile_id) : "None") +
+          (device.group_name ? " · Group: " + device.group_name + (device.group_profile_id ? " (override: " + savedProfileName(device.group_profile_id) + ")" : "") : "");
         details.append(address, metadata, deviceType, assignmentInfo);
         connectedRowHooks.forEach((hook) => hook(device, details));
         if (device.hostname) {
@@ -4545,7 +4955,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         profiles.forEach((profile) => {
           const option = document.createElement("option");
           option.value = profile.id;
-          option.textContent = profile.name + " (" + profile.id + ")";
+          option.textContent = profileLabels.get(profile.id);
           option.selected = profile.id === device.assigned_profile_id;
           profileSelect.appendChild(option);
         });
@@ -4614,7 +5024,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         protectionButton.addEventListener("click", () => connectedControlAction(
           device.unaffected ? "/api/unaffected-devices/delete" : "/api/unaffected-devices",
           {mac_address: device.mac_address, display_name: device.display_name || ""}, protectionButton,
-          device.unaffected ? "Protection removed. Saved profiles can apply again." : "Protection saved and applied. This device is unaffected by profiles."
+          device.unaffected ? "Stopped protecting this device. Saved profiles can apply again." : "Protected. Profiles no longer affect this device."
         ));
         controls.append(profileSelect, applyButton, groupSelect, groupButton, protectionButton);
         if (rowState.protectedRow) {
@@ -4658,7 +5068,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const details = document.createElement("div");
         const name = document.createElement("p");
         name.className = "connected-address";
-        name.textContent = label.display_name || "Unnamed client";
+        name.textContent = label.display_name || label.mac_address;
         const mac = document.createElement("p");
         mac.className = "connected-meta";
         mac.textContent = label.mac_address;
@@ -4761,7 +5171,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           profile_id: profileId
         });
         clearConnectedDrafts.add(device.mac_address);
-        refreshAfterSuccess((result.message || "Base profile saved and applied.") + (result.warning ? " " + result.warning : ""));
+        refreshAfterSuccess((result.message || "Profile saved and applied.") + (result.warning ? " " + result.warning : ""));
       } catch (error) {
         showMessage(error.message, "error");
         await loadConnectedDevices();
@@ -4794,7 +5204,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         renderApplySummary();
         container.replaceChildren();
         if (!data.devices.length) {
-          container.textContent = "No devices are protected. Choose Make unaffected beside a connected client.";
+          container.textContent = "No devices are protected. Choose Protect beside a connected client.";
         }
         data.devices.forEach((device) => {
           const row = document.createElement("div");
@@ -4802,16 +5212,16 @@ DASHBOARD_HTML = r"""<!doctype html>
           const name = document.createElement("div");
           const title = document.createElement("p");
           title.className = "connected-address";
-          title.textContent = device.display_name || "Unnamed device";
+          title.textContent = device.display_name || device.mac_address;
           const mac = document.createElement("p");
           mac.className = "connected-meta";
           mac.textContent = device.mac_address;
           name.append(title, mac);
           const button = document.createElement("button");
           button.type = "button";
-          button.textContent = "Remove protection";
-          button.setAttribute("aria-label", "Remove protection for " + (device.display_name || device.mac_address));
-          button.addEventListener("click", () => connectedControlAction("/api/unaffected-devices/delete", {mac_address: device.mac_address}, button, "Protection removed. Saved profiles can apply again."));
+          button.textContent = "Stop protecting";
+          button.setAttribute("aria-label", "Stop protecting for " + (device.display_name || device.mac_address));
+          button.addEventListener("click", () => connectedControlAction("/api/unaffected-devices/delete", {mac_address: device.mac_address}, button, "Stopped protecting this device. Saved profiles can apply again."));
           row.append(name, button);
           container.appendChild(row);
         });
@@ -5001,8 +5411,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       showMessage(error.message, "error");
     }
 
-    const ENFORCE_NOTE = "It applies on its own while JitterSim is running. " +
-      "After Reset or Panic choose Start with saved settings. After Panic also turn household blocking back on.";
+    const ENFORCE_NOTE = "It applies on its own while profiles are running. " +
+      "After Reset or Panic choose Start. After Panic also turn household blocking back on.";
 
     function queryCountText(count) {
       return count + (count === 1 ? " query" : " queries");
@@ -6325,6 +6735,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function loadProfiles() {
       const data = await request("/api/profiles", "GET");
       profiles = data.profiles;
+      const profileLabels = profileOptionLabels(profiles);
       profilesLoaded = true;
       renderSidebarStatus();
       element("profiles-json").textContent = JSON.stringify(profiles, null, 2);
@@ -6360,7 +6771,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         profiles.forEach((profile) => {
           const option = document.createElement("option");
           option.value = profile.id;
-          option.textContent = profile.name + " (" + profile.id + ")";
+          option.textContent = profileLabels.get(profile.id);
           profileSelect.appendChild(option);
         });
         // Rebuilding the menu must not change a choice being edited.
@@ -6385,9 +6796,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       const status = element("general-profile-status");
       status.textContent = !data.profile
-        ? profiles.length ? "No general profile. Saved device rules apply when profiles are on." : "Create a saved profile on the Profiles page to use this control."
+        ? profiles.length ? "Nothing set for everyone. Saved device rules apply when profiles are on." : "Create a saved profile on the Profiles page to use this control."
         : data.active ? "Active: " + data.profile.name + ". Applies to every unprotected device."
-        : data.state.observed_state === "reset" ? "Paused: " + data.profile.name + ". Choose Apply to all or Start with saved settings to resume."
+        : data.state.observed_state === "reset" ? "Paused: " + data.profile.name + ". Choose Apply to all or Start to resume."
         : data.state.observed_state === "error" ? "Saved: " + data.profile.name + ". Network update failed. Retry Apply to all."
         : "Saved: " + data.profile.name + ". Apply to all to start.";
       updateTrafficDeviceOptions(savedDevices);
@@ -6676,10 +7087,13 @@ DASHBOARD_HTML = r"""<!doctype html>
     function renderRandomWebsiteAnalytics(data) {
       const rows = element("random-website-rows");
       rows.replaceChildren();
+      const deviceNames = new Map((data.rows || []).map((item) =>
+        [item.device_id, {id: item.device_id, name: item.display_name || item.device_name}]));
+      const deviceLabels = profileOptionLabels(Array.from(deviceNames.values()));
       (data.rows || []).forEach((item) => {
         const row = document.createElement("tr");
         const device = document.createElement("td");
-        device.textContent = (item.display_name || item.device_name) + " (" + item.device_id + ")";
+        device.textContent = deviceLabels.get(item.device_id);
         const domain = document.createElement("td");
         domain.className = "analytics-domain";
         domain.textContent = item.domain;
@@ -6729,10 +7143,12 @@ DASHBOARD_HTML = r"""<!doctype html>
         allDevices.value = "";
         allDevices.textContent = "All devices";
         deviceSelect.appendChild(allDevices);
+        const deviceLabels = profileOptionLabels((deviceData.devices || []).map((device) =>
+          ({id: device.id, name: deviceDisplayName(device)})));
         (deviceData.devices || []).forEach((device) => {
           const option = document.createElement("option");
           option.value = device.id;
-          option.textContent = deviceDisplayName(device) + " (" + device.id + ")";
+          option.textContent = deviceLabels.get(device.id);
           option.selected = device.id === selectedDevice;
           deviceSelect.appendChild(option);
         });
@@ -6772,7 +7188,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         element("random-website-rows").replaceChildren();
         element("random-website-status").textContent = error.message;
         element("random-website-status").className = "analytics-status error";
-        return { ok: false, message: error.message, status: error.status };
+        return { ok: false, message: error.message, status: error.status,
+                 connectionLost: typeof isConnectionLost === "function" && isConnectionLost(error) };
       }
       let actionHistoryLoaded = true;
       try {
@@ -6831,10 +7248,13 @@ DASHBOARD_HTML = r"""<!doctype html>
           status.textContent = access.can_register ? "Token accepted. Choose Allow this device."
             : "Token accepted but device verification is pending. Wait a few seconds and check again.";
           status.className = "token-check-status success";
+          // The status line is not read out. The toast says it and replaces the working message.
+          showMessage(status.textContent, "info");
           return;
         }
         const result = await loadAdminTools();
         if (tokenRevision !== adminTokenRevision) return;
+        if (result.connectionLost) throw lostConnectionError(new Error(result.message));
         if (result.ok) {
           adminTokenVerified = true;
           // Remember an accepted token now. The refresh below can take seconds and a
@@ -6854,6 +7274,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           await startTrafficSampling();
           if (tokenRevision !== adminTokenRevision) return;
           if (typeof syncImpact === "function") syncImpact();
+          if (typeof loadBrand === "function") loadBrand();
+          if (typeof resumeWifiChangeNotice === "function") resumeWifiChangeNotice();
         } else {
           adminTokenVerified = false;
           adminTokenRejected = true;
@@ -6871,15 +7293,21 @@ DASHBOARD_HTML = r"""<!doctype html>
       } catch (error) {
         if (tokenRevision !== adminTokenRevision) return;
         adminTokenVerified = false;
-        adminTokenRejected = true;
+        // A dropped connection says nothing about the token. It is kept and checked again
+        // as soon as the Pi answers, so a Wi-Fi restart never looks like a sign-out.
+        const connectionLost = typeof isConnectionLost === "function" && isConnectionLost(error);
+        adminTokenRejected = !connectionLost;
         adminTokenRefused = error.status === 401;
         setDashboardUnlocked(false);
         element("allow-dashboard-device").disabled = true;
-        setPrivateDataPanels("Token check failed: " + error.message);
-        status.textContent = "Token check failed: " + error.message;
+        setPrivateDataPanels(connectionLost ? error.message : "Token check failed: " + error.message);
+        status.textContent = connectionLost ? error.message + " Your token is kept and checked again when the Pi answers."
+          : "Token check failed: " + error.message;
         status.className = "token-check-status error";
         showMessage(status.textContent, "error");
+        if (connectionLost && typeof recheckTokenWhenPiAnswers === "function") recheckTokenWhenPiAnswers();
       } finally {
+        if (tokenRevision !== adminTokenRevision) return;
         button.disabled = false;
         button.removeAttribute("aria-busy");
         button.textContent = "Check token";
@@ -6955,7 +7383,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function appliedMessage(data, wasRunning) {
       const applied = data.applied;
       if (!applied) {
-        return wasRunning ? "Re-applied your saved settings." : "Started with your saved settings.";
+        return "Started with your saved settings.";
       }
       return startedText({
         devices: applied.devices,
@@ -6981,7 +7409,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     element("panic-button").addEventListener("click", () => {
       runAction(
         "/api/normal-access",
-        "All profiles and household blocking are off. Choose Start with saved settings to run the profiles again. Turn blocking back on under Access rules.",
+        "All profiles and household blocking are off. Choose Start to run the profiles again. Turn blocking back on under Access rules.",
         "Turning everything off..."
       );
     });
@@ -6993,12 +7421,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       const path = stop ? "/api/general-profile/stop" : "/api/general-profile";
       savedProfileBusy = rowProfileId ? { id: rowProfileId, stop: stop } : null;
       setActionBusy(true, path);
-      showMessage(stop ? "Stopping the general profile..." : "Applying the profile to all unprotected devices...", "working");
+      showMessage(stop ? "Stopping the profile for everyone..." : "Applying the profile to all unprotected devices...", "working");
       try {
         await request(path, "POST", stop ? {} : {profile_id: profileId});
         refreshAfterSuccess(stop
-          ? "General profile stopped. Saved device rules resumed."
-          : "General profile applied. Protected devices remain unaffected.");
+          ? "Stopped the profile for everyone. Saved device rules resumed."
+          : "Profile applied for everyone. Protected devices keep normal access.");
       } catch (error) {
         showMessage(error.message, "error");
       } finally {
@@ -7514,7 +7942,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Timer started and the profile is active now."
-            : "Timer saved. Choose Start with saved settings to start it.",
+            : "Timer saved. Choose Start to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -7546,7 +7974,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Progression started and is active now."
-            : "Progression saved. Choose Start with saved settings to start it.",
+            : "Progression saved. Choose Start to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -7596,7 +8024,10 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     element("admin-token").addEventListener("input", () => {
       adminTokenRevision += 1;
+      if (typeof cancelWifiRecovery === "function") cancelWifiRecovery();
       adminTokenChecking = false;
+      element("check-admin-token").disabled = false;
+      element("check-admin-token").removeAttribute("aria-busy");
       adminTokenRejected = false;
       adminTokenRefused = false;
       adminTokenVerified = false;
@@ -7861,43 +8292,76 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     element("access-point-form").addEventListener("submit", async (event) => {
       event.preventDefault();
+      const cancelChange = (text) => {
+        if (pendingFormSubmitButton) setButtonBusy(pendingFormSubmitButton, false);
+        pendingFormSubmitButton = null;
+        showMessage(text);
+      };
+      if (wifiChangePending) return cancelChange("Another Pi Wi-Fi change is still running.");
+      if (!window.confirm(WIFI_RESTART_NOTICE)) return cancelChange("Pi Wi-Fi change cancelled.");
+      wifiChangePending = true;
+      const submittedSsid = element("access-point-ssid").value;
+      const submittedPassword = element("access-point-password").value;
+      const submittedDraft = formDrafts.get("access-point-form");
+      const tokenRevision = adminTokenRevision;
       try {
-        await request("/api/access-point", "POST", {
-          ssid: element("access-point-ssid").value,
-          password: element("access-point-password").value
+        // The Pi confirms first and restarts its Wi-Fi afterwards. The result is read once it is back.
+        const outcome = await runWifiChange("/api/access-point", {
+          ssid: submittedSsid,
+          password: submittedPassword
+        }, (operation) => {
+          if (tokenRevision !== adminTokenRevision || !operation || operation.state !== "succeeded") return;
+          if (formDrafts.get("access-point-form") !== submittedDraft ||
+              element("access-point-ssid").value !== submittedSsid ||
+              element("access-point-password").value !== submittedPassword) return;
+          element("access-point-password").value = "";
+          // The saved name is what the field shows now so nothing is left to restore.
+          clearDraft("access-point-form");
+          showMessage(operation.message, "success");
         });
-        element("access-point-password").value = "";
-        // The saved name is what the field shows now so nothing is left to restore.
-        clearDraft("access-point-form");
-        showMessage("Pi access point updated. Reconnect the test device if its Wi-Fi name changed.", "success");
+        if (tokenRevision === adminTokenRevision && outcome && outcome.gaveUp) showMessage("The Pi has not answered yet. See the note on this page.", "error");
       } catch (error) {
-        showMessage(error.message, "error");
+        if (tokenRevision === adminTokenRevision) showMessage(error.message, "error");
+      } finally {
+        wifiChangePending = false;
       }
     });
 
     element("reset-wifi-name").addEventListener("click", async (event) => {
-      if (wifiResetPending || !helperConfigured) return;
-      if (!window.confirm("Restore the Wi-Fi name to JitterSim? The password and security type stay the same. Test clients will disconnect while Wi-Fi restarts.")) return;
+      if (wifiResetPending || wifiChangePending || !helperConfigured) return;
+      if (!window.confirm("Restore the default Wi-Fi name? The password and security type stay the same. " + WIFI_RESTART_NOTICE)) return;
       const button = event.currentTarget;
       const status = element("wifi-reset-status");
       wifiResetPending = true;
       setButtonBusy(button, true);
       status.textContent = "Restoring the Pi Wi-Fi name...";
+      const submittedDraft = formDrafts.get("access-point-form");
+      const submittedSsid = element("access-point-ssid").value;
+      const tokenRevision = adminTokenRevision;
       try {
-        const response = await request("/api/access-point/reset-name", "POST", {});
-        element("access-point-ssid").value = response.result.ssid;
-        // The restored name replaces what was typed. Without this the next refresh
-        // puts the typed name back and a later save sends it to the access point.
-        clearDraft("access-point-form");
-        status.textContent = "JitterSim restored using " + response.result.security + ". Password unchanged.";
-        showMessage(status.textContent, "success");
+        const outcome = await runWifiChange("/api/access-point/reset-name", {}, (operation) => {
+          if (tokenRevision !== adminTokenRevision) return;
+          if (operation && operation.state === "succeeded" &&
+              formDrafts.get("access-point-form") === submittedDraft &&
+              element("access-point-ssid").value === submittedSsid) {
+            element("access-point-ssid").value = operation.ssid;
+            // The restored name replaces what was typed. Without this the next refresh
+            // puts the typed name back and a later save sends it to the access point.
+            clearDraft("access-point-form");
+          }
+          status.textContent = operation ? operation.message : "Check the Pi Wi-Fi settings.";
+          showMessage(status.textContent, operation && operation.state === "succeeded" ? "success" : "error");
+        });
+        if (tokenRevision === adminTokenRevision && outcome && outcome.gaveUp) status.textContent = "The Pi has not answered yet. See the note on this page.";
       } catch (error) {
-        status.textContent = error.message;
-        showMessage(error.message, "error");
+        if (tokenRevision === adminTokenRevision) status.textContent = error.message;
+        if (tokenRevision === adminTokenRevision) showMessage(error.message, "error");
       } finally {
         wifiResetPending = false;
-        setButtonBusy(button, false);
-        button.disabled = !helperConfigured;
+        if (tokenRevision === adminTokenRevision) {
+          setButtonBusy(button, false);
+          button.disabled = !helperConfigured;
+        }
       }
     });
 
@@ -7979,17 +8443,26 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function routerRequest(path, body) {
       const passwordRevision = routerPasswordRevision;
       const tokenRevision = adminTokenRevision;
-      let response = await request(path, "POST", {...body, background: true});
-      const deadline = Date.now() + 210000;
+      const context = wifiRecoveryContext(210000);
+      const tokenValid = context.valid;
+      context.valid = () => tokenValid() && passwordRevision === routerPasswordRevision;
+      const identifier = await boundedRecoveryRead(options => newWifiRequestId(options), context);
+      let response;
+      try {
+        response = await boundedRecoveryRead(options => request(path, "POST",
+          {...body, background: true, request_id: identifier}, options), context);
+      } catch (error) {
+        if (!context.valid() || (!isConnectionLost(error) && !error.recoveryStopped)) throw error;
+        // The write may have happened. Confirm exactly this identifier through read-only polling.
+        response = {pending: true, operation_id: identifier};
+      }
       while (response.pending) {
-        if (Date.now() >= deadline) throw new Error("Router result timed out. Check the current state before another change.");
-        await new Promise(resolve => window.setTimeout(resolve, 1000));
-        if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) {
-          throw new Error("Credentials changed. Check router state before another change.");
-        }
-        response = await request("/api/router/operation", "POST", {
-          admin_password: body.admin_password, operation_id: response.operation_id
-        });
+        await recoveryPause(1000, context);
+        const pendingId = response.operation_id;
+        const poll = options => request("/api/router/operation", "POST", {
+          admin_password: body.admin_password, operation_id: pendingId
+        }, options);
+        response = await requestAcrossWifiRestart(poll, context);
       }
       if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) {
         throw new Error("Credentials changed. Check router state before another change.");
@@ -8001,6 +8474,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (routerActionPending || routerPasswordChecking) return;
       if (!requireAdminToken(button)) return;
       const passwordRevision = routerPasswordRevision;
+      const tokenRevision = adminTokenRevision;
+      const stillCurrent = () => passwordRevision === routerPasswordRevision && tokenRevision === adminTokenRevision;
       const password = element("router-admin-password").value;
       const status = element("router-action-message");
       if (!password) {
@@ -8023,10 +8498,10 @@ DASHBOARD_HTML = r"""<!doctype html>
         if (path === "/api/router/sync-ap") {
           const previewResponse = await routerRequest("/api/router/preview-ap", { admin_password: password });
           const preview = previewResponse.result;
-          if (passwordRevision !== routerPasswordRevision) throw new Error("Router password changed. Check Wi-Fi security again.");
+          if (!stillCurrent()) return;
           status.textContent = "Router Wi-Fi uses " + preview.security + " on " + preview.band + ".";
           const warning = preview.legacy ? " Older WPA is weak security. Copy it only for compatibility testing." : "";
-          if (!window.confirm("Copy " + preview.ssid + " using " + preview.security + " (" + preview.band + ")?" + warning + " The Pi will use the router's Wi-Fi password. Test clients disconnect while Wi-Fi restarts. Keep a separate management connection.")) {
+          if (!window.confirm("Copy " + preview.ssid + " using " + preview.security + " (" + preview.band + ")?" + warning + " The Pi will use the router's Wi-Fi password. " + (typeof WIFI_RESTART_NOTICE === "string" ? WIFI_RESTART_NOTICE : "") + " Keep a separate management connection.")) {
             status.textContent = "Wi-Fi security checked. Copy cancelled.";
             showMessage(status.textContent, "success");
             return;
@@ -8034,6 +8509,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           body = { ...body, expected_fingerprint: preview.fingerprint, confirm_legacy: preview.legacy };
         }
         const response = await routerRequest(path, { admin_password: password, ...body });
+        if (!stillCurrent()) return;
         const result = response.result || response;
         if (typeof result.enabled === "boolean") {
           routerWifiEnabled = result.enabled;
@@ -8043,6 +8519,17 @@ DASHBOARD_HTML = r"""<!doctype html>
         status.textContent = result.ssid
           ? "Copied " + result.ssid + " using " + result.security + ". Join with the router's Wi-Fi password."
           : (result.enabled ? "Router Wi-Fi is on." : "Router Wi-Fi is off.");
+        if (typeof showWifiResult !== "function") {
+          // The reconnect script is not part of this page.
+        } else if (result.ssid) {
+          showWifiResult({state: "succeeded", kind: "router-copy",
+            message: "Copied " + result.ssid + " using " + result.security + ".", ssid: result.ssid});
+        } else if (reconnectHappened) {
+          showWifiBanner("success", "Router Wi-Fi change finished", [status.textContent].concat(
+            result.enabled ? [] : ["If this Mac was using the router's Wi-Fi, join the Pi's test Wi-Fi network."]),
+            [{label: "Dismiss", run: hideWifiBanner}]);
+        }
+        if (typeof clearReconnectFlag === "function") clearReconnectFlag();
         element("credential-router-status").textContent = status.textContent;
         showMessage(status.textContent, "success");
         if (passwordRevision === routerPasswordRevision) {
@@ -8050,6 +8537,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           routerPasswordRejected = false;
         }
       } catch (error) {
+        if (!stillCurrent()) return;
         if (path === "/api/router/wifi") { routerWifiEnabled = null; routerWifiError = error.message; }
         status.textContent = error.message;
         element("credential-router-status").textContent = status.textContent;
@@ -8059,6 +8547,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           routerPasswordRejected = true;
         }
       } finally {
+        if (stillCurrent() && typeof clearReconnectFlag === "function") clearReconnectFlag();
         routerActionPending = false;
         ["sync-router-ap", "router-wifi-toggle"].forEach((id) => { element(id).disabled = false; });
         setButtonBusy(button, false);
@@ -8134,7 +8623,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     element("router-wifi-toggle").addEventListener("click", (event) => {
       if (typeof routerWifiEnabled !== "boolean" || event.currentTarget.disabled) return;
       const enabled = !routerWifiEnabled;
-      if (!enabled && !window.confirm("Turn off router Wi-Fi, including guest Wi-Fi? Keep the Pi connected by Ethernet.")) return;
+      if (!enabled && !window.confirm("Turn off router Wi-Fi, including guest Wi-Fi? Keep the Pi connected by Ethernet. A Mac that is using the router's Wi-Fi loses its connection and needs to join the Pi's test Wi-Fi network.")) return;
       routerAction("/api/router/wifi", {enabled, confirm_disable: !enabled},
         enabled ? "Turning on router Wi-Fi..." : "Turning off router Wi-Fi...", event.currentTarget);
     });
@@ -8448,8 +8937,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (!everyoneElse.profile_id && !condition) return null;
       return {
         cells: [
-          ["Everyone else", "Test Wi-Fi clients that aren't saved or unaffected"],
-          ["Any address", everyoneElse.unaffected_devices.length + " unaffected"],
+          ["Everyone else", "Test Wi-Fi clients that aren't saved or protected"],
+          ["Any address", everyoneElse.unaffected_devices.length + " protected"],
           appliedProfileCell(
             everyoneElse.profile_id ? profileName(everyoneElse.profile_id) : "None", condition
           ),
@@ -8460,7 +8949,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     // A saved profile that is paused because the device is protected or cannot be
-    // checked against the Unaffected list is never shown as applied or degraded.
+    // checked against the Protected list is never shown as applied or degraded.
     function deviceIsPaused(device) {
       return !!device && (device.effective_state === "protected" || device.effective_state === "unverified");
     }
@@ -8474,11 +8963,11 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function deviceStateCell(device) {
       if (device.effective_state === "protected") {
-        return ["Protected: profile paused", "Unaffected by profiles · Traffic is not monitored"];
+        return ["Protected: profile paused", "Protected from profiles · Traffic is not monitored"];
       }
       if (device.effective_state === "unverified") {
         return ["Profile paused", device.effective_note ||
-          "This saved device has no MAC address so JitterSim cannot check it against the Unaffected list."];
+          "This saved device has no MAC address so the Pi cannot check it against the Protected list."];
       }
       return deviceConditionCell(device.id);
     }
@@ -9020,7 +9509,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           return;
         }
         if (!validMeasurement(run)) {
-          showMessage(file.name + " is not a JitterSim measurement.", "error");
+          showMessage(file.name + " is not a measurement file.", "error");
           return;
         }
         loaded.push(run);
@@ -9063,7 +9552,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       // Configuration-only mode can't apply anything. Any network action counts,
       // so a later Reset doesn't bring the list back.
       if (state.canApply) {
-        steps.push({ text: "Start with saved settings", tab: null, done: Boolean(state.lastAction) });
+        steps.push({ text: "Start", tab: null, done: Boolean(state.lastAction) });
       }
       return steps;
     }
@@ -9120,7 +9609,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         .map((device) => ({
           value: device.mac_address,
           label: [
-            device.display_name || "Unnamed client",
+            device.display_name || device.ipv4_address || device.mac_address,
             device.ipv4_address || "no IP address yet",
             device.mac_address
           ].join(" · ")
@@ -9211,9 +9700,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (device.assigned_profile_id) {
         const saved = "Saved device: " + profileName(device.assigned_profile_id);
         // A saved device keeps its own profile even when its address is listed.
-        return device.unaffected ? saved + " (also on the unaffected list)" : saved;
+        return device.unaffected ? saved + " (also on the protected list)" : saved;
       }
-      if (device.unaffected) return "Unaffected";
+      if (device.unaffected) return "Protected";
       // The profile everyone else gets this minute, which a schedule can set.
       if (everyoneElse.active_profile_id) {
         return "Everyone else: " + profileName(everyoneElse.active_profile_id);
@@ -9224,20 +9713,20 @@ DASHBOARD_HTML = r"""<!doctype html>
     function savedChangeMessage(message, result) {
       if (result.live_applied !== false) return message;
       return helperConfigured
-        ? message + " The network is reset, so choose Start with saved settings to use it."
+        ? message + " The network is reset, so choose Start to use it."
         : message + " It takes effect when the dashboard runs in hardware mode.";
     }
 
     async function keepUnaffected(macAddress, name, button) {
       if (button) setButtonBusy(button, true);
-      showMessage("Adding " + macAddress + " to the unaffected list...", "working");
+      showMessage("Adding " + macAddress + " to the protected list...", "working");
       try {
         const result = await request("/api/unaffected-devices", "POST", {
           mac_address: macAddress,
           name: name
         });
         refreshAfterSuccess(savedChangeMessage(
-          "Added " + result.unaffected_device.name + " to the unaffected list.", result
+          "Added " + result.unaffected_device.name + " to the protected list.", result
         ));
         return true;
       } catch (error) {
@@ -9252,7 +9741,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       deleteItem(
         "/api/unaffected-devices/delete",
         { mac_address: macAddress },
-        "Removed from the unaffected list.",
+        "Removed from the protected list.",
         button
       );
     }
@@ -9379,6 +9868,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function scenarioStepRow(step) {
+      const profileLabels = profileOptionLabels(profiles);
       const row = document.createElement("div");
       row.className = "scenario-step";
       const profileLabel = document.createElement("label");
@@ -9389,7 +9879,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       profiles.forEach((profile) => {
         const option = document.createElement("option");
         option.value = profile.id;
-        option.textContent = profile.name + " (" + profile.id + ")";
+        option.textContent = profileLabels.get(profile.id);
         profileSelect.appendChild(option);
       });
       if (step.profile_id) profileSelect.value = step.profile_id;
@@ -10234,6 +10724,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function setControlsOpen(open, moveFocus) {
       const wasOpen = controlsOpen();
       sidebar.classList.toggle("controls-open", open);
+      document.body.classList.toggle("phone-controls-open", phoneLayout.matches && open);
       controlsToggle.setAttribute("aria-expanded", String(open));
       if (!moveFocus) return;
       if (open) {
@@ -10259,7 +10750,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function statusStripText(general, devices) {
-      return [String(general || "").replace(/^General profile: /, "General: "), devices]
+      return [String(general || ""), devices]
         .filter((part) => part).join(" · ");
     }
 
@@ -10303,12 +10794,14 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (typeof syncImpact === "function") syncImpact();
     }
 
+    // The page carries only the short card name. The browser storage key keeps its old prefix so
+    // saved open and closed cards stay as they were.
     function storedCardState(key) {
-      try { return window.localStorage.getItem(key); } catch (error) { return null; }
+      try { return window.localStorage.getItem("jittersim.card." + key); } catch (error) { return null; }
     }
 
     function storeCardState(key, open) {
-      try { window.localStorage.setItem(key, open ? "open" : "closed"); } catch (error) { /* private window */ }
+      try { window.localStorage.setItem("jittersim.card." + key, open ? "open" : "closed"); } catch (error) { /* private window */ }
     }
 
     function setCardOpen(card, open, remember) {
@@ -10338,7 +10831,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         toggle.setAttribute("aria-controls", body.id);
         while (title.firstChild) toggle.appendChild(title.firstChild);
         title.appendChild(toggle);
-        card.dataset.cardKey = "jittersim.card." + title.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        card.dataset.cardKey = card.dataset.cardKey || title.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
         toggle.addEventListener("click", () => setCardOpen(card, body.hidden, true));
         setCardOpen(card, cardStartsOpen(storedCardState(card.dataset.cardKey), card.dataset.collapse), false);
       });
@@ -10355,6 +10848,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
     }
+
 
     function syncDeviceChip() {
       const chip = document.getElementById("nav-devices-count");
@@ -10438,6 +10932,7 @@ DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("ac
 # The phone layout comes last so that it wins over the earlier narrow-screen rules.
 DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("phone.css").read_text(encoding="utf-8") + "</style>", 1)
 DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("access.js").read_text(encoding="utf-8") + "\n    startDashboard();")
+DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("reconnect.js").read_text(encoding="utf-8") + "\n    startDashboard();")
 
 
 _DASHBOARD_PAGE_CACHE: Dict[str, Tuple[str, bytes, bytes, str]] = {}
@@ -10540,7 +11035,7 @@ def _device_title(
 
 
 IMPACT_NO_HELPER_MESSAGE = "Impact needs the Pi helper."
-IMPACT_RESET_MESSAGE = "Network is reset. Choose Start with saved settings to start impact checks."
+IMPACT_RESET_MESSAGE = "Network is reset. Choose Start to start impact checks."
 IMPACT_OUT_OF_DATE_MESSAGE = (
     "The networking helper is out of date. Update it to see the impact check."
 )
@@ -10557,7 +11052,7 @@ def _impact_queue_name(
     """Name one queue of the impact check and say what kind of queue it is."""
 
     if queue_id == GENERAL_QUEUE_ID:
-        return "General profile", "General profile"
+        return "Everyone", "Everyone"
     for prefix, label in (("quota:", "Service quota"), ("assignment:", "Browser service profile")):
         if queue_id.startswith(prefix):
             return f"{label} {queue_id[len(prefix):]}", label
@@ -10628,7 +11123,7 @@ def _connected_device_payload(
         "display_name": (
             saved_label["display_name"]
             if saved_label and saved_label["display_name"]
-            else hostname or "Unnamed client"
+            else hostname or device.get("ipv4_address") or mac_address
         ),
         "saved_display_name": saved_label["display_name"] if saved_label else "",
         "saved_device_type": saved_label["device_type"] if saved_label else "",
@@ -11118,8 +11613,10 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         self.helper_client = helper_client
         self.scheduler = scheduler
         self.router_operations = RouterOperations(
-            self._router_response_for, str(admin_token) + "\0" + str(getattr(helper_client, "socket_path", "local")),
+            self._router_execute, str(admin_token) + "\0" + str(getattr(helper_client, "socket_path", "local")),
         )
+        # Wi-Fi restarts answer first and restart later. Their outcome waits to be read.
+        self.wifi_operations = WifiOperations()
         self.secure_transport = tls_context is not None
         self._tls_context = tls_context
         self._pending_connections: Dict[socket.socket, _PendingConnection] = {}
@@ -11369,8 +11866,24 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         workflow = read_workflow(self, path)
         if workflow is not None:
             return workflow
+        if path == "/api/wifi-operation/request-id":
+            identifier = issue_request_id()
+            return HTTPStatus.OK, "application/json", _json_bytes({"request_id": identifier})
+        if path == "/api/wifi-operation":
+            self._record_wifi_outcome()
+            identifier = parse_qs(query).get("id", [None])[0]
+            status, data = self.wifi_operations.last(identifier)
+            return status, "application/json", _json_bytes(data)
         if path == "/":
             return HTTPStatus.OK, "text/html; charset=utf-8", dashboard_page_bytes()
+        if path == "/favicon.ico":
+            return HTTPStatus.OK, "image/x-icon", NEUTRAL_ICON
+        if path == "/api/brand":
+            return HTTPStatus.OK, "application/json", _json_bytes({
+                "name": PRODUCT_NAME,
+                "command": PRODUCT_COMMAND,
+                "default_ssid": DEFAULT_ACCESS_POINT_SSID,
+            })
         if path == "/api/health":
             helper_reachable = False
             if self.helper_client is not None:
@@ -11918,7 +12431,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                         "message": (
                             "Live traffic needs hardware mode."
                             if self.helper_client is None
-                            else "Network is reset. Choose Start with saved settings to start traffic measurements."
+                            else "Network is reset. Choose Start to start traffic measurements."
                         ),
                         "devices": {},
                         "isp_limits": isp_limits,
@@ -11978,7 +12491,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 "connected_clients": None,
                 "traffic_counters": None,
                 "traffic_counters_message": (
-                    "Network is reset. Choose Start with saved settings to start traffic measurements."
+                    "Network is reset. Choose Start to start traffic measurements."
                     if runtime.observed_state == "reset"
                     else None
                 ),
@@ -12306,7 +12819,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     {
                         "timer": _timer_payload(timer),
                         "live_applied": False,
-                        "message": "timer saved; choose Start with saved settings in hardware mode to start it",
+                        "message": "timer saved; choose Start in hardware mode to start it",
                     }
                 )
             status, content_type, body = self._apply_after_change()
@@ -12384,7 +12897,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                             now=int(time.time()),
                         ),
                         "live_applied": False,
-                        "message": "progression saved; choose Start with saved settings in hardware mode to start it",
+                        "message": "progression saved; choose Start in hardware mode to start it",
                     }
                 )
             status, content_type, body = self._apply_after_change()
@@ -12770,23 +13283,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                     {"error": "network helper is not configured"}
                 )
-            try:
-                result = self.helper_client.reset_wifi_name()
-                if result.get("ssid") != "JitterSim" or result.get("security") not in SECURITY_MODES:
-                    raise HelperClientError("The helper did not confirm the expected Wi-Fi settings.")
-            except HelperClientError as error:
-                status = (HTTPStatus.CONFLICT if error.reason in ("wifi-busy", "helper-busy")
-                          else HTTPStatus.BAD_GATEWAY)
-                safe_errors = {
-                    "wifi-restored": "Wi-Fi name reset failed. The previous Wi-Fi settings were restored.",
-                    "wifi-restore-failed": "Wi-Fi name reset failed and recovery failed. Use management access to repair jittersim-ap.",
-                    "wifi-busy": "Another Pi Wi-Fi change is running. Try again later.",
-                    "helper-busy": "The networking helper is busy. Try again later.",
-                }
-                return status, "application/json", _json_bytes({
-                    "error": safe_errors.get(error.reason, "Wi-Fi name reset failed. Check the Pi helper and jittersim-ap connection through management access.")
-                })
-            return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+            return self._start_wifi_change("reset-name", self._reset_wifi_name, payload)
 
         if path == "/api/access-point":
             if self.helper_client is None:
@@ -12794,18 +13291,13 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     {"error": "network helper is not configured"}
                 )
             try:
-                result = self.helper_client.configure_access_point(
-                    ssid=payload["ssid"],
-                    password=payload["password"],
-                )
+                ssid, password = payload["ssid"], payload["password"]
+                # A refusal can only reach the browser now, not after the Wi-Fi restarted.
+                _validate_access_point_settings(ssid=ssid, password=password)
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid access point settings", error)
-            except HelperClientError:
-                LOGGER.exception("access point configuration failed")
-                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
-                    {"error": "access point configuration failed"}
-                )
-            return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+            return self._start_wifi_change(
+                "access-point", lambda: self._configure_access_point(ssid, password), payload)
 
         if path.startswith("/api/router/"):
             return self._handle_router_request(path, payload)
@@ -12851,7 +13343,110 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             self._close_pending(connection)
         self._request_inputs.clear()
         self.router_operations.close()
+        self.wifi_operations.close()
         super().server_close()
+
+    def _record_wifi_outcome(self) -> None:
+        outcome = self.wifi_operations.completed_action()
+        if outcome:
+            self.repository.record_action(action=outcome[0], status_code=outcome[1])
+
+    def _start_wifi_change(self, kind, work, payload):
+        """Legacy callers keep synchronous responses. The dashboard opts into exact outcomes."""
+        self._record_wifi_outcome()
+        identifier = payload.get("request_id")
+        if "request_id" in payload and not valid_request_id(identifier):
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": "Invalid or expired Wi-Fi request identifier."})
+        if identifier is None:
+            reserved = self.wifi_operations.reserve(kind)
+            if reserved is None:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": "Another Pi Wi-Fi change is running."})
+            if not self.wifi_operations.ready(reserved["id"], delayed=False):
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes({"error": "Service is stopping. Check current Wi-Fi settings."})
+            try:
+                if kind == "reset-name":
+                    result = self.helper_client.reset_wifi_name()
+                    if result.get("ssid") != "JitterSim" or result.get("security") not in SECURITY_MODES:
+                        raise HelperClientError("The helper did not confirm the expected Wi-Fi settings.")
+                    outcome = WifiOutcome(200, "Wi-Fi name restored.", ssid=result["ssid"], security=result["security"])
+                else:
+                    result = self.helper_client.configure_access_point(ssid=payload["ssid"], password=payload["password"])
+                    outcome = WifiOutcome(200, "Wi-Fi updated.", ssid=payload["ssid"], security="WPA3", password_changed=True)
+            except HelperClientError as error:
+                outcome = (_wifi_failure(error, "Wi-Fi name reset failed",
+                           "Check the Pi helper and jittersim-ap connection through management access.")
+                           if kind == "reset-name" else WifiOutcome(502, "access point configuration failed"))
+                self.wifi_operations.finish(reserved["id"], outcome)
+                return outcome.status, "application/json", _json_bytes({"error": outcome.message})
+            except Exception:
+                self.wifi_operations.finish(reserved["id"], WifiOutcome(502, "Wi-Fi result is uncertain. Check current settings."))
+                raise
+            self.wifi_operations.finish(reserved["id"], outcome)
+            return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+        started = self.wifi_operations.start(kind, work, request_id=identifier)
+        if started is None:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                {"error": "Another Wi-Fi change is running or the outcome store is full. Try again later."})
+        return HTTPStatus.ACCEPTED, "application/json", _json_bytes(
+            {"operation_id": started["id"], "pending": True, "kind": kind})
+
+    def _reset_wifi_name(self) -> WifiOutcome:
+        try:
+            result = self.helper_client.reset_wifi_name()
+            if result.get("ssid") != "JitterSim" or result.get("security") not in SECURITY_MODES:
+                raise HelperClientError("The helper did not confirm the expected Wi-Fi settings.")
+        except HelperClientError as error:
+            return _wifi_failure(error, "Wi-Fi name reset failed",
+                                 "Check the Pi helper and jittersim-ap connection through management access.")
+        return WifiOutcome(
+            200, "%s restored using %s. Password unchanged." % (result["ssid"], result["security"]),
+            ssid=result["ssid"], security=result["security"])
+
+    def _configure_access_point(self, ssid, password) -> WifiOutcome:
+        try:
+            self.helper_client.configure_access_point(ssid=ssid, password=password)
+        except (TypeError, ValueError, HelperClientError) as error:
+            LOGGER.warning("access point configuration failed")
+            if not isinstance(error, HelperClientError):
+                error = HelperClientError("access point configuration failed")
+            return _wifi_failure(error, "Pi Wi-Fi update failed",
+                                 "Check the Pi helper and jittersim-ap connection through management access.")
+        return WifiOutcome(
+            200, "Pi Wi-Fi updated. Join %s with the new password." % ssid,
+            ssid=ssid, security="WPA3", password_changed=True)
+
+    def _router_execute(self, path, payload):
+        """Run a router request on its worker. A Wi-Fi copy is also recorded as a Wi-Fi change."""
+        if path != "/api/router/sync-ap":
+            return self._router_response_for(path, payload)
+        identifier = payload.get("_wifi_operation_id")
+        if identifier is None:
+            reserved = self.wifi_operations.reserve("router-copy")
+            identifier = reserved["id"] if reserved else None
+        if identifier is None:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": "Another Pi Wi-Fi change is running."})
+        if not self.wifi_operations.ready(identifier, delayed=payload.get("background", True)):
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes({"error": "Service is stopping. Check current Wi-Fi settings."})
+        outcome = WifiOutcome(502, "The Wi-Fi copy did not finish. Check the Pi Wi-Fi settings before trying again.")
+        try:
+            status, content_type, body = self._router_response_for(path, payload)
+            try:
+                data = json.loads(body)
+                if status == HTTPStatus.OK:
+                    result = data["result"]
+                    outcome = WifiOutcome(
+                        200, "Copied %s using %s. Join with the router's Wi-Fi password."
+                        % (result["ssid"], result["security"]),
+                        ssid=result["ssid"], security=result["security"], password_changed=True)
+                else:
+                    outcome = WifiOutcome(int(status), data["error"])
+            except (KeyError, TypeError, ValueError):
+                pass
+            return status, content_type, body
+        finally:
+            # A request that raised keeps the failure outcome and the exception goes on.
+            if identifier is not None:
+                self.wifi_operations.finish(identifier, outcome)
 
     def _record_router_outcome(self) -> None:
         outcome = self.router_operations.completed_action()
@@ -12860,6 +13455,9 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
 
     def _handle_router_request(self, path, payload):
         self._record_router_outcome()
+        # A copy of the router Wi-Fi replaces the remembered Wi-Fi change. Write the last one
+        # into the history first, on this request thread, so it is not lost.
+        self._record_wifi_outcome()
         password = payload.get("admin_password")
         if not isinstance(password, str) or not password or len(password) > 1024:
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
@@ -12887,10 +13485,29 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             # carries the Wi-Fi password.
             return self._router_response_for(path, payload)
         if payload.get("background") is True:
+            identifier = payload.get("request_id")
+            if "request_id" in payload and not valid_request_id(identifier):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": "Invalid or expired router request identifier."})
             fields = {key: payload[key] for key in (
                 "admin_password", "enabled", "confirm_disable", "expected_fingerprint", "confirm_legacy") if key in payload}
+            if identifier is not None:
+                fields["request_id"] = identifier
+            reserved = None
+            if path == "/api/router/sync-ap":
+                if identifier is not None:
+                    previous_status, previous = self.router_operations.result(identifier, password, expected_path=path)
+                    if previous_status != 410:
+                        return previous_status, "application/json", _json_bytes(previous)
+                reserved = self.wifi_operations.reserve("router-copy", identifier)
+                if reserved is None:
+                    return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": "Another Wi-Fi change is running or the outcome store is full."})
+                fields["_wifi_operation_id"] = reserved["id"]
             status, data = self.router_operations.start(path, fields)
+            if status != 202 and reserved is not None:
+                self.wifi_operations.finish(reserved["id"], WifiOutcome(status, data.get("error", "Router change refused.")))
             return status, "application/json", _json_bytes(data)
+        if path == "/api/router/sync-ap":
+            return self._router_execute(path, {**payload, "background": False})
         return self._router_response_for(path, payload)
 
     def _router_response_for(self, path, payload):
@@ -13040,7 +13657,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     "error": (
                         "Traffic can only be scanned while at most "
                         f"{MAX_PROTECTED_MACS} devices are protected. "
-                        "Remove some from the Unaffected list."
+                        "Remove some from the Protected list."
                     )
                 }
             )
@@ -13273,7 +13890,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         ) + sum(item.enabled for item in self.repository.list_service_lists())
         if rules > 15:
             raise PlanError(
-                "At most 15 affected devices, service rules and service lists can be active. Remove one or keep the device unaffected."
+                "At most 15 affected devices, service rules and service lists can be active. Remove one or keep the device protected."
             )
         compile_stored_plan(repository=self.repository)
 
@@ -13310,7 +13927,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     {
                         **fields,
                         "live_applied": False,
-                        "message": "Saved. The network is reset, so choose Start with saved settings to use it.",
+                        "message": "Saved. The network is reset, so choose Start to use it.",
                     }
                 ),
             )
@@ -13424,7 +14041,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     def _change_general_profile(self, payload: dict, *, stop: bool):
         if self.helper_client is None:
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
-                {"error": "Connect the Pi networking helper to apply a general profile"}
+                {"error": "Connect the Pi networking helper to apply a profile for everyone"}
             )
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
@@ -13457,6 +14074,529 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 response["error"] = "Selection saved but the network update failed. " + response["error"]
             return status, content_type, _json_bytes(response)
 
+    def _address_access_state(self, record: AddressMove) -> str:
+        """Read exact root ownership or an atomic completed-Undo receipt."""
+        reader = getattr(self.helper_client, "dashboard_access", None)
+        if reader is None:
+            return "unknown"
+        try:
+            devices = reader("local-list")["devices"]
+            if not isinstance(devices, list) or len(devices) > 64:
+                return "unknown"
+            old = next((item for item in devices if item["mac_address"] == record.old_mac), None)
+            new = next((item for item in devices if item["mac_address"] == record.new_mac), None)
+        except (HelperClientError, KeyError, TypeError):
+            return "unknown"
+        if not record.move_id:
+            return "changed"
+        if (
+            old
+            and old.get("replacement_id") == record.move_id
+            and old.get("replaced_by") == record.new_mac
+            and new
+            and "replaced_by" not in new
+            and new.get("owner_id") == record.move_id
+        ):
+            return "owned"
+        if (
+            old
+            and "replaced_by" not in old
+            and old.get("undo_id") == record.move_id
+            and new is None
+        ):
+            return "undone"
+        return "changed"
+
+    @staticmethod
+    def _address_recovery_response(record: AddressMove, error: str):
+        return (
+            HTTPStatus.CONFLICT,
+            "application/json",
+            _json_bytes(
+                {
+                    "error": error
+                    + " Use the management connection to finish or inspect this move.",
+                    "saved": record.phase == "saved",
+                    "recovery_required": True,
+                    "old_mac": record.old_mac,
+                    "new_mac": record.new_mac,
+                    "move_id": record.move_id,
+                    "phase": record.phase,
+                }
+            ),
+        )
+
+    def _address_reservation(self, old: str, new: str, *, move_id: str = ""):
+        return next(
+            (
+                move
+                for move in self.repository.list_address_moves()
+                if move.phase != "saved"
+                and move.move_id != move_id
+                and {move.old_mac, move.new_mac} & {old, new}
+            ),
+            None,
+        )
+
+    def _address_return_history(self, old: str, new: str, move_id: str) -> list:
+        moves = [move for move in self.repository.list_address_moves() if move.move_id != move_id]
+        if not any(move.old_mac == new for move in moves):
+            return []
+        component = {old, new}
+        # At most 64 records can extend this component. No recursive history walks.
+        for _ in moves:
+            before = len(component)
+            for move in moves:
+                if {move.old_mac, move.new_mac} & component:
+                    component.update((move.old_mac, move.new_mac))
+            if len(component) == before:
+                break
+        superseded = [move for move in moves if {move.old_mac, move.new_mac} & component]
+        if any(move.phase != "saved" for move in superseded):
+            raise ValueError("Finish the pending move before returning to an earlier address.")
+        return superseded
+
+    def move_device_address_for_peer(self, old_mac: str, peer: str):
+        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
+        with operation:
+            identity = self.dashboard_access(peer)
+            new = normalize_exempt_mac(identity.get("mac_address"))
+            old = normalize_exempt_mac(old_mac)
+            existing = self.repository.get_address_move(old)
+            if existing is not None and existing.phase != "saved":
+                return self._address_recovery_response(existing, "An earlier move is unfinished.")
+            if not self.is_address_move_source(identity, old):
+                raise RequestError(
+                    "That device cannot be moved to this one. Choose a saved "
+                    "device that is not connected."
+                )
+            entries = self.helper_client.dashboard_access("local-list")["devices"]
+            if not isinstance(entries, list) or len(entries) > 64:
+                raise HelperClientError("Saved device access could not be verified.")
+            access = not identity.get("allowed") and any(
+                item.get("mac_address") == old and "replaced_by" not in item for item in entries
+            )
+            source_name = next(
+                (item.get("name", "") for item in entries if item.get("mac_address") == old), ""
+            )
+            with self.repository.address_move_transaction():
+                reserved = self._address_reservation(old, new)
+                if reserved is not None:
+                    return self._address_recovery_response(
+                        reserved, "These addresses are reserved."
+                    )
+                self._address_return_history(old, new, "")
+                record = AddressMove(
+                    old,
+                    new,
+                    name=source_name,
+                    moved_access=access,
+                    moved_at=int(time.time()),
+                    move_id=uuid.uuid4().hex,
+                    phase="pending",
+                    previous_protection_owner=(
+                        self.repository.address_move_protection_owner(old) or ""
+                    ),
+                    prepared_version=self.repository.get_runtime_state().configuration_version,
+                )
+                self.repository.save_address_move(record)
+            try:
+                data = self.dashboard_access(
+                    peer,
+                    "move-address-owned",
+                    mac_address=old,
+                    move_id=record.move_id,
+                    expected_mac=new,
+                    move_access=record.moved_access,
+                )
+            except HelperClientError:
+                return self._address_recovery_response(record, "The helper reply was uncertain.")
+            if data.get("mac_address") != new:
+                return self._address_recovery_response(record, "The verified connection changed.")
+            status, content_type, body = self.move_device_address(
+                old, new, access_moved=bool(data.get("moved")), prepared=record
+            )
+            result = json.loads(body)
+            if result.get("saved") is True:
+                return (
+                    status,
+                    content_type,
+                    _json_bytes({**result, "allowed": bool(data.get("allowed"))}),
+                )
+            current = self.repository.get_address_move(old)
+            if current != record:
+                return self._address_recovery_response(
+                    current or record, "The saved move changed during the request."
+                )
+            if data.get("moved"):
+                try:
+                    self.dashboard_access(
+                        peer, "undo-move-owned", mac_address=old, move_id=record.move_id
+                    )
+                except HelperClientError:
+                    return self._address_recovery_response(
+                        record, "Saving failed and access reversal is uncertain."
+                    )
+            # A concurrent edit or import invalidates the prepared decision. Keep its evidence.
+            if self.repository.get_runtime_state().configuration_version != record.prepared_version:
+                return self._address_recovery_response(record, "Settings changed during the move.")
+            try:
+                with self.repository.address_move_transaction():
+                    if self.repository.get_address_move(old) != record:
+                        raise StorageError("The recovery record changed.")
+                    if (
+                        self.repository.get_runtime_state().configuration_version
+                        != record.prepared_version
+                    ):
+                        raise StorageError("Settings changed during recovery.")
+                    self.repository.delete_address_move(old)
+            except StorageError:
+                return self._address_recovery_response(
+                    record, "The move's recovery record could not be cleared."
+                )
+            return status, content_type, body
+
+    def _active_access_entries(self) -> list:
+        """The saved dashboard access entries that grant access, or nothing when unreadable."""
+
+        reader = getattr(self.helper_client, "dashboard_access", None)
+        if reader is None:
+            return []
+        try:
+            devices = reader("local-list").get("devices", [])
+        except (HelperClientError, AttributeError, TypeError):
+            return []
+        return [item for item in devices if isinstance(item, dict) and "replaced_by" not in item]
+
+    @staticmethod
+    def _address_move_summary(move: AddressMove) -> dict:
+        return {
+            "old_mac": move.old_mac,
+            "new_mac": move.new_mac,
+            "name": move.name or move.old_mac,
+            "moved_access": move.moved_access,
+            "moved_protection": move.moved_protection,
+            "moved_at": move.moved_at,
+            "recovery_required": move.phase != "saved",
+        }
+
+    def address_move_offer(self, identity: Dict[str, Any]) -> Dict[str, Any]:
+        """Describe the requester's address and the saved devices it could take over.
+
+        The identity comes from the helper. Nothing here reads a name or address from the browser.
+        """
+
+        none = {"offer": False, "current": None, "candidates": [], "replaced": []}
+        if identity.get("network") != "test":
+            if identity.get("network") == "management" and identity.get("allowed"):
+                none["replaced"] = [
+                    self._address_move_summary(move)
+                    for move in self.repository.list_address_moves()
+                ]
+            return none
+        try:
+            current = normalize_exempt_mac(identity.get("mac_address"))
+        except ValueError:
+            return none
+        registered = bool(identity.get("allowed"))
+        protected_entries = {
+            item.mac_address: item for item in self.repository.list_unaffected_devices()
+        }
+        protected = current in protected_entries
+        private = int(current[1], 16) & 2 == 2
+        result = {
+            "offer": False,
+            "current": {
+                "mac_address": current,
+                "private_address": private,
+                "registered": registered,
+                "protected": protected,
+            },
+            "candidates": [],
+            "replaced": [],
+        }
+        if registered:
+            result["replaced"] = [
+                self._address_move_summary(move)
+                for move in self.repository.list_address_moves()
+                if move.new_mac == current
+            ]
+        if registered and protected or identity.get("can_register") is not True:
+            # Nothing to take over, or the Pi could not verify this device so a move would be refused.
+            return result
+        # A device that is still connected under its own address is not an old address.
+        connected = {station_mac(item) for item in self._station_devices()}
+        candidates: Dict[str, Dict[str, Any]] = {}
+        if not registered:
+            for entry in self._active_access_entries():
+                try:
+                    mac = normalize_exempt_mac(entry.get("mac_address"))
+                except ValueError:
+                    continue
+                candidates[mac] = {
+                    "mac_address": mac,
+                    "name": str(entry.get("name") or mac),
+                    "registered": True,
+                    "protected": False,
+                }
+        if not protected:
+            for mac, entry in protected_entries.items():
+                item = candidates.setdefault(
+                    mac,
+                    {
+                        "mac_address": mac,
+                        "name": entry.name,
+                        "registered": False,
+                        "protected": False,
+                    },
+                )
+                item["protected"] = True
+                if entry.display_name:
+                    item["name"] = entry.display_name
+        replaced_targets = {move.old_mac for move in self.repository.list_address_moves()}
+        result["candidates"] = sorted(
+            (
+                item
+                for mac, item in candidates.items()
+                if mac != current and mac not in connected and mac not in replaced_targets
+            ),
+            key=lambda item: (item["name"].lower(), item["mac_address"]),
+        )
+        result["offer"] = bool(result["candidates"])
+        return result
+
+    def is_address_move_source(self, identity: Dict[str, Any], old_mac: str) -> bool:
+        """Only a device the page could have offered may be moved, never one that is still connected."""
+
+        offer = self.address_move_offer(identity)
+        return any(item["mac_address"] == old_mac for item in offer["candidates"])
+
+    def move_device_address(
+        self,
+        old_mac: str,
+        new_mac: str,
+        *,
+        access_moved: bool,
+        name: str = "",
+        prepared: Optional[AddressMove] = None,
+    ):
+        """Commit protection and history together, then report the separate live outcome."""
+        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
+        with operation:
+            try:
+                old = normalize_exempt_mac(old_mac)
+                new = normalize_exempt_mac(new_mac)
+                record = prepared or AddressMove(
+                    old,
+                    new,
+                    move_id=uuid.uuid4().hex,
+                    previous_protection_owner=self.repository.address_move_protection_owner(old)
+                    or "",
+                    prepared_version=self.repository.get_runtime_state().configuration_version,
+                )
+                protected = {
+                    item.mac_address: item for item in self.repository.list_unaffected_devices()
+                }
+                move_protection = old in protected and new not in protected
+                if old == new or not (move_protection or access_moved):
+                    raise ValueError("There is nothing to move for that device.")
+                if move_protection:
+                    name = protected[old].display_name
+                    purge = {
+                        str(station["ipv4_address"])
+                        for station in self._station_devices()
+                        if station_mac(station) == new and station.get("ipv4_address")
+                    } | {
+                        str(device.ipv4_address)
+                        for device in self.repository.list_devices()
+                        if device.mac_address == new
+                    }
+                    if self.scheduler:
+                        self.scheduler.sample_before_control_change(repository=self.repository)
+                with self.repository.address_move_transaction():
+                    if prepared is not None and self.repository.get_address_move(old) != record:
+                        raise ValueError("The prepared move changed before its save completed.")
+                    if (
+                        self.repository.get_runtime_state().configuration_version
+                        != record.prepared_version
+                    ):
+                        raise ValueError(
+                            "Settings changed during the move. Nothing was overwritten."
+                        )
+                    reserved = self._address_reservation(old, new, move_id=record.move_id)
+                    if reserved is not None:
+                        raise ValueError("These addresses have an unfinished move.")
+                    superseded = self._address_return_history(old, new, record.move_id)
+                    if move_protection:
+                        self.repository.save_unaffected_device(
+                            UnaffectedDevice(new, name, int(time.time()))
+                        )
+                        self.repository.claim_address_move_protection(new, record.move_id)
+                        self.repository.delete_unaffected_device(old)
+                        self.repository.delete_domain_observations(purge, [new])
+                    for prior in superseded:
+                        self.repository.delete_address_move(prior.old_mac)
+                    self.repository.save_address_move(
+                        replace(
+                            record,
+                            name=name,
+                            moved_access=access_moved,
+                            moved_protection=move_protection,
+                            phase="saved",
+                        )
+                    )
+                    if move_protection:
+                        self._validate_saved_plan()
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return (
+                    HTTPStatus.CONFLICT,
+                    "application/json",
+                    _json_bytes({"error": str(error), "saved": False}),
+                )
+            fields = {
+                "saved": True,
+                "moved": {
+                    "old_mac": old,
+                    "new_mac": new,
+                    "access": access_moved,
+                    "protection": move_protection,
+                },
+            }
+            if not move_protection:
+                return HTTPStatus.OK, "application/json", _json_bytes(fields)
+            return self._address_saved_response(fields)
+
+    def _address_saved_response(self, fields: dict):
+        try:
+            return self._saved_control_response(fields)
+        except (HelperClientError, PlanError, StorageError, sqlite3.Error):
+            return (
+                HTTPStatus.BAD_GATEWAY,
+                "application/json",
+                _json_bytes(
+                    {
+                        **fields,
+                        "live_applied": False,
+                        "error": "Settings saved but the network update failed. Protection is not confirmed.",
+                    }
+                ),
+            )
+
+    def _check_address_protection_ownership(self, record: AddressMove) -> None:
+        if record.moved_protection and (
+            not record.move_id
+            or self.repository.address_move_protection_owner(record.new_mac) != record.move_id
+            or self.repository.address_move_protection_owner(record.old_mac) is not None
+        ):
+            raise ValueError(
+                "Protection changed or its ownership cannot be proved. Nothing was overwritten."
+            )
+
+    def undo_device_address_move(self, old_mac: str, peer: str):
+        """Undo only owned entries, retaining evidence until both stores agree."""
+        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
+        with operation:
+            record = None
+            try:
+                record = self.repository.get_address_move(old_mac)
+                if record is None:
+                    return (
+                        HTTPStatus.NOT_FOUND,
+                        "application/json",
+                        _json_bytes({"error": "There is no move to undo for that device."}),
+                    )
+                if not record.move_id:
+                    raise ValueError(
+                        "Legacy move ownership cannot be proved. Use management recovery."
+                    )
+                if any(
+                    move.old_mac == record.new_mac for move in self.repository.list_address_moves()
+                ):
+                    raise ValueError("That device moved again. Undo the latest move first.")
+                state = self._address_access_state(record) if record.moved_access else "unused"
+                with self.repository.address_move_transaction():
+                    if self.repository.get_address_move(record.old_mac) != record:
+                        raise ValueError("The move changed before Undo started.")
+                    reserved = self._address_reservation(
+                        record.old_mac, record.new_mac, move_id=record.move_id
+                    )
+                    if reserved is not None:
+                        return self._address_recovery_response(
+                            reserved, "These addresses are reserved."
+                        )
+                    self._check_address_protection_ownership(record)
+                    version = self.repository.get_runtime_state().configuration_version
+                    if record.phase != "saved" and version != record.prepared_version:
+                        raise ValueError(
+                            "Settings changed since this move was prepared. Inspect its recovery evidence."
+                        )
+                    if record.moved_access:
+                        if state != "owned" and not (record.phase != "saved" and state == "undone"):
+                            raise ValueError(
+                                "Dashboard access changed or its ownership cannot be proved."
+                            )
+                    if record.phase != "undoing":
+                        record = replace(record, phase="undoing", prepared_version=version)
+                        self.repository.save_address_move(record)
+                if self.scheduler and record.moved_protection:
+                    self.scheduler.sample_before_control_change(repository=self.repository)
+                if record.moved_access and self._address_access_state(record) != "undone":
+                    try:
+                        self.dashboard_access(
+                            peer,
+                            "undo-move-owned",
+                            mac_address=record.old_mac,
+                            move_id=record.move_id,
+                        )
+                    except HelperClientError:
+                        return self._address_recovery_response(
+                            record, "The helper reversal reply was uncertain."
+                        )
+                if record.moved_access and self._address_access_state(record) != "undone":
+                    return self._address_recovery_response(
+                        record, "The helper reversal could not be proved."
+                    )
+                with self.repository.address_move_transaction():
+                    current = self.repository.get_address_move(record.old_mac)
+                    if current != record:
+                        raise ValueError("The move changed before Undo completed.")
+                    if (
+                        self.repository.get_runtime_state().configuration_version
+                        != record.prepared_version
+                    ):
+                        raise ValueError("Settings changed during Undo. Nothing was overwritten.")
+                    self._check_address_protection_ownership(record)
+                    if record.moved_protection:
+                        self.repository.delete_unaffected_device(record.new_mac)
+                        self.repository.save_unaffected_device(
+                            UnaffectedDevice(record.old_mac, record.name, int(time.time()))
+                        )
+                        if any(
+                            move.move_id == record.previous_protection_owner
+                            for move in self.repository.list_address_moves()
+                        ):
+                            self.repository.claim_address_move_protection(
+                                record.old_mac, record.previous_protection_owner
+                            )
+                    self.repository.delete_address_move(record.old_mac)
+                    if record.moved_protection:
+                        self._validate_saved_plan()
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                if record is not None and record.phase != "saved":
+                    return self._address_recovery_response(record, str(error))
+                return (
+                    HTTPStatus.CONFLICT,
+                    "application/json",
+                    _json_bytes({"error": str(error), "saved": False}),
+                )
+            fields = {
+                "saved": True,
+                "undone": {"old_mac": record.old_mac, "new_mac": record.new_mac},
+            }
+            if not record.moved_protection:
+                return HTTPStatus.OK, "application/json", _json_bytes(fields)
+            return self._address_saved_response(fields)
+
     def _change_unaffected_device(self, payload: dict, *, remove: bool):
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
@@ -13482,7 +14622,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     if remove:
                         if not self.repository.delete_unaffected_device(item.mac_address):
                             return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                                {"error": f"{item.mac_address} is not on the unaffected list"}
+                                {"error": f"{item.mac_address} is not on the protected list"}
                             )
                     else:
                         self.repository.save_unaffected_device(item)
@@ -13526,7 +14666,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                         mac = normalize_exempt_mac(client["mac_address"])
                         if mac in protected_macs:
                             raise ValueError(
-                                "This device is unaffected by profiles. Remove its protection before adding it to a group."
+                                "This device is protected from profiles. Stop protecting it before adding it to a group."
                             )
                         saved = self.repository.get_device_by_mac_address(mac)
                         base_profile = saved.profile_id if saved else profile_id
@@ -13572,11 +14712,13 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             )
 
     def _base_profile_feedback(self, device: Device) -> str:
+        saved_profile = self.repository.get_profile(device.profile_id)
+        profile_label = saved_profile.name if saved_profile is not None else device.profile_id
         general = self.repository.get_general_profile()
         if general is not None:
             return (
-                f"Base profile {device.profile_id} saved. General profile {general.name} "
-                "takes priority when profiles are active. Stop it to resume saved device rules."
+                f"Profile {profile_label} saved for this device. Everyone uses {general.name}, which "
+                "takes priority while profiles are on. Stop it to use the saved device profile."
             )
         now = int(time.time())
         group = next(
@@ -13626,7 +14768,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             current = f"Group {group.name} currently uses {group.profile_id}."
         else:
             current = "This is the current device profile."
-        return f"Base profile {device.profile_id} saved. " + current
+        return f"Profile {profile_label} saved for this device. " + current
 
     def _apply_profile_to_connected_device(self, payload: dict):
         if self.helper_client is None:
@@ -13648,7 +14790,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     item.mac_address for item in self.repository.list_unaffected_devices()
                 }:
                     raise ValueError(
-                        "This device is unaffected by profiles. Remove its protection before applying a profile."
+                        "This device is protected from profiles. Stop protecting it before applying a profile."
                     )
                 self._verify_selected_client(device, snapshot)
                 if self.scheduler:
@@ -13797,7 +14939,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             or self.scheduler.applied_plan() is None
         ):
             return HTTPStatus.CONFLICT, "application/json", _json_bytes(
-                {"error": "Choose Start with saved settings before starting a scenario."}
+                {"error": "Choose Start before starting a scenario."}
             )
         if run.everyone_else and not self._everyone_else_counted():
             capacity_error = self._capacity_error(adding=1)
@@ -13810,10 +14952,10 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             # Do not let a failed Start count down or resume during recovery.
             self.repository.stop_scenario_run(run.id)
             response["live_applied"] = False
-            response["message"] = "Scenario did not start. Choose Start with saved settings, then start it again."
+            response["message"] = "Scenario did not start. Choose Start, then start it again."
             if status == HTTPStatus.OK:
                 status = HTTPStatus.CONFLICT
-                response["error"] = "Choose Start with saved settings before starting a scenario."
+                response["error"] = "Choose Start before starting a scenario."
         else:
             response["run"] = asdict(run)
             response["live_applied"] = True
@@ -13834,7 +14976,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     {
                         key: value,
                         "live_applied": False,
-                        "message": "settings saved; choose Start with saved settings in hardware mode to start them",
+                        "message": "settings saved; choose Start in hardware mode to start them",
                     }
                 ),
             )
@@ -13909,7 +15051,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     "live_applied": False,
-                    "message": "saved; the network is reset, so choose Start with saved settings to use it",
+                    "message": "saved; the network is reset, so choose Start to use it",
                 }
             )
         if self.helper_client is not None:
@@ -13926,7 +15068,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                         "live_applied": False,
                         "message": (
                             "saved; automatic recovery is paused. Check gateway status "
-                            "then choose Start with saved settings when it is safe"
+                            "then choose Start when it is safe"
                         ),
                     }
                 )
@@ -14255,10 +15397,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
                 return
-            if path != "/api/dashboard-access/status" and not self._check_device_access():
+            if path not in ("/api/dashboard-access/status", "/api/dashboard-access/moves"
+                            ) and not self._check_device_access():
                 return
         try:
-            if path in ("/api/dashboard-access/status", "/api/dashboard-access"):
+            if path == "/api/dashboard-access/moves":
+                identity = self.server.dashboard_access(self.client_address[0])
+                status, content_type, body = (HTTPStatus.OK, "application/json",
+                                              _json_bytes(self.server.address_move_offer(identity)))
+            elif path in ("/api/dashboard-access/status", "/api/dashboard-access"):
                 data = self.server.dashboard_access(
                     self.client_address[0], "status" if path.endswith("/status") else "list")
                 status, content_type, body = HTTPStatus.OK, "application/json", _json_bytes(data)
@@ -14350,7 +15497,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 body=_json_bytes({"error": "not found"}),
             )
             return
-        if path != "/api/dashboard-access/register-self" and not self._check_device_access():
+        if path not in ("/api/dashboard-access/register-self", "/api/dashboard-access/move"
+                        ) and not self._check_device_access():
             return
         if path == RELEASE_UPLOAD_PATH:
             handle_release_upload(self)
@@ -14359,7 +15507,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
         if (path.startswith("/api/router/") or path in ("/api/access-point/reset-name",
-                    "/api/dashboard-access/register-self", "/api/dashboard-access/remove")) and (
+                    "/api/dashboard-access/register-self", "/api/dashboard-access/remove",
+                    "/api/dashboard-access/move", "/api/dashboard-access/move-undo")) and (
             self.headers.get("Sec-Fetch-Site") == "cross-site"
             or (origin is not None and origin not in ("http://" + host, "https://" + host))
         ):
@@ -14378,7 +15527,21 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                     else MAX_JSON_BODY_BYTES
                 ),
             )
-            if path.startswith("/api/dashboard-access/"):
+            if path in ("/api/dashboard-access/move", "/api/dashboard-access/move-undo"):
+                # Only the old address is named. The new one is the verified connection.
+                if set(payload) != {"from_mac"} or not isinstance(payload["from_mac"], str):
+                    raise RequestError("Choose which device this is. Its new address comes from the connection.")
+                try:
+                    old = normalize_exempt_mac(payload["from_mac"])
+                except ValueError as error:
+                    raise RequestError("Choose a saved device.") from error
+                if path.endswith("-undo"):
+                    status, content_type, body = self.server.undo_device_address_move(
+                        old, self.client_address[0])
+                else:
+                    status, content_type, body = self.server.move_device_address_for_peer(
+                        old, self.client_address[0])
+            elif path.startswith("/api/dashboard-access/"):
                 register = path.endswith("/register-self")
                 if set(payload) - ({"name"} if register else {"mac_address"}):
                     raise RequestError("Device identity must come from the connection.")
@@ -14624,6 +15787,20 @@ def handle_release_upload(handler: "ControlRequestHandler") -> None:
         LOGGER.exception("could not record action history for the release upload")
     handler._send_response(
         status=status, content_type="application/json", body=_json_bytes(body))
+
+
+def _wifi_failure(error: HelperClientError, failed: str, fallback: str) -> WifiOutcome:
+    """Turn a helper failure into one of the safe texts. Nothing else is passed on."""
+
+    safe_errors = {
+        "wifi-restored": failed + ". The previous Wi-Fi settings were restored.",
+        "wifi-restore-failed": failed + " and recovery failed. Use management access to repair jittersim-ap.",
+        "wifi-busy": "Another Pi Wi-Fi change is running. Try again later.",
+        "helper-busy": "The networking helper is busy. Try again later.",
+    }
+    status = (HTTPStatus.CONFLICT if error.reason in ("wifi-busy", "helper-busy")
+              else HTTPStatus.BAD_GATEWAY)
+    return WifiOutcome(int(status), safe_errors.get(error.reason, failed + ". " + fallback))
 
 
 def _safe_wifi_copy_message(error: HelperClientError) -> str:

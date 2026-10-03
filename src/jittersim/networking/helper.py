@@ -29,7 +29,9 @@ from jittersim.release_uploads import UploadBusy, prepare_lock
 
 from .access import AccessManager
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
-from .dashboard_access import ACCESS_FILE, AccessError, AccessStore, identify_peer
+from .dashboard_access import (
+    ACCESS_FILE, AccessError, AccessStore, identify_peer, is_active, normalize_mac,
+)
 from .executor import CommandExecutionError, SubprocessExecutor
 from .renderer import queue_handle, queue_kind, queue_parent
 from .router import (
@@ -361,8 +363,26 @@ class HelperService:
                 return {"ok": True, "devices": store.remove(payload.get("mac_address"))}
             if operation == "local-list":
                 return {"ok": True, "devices": store.list_devices()}
-            if operation not in ("status", "register-self", "list", "remove"):
+            if operation not in (
+                "status",
+                "register-self",
+                "list",
+                "remove",
+                "move-address",
+                "undo-move",
+                "move-address-owned",
+                "undo-move-owned",
+            ):
                 raise AccessError("Unknown dashboard access action.")
+            owned = operation in ("move-address-owned", "undo-move-owned")
+            if owned:
+                move_id = payload.get("move_id")
+                if not isinstance(move_id, str) or not re.fullmatch(r"[0-9a-f]{32}", move_id):
+                    raise AccessError("An ownership-aware move requires its exact identifier.")
+                if operation == "move-address-owned":
+                    normalize_mac(payload.get("expected_mac"))
+                    if type(payload.get("move_access")) is not bool:
+                        raise AccessError("Choose explicitly whether this move transfers access.")
             peer = str(IPv4Address(payload.get("peer")))
             now = time.monotonic()
             cached = self._peer_cache.get(peer)
@@ -370,39 +390,92 @@ class HelperService:
                 identity = dict(cached[1])
             else:
                 identity = identify_peer(
-                    self._applier, peer, require_reachable=operation == "register-self"
+                    self._applier,
+                    peer,
+                    require_reachable=operation
+                    in ("register-self", "move-address", "move-address-owned"),
                 )
-                self._peer_cache = {key: value for key, value in self._peer_cache.items()
-                                    if now - value[0] < 1}
+                self._peer_cache = {
+                    key: value for key, value in self._peer_cache.items() if now - value[0] < 1
+                }
                 if len(self._peer_cache) < MAX_CONNECTED_CLIENTS:
                     self._peer_cache[peer] = (now, dict(identity))
-            devices = ([] if operation == "status" and identity["network"] == "management"
-                       else store.list_devices())
+            devices = (
+                []
+                if operation == "status" and identity["network"] == "management"
+                else store.list_devices()
+            )
             allowed = identity["network"] == "management" or any(
-                device["mac_address"] == identity["mac_address"] for device in devices)
+                device["mac_address"] == identity["mac_address"] and is_active(device)
+                for device in devices
+            )
+            moved = False
+            if operation in ("move-address", "move-address-owned"):
+                # The new address is the verified requester. Nothing from the browser names it.
+                if not identity["can_register"]:
+                    raise AccessError(
+                        "This device could not be verified. Connect directly to Pi Wi-Fi "
+                        "and try again."
+                    )
+                expected = payload.get("expected_mac")
+                if expected is not None and identity["mac_address"] != normalize_mac(expected):
+                    raise AccessError("The connection changed. Refresh before moving a device.")
+                old = payload.get("mac_address")
+                if (
+                    not allowed
+                    and (not owned or payload["move_access"])
+                    and any(
+                        device["mac_address"] == normalize_mac(old) and is_active(device)
+                        for device in devices
+                    )
+                ):
+                    devices = store.move(
+                        old, identity["mac_address"], move_id=payload.get("move_id")
+                    )
+                    moved = allowed = True
+            if operation in ("undo-move", "undo-move-owned"):
+                if not allowed:
+                    raise AccessError("Allow this device before using dashboard controls.")
+                devices = store.undo_move(
+                    payload.get("mac_address"), move_id=payload.get("move_id")
+                )
+                allowed = identity["network"] == "management" or any(
+                    device["mac_address"] == identity["mac_address"] and is_active(device)
+                    for device in devices
+                )
             if operation == "register-self":
                 if not identity["can_register"]:
-                    raise AccessError("This device could not be verified. Connect directly to Pi Wi-Fi "
-                                      "and try again or use the Pi recovery command.")
+                    raise AccessError(
+                        "This device could not be verified. Connect directly to Pi Wi-Fi "
+                        "and try again or use the Pi recovery command."
+                    )
                 store.add(identity["mac_address"], payload.get("name", ""))
                 allowed = True
             if operation in ("list", "remove"):
                 if not allowed:
                     raise AccessError("Allow this device before using dashboard controls.")
-                devices = (store.remove(payload.get("mac_address")) if operation == "remove"
-                           else devices)
+                devices = (
+                    store.remove(payload.get("mac_address")) if operation == "remove" else devices
+                )
                 allowed = identity["network"] == "management" or any(
-                    device["mac_address"] == identity["mac_address"] for device in devices)
+                    device["mac_address"] == identity["mac_address"] and is_active(device)
+                    for device in devices
+                )
             result = {"ok": True, **identity, "allowed": allowed}
-            if operation in ("list", "remove"):
+            if operation in ("move-address", "move-address-owned"):
+                result["moved"] = moved
+            if operation in ("list", "remove", "undo-move", "undo-move-owned"):
                 result["devices"] = devices
             return result
         except AccessError as error:
             return {"ok": False, "error": str(error)}
         except (ValueError, TypeError, OSError, CommandExecutionError):
             # Do not expose kernel output or saved device records to an unregistered caller.
-            return {"ok": False, "error": "Dashboard access could not be verified or saved. "
-                    "Check the Pi access file and reconnect directly to its Wi-Fi."}
+            return {
+                "ok": False,
+                "error": "Dashboard access could not be verified or saved. "
+                "Check the Pi access file and reconnect directly to its Wi-Fi.",
+            }
 
     def _handle_clients(self) -> Dict[str, Any]:
         station_info_available = True
@@ -1480,10 +1553,15 @@ class HelperClient:
         return self._request({"action": "ping"})
 
     def dashboard_access(self, operation: str = "status", *, peer: Optional[str] = None,
-                         mac_address: Optional[str] = None, name: str = "") -> Dict[str, Any]:
+                         mac_address: Optional[str] = None, name: str = "",
+                         move_id: Optional[str] = None,
+                         expected_mac: Optional[str] = None,
+                         move_access: Optional[bool] = None) -> Dict[str, Any]:
         """Use the saved access list without supplying command arguments."""
         return self._request({"action": "dashboard-access", "operation": operation,
-                              "peer": peer, "mac_address": mac_address, "name": name})
+                              "peer": peer, "mac_address": mac_address, "name": name,
+                              "move_id": move_id, "expected_mac": expected_mac,
+                              "move_access": move_access})
 
     def _check_plan_support(self, plan: NetworkPlan) -> None:
         if plan.general_profile is not None:
@@ -1598,9 +1676,9 @@ class HelperClient:
             # A busy helper is not an old one, so it keeps its own message.
             if error.reason == "helper-busy":
                 raise
-            raise HelperClientError("Update the Pi helper before applying a general profile") from error
+            raise HelperClientError("Update the Pi helper before applying a profile for everyone") from error
         if capabilities.get("general_profile") is not True:
-            raise HelperClientError("Update the Pi helper before applying a general profile")
+            raise HelperClientError("Update the Pi helper before applying a profile for everyone")
 
     def reset(self) -> Dict[str, Any]:
         """Ask the helper to remove project-owned network state."""

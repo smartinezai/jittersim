@@ -235,7 +235,7 @@ def test_the_block_shows_complete_data_as_soon_as_the_last_input_arrives(last):
     )
     result = run(body)
     assert result["hidden"] is False
-    assert result["general"] == "General profile: none"
+    assert result["general"] == "Everyone: none"
     assert result["summary"] == "1 device affected"
     assert result["items"] == [["Laptop", "Slow network"]]
     assert result["lists"] == "Service lists: Video (every unprotected device)"
@@ -251,7 +251,7 @@ def test_the_active_general_profile_shows_as_soon_as_it_arrives():
         + "\nawait loadGeneralProfile();\nconsole.log(JSON.stringify(block()));"
     )
     result = run(body)
-    assert result["general"] == "General profile: Shared slow · active"
+    assert result["general"] == "Everyone: Shared slow · active"
     assert result["generalClass"] == "status-line status-on"
     assert result["items"] == [["Laptop", "Shared slow"]]
 
@@ -535,7 +535,7 @@ def test_a_failed_action_refreshes_the_state_once(path, last_action, runtime, sh
     assert result["requests"].count("GET /api/state") == 1
     assert result["shown"] == shown
     assert result["runtime"] == runtime
-    assert result["button"] == "Start with saved settings"
+    assert result["button"] == "Start"
     assert result["messages"][-1] == ["network helper failed", "error"]
 
 

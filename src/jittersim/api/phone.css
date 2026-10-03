@@ -163,12 +163,14 @@
 
   /* Messages and tips keep clear of the bar. */
   .toast {
-    top: calc(0.75rem + env(safe-area-inset-top, 0px)); right: 0.75rem; bottom: auto; left: 0.75rem;
-    width: auto;
-    /* A message at the top must not block taps on the page links under it. */
-    pointer-events: none;
+    top: auto; right: 0.75rem; bottom: calc(var(--phone-bar-height) + 0.75rem); left: auto;
+    width: min(22rem, calc(100vw - 1.5rem));
+    /* Read and scroll recovery instructions while keeping the safety bar usable. */
+    pointer-events: auto;
   }
   .toast button { pointer-events: auto; }
+  /* Keep recovery messages available after using the controls they would cover. */
+  .phone-controls-open .toast { visibility: hidden; }
   .sidebar .sidebar-action-row .help-icon::after {
     position: fixed; top: auto; right: auto; bottom: calc(var(--phone-bar-height) + 0.75rem); left: 1rem;
     width: calc(100vw - 2rem);

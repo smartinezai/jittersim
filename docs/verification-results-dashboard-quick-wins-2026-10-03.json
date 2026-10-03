@@ -1,0 +1,1126 @@
+{
+  "date": "2026-10-03",
+  "checked_source_commit": "71e437abdc8f9173f4ecceea7b711a3001221c0f",
+  "checked_source_tree": "4d48c92cf93f11989672dbaba76e48a99fd905be",
+  "application_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+  "wheel_built_from_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+  "source_equivalence": "Only browser readiness/wording tests gui_capture.py and phone_layout.py changed after application source a64965b. All production files and inputs to reused commands are unchanged.",
+  "wheel_sha256": "652a5566c4a801370093888179c5cb1cc817c9d9ad6b04eb95046e6aab183b47",
+  "matching_packaged_files": 64,
+  "checks": {
+    "python39": {
+      "source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+      "wheel_sha256": "652a5566c4a801370093888179c5cb1cc817c9d9ad6b04eb95046e6aab183b47",
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-linux39-by8auy8z",
+      "expected_image_id": "sha256:f05047a476987d6d985eeb42a9039650f98256400cdd8d8eebb4076aa8c0b93f",
+      "ready_to_run_offline": true,
+      "docker_started": true,
+      "container": "jittersim-pr73-python39-969b55575a9249f2948f7c5686835de3",
+      "actual_image_id": "sha256:f05047a476987d6d985eeb42a9039650f98256400cdd8d8eebb4076aa8c0b93f",
+      "complete": true,
+      "attach_exit_code": 0,
+      "container_exit_code": 0,
+      "copy_container-result.json_exit_code": 0,
+      "copy_junit.xml_exit_code": 0,
+      "result": {
+        "source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+        "wheel_sha256": "652a5566c4a801370093888179c5cb1cc817c9d9ad6b04eb95046e6aab183b47",
+        "python": "3.9.25 (main, Oct 31 2025, 23:18:06) \n[GCC 12.2.0]",
+        "system": "Linux",
+        "architecture": "aarch64",
+        "kernel": "6.8.0-117-generic",
+        "ssl": "OpenSSL 3.0.22 25 Aug 2026",
+        "os_release": "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nNAME=\"Debian GNU/Linux\"\nVERSION_ID=\"12\"\nVERSION=\"12 (bookworm)\"\nVERSION_CODENAME=bookworm\nID=debian\nHOME_URL=\"https://www.debian.org/\"\nSUPPORT_URL=\"https://www.debian.org/support\"\nBUG_REPORT_URL=\"https://bugs.debian.org/\"\n",
+        "node": "v22.23.1",
+        "tracked_files": 361,
+        "current_test_files": 182,
+        "wheel_files": 64,
+        "application": "/verification/site-packages/jittersim/api/server.py",
+        "tests": "/verification/repo/tests/__init__.py",
+        "dependencies": {
+          "pycryptodome": "3.23.0",
+          "iniconfig": "2.1.0",
+          "exceptiongroup": "1.3.1",
+          "urllib3": "2.6.3",
+          "requests": "2.32.5",
+          "pluggy": "1.6.0",
+          "tomli": "2.4.1",
+          "jittersim": "0.1.0",
+          "packaging": "26.3",
+          "pygments": "2.21.0",
+          "idna": "3.20",
+          "ruff": "0.16.10",
+          "charset-normalizer": "3.5.2",
+          "typing-extensions": "4.16.0",
+          "certifi": "2026.7.22",
+          "pytest": "8.4.2"
+        },
+        "sys_path": [
+          "/verification",
+          "/verification/site-packages",
+          "/verification/repo",
+          "/usr/local/lib/python39.zip",
+          "/usr/local/lib/python3.9",
+          "/usr/local/lib/python3.9/lib-dynload"
+        ],
+        "preloaded_site_packages_excluded": true,
+        "pytest_exit_code": 0,
+        "pytest_seconds": 112.8,
+        "ruff_exit_code": 0,
+        "collected": 3276,
+        "skipped": 39,
+        "failed": 0,
+        "passed": 3237
+      },
+      "cleanup_exit_code": 0,
+      "elapsed_seconds": 115.85
+    },
+    "python313_browsers_gui": {
+      "source_commit": "71e437abdc8f9173f4ecceea7b711a3001221c0f",
+      "checks": [
+        {
+          "name": "pip-check",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "pip",
+            "check"
+          ],
+          "exit_code": 0,
+          "seconds": 0.12
+        },
+        {
+          "name": "node-version",
+          "command": [
+            "node",
+            "--version"
+          ],
+          "exit_code": 0,
+          "seconds": 0.02
+        },
+        {
+          "name": "npm-ci",
+          "command": [
+            "npm",
+            "ci",
+            "--offline",
+            "--ignore-scripts",
+            "--cache",
+            "/verification/npm-cache",
+            "--prefix",
+            "experiments/homepage-bounce-reference"
+          ],
+          "exit_code": 0,
+          "seconds": 0.27
+        },
+        {
+          "name": "ruff",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "ruff",
+            "check",
+            "--no-cache",
+            "--select",
+            "E9,F63,F7,F82,F811",
+            "src",
+            "tests"
+          ],
+          "exit_code": 0,
+          "seconds": 0.12
+        },
+        {
+          "name": "gui-unit",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "pytest",
+            "-o",
+            "addopts=",
+            "-q",
+            "tests/unit/test_gui_capture.py",
+            "tests/unit/test_gui_axe_report.py",
+            "tests/unit/test_gui_container.py"
+          ],
+          "exit_code": 0,
+          "seconds": 0.32
+        },
+        {
+          "name": "gui_baseline",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.gui_baseline",
+            "--output",
+            "/verification/artifacts/gui_baseline"
+          ],
+          "exit_code": 0,
+          "seconds": 76.36
+        },
+        {
+          "name": "a11y_axe",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.a11y_axe",
+            "--output",
+            "/verification/artifacts/a11y_axe"
+          ],
+          "exit_code": 0,
+          "seconds": 45.38
+        }
+      ],
+      "complete": true,
+      "reused_checks": [
+        {
+          "name": "full-python313",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "pytest",
+            "-o",
+            "addopts=",
+            "-q",
+            "-p",
+            "no:cacheprovider"
+          ],
+          "exit_code": 0,
+          "seconds": 108.89,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "homepage-fixture",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "pytest",
+            "-o",
+            "addopts=",
+            "-q",
+            "tests/test_homepage_reference_fixture.py"
+          ],
+          "exit_code": 0,
+          "seconds": 8.83,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-journeys",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.journeys"
+          ],
+          "exit_code": 0,
+          "seconds": 135.74,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-observation_confirmation",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.observation_confirmation"
+          ],
+          "exit_code": 0,
+          "seconds": 18.96,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-homepage_bounce_reference",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.homepage_bounce_reference"
+          ],
+          "exit_code": 0,
+          "seconds": 10.06,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-wifi_recovery",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.wifi_recovery"
+          ],
+          "exit_code": 0,
+          "seconds": 16.5,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-dashboard_access",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.dashboard_access"
+          ],
+          "exit_code": 0,
+          "seconds": 4.98,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-general_profile",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.general_profile"
+          ],
+          "exit_code": 0,
+          "seconds": 8.42,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-saved_profiles",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.saved_profiles"
+          ],
+          "exit_code": 0,
+          "seconds": 6.54,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-dashboard_navigation",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.dashboard_navigation"
+          ],
+          "exit_code": 0,
+          "seconds": 4.51,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-protected_clients",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.protected_clients"
+          ],
+          "exit_code": 0,
+          "seconds": 6.06,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-impact_check",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.impact_check"
+          ],
+          "exit_code": 0,
+          "seconds": 81.87,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-sidebar_status",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.sidebar_status"
+          ],
+          "exit_code": 0,
+          "seconds": 102.82,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-apply_clarity",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.apply_clarity"
+          ],
+          "exit_code": 0,
+          "seconds": 58.45,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-router_copy",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.router_copy"
+          ],
+          "exit_code": 0,
+          "seconds": 17.74,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-traffic_chart",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.traffic_chart"
+          ],
+          "exit_code": 0,
+          "seconds": 34.42,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-device_names",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.device_names"
+          ],
+          "exit_code": 0,
+          "seconds": 3.31,
+          "checked_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp"
+        },
+        {
+          "name": "browser-phone_layout",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.phone_layout"
+          ],
+          "exit_code": 0,
+          "seconds": 16.08,
+          "checked_source_commit": "baa90bc7a0b4200cc58836d94264ca811742dc0a",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-aqpo6zuy"
+        },
+        {
+          "name": "browser-help_icons",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.help_icons"
+          ],
+          "exit_code": 0,
+          "seconds": 37.5,
+          "checked_source_commit": "baa90bc7a0b4200cc58836d94264ca811742dc0a",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-aqpo6zuy"
+        },
+        {
+          "name": "browser-token_remember",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.token_remember"
+          ],
+          "exit_code": 0,
+          "seconds": 9.99,
+          "checked_source_commit": "baa90bc7a0b4200cc58836d94264ca811742dc0a",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-aqpo6zuy"
+        },
+        {
+          "name": "browser-dns_failure",
+          "command": [
+            "/usr/local/bin/python",
+            "-m",
+            "tests.browser.dns_failure"
+          ],
+          "exit_code": 0,
+          "seconds": 16.53,
+          "checked_source_commit": "baa90bc7a0b4200cc58836d94264ca811742dc0a",
+          "evidence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-aqpo6zuy"
+        }
+      ],
+      "reuse_basis": "Only browser test phone_layout.py and GUI readiness test gui_capture.py changed. Production bytes and inputs to all19 ordinary browser checks are unchanged. GUI unit and matrix checks run on final test source.",
+      "python": "3.13.15",
+      "system": "Linux",
+      "architecture": "aarch64",
+      "tracked_files": 453,
+      "wheel_files": 64,
+      "wheel_sha256": "652a5566c4a801370093888179c5cb1cc817c9d9ad6b04eb95046e6aab183b47",
+      "server": "/verification/site-packages/jittersim/api/server.py",
+      "dependencies": {
+        "packaging": "26.3",
+        "pluggy": "1.6.0",
+        "idna": "3.20",
+        "iniconfig": "2.3.0",
+        "charset-normalizer": "3.5.2",
+        "Pygments": "2.21.0",
+        "jittersim": "0.1.0",
+        "pycryptodome": "3.23.0",
+        "pytest": "8.4.2",
+        "typing_extensions": "4.16.0",
+        "urllib3": "2.8.0",
+        "pyee": "13.0.1",
+        "greenlet": "3.5.6",
+        "playwright": "1.63.0",
+        "requests": "2.34.2",
+        "setuptools": "84.0.0",
+        "ruff": "0.16.10",
+        "certifi": "2026.7.22"
+      }
+    },
+    "release_python311_12_commands": {
+      "source_commit": "71e437abdc8f9173f4ecceea7b711a3001221c0f",
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-commands-final-kcphh95h",
+      "image_id": "sha256:6cb7229f82f4e68571c3b81b86282b14d82f87700179238885a1371d90544cb7",
+      "wheel_sha256": "652a5566c4a801370093888179c5cb1cc817c9d9ad6b04eb95046e6aab183b47",
+      "verification_mode": "clean-release-Dockerfile-build-with-fresh-dependencies-and-current-wheel",
+      "complete": true,
+      "checks": [
+        {
+          "name": "installer-permissions",
+          "command": [
+            "python",
+            "tests/integration/linux_installer_permissions.py"
+          ],
+          "docker_privileges": [],
+          "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-commands-final-kcphh95h/installer-permissions.log",
+          "attach_exit_code": 0,
+          "exit_code": 0,
+          "seconds": 2.94,
+          "cleanup_returncode": 0
+        },
+        {
+          "name": "dashboard-peer",
+          "command": [
+            "python",
+            "tests/integration/linux_dashboard_peer_identity.py"
+          ],
+          "docker_privileges": [
+            "--cap-add",
+            "NET_ADMIN"
+          ],
+          "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-commands-final-kcphh95h/dashboard-peer.log",
+          "attach_exit_code": 0,
+          "exit_code": 0,
+          "seconds": 0.88,
+          "cleanup_returncode": 0
+        },
+        {
+          "name": "privileged-full-python",
+          "command": [
+            "python",
+            "-m",
+            "pytest",
+            "-o",
+            "addopts=",
+            "-q",
+            "-p",
+            "no:cacheprovider"
+          ],
+          "docker_privileges": [
+            "--privileged"
+          ],
+          "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-commands-final-kcphh95h/privileged-full-python.log",
+          "attach_exit_code": 0,
+          "exit_code": 0,
+          "seconds": 134.42,
+          "cleanup_returncode": 0
+        },
+        {
+          "name": "network-smoke",
+          "command": [
+            "python",
+            "tests/integration/linux_network_smoke.py"
+          ],
+          "docker_privileges": [
+            "--privileged"
+          ],
+          "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-commands-final-kcphh95h/network-smoke.log",
+          "attach_exit_code": 0,
+          "exit_code": 0,
+          "seconds": 1.41,
+          "cleanup_returncode": 0
+        },
+        {
+          "name": "exemption-packets",
+          "command": [
+            "python",
+            "tests/integration/linux_exemption_packets.py"
+          ],
+          "docker_privileges": [
+            "--privileged"
+          ],
+          "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-commands-final-kcphh95h/exemption-packets.log",
+          "attach_exit_code": 0,
+          "exit_code": 0,
+          "seconds": 5.68,
+          "cleanup_returncode": 0
+        },
+        {
+          "name": "many-queues",
+          "command": [
+            "python",
+            "tests/integration/linux_many_queues.py"
+          ],
+          "docker_privileges": [
+            "--privileged"
+          ],
+          "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-commands-final-kcphh95h/many-queues.log",
+          "attach_exit_code": 0,
+          "exit_code": 0,
+          "seconds": 1.48,
+          "cleanup_returncode": 0
+        },
+        {
+          "name": "protected-not-monitored",
+          "command": [
+            "python",
+            "tests/integration/linux_protected_not_monitored.py"
+          ],
+          "docker_privileges": [
+            "--privileged"
+          ],
+          "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-commands-final-kcphh95h/protected-not-monitored.log",
+          "attach_exit_code": 0,
+          "exit_code": 0,
+          "seconds": 11.3,
+          "cleanup_returncode": 0
+        },
+        {
+          "name": "service-list-packets",
+          "command": [
+            "python",
+            "tests/integration/linux_service_list_packets.py"
+          ],
+          "docker_privileges": [
+            "--privileged"
+          ],
+          "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-commands-final-kcphh95h/service-list-packets.log",
+          "attach_exit_code": 0,
+          "exit_code": 0,
+          "seconds": 8.8,
+          "cleanup_returncode": 0
+        },
+        {
+          "name": "service-list-variation",
+          "command": [
+            "python",
+            "tests/integration/linux_service_list_variation.py"
+          ],
+          "docker_privileges": [
+            "--privileged"
+          ],
+          "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-commands-final-kcphh95h/service-list-variation.log",
+          "attach_exit_code": 0,
+          "exit_code": 0,
+          "seconds": 5.34,
+          "cleanup_returncode": 0
+        },
+        {
+          "name": "queue-stats",
+          "command": [
+            "python",
+            "tests/integration/linux_queue_stats.py"
+          ],
+          "docker_privileges": [
+            "--privileged"
+          ],
+          "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-commands-final-kcphh95h/queue-stats.log",
+          "attach_exit_code": 0,
+          "exit_code": 0,
+          "seconds": 2.5,
+          "cleanup_returncode": 0
+        },
+        {
+          "name": "dns-watch",
+          "command": [
+            "python",
+            "-m",
+            "tests.integration.linux_dns_watch"
+          ],
+          "docker_privileges": [
+            "--privileged"
+          ],
+          "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-commands-final-kcphh95h/dns-watch.log",
+          "attach_exit_code": 0,
+          "exit_code": 0,
+          "seconds": 3.58,
+          "cleanup_returncode": 0
+        },
+        {
+          "name": "dashboard-access-packets",
+          "command": [
+            "python",
+            "tests/integration/linux_dashboard_access_packets.py"
+          ],
+          "docker_privileges": [
+            "--cap-add",
+            "NET_ADMIN",
+            "--cap-add",
+            "NET_RAW"
+          ],
+          "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-commands-final-kcphh95h/dashboard-access-packets.log",
+          "attach_exit_code": 0,
+          "exit_code": 0,
+          "seconds": 3.9,
+          "cleanup_returncode": 0
+        }
+      ]
+    },
+    "kernel39_and_smoke": {
+      "source_commit": "71e437abdc8f9173f4ecceea7b711a3001221c0f",
+      "image_id": "sha256:e2c3202c99c43d061d4df8cdd1b16a97e2f3bd14b69841226297e2fc1f163daa",
+      "wheel_sha256": "652a5566c4a801370093888179c5cb1cc817c9d9ad6b04eb95046e6aab183b47",
+      "kernel": true,
+      "smoke_only": false,
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-kernel-rh3sbwim",
+      "container": "jittersim-pr73-final-a508a6d63b314c288bbfd4f648880328",
+      "complete": true,
+      "verification_mode": "fresh-current-wheel-on-cached-Linux-dependencies",
+      "attach_exit_code": 0,
+      "exit_code": 0,
+      "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-kernel-rh3sbwim/pytest.log",
+      "cleanup_returncode": 0
+    }
+  },
+  "clean_builds": {
+    "release": {
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-clean-build-zljupa5q",
+      "report": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-clean-build-zljupa5q/verification.json",
+      "source_commit": "71e437abdc8f9173f4ecceea7b711a3001221c0f",
+      "tag": "jittersim-pr73-clean-f9595ecc841b486492256d572c088622",
+      "command": [
+        "docker",
+        "build",
+        "--pull=false",
+        "--no-cache",
+        "--file",
+        "tests/wifi/Dockerfile",
+        "--tag",
+        "jittersim-pr73-clean-f9595ecc841b486492256d572c088622",
+        "--add-host",
+        "deb.debian.org:146.75.118.132",
+        "--add-host",
+        "pypi.org:151.101.128.223",
+        "--add-host",
+        "files.pythonhosted.org:151.101.64.223",
+        "."
+      ],
+      "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-release-clean-build-zljupa5q/build.log",
+      "complete": true,
+      "exit_code": 0,
+      "seconds": 40.74,
+      "image_id": "sha256:6cb7229f82f4e68571c3b81b86282b14d82f87700179238885a1371d90544cb7"
+    },
+    "kernel": {
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-kernel-clean-build-b9m18z36",
+      "report": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-kernel-clean-build-b9m18z36/verification.json",
+      "source_commit": "71e437abdc8f9173f4ecceea7b711a3001221c0f",
+      "tag": "jittersim-pr73-kernel-clean-4890e84b96b44c608c0e8254f46603d3",
+      "command": [
+        "docker",
+        "build",
+        "--pull=false",
+        "--no-cache",
+        "--file",
+        "tests/kernel/Dockerfile",
+        "--tag",
+        "jittersim-pr73-kernel-clean-4890e84b96b44c608c0e8254f46603d3",
+        "--add-host",
+        "deb.debian.org:146.75.118.132",
+        "--add-host",
+        "pypi.org:151.101.128.223",
+        "--add-host",
+        "files.pythonhosted.org:151.101.64.223",
+        "."
+      ],
+      "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-kernel-clean-build-b9m18z36/build.log",
+      "complete": true,
+      "exit_code": 0,
+      "seconds": 30.15,
+      "image_id": "sha256:e2c3202c99c43d061d4df8cdd1b16a97e2f3bd14b69841226297e2fc1f163daa"
+    }
+  },
+  "artifact_directory": "/Users/samantha.martinez/Github repos/jittersim/test-results/dashboard-quick-wins-2026-10-03",
+  "retain_until": "2026-10-10",
+  "hosted_checks": "Not yet published. GitHub account-limited checks may be substituted by these actual local workflow commands under direct human authorization.",
+  "independent_source_review": "Frozen application, packaged files, GUI artifacts and complete workflow evidence approved for integration.",
+  "failed_attempts": [
+    {
+      "source_commit": "3b9f7c3e876eb9b9f089436341c4af135a04b533",
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-4vq4_a73",
+      "image_id": "sha256:c84c35705a9b65f48fcbc676f6653514bab9086e746c09035c8dbc695a60ab16",
+      "container": "jittersim-pr73-ci313-final-e286a670d1444ac9bc67f878c9b84567",
+      "verification_mode": "fresh-dependencies-and-current-wheel-on-cached-browser-Linux-runtime",
+      "complete": false,
+      "attach_exit_code": 1,
+      "exit_code": 1,
+      "copy_returncode": 0,
+      "cleanup_returncode": 0
+    },
+    {
+      "source_commit": "67a1b0333682c090bb67fd03e5b248607cd136fa",
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-zwzci_36",
+      "image_id": "sha256:c84c35705a9b65f48fcbc676f6653514bab9086e746c09035c8dbc695a60ab16",
+      "container": "jittersim-pr73-ci313-final-c9fb36e6cf4140d8a5a136345a17d7ba",
+      "verification_mode": "fresh-dependencies-and-current-wheel-on-cached-browser-Linux-runtime",
+      "complete": false,
+      "attach_exit_code": 1,
+      "exit_code": 1,
+      "copy_returncode": 0,
+      "cleanup_returncode": 0
+    },
+    {
+      "source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-5ofx_rnp",
+      "image_id": "sha256:c84c35705a9b65f48fcbc676f6653514bab9086e746c09035c8dbc695a60ab16",
+      "container": "jittersim-pr73-ci313-final-a592ce1bc15a436e86505231839961e6",
+      "verification_mode": "fresh-dependencies-and-current-wheel-on-cached-browser-Linux-runtime",
+      "complete": false,
+      "attach_exit_code": 1,
+      "exit_code": 1,
+      "copy_returncode": 0,
+      "cleanup_returncode": 0
+    },
+    {
+      "source_commit": "baa90bc7a0b4200cc58836d94264ca811742dc0a",
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-pr73-ci313-final-aqpo6zuy",
+      "image_id": "sha256:c84c35705a9b65f48fcbc676f6653514bab9086e746c09035c8dbc695a60ab16",
+      "container": "jittersim-pr73-ci313-final-089689d29cc4481086770fac439fc4ed",
+      "verification_mode": "fresh-dependencies-and-current-wheel-on-cached-browser-Linux-runtime",
+      "complete": false,
+      "attach_exit_code": 1,
+      "exit_code": 1,
+      "copy_returncode": 0,
+      "cleanup_returncode": 0
+    }
+  ],
+  "integration_ready": true,
+  "main_release_ready": false,
+  "pi_deployment_ready": false,
+  "live_pi_changed": false,
+  "independent_gui_audit": {
+    "source_commit": "71e437abdc8f9173f4ecceea7b711a3001221c0f",
+    "wheel_sha256": "652a5566c4a801370093888179c5cb1cc817c9d9ad6b04eb95046e6aab183b47",
+    "server_sha256": "5e3a1bacc3395735812004bf9ce5f6a198467780d4e1f831e4cd909b50fab6fe",
+    "matrices": {
+      "screenshots": {
+        "states": 40,
+        "files": 81,
+        "bytes": 3817167,
+        "browser_version": "153.0.8010.12",
+        "observed_violation_nodes": 0,
+        "sha256": {
+          "access-1440-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "access-1440-dark.png": "c2c47dbc88d0bcc386b255f35e1fbd9882b1f96565cba0bda4749d03b45cc27d",
+          "access-1440-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "access-1440-light.png": "c2c47dbc88d0bcc386b255f35e1fbd9882b1f96565cba0bda4749d03b45cc27d",
+          "access-375-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "access-375-dark.png": "a90b0a4f45dbd35244bda6442a464fdda12d8fbe705da32db81d121de599188d",
+          "access-375-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "access-375-light.png": "a90b0a4f45dbd35244bda6442a464fdda12d8fbe705da32db81d121de599188d",
+          "activity-1440-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "activity-1440-dark.png": "7aeac2e7c88ea41798de8dfa0114268f54fff3da46acf5553cd195f1105f97df",
+          "activity-1440-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "activity-1440-light.png": "7aeac2e7c88ea41798de8dfa0114268f54fff3da46acf5553cd195f1105f97df",
+          "activity-375-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "activity-375-dark.png": "293bbb7a95189af06e6f1fb6cb311244e8b7eef3f2e59e529e6686c363a2a971",
+          "activity-375-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "activity-375-light.png": "293bbb7a95189af06e6f1fb6cb311244e8b7eef3f2e59e529e6686c363a2a971",
+          "devices-1440-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "devices-1440-dark.png": "55721c607a62fee2837f5ad34cb3db839d7043e0c354fc8cd51251649f89f901",
+          "devices-1440-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "devices-1440-light.png": "24ff30e70217c465a13ed48bd8d922096b4c98f8ddf747de76b6b433c29f28c3",
+          "devices-375-dark.json": "d301834cbe7e88380403936884ef41762ac45811d1564c50cb2f23ef4f71f44c",
+          "devices-375-dark.png": "03ed2d8582fe90404fe1ddc378185577520edc8c92a351e627d80e371da56829",
+          "devices-375-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "devices-375-light.png": "77613764aacd7b3f21682e71551b247525dba20a1d89ceab2b45f435fc07880e",
+          "diagnostics-1440-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "diagnostics-1440-dark.png": "7cdf1d0babafc6d9d47a86073589b0d33af9084ec5a2c4c58e3e2dcbad43485d",
+          "diagnostics-1440-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "diagnostics-1440-light.png": "7cdf1d0babafc6d9d47a86073589b0d33af9084ec5a2c4c58e3e2dcbad43485d",
+          "diagnostics-375-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "diagnostics-375-dark.png": "99fa28798d7a56de2af5098ba3e788e45c1cf7ad5d33535977689d80435265ce",
+          "diagnostics-375-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "diagnostics-375-light.png": "99fa28798d7a56de2af5098ba3e788e45c1cf7ad5d33535977689d80435265ce",
+          "manifest.json": "5d10001f9bddc5de9588b8e9ac2b70e0bbe12791fca92ce8f8019b4bf3a794c5",
+          "measurements-1440-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "measurements-1440-dark.png": "9b86cd1835ba49b0f821ced07c6ceed92071f003307db71141460fbb131f9624",
+          "measurements-1440-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "measurements-1440-light.png": "9d631cec8d8851fe497cc821f969e29df70fc1685af55b25cfbb0bdbe3ee50d4",
+          "measurements-375-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "measurements-375-dark.png": "1d1482497996f1b83d0cc0088f42c18ea91479b9ff69e97bc69ba78e134ea8fc",
+          "measurements-375-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "measurements-375-light.png": "1d1482497996f1b83d0cc0088f42c18ea91479b9ff69e97bc69ba78e134ea8fc",
+          "profiles-1440-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "profiles-1440-dark.png": "036055717a672be8b38bbd08116e1ff4e88c4396df192b9187075bdd4358df01",
+          "profiles-1440-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "profiles-1440-light.png": "cd95c71d3fac6d792bac1073069cf20525473a68ca175e284b171458a00b644e",
+          "profiles-375-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "profiles-375-dark.png": "471ca0691ef25beaf45950b15ef39ae2bcd40d6dac54ee9dfb4cdc50aa784eaa",
+          "profiles-375-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "profiles-375-light.png": "471ca0691ef25beaf45950b15ef39ae2bcd40d6dac54ee9dfb4cdc50aa784eaa",
+          "router-1440-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "router-1440-dark.png": "0142dced16c3c2594cb75ab709bb05cc18bc0956494f63e6fd441c91d05725b3",
+          "router-1440-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "router-1440-light.png": "c2d6dfc9bb6aed61f2822b23c5f2a4bcee9ffea5b841ab033bd56c27161430de",
+          "router-375-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "router-375-dark.png": "eaec65ead2a661a5451e2dd2984a5f9d39d3b9513a60321905c79a8ab139c99d",
+          "router-375-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "router-375-light.png": "eaec65ead2a661a5451e2dd2984a5f9d39d3b9513a60321905c79a8ab139c99d",
+          "schedules-1440-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "schedules-1440-dark.png": "d4499bc4b3ed13170e0af9bc8ed2cbc026f4084162061291c1e40ad3821cfaa5",
+          "schedules-1440-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "schedules-1440-light.png": "c84472c00050ae1d4342e0b718e0b31adc4c2a40df6b6dc94e4aa36482bfabaa",
+          "schedules-375-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "schedules-375-dark.png": "d60f69f0c7bbe715fc534cfddf0a8a62490fe5eee29a6d7d28c2d73d53708106",
+          "schedules-375-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "schedules-375-light.png": "2f6e29ef4eb5be03a47556bf3247e61352dd38d734e9351dff5dba483355f437",
+          "sign-in-1440-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "sign-in-1440-dark.png": "792ba750a3a10a2bc8ec554aebf182929563137666ef24a5f41287d701c448f6",
+          "sign-in-1440-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "sign-in-1440-light.png": "792ba750a3a10a2bc8ec554aebf182929563137666ef24a5f41287d701c448f6",
+          "sign-in-375-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "sign-in-375-dark.png": "03da48e9d2008fa27dfd76d36af1c8208beba804c39e57e25f936729b574d00e",
+          "sign-in-375-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "sign-in-375-light.png": "03da48e9d2008fa27dfd76d36af1c8208beba804c39e57e25f936729b574d00e",
+          "traffic-1440-dark.json": "679261efb953e62551f2931e9fd9351017f0d74d9de59b93ceb015518c6b8dae",
+          "traffic-1440-dark.png": "f781f5ff4d962801cca546e47402c7a24adf3e473e37f074c7e213546b5c15b0",
+          "traffic-1440-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "traffic-1440-light.png": "3da4e063c6d502692bec759c4f92a437087f822c9fd8461a20f1166a90a760c7",
+          "traffic-375-dark.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "traffic-375-dark.png": "6f9047f3b32afdbb92da85a4c46a7476d1175806df1aed15a8f832bcfb2f0372",
+          "traffic-375-light.json": "8af6b66d895bfe8d4a2cc0a5184177e4458f692fc02b7448f99a9d085c6d80b4",
+          "traffic-375-light.png": "6f9047f3b32afdbb92da85a4c46a7476d1175806df1aed15a8f832bcfb2f0372"
+        }
+      },
+      "axe": {
+        "states": 40,
+        "files": 41,
+        "bytes": 207399,
+        "browser_version": "153.0.8010.12",
+        "observed_violation_nodes": 50,
+        "sha256": {
+          "axe-access-1440-dark.json": "b82dd9a9cf42076b9735f974e7a16128f46ee33cb72f1ef9bf35c6bc7f479713",
+          "axe-access-1440-light.json": "a2d5722a0edc4252662aa7ad1a59f1b56933d4548dbeb3b4dbc83679f04ae9d4",
+          "axe-access-375-dark.json": "7c56d45bd644f74069ed40c83e331e49e5ddd1c0bf1e9b2228f08104fac75dca",
+          "axe-access-375-light.json": "a223b643cfb0a54fd2231f0a22fd7ee3cfb28991a9243fc50d4f8e20a1653a8e",
+          "axe-activity-1440-dark.json": "44746e359bf0422b21666956ba3a1b71d6a941626abc2351344320b032ed1670",
+          "axe-activity-1440-light.json": "170a9629197d98a60afaaf60bd0878115943bd0147865b7f838fce62963ac884",
+          "axe-activity-375-dark.json": "bf21fe55b4191c66f20d9c7ca8b6c563c05c9b829e912407edf3e895a3ec0f4f",
+          "axe-activity-375-light.json": "556f581623ef6874c1af509003f493792edb2a5dc7b37cd89cfbe7f0813909f1",
+          "axe-devices-1440-dark.json": "aa5e4276bb057e6523ec84bbb19b499352d67e90257010e32cc5f1c96f5048d1",
+          "axe-devices-1440-light.json": "8f9b3b2f95c4b2c210a2b0ade1a335fcd26d4ced80979899975b8581ea20b873",
+          "axe-devices-375-dark.json": "b415b5178f2a9675862566f1c63753b497a7586761881d41996d2658efb5a210",
+          "axe-devices-375-light.json": "db11c4a1d3521a227353145a9db60253b34a417e5fa0282e1b7878f18e98860e",
+          "axe-diagnostics-1440-dark.json": "2e4e29d1722f579275a12b312c3b1adb222055623caf7a74c9fbe47e54f15261",
+          "axe-diagnostics-1440-light.json": "e645b5516cb0a768ef552bf9877badb1d962912a3bf6f81f1e19702cb8ac6767",
+          "axe-diagnostics-375-dark.json": "a5c2dcfc5e78aaf2df3f8170995742c69f731eb41caf47f60722fcabe6d70489",
+          "axe-diagnostics-375-light.json": "cbb506fcc391f0b030b9fc80b99105257c415825cfb4155075e7784591a755d5",
+          "axe-measurements-1440-dark.json": "6d05f0bff0f1c109115c2b7cf5e19e8817e4baae89296155eed870be6633ba72",
+          "axe-measurements-1440-light.json": "44169c67d0b3d2253f5f03e8f6af5614a1c4f2c62cf5cc7aa44ae787aa821678",
+          "axe-measurements-375-dark.json": "cc20bf01af41321e4ea3a7299fbbf2505fb977a38fc38cc5cdc361289cee0ae1",
+          "axe-measurements-375-light.json": "27e826258ec89c03293e4d464ee8a667ef7f11e96e33498b9a988b1c601e74fd",
+          "axe-profiles-1440-dark.json": "72169f1ae8b0ac2166b64782f03f01544a06d7f9dcfa6b448c10127aa97645ef",
+          "axe-profiles-1440-light.json": "b2cbbe3c7b3d5e84c06f3eaad3757ebc35910c5690fa4f16a7c2ca1c912286dd",
+          "axe-profiles-375-dark.json": "9993db23b88b519cc7ca8161dd982c8aa99b68e85b730a8e73ac92883669fd43",
+          "axe-profiles-375-light.json": "919426436bfb1e247bff0eb3b3a3784e63a9c1ea4c512903d94998cd10134253",
+          "axe-router-1440-dark.json": "3cfb1162f3dcfd39e9908028733571f056751ee6f91e6b9012dcce5b687e7095",
+          "axe-router-1440-light.json": "5342ffcc8ac67121ca8e7ee45a2bbb839a72e2e500b588ab6ad2c72ab364c75c",
+          "axe-router-375-dark.json": "6b869d403038d220a27a712a2b68e1fe50f7a6c22f8a4221c757fc3e9398b636",
+          "axe-router-375-light.json": "fd563f3e40d85f841b1c3333468705dc3d15c0351fba948af533470e2a5f8e70",
+          "axe-schedules-1440-dark.json": "49e7018d595190eb742ff8b8a594257d481f610e8c9891c2ebc3908b55089c0b",
+          "axe-schedules-1440-light.json": "81f7eb40a4df8289e8c867ccd21a0908de4b533c9b0b482fc361d8b2b7984411",
+          "axe-schedules-375-dark.json": "665d236049caae4a1ca4bc85ed28e372943a5932415e47093de640a7a1abe566",
+          "axe-schedules-375-light.json": "3b37e7d821465aa7a51f8a88d3a0e134e8250b1cb8bf4751d541e7a91dc6113e",
+          "axe-sign-in-1440-dark.json": "4eaafe70c7dde8f58132ec6b542d12c23deeba2e68768ca291f5d6d95a06ad87",
+          "axe-sign-in-1440-light.json": "c69ec537711a2427a8730bee21a8c4dc11cd2ff35505865e49afce0397e6d32e",
+          "axe-sign-in-375-dark.json": "695133fd2e95eff415a54a41d45ea04c804b2dd225ea5578da9d470f77c88c89",
+          "axe-sign-in-375-light.json": "6d2712f777a08ee308bc64bc57048446d26ae962bc7717091e44e5f14757edea",
+          "axe-traffic-1440-dark.json": "6c8d7d99bf51fe2b5b5fd00d3721225001f4094c15f49e96c5cb7694e7245fb7",
+          "axe-traffic-1440-light.json": "359d78e47a6fe915c4b40b3bc7dd03f100b17ae739a9ee9f4726cc6dea149eb0",
+          "axe-traffic-375-dark.json": "2c520622b1433f282386f18ba01a08629c6ad8c9a3ae2132d10addbeff7723fc",
+          "axe-traffic-375-light.json": "4b5061ba5837ef08a264c4419735efce1c0b694e9e386b0bae929f4d5605a3c1",
+          "manifest.json": "34bc30e42a4a087ef6d8a5db68c9d69260ed91c6eab57a34c1bdbbfa0accd7fb"
+        }
+      }
+    },
+    "complete": true,
+    "packaged_files": {
+      "jittersim/__init__.py": "3853b0b8b93febafdbe20e48b873e9e51fb72d5f24076fbe147dc8da5fa19852",
+      "jittersim/__main__.py": "d67a98aa4df2af67e6bd7ea72bd22dee5cb26ae9f8817eea64b4751f3cf3082c",
+      "jittersim/cli.py": "6a4e76e28c7ba3a0f67b83f102d5060ad0ce787c1331dbf445ff16c9185ad9d4",
+      "jittersim/dashboard_access_cli.py": "f5c064920a8fd5bf5036c69d2b6137105da5175776af1a1f31420db567400616",
+      "jittersim/measure.py": "4da2b971ccdd35a8cf67f0b2011062cc42187eaa5214783673b5166f0db17835",
+      "jittersim/updates.py": "40c5d5955d1459a77d086e19dbebdba9d1e8f4658a94d0fdc374678ff670794f",
+      "jittersim/api/__init__.py": "c9b65fbdce4ff758eb1559ddcfc0d6645fdede742d2d769ade602afa1f18296b",
+      "jittersim/api/__main__.py": "9417f6fa93040a9d6b4567b47801c3f83d90d79d4b28faccedc68b311c0e1046",
+      "jittersim/api/access.css": "a17152b3038c2db2281fddc151d37625a9ae195360928bbba05c585840e757a7",
+      "jittersim/api/access.js": "57b72143a3ccf8c2bc94300554690505bb0b67647887ff91107195fa73bb09d6",
+      "jittersim/api/access.py": "c772386a89c58688eb6986f5ae9bb6c90ebbb84a9481bd7e5c81bbadd2367921",
+      "jittersim/api/phone.css": "adfed1f7560b57348a2531e8db40dc63fa369f30a97bf86bb46913b795e1842a",
+      "jittersim/api/router_operations.py": "d2805256c939001eea0ef8106588f77ba83b332ab0f815ac7df25ff25844816a",
+      "jittersim/api/server.py": "5e3a1bacc3395735812004bf9ce5f6a198467780d4e1f831e4cd909b50fab6fe",
+      "jittersim/api/workflows.css": "4f271ea90f7673cee9ea930f7ca998ccd2380811a03582e425f6a9731c2e1484",
+      "jittersim/api/workflows.js": "277420f27104e2d81f61b0c13dd746724a3887f8e1be3b10f05c1c03bd346786",
+      "jittersim/api/workflows.py": "0f8953a71124a1d12f8a5346d217ee7655fcced63f753a7a5ad900d927556225",
+      "jittersim/config/__init__.py": "87c6d0c814c12d54b92e9a0a3b8913b6e73ab7f04206c0e169bb14d5f5d97477",
+      "jittersim/config/device_labels.py": "672dc4224d68ac2dacbe3c3b4e090f7ee802788f22f84e4a0930e76caec9b170",
+      "jittersim/config/device_names.py": "63a71f2a147dedc349cc54ef437321e8e3258ce411b5e1ac83040883063a3ab4",
+      "jittersim/config/domain_labels.py": "17aa5104c5128eff99074910a5f460eb52b3254db955b460d74787f0c487140a",
+      "jittersim/config/exemptions.py": "0b86371b7d976df1b5d4ae01dce8b2ccaf600a2f350649e9e90fbf4220d54f04",
+      "jittersim/config/models.py": "0445a4b3f68b326c4e9cd0abc9c088128609de84845d6cd4b15ae387180aa582",
+      "jittersim/config/protection.py": "61240f11c1b1bb3f2776d94aa31f2d2df34029cbf71062d51c14ddb21d5e3dd7",
+      "jittersim/config/service_catalogue.py": "e667b28dd9ca00b14f900b640caab01053a19ffc389e99b486cc33241de978b0",
+      "jittersim/config/storage.py": "628d2334a03357ec08c75608ae6e197f4342157a911dac0169b8c0a15c6ff8e7",
+      "jittersim/config/transfer.py": "887eb8951e081889bb28225ebdf60157cdb45b0fc0edd1b182b5d0b6bc412c47",
+      "jittersim/config/workflows.py": "b54692b5aafdd7f24342ab9bfedb2727eb4aa0e0d21721faeee7e8c79ca7c506",
+      "jittersim/engine/__init__.py": "ac8cff5e329f1498714be99966767c20f131f42ef9c20b695dd0b037998e30ad",
+      "jittersim/engine/access.py": "05bad1896ec23e2c0431695e874969472a803ea39cf59c55b8eff1269edc5e2e",
+      "jittersim/engine/activity.py": "632c96481bd27b8a40543bb7be72b1d5bea4e5bb1421a7a8ccbdd00e4cf73d47",
+      "jittersim/engine/codec.py": "6880594397277116d4ad740a6fdc69cb65498758d3895cd4af6c76b89099fb34",
+      "jittersim/engine/compiler.py": "b57c25af51647ad3a428c0137dde13ba2cc8d01d1e689d24e1fff5df7309e53a",
+      "jittersim/engine/conditions.py": "b22d5cf582a086bb5f93f2aced841274669dac3b1ed36f80b6a671e1a4dfa6ff",
+      "jittersim/engine/eligibility.py": "3b2a6a7dd41cd49e07e488678b1517418a246d83e9c4888440f1f06fc95002e5",
+      "jittersim/engine/general.py": "1c3ce0e9b109f852a23b6083ca6c06687aedd391e6605e08969f07adcea4704c",
+      "jittersim/engine/lookup_pool.py": "8ebd990644bc658da435d1fea284138cec4b967e77e66dadc65944b78ef945f0",
+      "jittersim/engine/plan.py": "cf2776a3294ef3b0f6c0d798a1f3e91d5cfcecdacd713a8c4caef2847a70b4b0",
+      "jittersim/engine/progression.py": "c2aca879916bb56bba9c65b946a89adb69feb76fd0edc86212927cef3147f657",
+      "jittersim/engine/randomizer.py": "ba6d78726aefbf42254926e524d9a4bbeda876ddec2d22a6310b28ab17410574",
+      "jittersim/engine/runtime.py": "5748b17612bfb1c2851cccffc7f3d2b498d700897dc148e949d677027331e956",
+      "jittersim/engine/scenarios.py": "a6777a9039d0d2d823280b2693a4544e04f8a3e8f7696139d14b7dd39f6a63bc",
+      "jittersim/engine/schedules.py": "56a75d53040b2575dce961a0b99958d2f37e58a2a97e25a308623837cc477083",
+      "jittersim/engine/selection.py": "8a8964122f04540c998daa9773498cdec271b60eab13c9e448996b102cf641fe",
+      "jittersim/engine/service.py": "38f4f882ffdb7ccbab4a9eb727650ffc4fbe4a8e7614a600d57e07a2a63a6658",
+      "jittersim/engine/service_lists.py": "8328050b5f0e59c63e8bfa367c5f62ee2e8c81f2abbb4ba248ddc8d459652fe4",
+      "jittersim/engine/service_resolver.py": "ac9fae3feb7778713bec8649d7a8e0c5e4b602286596019499bb27904b4ec84c",
+      "jittersim/engine/timeline.py": "452cb44333cc9b15e404398dacba36a6129492d12f31941eba7e274053d4aed0",
+      "jittersim/engine/website.py": "f200363e90543decbe429499688f610eb48ef852da24b837bc374f4612f5b028",
+      "jittersim/networking/__init__.py": "c415657b058eae32ed5e9b90ae634dc45d2e5ba23de0e49ebd0669337171dec3",
+      "jittersim/networking/access.py": "8affc6670efb98833da4415b3be3ca98f4a7827855017569b0e90b9f24336c2c",
+      "jittersim/networking/applier.py": "e3b9ed684be72a9ec6d821b992d05b4e5d501c162ccf11129c2051274422589a",
+      "jittersim/networking/browser_proxy.py": "74ed4f52e7e3b720a8502cfe1cd489de68cea9e9d9120eb0383280e4c189d71e",
+      "jittersim/networking/commands.py": "b06e4d662c78e92cacf4bfa049dc1d2522c70f70bbc1b0502f256125eadd7834",
+      "jittersim/networking/dashboard_access.py": "fdee6108949355c67a7e29ebe3af7b638a561b7d3828f8d651ba327ea1e51332",
+      "jittersim/networking/dns_watch.py": "0ce869023f5f7d5dd1d82f1a665050bf8fe85cf887e34ae4e667027ef55d25ad",
+      "jittersim/networking/executor.py": "a8dcc998a265798c063074558a8c4015fb014bc92342c3e80be7d458d0c4b4c7",
+      "jittersim/networking/helper.py": "f85cccace787954c7c1b2be779aec3bad368524f53ce1f454adaf9603650322d",
+      "jittersim/networking/renderer.py": "942939118ae4cbb2ab5d8d89d78689e636ec0864ed0ee67884521b9ecb518568",
+      "jittersim/networking/router.py": "fca1fbdf241b0e9628d1a4efe7ae2e83b5a9314e7ca5d645ed40b5bb8737bfb5",
+      "jittersim/networking/service_addresses.py": "91f97480d660c53edad12558c8816ec2dd5885feeb642dd0cb1c71e7e014445c",
+      "jittersim/networking/topology.py": "d946b1c40d1653cd6517ebf898bc07247fc4e27ed7d54c590b9f8f12b0202af9",
+      "jittersim/networking/wifi.py": "ea960797d14bc464a52c1d58f859e2ef1c5628d6238a03a008d6d6ac14efec18",
+      "jittersim/networking/wifi_security.py": "71329f75f5ad571c63965be5aa9c6b8817d6e4601a2e2235074834214d3e34a4"
+    },
+    "packaged_file_count": 64,
+    "reused_checks_cross_checked": 21,
+    "ordinary_browser_modules": 19,
+    "installed_files_match_wheel": 64,
+    "schema_audit_passed": true,
+    "runtime_error_counts_all_zero": true,
+    "visual_samples": [
+      "sign-in-375-light.png",
+      "devices-375-dark.png",
+      "router-375-dark.png",
+      "traffic-1440-dark.png"
+    ],
+    "masking_review": "Pinned runner masks all password fields and admin-token-help. No synthetic token in JSON. Inspected sample screenshots have no visible credential value.",
+    "axe_previous_baseline_counts_unchanged": true,
+    "limitations": [
+      "Actual assistive-technology speech unmeasured",
+      "Axe findings are report-only and do not certify accessibility",
+      "Clean release/kernel/12Linux command verification remains outside this GUI audit"
+    ]
+  },
+  "official_kernel_base": {
+    "complete": true,
+    "registry": "https://registry-1.docker.io/v2/library/python/",
+    "tag": "python:3.11-slim-bookworm",
+    "index_digest": "sha256:2333bd330d12de02514770b3585cad313644316047cdee24a7acfdece6de6efb",
+    "manifest_digest": "sha256:414e30d53a37307f4806508c1e44bdcd84b91277070aa7b8732d051ec4d9cc63",
+    "config_digest": "sha256:4681d9232ccddb194601de99be7cac73f9fc1adc369aad7247a0272710b88ebd",
+    "docker_image_id": "sha256:964763f4c35534a46c159760ee4a9817892d8559854a8d2dbfc2167054085d70",
+    "docker_manifest_descriptor": {
+      "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+      "digest": "sha256:964763f4c35534a46c159760ee4a9817892d8559854a8d2dbfc2167054085d70",
+      "size": 918,
+      "annotations": {
+        "io.containerd.image.name": "docker.io/library/python:3.11-slim-bookworm",
+        "org.opencontainers.image.ref.name": "3.11-slim-bookworm"
+      }
+    },
+    "filesystem_diff_ids": [
+      "sha256:055ab12bd547e17a0630037f06a186cf405e3f61bb03a614562ca8f5ab52a8be",
+      "sha256:06da974f6c31b9c8dd1dee31561748dcca9c7475e6659572c5a2a5ebf7cae600",
+      "sha256:437fa96ca06404e2aca22b3a78a3f9e4178e5aa4e41eec7a2c5e2316d2529f4d",
+      "sha256:20ca512ec270b324c52de8ea67d825e60b6bafaf0a7ba1ce1164cce970dc5f54"
+    ],
+    "runtime_configuration_matches": true,
+    "all_downloaded_blob_digests_verified": true,
+    "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-official-kernel-base-7s0as5ks",
+    "method": "Public official HTTPS registry download on host followed by Docker archive import. Docker container store ID identifies its translated manifest, not the registry config blob.",
+    "original_direct_pull_failure": "Docker VM DNS timeout",
+    "first_import_verifier_failure": "Expected config digest as image ID, disproved by container-store descriptor; filesystem and runtime configuration independently matched."
+  },
+  "accessibility_observations": {
+    "repeated_nodes": 50,
+    "moderate": 48,
+    "minor": 2,
+    "manual_review_observations": 74,
+    "categories": [
+      "skip-link",
+      "landmark-unique",
+      "empty-table-header"
+    ],
+    "unchanged_from_foundation": true
+  },
+  "verification_limits": [
+    "Linux architecture aarch64 differs from hosted Ubuntu x86_64.",
+    "Browser image uses recorded immutable runtime with fresh Python dependencies and current installed wheel. Kernel and release Dockerfiles rebuilt without cache.",
+    "Axe reports and synthetic screenshots do not establish physical-device or assistive-speech acceptance.",
+    "Physical management recovery and trusted live HTTPS remain unverified."
+  ],
+  "independent_workflow_review": {
+    "checked_source_commit": "71e437abdc8f9173f4ecceea7b711a3001221c0f",
+    "checked_source_tree": "4d48c92cf93f11989672dbaba76e48a99fd905be",
+    "application_source_commit": "a64965b531b316c22a1e507d3c99409d8f72af13",
+    "application_tree": "c6ffd67e834e95cee64d347e5af7e752bfed58d6",
+    "wheel_sha256": "652a5566c4a801370093888179c5cb1cc817c9d9ad6b04eb95046e6aab183b47",
+    "artifact_directory": "/Users/samantha.martinez/Github repos/jittersim/test-results/dashboard-quick-wins-2026-10-03",
+    "durable_inventory_files_verified": 386,
+    "workflow_coverage_complete": true,
+    "configured_python_versions": [
+      "3.9",
+      "3.11",
+      "3.13"
+    ],
+    "python_results_each": {
+      "passed": 3237,
+      "skipped": 39
+    },
+    "kernel_checks": 39,
+    "kernel_smoke_passed": true,
+    "linux_release_commands": 12,
+    "linux_command_capabilities_match_workflow": true,
+    "ordinary_browser_modules": 19,
+    "gui_states": 40,
+    "axe_states": 40,
+    "packaged_files_verified": 64,
+    "clean_no_cache_builds_verified": [
+      "release",
+      "kernel"
+    ],
+    "base_config_blob_and_four_compressed_and_uncompressed_layer_hashes_verified": true,
+    "prior_failures_retained": 4,
+    "integration_ready": true,
+    "main_release_ready": false,
+    "pi_deployment_ready": false,
+    "hosted_ci_status": "No hosted passing result claimed. Local workflow substitute under direct authorization.",
+    "notes": [
+      "Architecture aarch64 differs from hosted x86_64",
+      "50 repeated existing axe observations unchanged. Actual assistive speech unmeasured",
+      "Kernel registry selection is recorded by fetch report. Downloaded content hashes independently verified",
+      "Approval applies to source71e437a and unchanged source in a documentation-only publication commit"
+    ],
+    "reviewed_report_sha256": "7c4d6fbca96ed19a98169f5fe212f05c2381c1dc58518c7820fda3550894be03"
+  },
+  "evidence_clarifications": [
+    "The original kernel verification mode label mentions cached dependencies. Its exact image binding and clean build log prove the newly built no-cache kernel image. The original evidence is preserved.",
+    "Official registry selection and index/manifest digests are recorded by the HTTPS fetch report. Original registry index and selected-manifest bytes were not retained. Downloaded blobs, runtime configuration and filesystem hashes were independently verified. The retained Docker import manifest is not the original registry manifest."
+  ]
+}
