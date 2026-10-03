@@ -1,5 +1,6 @@
 """Copy and verify first-install source before running anything from its archive."""
 
+import gzip
 import hashlib
 import json
 import os
@@ -9,11 +10,91 @@ import stat
 import sys
 import tarfile
 import time
+import zlib
 from pathlib import Path, PurePosixPath
 
 MAX_ARCHIVE = 25 * 1024 * 1024
 MAX_SOURCE = 256 * 1024 * 1024
 MAX_ENTRIES = 20000
+
+
+def check_archive_headers(archive, check):
+    """Bound physical bytes before any version-specific member processing."""
+    count, payload_bytes, read_bytes, extensions = 0, 0, 0, 0
+    maximum = MAX_SOURCE + MAX_ENTRIES * 1024 + tarfile.RECORDSIZE
+    extended = (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE,
+                tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK)
+    allowed = (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE, *extended)
+    pax_fields = {b"path", b"mtime", b"atime", b"ctime", b"uid", b"gid",
+                  b"uname", b"gname", b"comment"}
+    with gzip.open(archive, "rb") as raw:
+        def read(size):
+            nonlocal read_bytes
+            check()
+            block = raw.read(size)
+            read_bytes += len(block)
+            check()
+            if read_bytes > maximum:
+                raise RuntimeError("the expanded archive is too large")
+            return block
+
+        while True:
+            header = read(512)
+            if len(header) != 512:
+                raise RuntimeError("the archive physical header is incomplete")
+            if not any(header):
+                if read(512) != bytes(512):
+                    raise RuntimeError("the archive end marker is invalid")
+                while True:
+                    padding = read(1024 * 1024)
+                    if not padding:
+                        return
+                    if any(padding):
+                        raise RuntimeError("the archive contains data after its end")
+            if header[156:157] not in allowed:
+                raise RuntimeError("the archive physical header is unsupported")
+            # frombuf parses this fixed 512-byte header only. It cannot enter
+            # sparse, extended or recursive member processing.
+            item = tarfile.TarInfo.frombuf(header, "utf-8", "surrogateescape")
+            if item.isdir() and item.size != 0:
+                # tarfile does not skip directory payload. Both scans must see
+                # the same next physical header before any member processing.
+                raise RuntimeError("the archive directory has unsupported payload")
+            count += 1
+            payload_bytes += item.size
+            extensions = extensions + 1 if item.type in extended else 0
+            if (count > MAX_ENTRIES or item.size < 0 or payload_bytes > MAX_SOURCE
+                    or extensions > 32 or (item.type in extended and item.size > 64 * 1024)):
+                raise RuntimeError("the archive metadata is too large")
+            padded = (item.size + 511) // 512 * 512
+            if item.type in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE):
+                body = read(padded)
+                if len(body) != padded:
+                    raise RuntimeError("the archive metadata is incomplete")
+                body = body[:item.size]
+                if b"GNU.sparse" in body:
+                    raise RuntimeError("the archive sparse metadata is unsupported")
+                position = 0
+                while position < len(body):
+                    check()
+                    separator = body.find(b" ", position, position + 12)
+                    digits = body[position:separator] if separator >= 0 else b""
+                    if not digits or not digits.isdigit():
+                        raise RuntimeError("the archive metadata record is invalid")
+                    size = int(digits)
+                    end = position + size
+                    if size < 5 or end > len(body) or body[end - 1:end] != b"\n":
+                        raise RuntimeError("the archive metadata record is invalid")
+                    key, equals, value = body[separator + 1:end - 1].partition(b"=")
+                    if equals != b"=" or key not in pax_fields or len(value) > 4096:
+                        raise RuntimeError("the archive metadata field is unsupported")
+                    position = end
+            else:
+                while padded:
+                    block = read(min(padded, 1024 * 1024))
+                    if not block:
+                        raise RuntimeError("the archive member is incomplete")
+                    padded -= len(block)
 
 
 def prepare_source(archive, destination, digest, metadata):
@@ -29,45 +110,10 @@ def prepare_source(archive, destination, digest, metadata):
             or type(metadata["sequence"]) is not int or not 0 < metadata["sequence"] < 2 ** 63):
         raise ValueError("the release label is invalid")
     deadline = time.monotonic() + 120
-    header_count = 0
-    header_bytes = 0
-    extensions = 0
 
     def check():
         if time.monotonic() >= deadline:
             raise RuntimeError("the installer source exceeded its time allowance")
-
-    class BoundedInfo(tarfile.TarInfo):
-        @classmethod
-        def frombuf(cls, buf, encoding, errors):
-            nonlocal header_count, header_bytes, extensions
-            check()
-            item = super().frombuf(buf, encoding, errors)
-            if item.type not in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE,
-                                 tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE,
-                                 tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK):
-                raise RuntimeError("the archive physical header is unsupported")
-            header_count += 1
-            header_bytes += item.size
-            extended = item.type in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE,
-                                     tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK)
-            extensions = extensions + 1 if extended else 0
-            if (header_count > MAX_ENTRIES or header_bytes > MAX_SOURCE or item.size < 0
-                    or extensions > 32 or (extended and item.size > 64 * 1024)):
-                raise RuntimeError("the archive metadata is too large")
-            return item
-
-        def _proc_pax(self, bundle):
-            # PAX can also describe GNU sparse maps on an ordinary file header.
-            # Reject those before the library enters its sparse-data parser.
-            check()
-            position = bundle.fileobj.tell()
-            metadata = bundle.fileobj.read(self._block(self.size))
-            check()
-            if b"GNU.sparse" in metadata:
-                raise RuntimeError("the archive sparse metadata is unsupported")
-            bundle.fileobj.seek(position)
-            return super()._proc_pax(bundle)
 
     parent = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     created = False
@@ -101,7 +147,8 @@ def prepare_source(archive, destination, digest, metadata):
             os.fsync(output.fileno())
         if calculated.hexdigest() != digest:
             raise RuntimeError("the release archive checksum changed")
-        with tarfile.open(copied, "r:gz", tarinfo=BoundedInfo) as bundle:
+        check_archive_headers(copied, check)
+        with tarfile.open(copied, "r:gz") as bundle:
             entries, names, total, folders = [], set(), 0, {destination}
             for item in bundle:
                 check()
@@ -173,7 +220,7 @@ def main():
             raise RuntimeError("administrator access and verified source are required")
         prepare_source(sys.argv[1], sys.argv[2], sys.argv[3], json.loads(sys.argv[4]))
         return 0
-    except (OSError, ValueError, RuntimeError, tarfile.TarError):
+    except (OSError, EOFError, ValueError, RuntimeError, tarfile.TarError, zlib.error):
         print("Checking the installer source failed. The full installer did not run.", file=sys.stderr)
         return 1
 
