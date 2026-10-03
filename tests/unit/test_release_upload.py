@@ -133,7 +133,11 @@ class ReleaseUploadTests(unittest.TestCase):
             for name, value in values.items():
                 connection.putheader(name, value)
             connection.endheaders()
-            connection.send(archive + signature)
+            try:
+                connection.send(archive + signature)
+            except (BrokenPipeError, ConnectionResetError):
+                # A header rejection can close the body stream. Check its reply.
+                pass
             response = connection.getresponse()
             return response.status, json.loads(response.read() or b"{}")
         finally:
