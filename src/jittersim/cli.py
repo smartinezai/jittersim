@@ -486,6 +486,15 @@ def _apply_access(arguments) -> int:
     if repository is None:
         print(f"Settings database is not readable at {arguments.database}", file=sys.stderr)
         return 1
+    client = HelperClient(
+        socket_path=arguments.helper_socket, timeout_seconds=arguments.timeout_seconds
+    )
+    try:
+        revision = client.control_revision()
+    except HelperClientError as error:
+        repository.close()
+        print(f"Access apply failed: {error}", file=sys.stderr)
+        return 1
     try:
         plan = build_access_plan(repository.access_settings())
     except (StorageError, sqlite3.Error, ValueError) as error:
@@ -493,11 +502,8 @@ def _apply_access(arguments) -> int:
         return 1
     finally:
         repository.close()
-    client = HelperClient(
-        socket_path=arguments.helper_socket, timeout_seconds=arguments.timeout_seconds
-    )
     try:
-        result = client.apply_access(plan)
+        result = client.apply_access(plan, control_revision=revision)
     except HelperClientError as error:
         print(f"Access apply failed: {error}", file=sys.stderr)
         return 1

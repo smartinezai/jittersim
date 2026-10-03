@@ -18,7 +18,12 @@ from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.access import AccessManager
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.executor import FakeExecutor
-from jittersim.networking.helper import HelperClient, HelperService, UnixHelperServer
+from jittersim.networking.helper import (
+    HelperClient,
+    HelperService,
+    UnixHelperServer,
+    restore_access_at_start,
+)
 from jittersim.networking.topology import Topology
 from tests.access_support import AccessExecutor
 from tests.unit.test_helper_access import apply_payload
@@ -33,6 +38,7 @@ def helper(directory):
         directory=directory,
         runtime_path=directory / "access-runtime.json",
     )
+    assert restore_access_at_start(manager)
     service = HelperService(
         NetworkApplier(executor=FakeExecutor(), topology=topology),
         active_plan_path=directory / "active-plan.json",
@@ -177,4 +183,5 @@ def test_durable_acknowledgement_syncs_file_and_parent_and_failed_sync_blocks_st
             assert service.handle_payload(payload)["ok"] is False
             monkeypatch.setattr(os, "fsync", original)
             assert client.normal_access()["ok"] is True
+            payload["expected_control_revision"] = client.control_revision()
             assert service.handle_payload(payload)["ok"] is True

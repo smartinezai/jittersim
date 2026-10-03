@@ -25,6 +25,8 @@ class SnapshotCacheTests(unittest.TestCase):
 
         def request(_client, payload, timeout_seconds=None):
             self.actions.append(payload["action"])
+            if payload["action"] == "control-revision":
+                return {"ok": True, "control_revision": "0" * 32, "recovery_required": False}
             if payload["action"] != "clients":
                 return {"ok": True}
             if self.gate is not None:
@@ -117,6 +119,7 @@ class SnapshotCacheTests(unittest.TestCase):
     def test_reading_status_keeps_the_scan(self):
         self.client.connected_device_snapshot()
         self.client.ping()
+        self.client.control_revision()
         self.client._request({"action": "traffic-counters"})
         self.client.connected_device_snapshot()
 

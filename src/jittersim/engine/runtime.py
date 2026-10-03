@@ -728,6 +728,12 @@ class RuntimeScheduler:
                     current_time,
                 )
                 return False
+            control_revision = None
+            reader = getattr(self._helper_client, "control_revision", None)
+            if callable(reader):
+                control_revision = gateway_status.get("control_revision")
+                if control_revision is None:
+                    control_revision = reader()
             recovery_pending = (
                 gateway_status.get("recovery_pending") is True
                 and gateway_status.get("gateway_state") == "available"
@@ -798,7 +804,8 @@ class RuntimeScheduler:
             helper_attempted = True
             try:
                 apply = getattr(self._helper_client, "apply_experiment", self._helper_client.apply)
-                apply(plan=plan)
+                arguments = {"control_revision": control_revision} if control_revision is not None else {}
+                apply(plan=plan, **arguments)
             except HelperClientError:
                 # Cleanup may have removed the previous rules too. An active
                 # scheduler must retry even if the desired plan is unchanged.
@@ -822,6 +829,10 @@ class RuntimeScheduler:
                 self._honor_external_reset(repository=active_repository, now=current_time)
             return bool(accepted and applied)
         except (HelperClientError, PlanError, StorageError, OSError) as error:
+            if isinstance(error, HelperClientError) and error.reason == "control-changed":
+                self.halt()
+                self.require_recovery()
+                return False
             if not self.can_apply(halts_at_start):
                 if helper_attempted and self.halt_count != halts_at_start:
                     self._undo_overtaken_apply(active_repository)

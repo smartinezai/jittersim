@@ -184,6 +184,9 @@ class HelperService:
         self._outage_stop_latched = False
         self._panic_stop_latched = False
         self._panic_recovery_failed = False
+        self._control_revision = secrets.token_bytes(16).hex()
+        self._revision_lock = threading.Lock()
+        self._control_revision_required = False
         self._reset_pending = False
         self._recovery_pending = False
         self._consecutive_failures = 0
@@ -213,13 +216,20 @@ class HelperService:
         if not isinstance(payload, dict):
             return {"ok": False, "error": "request must be an object"}
         action = payload.get("action")
+        if action == "control-revision":
+            with self._revision_lock:
+                return {"ok": True, "control_revision": self._control_revision,
+                        "recovery_required": self._panic_recovery_failed}
         if action == "normal-access":
             if not self._network_lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS):
                 return {"ok": False, "error": "Pi networking is busy. Try again later.",
                         "reason": "helper-busy"}
             try:
-                self._panic_stop_latched = True
-                self._panic_recovery_failed = True
+                with self._revision_lock:
+                    self._control_revision = secrets.token_bytes(16).hex()
+                    self._control_revision_required = True
+                    self._panic_stop_latched = True
+                    self._panic_recovery_failed = True
                 self._write_gateway_state(durable=True)
                 reset = self._handle_reset()
                 access_ok = False
@@ -232,7 +242,8 @@ class HelperService:
                     LOGGER.exception("could not disable household restrictions")
                 failed = not reset["ok"] or not access_ok
                 saved = self._write_gateway_state(durable=True, panic_recovery_failed=failed)
-                self._panic_recovery_failed = failed or not saved
+                with self._revision_lock:
+                    self._panic_recovery_failed = failed or not saved
             finally:
                 self._network_lock.release()
             if not saved:
@@ -245,13 +256,27 @@ class HelperService:
         if action in ("access-status", "access-apply"):
             if self._access_manager is None:
                 return {"ok": False, "error": "persistent access controls are unavailable"}
+            acquired = False
             try:
-                result = (self._access_manager.status() if action == "access-status" else
-                          self._access_manager.apply(access_from_payload(payload.get("policy"))))
+                if action == "access-status":
+                    result = self._access_manager.status()
+                else:
+                    acquired = self._network_lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS)
+                    if not acquired:
+                        return {"ok": False, "error": "Pi networking is busy. Try again later.", "reason": "helper-busy"}
+                    refused = self._control_refusal(payload)
+                    if refused is not None:
+                        return refused
+                    if self._panic_recovery_failed:
+                        return {"ok": False, "error": "Retry Panic before applying access rules."}
+                    result = self._access_manager.apply(access_from_payload(payload.get("policy")))
                 return {"ok": True, **result}
             except (OSError, ValueError, CommandExecutionError):
                 LOGGER.exception("persistent access operation failed")
                 return {"ok": False, "error": self._access_failure_message()}
+            finally:
+                if acquired:
+                    self._network_lock.release()
         if action in ("update-status", "update-install", "update-rollback"):
             try:
                 if action != "update-status":
@@ -293,6 +318,7 @@ class HelperService:
                 "service_list_outages": True,
                 "protected_dns_capture": True,
                 "identified_release_uploads": True,
+                "control_intent_fence": True,
             }
         if action == "dashboard-access":
             if not self._access_lock.acquire(blocking=False):
@@ -312,6 +338,9 @@ class HelperService:
             try:
                 if action == "reset":
                     return self._handle_reset()
+                refused = self._control_refusal(payload)
+                if refused is not None:
+                    return refused
                 return self._handle_apply(
                     payload.get("plan"),
                     update_access=action == "apply",
@@ -565,11 +594,14 @@ class HelperService:
                 or not 0 <= successes <= GATEWAY_SUCCESSES_TO_UP
             ):
                 raise ValueError("gateway probe count is invalid")
-            for field in ("panic_stop_latched", "panic_recovery_failed"):
+            for field in ("panic_stop_latched", "panic_recovery_failed", "control_revision_required"):
                 if field in state and not isinstance(state[field], bool):
                     raise ValueError("Panic recovery state is invalid")
             self._panic_stop_latched = state.get("panic_stop_latched", False)
             self._panic_recovery_failed = state.get("panic_recovery_failed", False)
+            self._control_revision_required = state.get("control_revision_required", self._panic_stop_latched)
+            if self._panic_stop_latched:
+                self._control_revision_required = True
             if self._panic_recovery_failed and not self._panic_stop_latched:
                 raise ValueError("Panic recovery state is inconsistent")
             self._persistence_enabled = state["persistence_enabled"]
@@ -598,8 +630,19 @@ class HelperService:
             self._outage_stop_latched = True
             self._panic_stop_latched = True
             self._panic_recovery_failed = True
+            self._control_revision_required = True
             self._reset_pending = True
             self._gateway_state_error = True
+
+    def _control_refusal(self, payload):
+        expected = payload.get("expected_control_revision")
+        if expected is None and "expected_control_revision" not in payload and not self._control_revision_required:
+            return None
+        if (not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{32}", expected) is None
+                or not secrets.compare_digest(expected, self._control_revision)):
+            return {"ok": False, "error": "Network control changed. Reload before choosing a fresh action.",
+                    "reason": "control-changed"}
+        return None
 
     def _gateway_status(self) -> Dict[str, Any]:
         return {
@@ -609,10 +652,12 @@ class HelperService:
             "outage_observed": self._outage_observed,
             "outage_stop_latched": self._outage_stop_latched,
             "panic_stop_latched": self._panic_stop_latched,
+            "control_revision_required": self._control_revision_required,
             "panic_recovery_failed": self._panic_recovery_failed,
             "reset_pending": self._reset_pending,
             "recovery_pending": self._recovery_pending,
             "state_error": self._gateway_state_error,
+            "control_revision": self._control_revision,
         }
 
     def _write_gateway_state(self, *, durable: bool = False,
@@ -627,6 +672,7 @@ class HelperService:
             "outage_observed": self._outage_observed,
             "outage_stop_latched": self._outage_stop_latched,
             "panic_stop_latched": self._panic_stop_latched,
+            "control_revision_required": self._control_revision_required,
             "panic_recovery_failed": (self._panic_recovery_failed if panic_recovery_failed is None
                                       else panic_recovery_failed),
             "reset_pending": self._reset_pending,
@@ -1361,7 +1407,7 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "request must be valid JSON"})
             return
         action = payload.get("action") if isinstance(payload, dict) else None
-        if action in ("ping", "dashboard-access") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
+        if action in ("ping", "control-revision", "dashboard-access") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
             self._send_response(self.server.service.handle_payload(payload))
             return
         # Apply and reset wait a moment for a read so a poll never refuses Panic. Every
@@ -1530,7 +1576,7 @@ def _validated_queues(raw_queues: Any) -> Dict[str, Any]:
 
 # Helper actions that only read, so they leave a recent client scan valid.
 READ_ONLY_ACTIONS = frozenset((
-    "ping", "dashboard-access", "gateway-status", "capabilities", "access-status",
+    "ping", "control-revision", "dashboard-access", "gateway-status", "capabilities", "access-status",
     "update-status", "clients", "uplink-info", "observe-dns", "queue-stats", "traffic-counters",
     "router-preview-ap", "router-status", "router-check", "router-wifi-credentials",
 ))
@@ -1623,9 +1669,10 @@ class HelperClient:
                 outages=any(rule.outage_active for rule in plan.service_list_rules)
             )
 
-    def apply(self, *, plan: NetworkPlan, explicit_apply: bool = False) -> Dict[str, Any]:
+    def apply(self, *, plan: NetworkPlan, explicit_apply: bool = False, control_revision: Optional[str] = None) -> Dict[str, Any]:
         """Ask the helper to apply one validated network plan."""
 
+        revision = self.control_revision() if control_revision is None else control_revision
         self._check_plan_support(plan)
         # Applying waits for the kernel and the access policy, so allow longer.
         return self._request(
@@ -1633,9 +1680,31 @@ class HelperClient:
                 "action": "apply",
                 "plan": plan_to_payload(plan),
                 "explicit_apply": explicit_apply,
+                "expected_control_revision": revision,
             },
             timeout_seconds=60,
         )
+
+    def control_revision(self) -> str:
+        """Capture one immutable helper intent before any plan or saved change."""
+
+        try:
+            result = self._request({"action": "control-revision"})
+        except HelperClientError as error:
+            if str(error) == "unknown action":
+                raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE) from error
+            raise
+        revision = result.get("control_revision")
+        if revision is None:
+            raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE)
+        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{32}", revision) is None:
+            raise HelperClientError("helper returned an invalid control revision")
+        required = result.get("recovery_required")
+        if not isinstance(required, bool):
+            raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE)
+        if required:
+            raise HelperClientError("Normal access recovery is not confirmed. Retry Panic before Start.")
+        return revision
 
     def gateway_status(self) -> Dict[str, Any]:
         """Read the helper's bounded gateway and persistence state."""
@@ -1656,6 +1725,12 @@ class HelperClient:
         for field in ("panic_stop_latched", "panic_recovery_failed"):
             if field in result and not isinstance(result[field], bool):
                 raise HelperClientError("helper returned invalid Panic recovery state")
+        if "control_revision" in result:
+            revision = result["control_revision"]
+            if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{32}", revision) is None:
+                raise HelperClientError("helper returned an invalid control revision")
+        if "control_revision_required" in result and not isinstance(result["control_revision_required"], bool):
+            raise HelperClientError("helper returned invalid control intent state")
         return result
 
     def set_gateway_persistence(self, *, enabled: bool) -> Dict[str, Any]:
@@ -1740,12 +1815,13 @@ class HelperClient:
 
         return self._request({"action": "reset"})
 
-    def apply_experiment(self, *, plan: NetworkPlan) -> Dict[str, Any]:
+    def apply_experiment(self, *, plan: NetworkPlan, control_revision: Optional[str] = None) -> Dict[str, Any]:
         """Change scheduled effects without activating pending access-rule edits."""
 
+        revision = self.control_revision() if control_revision is None else control_revision
         self._check_plan_support(plan)
         return self._request(
-            {"action": "apply-experiment", "plan": plan_to_payload(plan)}, timeout_seconds=60
+            {"action": "apply-experiment", "plan": plan_to_payload(plan), "expected_control_revision": revision}, timeout_seconds=60
         )
 
     def normal_access(self) -> Dict[str, Any]:
@@ -1755,10 +1831,11 @@ class HelperClient:
     def access_status(self) -> Dict[str, Any]:
         return self._request({"action": "access-status"})
 
-    def apply_access(self, policy: AccessPlan) -> Dict[str, Any]:
+    def apply_access(self, policy: AccessPlan, control_revision: Optional[str] = None) -> Dict[str, Any]:
         # DNS restart and recovery can take longer than a status read.
+        revision = self.control_revision() if control_revision is None else control_revision
         client = self._with_timeout(60)
-        return client._request({"action": "access-apply", "policy": policy.payload()})
+        return client._request({"action": "access-apply", "policy": policy.payload(), "expected_control_revision": revision})
 
     def configure_access_point(self, *, ssid: str, password: str) -> Dict[str, Any]:
         """Set the local test AP credentials through the privileged helper."""
@@ -2158,7 +2235,7 @@ class HelperClient:
             raise HelperClientError("helper returned an invalid response object")
         if not decoded.get("ok", False):
             reason = decoded.get("reason")
-            if reason not in ("wifi-busy", "helper-busy", "wifi-failed",
+            if reason not in ("control-changed", "wifi-busy", "helper-busy", "wifi-failed",
                               "wifi-restored", "wifi-restore-failed", "release-refused"):
                 reason = None
             raise HelperClientError(str(decoded.get("error", "helper request failed")), reason=reason)

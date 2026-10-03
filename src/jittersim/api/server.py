@@ -13791,6 +13791,10 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         the addresses of each listed name within a second while JitterSim runs.
         """
 
+        generation = getattr(self.scheduler, "apply_generation", 0)
+        refused, revision = self._capture_control_intent(generation)
+        if refused is not None:
+            return refused
         settings = self.repository.access_settings()
         if (
             not settings.access_options.enabled
@@ -13799,8 +13803,22 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         ):
             return None
         try:
-            self.helper_client.apply_access(build_access_plan(settings))
-        except (HelperClientError, ValidationError):
+            arguments = {"control_revision": revision} if revision is not None else {}
+            refused = self._apply_refused(generation)
+            if refused is not None:
+                return refused
+            self.helper_client.apply_access(build_access_plan(settings), **arguments)
+            refused = self._apply_refused(generation, undo=True)
+            if refused is not None:
+                return refused
+        except (HelperClientError, ValidationError) as error:
+            if isinstance(error, HelperClientError):
+                rejected = self._control_rejected(error)
+                if rejected is not None:
+                    return rejected
+            refused = self._apply_refused(generation, undo=True)
+            if refused is not None:
+                return refused
             LOGGER.warning("the global block list did not reach the filtered resolver")
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                 {
@@ -15087,7 +15105,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 _json_bytes({"error": "network helper is not configured"}),
             )
         halts_at_start = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
-        refused = self._apply_refused(halts_at_start)
+        refused, control_revision = self._capture_control_intent(halts_at_start)
         if refused is not None:
             return refused
         try:
@@ -15127,11 +15145,16 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         if refused is not None:
             return refused
         try:
+            arguments = {"plan": plan}
+            if control_revision is not None:
+                arguments["control_revision"] = control_revision
             if explicit_apply:
-                result = self.helper_client.apply(plan=plan, explicit_apply=True)
-            else:
-                result = self.helper_client.apply(plan=plan)
+                arguments["explicit_apply"] = True
+            result = self.helper_client.apply(**arguments)
         except HelperClientError as error:
+            rejected = self._control_rejected(error)
+            if rejected is not None:
+                return rejected
             LOGGER.error("network helper apply failed: %s", error)
             if self.scheduler is not None:
                 self.scheduler.invalidate_applied_plan()
@@ -15187,6 +15210,27 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
 
     def _panic_since(self, halts_at_start: int) -> bool:
         return getattr(self.scheduler, "halt_count", 0) != halts_at_start
+
+    def _control_rejected(self, error):
+        if error.reason != "control-changed":
+            return None
+        if self.scheduler is not None:
+            self.scheduler.halt()
+            self.scheduler.require_recovery()
+        return HTTPStatus.CONFLICT, "application/json", _json_bytes({
+            "error": "Network control changed before this action. Reload and retry Panic before choosing Start.",
+        })
+
+    def _capture_control_intent(self, generation):
+        refused = self._apply_refused(generation)
+        if refused is not None:
+            return refused, None
+        reader = getattr(self.helper_client, "control_revision", None)
+        try:
+            revision = reader() if callable(reader) else None
+        except HelperClientError as error:
+            return (HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes({"error": str(error)})), None
+        return self._apply_refused(generation), revision
 
     def _publish_apply(self, generation, publish):
         if self.scheduler is not None and hasattr(self.scheduler, "publish_if_current"):

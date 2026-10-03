@@ -160,10 +160,14 @@ def write_access_api(server, path, payload):
         return None
     if path == "/api/normal-access":
         return normal_access(server)
-    if server.scheduler is not None:
-        refused = server._apply_refused(server.scheduler.apply_generation)
-        if refused is not None:
-            return refused
+    generation = getattr(server.scheduler, "apply_generation", 0)
+    control_revision = None
+    if path in ("/api/site-blocks", "/api/site-blocks/delete"):
+        refused = server._apply_refused(generation)
+    else:
+        refused, control_revision = server._capture_control_intent(generation)
+    if refused is not None:
+        return refused
     repository = server.repository
     try:
         version = payload.get("version")
@@ -183,9 +187,11 @@ def write_access_api(server, path, payload):
             else:
                 rule = SiteBlock(**payload["rule"])
                 blocks = [existing for existing in blocks if existing.id != rule.id] + [rule]
-            repository.save_access_policies(
+            accepted, _ = server._publish_apply(generation, lambda: repository.save_access_policies(
                 mac, settings.website_policy, blocks=blocks, expected_version=version
-            )
+            ))
+            if not accepted:
+                return server._apply_refused(generation)
             repository.record_activity(
                 kind="access", message="Site access rules changed.", now=time.time()
             )
@@ -229,20 +235,28 @@ def write_access_api(server, path, payload):
                 mac = MacPolicy("denylist", mac.allowlist, tuple(sorted(denied)))
             options = replace(options, enabled=True)
         if options != settings.access_options or mac != settings.mac_policy:
-            repository.save_access_policies(
+            accepted, _ = server._publish_apply(generation, lambda: repository.save_access_policies(
                 mac, settings.website_policy, options=options, expected_version=version
-            )
+            ))
+            if not accepted:
+                return server._apply_refused(generation)
         plan = build_access_plan(repository.access_settings())
-        result = server.helper_client.apply_access(plan)
-        repository.record_activity(
+        refused = server._apply_refused(generation)
+        if refused is not None:
+            return refused
+        arguments = {"control_revision": control_revision} if control_revision is not None else {}
+        result = server.helper_client.apply_access(plan, **arguments)
+        refused = server._apply_refused(generation, undo=True)
+        if refused is not None:
+            return refused
+        accepted, _ = server._publish_apply(generation, lambda: repository.record_activity(
             kind="access",
-            message=(
-                "Household access rules applied."
-                if plan.options.enabled
-                else "Household access rules disabled."
-            ),
+            message=("Household access rules applied." if plan.options.enabled
+                     else "Household access rules disabled."),
             now=time.time(),
-        )
+        ))
+        if not accepted:
+            return server._apply_refused(generation, undo=True)
         return response(
             {"result": result, "version": repository.get_runtime_state().configuration_version}
         )
@@ -250,7 +264,13 @@ def write_access_api(server, path, payload):
         return response({"error": str(error)}, 409)
     except (KeyError, TypeError, ValueError) as error:
         return response({"error": str(error)}, 400)
-    except HelperClientError:
+    except HelperClientError as error:
+        rejected = server._control_rejected(error)
+        if rejected is not None:
+            return rejected
+        refused = server._apply_refused(generation, undo=True)
+        if refused is not None:
+            return refused
         return response(
             {"error": "Access update failed. Check access status before retrying."}, 503
         )
