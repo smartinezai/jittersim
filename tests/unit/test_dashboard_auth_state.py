@@ -20,6 +20,7 @@ def test_token_checks_and_edits_release_all_private_loading_states():
 
     functions = block("const privateDataPanelIds =", "function setDashboardUnlocked(")
     functions += block("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
+    functions += block("function clearAdminToolsUi()", "async function loadRandomWebsiteAnalytics(")
     functions += block("async function checkAdminToken()", "async function refresh(")
     listener = block(
         'element("admin-token").addEventListener("input",',

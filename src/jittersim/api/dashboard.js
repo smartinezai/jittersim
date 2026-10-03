@@ -299,20 +299,6 @@
 
     const privateDataLockHooks = [];
 
-    function clearAdminToolsUi() {
-      randomWebsiteAnalyticsRequestVersion += 1;
-      element("random-website-rows").replaceChildren();
-      const devices = element("random-website-device");
-      devices.replaceChildren();
-      const allDevices = document.createElement("option");
-      allDevices.value = "";
-      allDevices.textContent = "All devices";
-      devices.appendChild(allDevices);
-      element("random-website-status").className = "analytics-status";
-    }
-
-    privateDataLockHooks.push(clearAdminToolsUi);
-
     function setDashboardUnlocked(allowed) {
       element("private-dashboard").hidden = !allowed;
       element("dashboard-access-list").hidden = !allowed;
@@ -5000,6 +4986,20 @@
         status.textContent = data.rows.length + " device and website totals. " + history;
       }
     }
+
+    function clearAdminToolsUi() {
+      randomWebsiteAnalyticsRequestVersion += 1;
+      element("random-website-rows").replaceChildren();
+      const devices = element("random-website-device");
+      devices.replaceChildren();
+      const allDevices = document.createElement("option");
+      allDevices.value = "";
+      allDevices.textContent = "All devices";
+      devices.appendChild(allDevices);
+      element("random-website-status").className = "analytics-status";
+    }
+
+    privateDataLockHooks.push(clearAdminToolsUi);
 
     async function loadRandomWebsiteAnalytics() {
       const revision = adminTokenRevision;
