@@ -57,6 +57,7 @@ jobs:
       - run: python -m tests.browser.wifi_recovery
       - run: python -m tests.browser.dashboard_access
       - run: python -m tests.browser.address_move
+      - run: python -m tests.browser.address_move_privacy
       - run: python -m tests.browser.general_profile
       - run: python -m tests.browser.saved_profiles
       - run: python -m tests.browser.dashboard_navigation

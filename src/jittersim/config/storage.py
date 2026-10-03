@@ -1,6 +1,7 @@
 """SQLite persistence for validated jittersim configuration."""
 
 import json
+import re
 import sqlite3
 import tempfile
 import time
@@ -540,6 +541,14 @@ class ConfigRepository:
             """
         )
         self._migrate_unaffected_devices()
+        self._add_column_if_missing("unaffected_devices", "address_move_id", "TEXT NOT NULL DEFAULT ''")
+        for column, definition in (
+            ("move_id", "TEXT NOT NULL DEFAULT ''"),
+            ("phase", "TEXT NOT NULL DEFAULT 'saved'"),
+            ("previous_protection_owner", "TEXT NOT NULL DEFAULT ''"),
+            ("prepared_version", "INTEGER NOT NULL DEFAULT -1"),
+        ):
+            self._add_column_if_missing("address_moves", column, definition)
         self._connection.execute(_SCHEDULES_TABLE_SQL.format(name="schedules"))
         self._upgrade_schedules_table()
         self._connection.execute("""
@@ -1233,7 +1242,8 @@ class ConfigRepository:
                 raise StorageError("The unaffected-device list can contain at most 256 devices")
             self._connection.execute(
                 "INSERT INTO unaffected_devices (mac_address, display_name, created_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(mac_address) DO UPDATE SET display_name = excluded.display_name",
+                "ON CONFLICT(mac_address) DO UPDATE SET display_name = excluded.display_name, "
+                "address_move_id = ''",
                 (device.mac_address, device.display_name, device.created_at),
             )
             self._bump_configuration_version()
@@ -1248,15 +1258,62 @@ class ConfigRepository:
                 self._bump_configuration_version()
             return bool(cursor.rowcount)
 
+    @contextmanager
+    def address_move_transaction(self):
+        """Keep a failed identity commit from leaving an open transaction."""
+        depth = self._transaction_depth
+        try:
+            with self.transaction():
+                yield
+        except sqlite3.Error as error:
+            if depth == 0:
+                self._connection.rollback()
+            raise StorageError("Device move could not be saved.") from error
+
+    def address_move_protection_owner(self, mac_address: str) -> Optional[str]:
+        row = self._connection.execute(
+            "SELECT address_move_id FROM unaffected_devices WHERE mac_address = ?",
+            (normalize_exempt_mac(mac_address),),
+        ).fetchone()
+        if row is None:
+            return None
+        owner = row[0]
+        if not isinstance(owner, str) or owner and not re.fullmatch(r"[0-9a-f]{32}", owner):
+            raise StorageError("Saved protection ownership is invalid.")
+        return owner
+
+    def claim_address_move_protection(self, mac_address: str, move_id: str) -> None:
+        if move_id and not re.fullmatch(r"[0-9a-f]{32}", move_id):
+            raise ValueError("move ownership identifier is invalid")
+        self._connection.execute(
+            "UPDATE unaffected_devices SET address_move_id = ? WHERE mac_address = ?",
+            (move_id, normalize_exempt_mac(mac_address)),
+        )
+        self._commit()
+
     def list_address_moves(self) -> tuple:
         rows = self._connection.execute(
-            "SELECT old_mac, new_mac, name, moved_access, moved_protection, moved_at "
+            "SELECT old_mac, new_mac, name, moved_access, moved_protection, moved_at, "
+            "move_id, phase, previous_protection_owner, prepared_version "
             "FROM address_moves ORDER BY moved_at DESC, old_mac LIMIT ?",
-            (MAX_ADDRESS_MOVES,),
+            (MAX_ADDRESS_MOVES + 1,),
         ).fetchall()
+        if len(rows) > MAX_ADDRESS_MOVES:
+            raise StorageError("The device move history exceeds its limit.")
         try:
             return tuple(
-                AddressMove(row[0], row[1], row[2], bool(row[3]), bool(row[4]), row[5])
+                AddressMove(
+                    row[0],
+                    row[1],
+                    row[2],
+                    bool(row[3]),
+                    bool(row[4]),
+                    row[5],
+                    row[6],
+                    row[7],
+                    row[8],
+                    row[9],
+                )
                 for row in rows
             )
         except (TypeError, ValueError) as error:
@@ -1267,21 +1324,45 @@ class ConfigRepository:
         return next((move for move in self.list_address_moves() if move.old_mac == key), None)
 
     def save_address_move(self, move: AddressMove) -> None:
-        """Remember what a move took over so it can be undone. Not part of the exported settings."""
-
-        with self.transaction():
+        """Keep bounded ownership evidence without evicting unfinished recovery."""
+        with self.address_move_transaction():
+            moves = self.list_address_moves()
+            existing = next((item for item in moves if item.old_mac == move.old_mac), None)
+            if existing is not None and existing.move_id != move.move_id:
+                raise StorageError("Resolve the existing move before replacing it.")
+            if existing is not None and (
+                existing.new_mac != move.new_mac
+                or existing.phase == "undoing"
+                and move.phase != "undoing"
+                or existing.phase == "saved"
+                and move.phase == "pending"
+            ):
+                raise StorageError("Move recovery cannot be replaced by an earlier phase.")
+            if existing is None and len(moves) >= MAX_ADDRESS_MOVES:
+                raise StorageError("Device move history is full. Resolve earlier moves first.")
             self._connection.execute(
-                "INSERT OR REPLACE INTO address_moves "
-                "(old_mac, new_mac, name, moved_access, moved_protection, moved_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (move.old_mac, move.new_mac, move.name, int(move.moved_access),
-                 int(move.moved_protection), move.moved_at),
-            )
-            # Keep the newest records only.
-            self._connection.execute(
-                "DELETE FROM address_moves WHERE old_mac NOT IN ("
-                "SELECT old_mac FROM address_moves ORDER BY moved_at DESC, old_mac LIMIT ?)",
-                (MAX_ADDRESS_MOVES,),
+                "INSERT INTO address_moves "
+                "(old_mac, new_mac, name, moved_access, moved_protection, moved_at, "
+                "move_id, phase, previous_protection_owner, prepared_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(old_mac) DO UPDATE SET "
+                "new_mac = excluded.new_mac, name = excluded.name, "
+                "moved_access = excluded.moved_access, moved_protection = excluded.moved_protection, "
+                "moved_at = excluded.moved_at, phase = excluded.phase, "
+                "previous_protection_owner = excluded.previous_protection_owner, "
+                "prepared_version = excluded.prepared_version",
+                (
+                    move.old_mac,
+                    move.new_mac,
+                    move.name,
+                    int(move.moved_access),
+                    int(move.moved_protection),
+                    move.moved_at,
+                    move.move_id,
+                    move.phase,
+                    move.previous_protection_owner,
+                    move.prepared_version,
+                ),
             )
 
     def delete_address_move(self, old_mac: str) -> bool:
