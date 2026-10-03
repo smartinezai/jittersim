@@ -6,6 +6,7 @@ import os
 import shlex
 import sqlite3
 import subprocess
+import time
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -144,13 +145,13 @@ def _build_operations_parser() -> argparse.ArgumentParser:
 
     updates = commands.add_parser("update", help="check and manage signed staged releases")
     update_commands = updates.add_subparsers(dest="update_command", required=True)
-    for name in ("check", "install", "rollback"):
+    for name in ("check", "install", "rollback", "retry"):
         command = update_commands.add_parser(name)
         if name != "check":
             command.add_argument(
                 "--yes", action="store_true", help="confirm without an interactive prompt"
             )
-        if name == "install":
+        if name in ("install", "retry"):
             command.add_argument(
                 "--wait", action="store_true",
                 help="as root: wait until the update service installed and checked the release",
@@ -525,12 +526,25 @@ def _release_status(arguments):
     return client.release_status()
 
 
-def _wait_for_update() -> int:
+def _wait_for_update(*, request_id=None, recovering=False) -> int:
     """Join the queued run of the one-shot update service and report how it ended."""
     from jittersim.updates import update_status
 
     print("Waiting for the update service to install and check the release.", flush=True)
     try:
+        if request_id is not None:
+            until = time.monotonic() + UPDATE_WAIT_SECONDS
+            while time.monotonic() < until:
+                final = update_status()
+                if final.get("request_id") != request_id:
+                    print("The update changed. Check 'jittersim update check'.", file=sys.stderr)
+                    return 1
+                if final.get("phase") in ("complete", "rolled-back", "failed"):
+                    print(f"Update state: {final.get('message', 'unknown')}")
+                    return 0 if final.get("phase") == "complete" or (recovering and final.get("phase") == "rolled-back") else 1
+                time.sleep(min(1, max(0, until - time.monotonic())))
+            print("The update is still running. Check 'jittersim update check'.", file=sys.stderr)
+            return 1
         subprocess.run(
             ["systemctl", "start", UPDATE_SERVICE], check=False, timeout=UPDATE_WAIT_SECONDS,
             stdin=subprocess.DEVNULL,
@@ -546,8 +560,8 @@ def _wait_for_update() -> int:
 
 
 def _update_command(arguments) -> int:
-    if arguments.update_command == "install" and arguments.wait and os.geteuid() != 0:
-        print("--wait needs root: run 'sudo jittersim update install --yes --wait'.",
+    if arguments.update_command in ("install", "retry") and arguments.wait and os.geteuid() != 0:
+        print(f"--wait needs root: run 'sudo jittersim update {arguments.update_command} --yes --wait'.",
               file=sys.stderr)
         return 1
     try:
@@ -571,10 +585,36 @@ def _update_command(arguments) -> int:
             print(f"Online check token: {'set' if status['token_set'] else 'not set'}")
         print(f"Update phase: {status.get('phase', 'unknown')}")
         print(f"Update state: {status.get('message', 'unknown')}")
+        if status.get("retry"):
+            print("Retry available: run 'sudo jittersim update retry --yes --wait'.")
+        elif status.get("retry_unavailable_reason"):
+            print(f"Retry unavailable: {status['retry_unavailable_reason']}")
         print(
             "This checks signed releases staged on the Pi. "
             "It does not check the private repository online."
         )
+        return 0
+    if arguments.update_command == "retry":
+        retry = status.get("retry")
+        if not isinstance(retry, dict) or not isinstance(retry.get("id"), str):
+            print(status.get("retry_unavailable_reason") or "No failed update is ready to retry.", file=sys.stderr)
+            return 1
+        if not _confirm("Retry the failed update or recovery?", arguments.yes):
+            print("Cancelled. The failed update was not retried.")
+            return 0
+        try:
+            queued = HelperClient(socket_path=arguments.helper_socket,
+                                  timeout_seconds=arguments.timeout_seconds).retry_update(retry_id=retry["id"])
+        except HelperClientError as error:
+            print(f"Retry request failed: {error}", file=sys.stderr)
+            return 1
+        if arguments.wait:
+            if (not isinstance(queued, dict) or queued.get("request_id") != retry.get("request_id")
+                    or not isinstance(queued.get("request_id"), str)):
+                print("The retry answer could not be checked. Check 'jittersim update check'.", file=sys.stderr)
+                return 1
+            return _wait_for_update(request_id=queued["request_id"], recovering=retry.get("recovering") is True)
+        print("Retry queued. Check with 'jittersim update check'.")
         return 0
     if arguments.update_command == "install":
         version = status.get("available")
@@ -593,7 +633,7 @@ def _update_command(arguments) -> int:
             print("Cancelled. The staged release was not installed.")
             return 0
         try:
-            HelperClient(
+            queued = HelperClient(
                 socket_path=arguments.helper_socket,
                 timeout_seconds=arguments.timeout_seconds,
             ).install_release(version=version)
@@ -601,6 +641,8 @@ def _update_command(arguments) -> int:
             print(f"Install request failed: {error}", file=sys.stderr)
             return 1
         if arguments.wait:
+            if isinstance(queued, dict) and isinstance(queued.get("request_id"), str):
+                return _wait_for_update(request_id=queued["request_id"])
             return _wait_for_update()
         print(f"Installation of {version} was queued. Check with 'jittersim update check'.")
         return 0

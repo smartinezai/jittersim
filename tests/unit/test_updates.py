@@ -280,7 +280,11 @@ class UpdateTests(unittest.TestCase):
             self.apply(lambda command, timeout: commands.append(command), lambda: True)
         self.assertEqual(commands, [])
         self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)['phase'], 'failed')
-        self.assertFalse((self.root / 'request.json').exists())
+        retained = updates.read_json(self.root / 'request.json')
+        self.assertTrue(retained['rollback'])
+        self.assertEqual(retained['request_kind'], 'rollback')
+        self.assertEqual(updates.recovery_backup(self.root, pinned=retained['recovery']),
+                         updates.recovery_backup(self.root))
 
     def test_successful_install_can_be_rolled_back(self):
         self.stage()

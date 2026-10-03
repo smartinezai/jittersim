@@ -94,6 +94,48 @@ def test_uncertain_stop_and_failed_restart_keeps_a_retryable_request(pi):
     assert updates.read_json(pi.root / "status.json")["phase"] == "failed"
 
 
+def test_public_operation_identity_precedes_preflight_and_survives_completion(pi):
+    initial = updates.read_json(pi.root / "request.json")
+    assert len(initial["request_id"]) == 32
+    assert initial["request_kind"] == "install"
+    _, run = pi.recorder()
+    records = []
+    atomic = updates.atomic_json
+
+    def record(path, value):
+        if path.name == "status.json":
+            records.append(dict(value))
+        return atomic(path, value)
+
+    with patch.object(updates, "atomic_json", record):
+        pi.apply(run, lambda: True)
+    assert records and records[-1]["phase"] == "complete"
+    assert all(row["request_id"] == initial["request_id"] for row in records)
+    assert all(row["request_kind"] == "install" for row in records)
+    assert updates.update_status(root=pi.root, code=pi.code, config=pi.config)["request_id"] == initial["request_id"]
+
+
+def test_retry_keeps_attempt_after_complete_but_unpublished_snapshot(pi):
+    atomic = updates.atomic_json
+
+    def interrupt_selector(path, value):
+        if path.name == "backup-current.json":
+            raise KeyboardInterrupt()
+        return atomic(path, value)
+
+    with patch.object(updates, "atomic_json", interrupt_selector), pytest.raises(KeyboardInterrupt):
+        pi.apply(lambda *args: None, lambda: True)
+    request = updates.read_json(pi.root / "request.json")
+    attempt = request["attempt"]
+    assert (pi.root / ("backup-" + attempt) / "complete.json").exists()
+    assert not (pi.root / "backup-current.json").exists()
+    _, run = pi.recorder()
+    pi.apply(run, lambda: True)
+    completed = updates.read_json(updates.recovery_backup(pi.root) / "complete.json")
+    assert completed["attempt"] == attempt
+    assert updates.read_json(pi.root / "status.json")["request_id"] == request["request_id"]
+
+
 def test_connection_query_rejects_excess_output():
     with pytest.raises(updates.UpdateError, match="output"):
         updates.read_command([sys.executable, "-c", "print('x' * 65536)"], timeout=5)
