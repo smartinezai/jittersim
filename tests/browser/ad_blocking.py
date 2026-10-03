@@ -4,6 +4,7 @@ import os
 import selectors
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
@@ -82,6 +83,54 @@ def check_width(browser, base, width, height):
         switch.uncheck()
     expect(switch).not_to_be_checked()
     assert request.get(base + "/api/unaffected-devices", headers=HEADERS).json()["devices"]
+    lost_replies = []
+
+    def drop_saved_reply(route):
+        if route.request.method != "POST":
+            route.continue_()
+            return
+        response = route.fetch()
+        assert response.ok
+        lost_replies.append(response.status)
+        route.abort("connectionreset")
+
+    page.route("**/api/ad-blocking", drop_saved_reply)
+    switch.focus()
+    page.keyboard.press("Space")
+    expect(switch).to_be_enabled()
+    expect(switch).to_be_focused()
+    expect(switch).to_be_checked()
+    expect(page.locator("#message")).to_contain_text("Saved Block ads is on.")
+    assert lost_replies == [200]
+    assert request.get(base + "/api/ad-blocking", headers=HEADERS).json()["mac_addresses"] == [
+        MAC_ADDRESS
+    ]
+    page.unroute("**/api/ad-blocking", drop_saved_reply)
+
+    held = []
+
+    def hold_saved_reply(route):
+        if route.request.method == "POST":
+            response = route.fetch()
+            assert response.ok
+            held.append((route, response))
+        else:
+            route.continue_()
+
+    page.route("**/api/ad-blocking", hold_saved_reply)
+    switch.focus()
+    page.keyboard.press("Space")
+    deadline = time.monotonic() + 3
+    while not held and time.monotonic() < deadline:
+        page.wait_for_timeout(50)
+    assert held
+    page.evaluate("showMessage('A newer action finished.', 'success')")
+    route, response = held.pop()
+    route.fulfill(response=response)
+    expect(switch).to_be_enabled()
+    expect(switch).not_to_be_checked()
+    expect(page.locator("#message")).to_have_text("A newer action finished.")
+    page.unroute("**/api/ad-blocking", hold_saved_reply)
     assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
     page.get_by_text("Ad-blocking options", exact=True).click()
     dismiss = page.get_by_role("button", name="Dismiss", exact=True)
@@ -90,6 +139,27 @@ def check_width(browser, base, width, height):
     page.locator("#unaffected-title").locator(
         "xpath=ancestor::section[contains(@class, 'card')][1]"
     ).screenshot(path=f"test-results/ad-blocking-{width}.png")
+    page.route("**/api/ad-blocking", hold_saved_reply)
+    switch.focus()
+    page.keyboard.press("Space")
+    deadline = time.monotonic() + 3
+    while not held and time.monotonic() < deadline:
+        page.wait_for_timeout(50)
+    assert held
+    if not page.locator("#open-admin-credentials").is_visible():
+        page.locator("#controls-toggle").click()
+    page.locator("#open-admin-credentials").click()
+    page.locator("#clear-admin-token").click()
+    expect(page.locator("#private-dashboard")).to_be_hidden()
+    notice = page.locator("#message").text_content()
+    route, response = held.pop()
+    route.fulfill(response=response)
+    page.wait_for_timeout(100)
+    expect(page.locator("#message")).to_have_text(notice)
+    assert page.locator("#ad-blocking-form button").evaluate_all(
+        "buttons => buttons.every(button => button.disabled)"
+    )
+    expect(page.locator("#ad-blocking-allowances")).to_have_value("")
     assert not errors, errors
     context.close()
 
