@@ -166,15 +166,16 @@ and `sudo jittersim wifi reset` still runs there.
 
 To put a new release on the Pi from the Mac, run
 `deploy/raspberry-pi/deploy-from-mac.sh` in a checkout. It runs on the Mac and
-needs only git, ssh, scp, tar and shasum. It builds the release archive of a
-commit, signs it with your release signing key, copies it to the Pi with your
-SSH key and installs it through the verified update service. It shows the
+needs git, ssh-keygen, ssh, scp, curl, tar, shasum and Python 3. It builds the
+release archive of a commit, signs it with your release signing key and
+installs it through the verified update service. It shows the
 release the Pi now runs. Use `--stage-only` to upload without installing.
-The Pi asks for its `sudo`
-password in your terminal unless passwordless staging is on (see
+When using SSH the Pi asks for its `sudo` password in your terminal unless
+passwordless staging is on (see
 [Signed releases](deploy/raspberry-pi/README.md#signed-releases)). Deploying needs a
-connection to the Pi's router network (Ethernet or the router's Wi-Fi): a Mac on
-the Pi's test Wi-Fi cannot reach the Pi over SSH. See
+connection to the Pi's router network or its own test Wi-Fi. The command uses
+the trusted HTTPS dashboard on the test Wi-Fi and when SSH cannot answer.
+See
 [Deploy from a Mac](deploy/raspberry-pi/README.md#deploy-from-a-mac).
 
 ## Features

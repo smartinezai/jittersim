@@ -3,7 +3,7 @@
 # network that reaches https://PI:8080, also the Pi's own test Wi-Fi where SSH is blocked on
 # purpose. deploy-from-mac.sh runs this for you when SSH does not work. It builds and signs the
 # release, uploads it to /api/updates/upload, installs it and waits until
-# the Pi answers with the new release. Only git, ssh-keygen, curl and tar are needed.
+# the Pi answers with the new release. Git, ssh-keygen, curl, tar and Python 3 are needed.
 # The admin token comes from JITTERSIM_TOKEN or the macOS Keychain item jittersim-admin-token
 # (create it with --save-token). The token is never put on a command line, printed or saved
 # by this script. The Pi's certificate is checked against the file given by --ca-cert only,
@@ -46,6 +46,14 @@ USAGE
 fail() {
     printf 'deploy-over-https: %s\n' "$1" >&2
     exit "${2:-1}"
+}
+
+monotonic_milliseconds() {
+    python3 -c 'import time; print(int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1000))'
+}
+
+seconds_from_milliseconds() {
+    printf '%s.%03d' "$(( $1 / 1000 ))" "$(( $1 % 1000 ))"
 }
 
 ref=HEAD
@@ -154,6 +162,15 @@ if [ "$dry_run" = no ]; then
     if [ "$token_bad" = yes ] || printf '%s' "$token" | LC_ALL=C grep -q '[^!-~]\|["\\]'; then
         fail "the admin token has characters that cannot be right. Store it again with --save-token"
     fi
+    if [ "$install" = yes ]; then
+        case $INSTALL_WAIT_SECONDS in
+            ''|0*|*[!0-9]*) fail "the install wait must be a whole number from 1 to 900 seconds" ;;
+        esac
+        [ "${#INSTALL_WAIT_SECONDS}" -le 3 ] && [ "$INSTALL_WAIT_SECONDS" -le 900 ] \
+            || fail "the install wait must be a whole number from 1 to 900 seconds"
+        monotonic_milliseconds >/dev/null 2>&1 \
+            || fail "Python 3 is needed to keep the install wait within its time limit"
+    fi
     (cd "$repo" && sh deploy/raspberry-pi/build-release.sh "$commit" "$archive" "$signing_key" >/dev/null) \
         || fail "building or signing the release failed"
 fi
@@ -236,14 +253,21 @@ status=$(api POST /api/updates/install 60 --header "Content-Type: application/js
     --data "{\"version\": \"$staged\", \"confirm\": true}")
 [ "$status" = 200 ] || [ "$status" = 202 ] || explain "$status"
 printf 'Install queued. Waiting for the Pi to run release %s.\n' "$staged"
-waited=0
-while [ "$waited" -lt "$INSTALL_WAIT_SECONDS" ]; do
-    sleep 5
-    waited=$((waited + 5))
-    status=$(api GET /api/updates 15)
+wait_deadline=$(( $(monotonic_milliseconds) + INSTALL_WAIT_SECONDS * 1000 ))
+while :; do
+    remaining=$((wait_deadline - $(monotonic_milliseconds)))
+    [ "$remaining" -gt 0 ] || break
+    call_milliseconds=$remaining
+    [ "$call_milliseconds" -le 15000 ] || call_milliseconds=15000
+    status=$(api GET /api/updates "$(seconds_from_milliseconds "$call_milliseconds")")
+    remaining=$((wait_deadline - $(monotonic_milliseconds)))
+    [ "$remaining" -gt 0 ] || break
     if [ "$status" = 200 ] && [ "$(field installed)" = "$staged" ]; then
         printf 'The Pi now runs release %s.\n' "$staged"
         exit 0
     fi
+    sleep_milliseconds=$remaining
+    [ "$sleep_milliseconds" -le 5000 ] || sleep_milliseconds=5000
+    sleep "$(seconds_from_milliseconds "$sleep_milliseconds")"
 done
 fail "the Pi does not run release $staged after $INSTALL_WAIT_SECONDS seconds. On the Pi check: jittersim update check"

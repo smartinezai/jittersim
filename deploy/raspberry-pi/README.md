@@ -751,7 +751,7 @@ relying on it for everyday access.
 
 `deploy/raspberry-pi/deploy-from-mac.sh` builds, copies, stages and installs
 above in one command. It runs on the **Mac** in a JitterSim checkout and needs
-only git, ssh, scp, tar and shasum (not the Python package):
+git, ssh-keygen, ssh, scp, curl, tar, shasum and Python 3:
 
 ```sh
 deploy/raspberry-pi/deploy-from-mac.sh --ref RELEASE_REF --dry-run
@@ -763,10 +763,12 @@ The defaults are `--host jittersim@192.168.0.17`,
 `--key ~/.ssh/jittersim_ed25519` and
 `--signing-key ~/.ssh/jittersim_release_ed25519`. `--ref` defaults to `HEAD`.
 
-Deploying needs a connection to the Pi's router network: Ethernet or the
-router's Wi-Fi. A Mac on the Pi's test Wi-Fi cannot reach the Pi over SSH
-because the test network is kept apart. The script prints the address it
-connects to and says so when it cannot reach it.
+Deploying works on the Pi's router network or its own test Wi-Fi. On the test
+Wi-Fi the command uses the HTTPS dashboard. It also uses HTTPS when SSH cannot
+answer. Give the dashboard's certificate with `--ca-cert` and store the admin
+token once with `--save-token`. Open the dashboard and choose Allow this device
+once before uploading from the test Wi-Fi. The script prints its destination.
+HTTPS installation waits up to 900 seconds in total, including status reads.
 
 1. It builds the archive of the commit with `build-release.sh` so uncommitted
    changes are left out. With the release signing key it signs the archive
