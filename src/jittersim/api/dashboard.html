@@ -1,0 +1,1351 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in</title>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <style>__JITTERSIM_DASHBOARD_STYLE__</style>
+</head>
+<body class="dashboard-locked">
+  <div id="action-announcer" class="action-announcer" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div id="toast" class="toast" hidden>
+    <span id="toast-icon" class="toast-icon" aria-hidden="true"></span>
+    <span id="toast-message"></span>
+    <button id="toast-dismiss" type="button" aria-label="Dismiss message">Dismiss</button>
+  </div>
+  <section id="credentials-panel" class="credentials-panel" aria-labelledby="credentials-title" hidden>
+    <div class="credential-heading">
+      <h2 id="credentials-title">Credentials</h2>
+      <button id="close-credentials" type="button" aria-label="Close credentials panel">Close</button>
+    </div>
+    <p class="credential-note">
+      Kept in this page only unless you choose Remember. Closing this panel keeps your entries.
+    </p>
+    <h3>Admin token</h3>
+    <form id="admin-token-form" autocomplete="on">
+    <!-- A name next to the password lets the Mac Keychain and password managers keep the token. -->
+    <input class="visually-hidden" type="text" name="username" value="dashboard" autocomplete="username" tabindex="-1" aria-hidden="true">
+    <label>Admin token
+      <input id="admin-token" name="password" type="password" autocomplete="current-password" aria-describedby="token-check-status">
+    </label>
+    <label class="remember-choice">
+      <input id="remember-admin-token" type="checkbox" autocomplete="off"> Remember for
+      <select id="remember-admin-duration" autocomplete="off" aria-label="How long to remember the token">
+        <option value="24" selected>24 hours</option>
+        <option value="168">7 days</option>
+        <option value="720">30 days</option>
+      </select>
+    </label>
+    <p id="remember-admin-token-note" class="credential-note remember-note" role="status"></p>
+    <div class="credential-actions">
+      <button id="check-admin-token" class="primary" type="submit">Check token</button>
+      <button id="clear-admin-token" type="button">Clear token</button>
+    </div>
+    </form>
+    <p id="token-check-status" class="token-check-status" aria-live="off">Enter the token and choose Check token to load diagnostics.</p>
+    <p id="remember-length-note" class="credential-note">Longer is less safe on a shared computer: anyone who can use this browser can open the dashboard until the time is up. Choose Clear token to forget it sooner.</p>
+    <details class="credential-help">
+      <summary>How to get the admin token</summary>
+      <p id="sign-in-address" class="credential-note">Open the dashboard at <strong>@@EASY_ADDRESS@@</strong>
+        on the router Wi-Fi or on the test Wi-Fi. It is the same address on both, so one saved sign-in
+        covers both.</p>
+      <pre id="admin-token-help"></pre>
+    </details>
+    <div id="router-credentials">
+    <h3>Router password</h3>
+    <label>Router admin password
+      <input id="router-admin-password" type="password" autocomplete="off" placeholder="Password for 192.168.0.1" aria-describedby="credential-router-status">
+    </label>
+    <label class="remember-choice">
+      <input id="remember-router-password" type="checkbox" autocomplete="off"> Remember for 24 hours
+    </label>
+    <p id="remember-router-password-note" class="credential-note remember-note" role="status"></p>
+    <div class="credential-actions">
+      <button id="check-router-password" class="primary" type="button">Check password</button>
+      <button id="clear-router-password" type="button">Clear router password</button>
+    </div>
+    <p id="credential-router-status" class="credential-note" role="status" aria-live="off">
+      Choose Check password to sign in to the router once. Nothing on the router is changed.
+      Repeated wrong passwords may temporarily lock its web login.
+    </p>
+    </div>
+  </section>
+  <div class="app">
+  <aside class="sidebar" id="brand-sidebar" aria-label="Network lab">
+    <div class="sidebar-brand">
+      <h1 id="brand-title">Network lab</h1>
+      <span id="mode-badge" class="badge pending">Checking mode...</span>
+    </div>
+    <nav class="sidebar-nav" aria-label="Sections">
+      <ul>
+        <li><a href="#devices" data-page-link="devices">Devices <span id="nav-devices-count" class="nav-chip" hidden></span></a></li>
+        <li><a href="#profiles" data-page-link="profiles">Profiles</a></li>
+        <li><a href="#schedules" data-page-link="schedules">Schedules and limits</a></li>
+        <li><a href="#router" data-page-link="router" id="setup-tab-link">Router and Wi-Fi</a></li>
+        <li><a href="#traffic" data-page-link="traffic">Traffic</a></li>
+        <li><a href="#measurements" data-page-link="measurements">Measurements</a></li>
+        <li><a href="#activity" data-page-link="activity">Activity</a></li>
+        <li><a href="#access" data-page-link="access">Access and rules</a></li>
+        <li><a href="#diagnostics" data-page-link="diagnostics">Diagnostics</a></li>
+        <li><a href="#updates" data-page-link="updates" id="updates-tab-link">Updates <span id="update-available-badge" class="update-badge" hidden>Update available</span></a></li>
+      </ul>
+    </nav>
+    <button id="status-strip" class="status-strip" type="button" aria-expanded="false"
+      aria-controls="sidebar-status" hidden><span id="status-strip-text"></span></button>
+    <section id="sidebar-status" class="sidebar-status" aria-label="Current status" hidden>
+      <p id="status-general" class="status-line"></p>
+      <p id="status-devices-plain" class="status-line" hidden></p>
+      <details id="status-devices" class="status-devices" hidden>
+        <summary id="status-devices-summary"></summary>
+        <ul id="status-devices-list"></ul>
+        <p id="status-devices-more" class="status-more" hidden></p>
+      </details>
+      <p id="status-lists" class="status-line" hidden></p>
+    </section>
+    <button id="controls-toggle" class="controls-toggle" type="button" aria-expanded="false"
+      aria-controls="sidebar-controls">Controls</button>
+    <div class="sidebar-footer" id="sidebar-controls">
+      <div class="sidebar-operate">
+        <div id="active-profile" class="active-profile">
+          <div class="active-profile-row">
+            <label for="active-profile-select">Active profile</label>
+            <select id="active-profile-select" aria-describedby="active-profile-note" disabled>
+              <option value="">None selected</option>
+            </select>
+          </div>
+          <button id="active-profile-button" class="primary" type="button" disabled>Apply to all devices</button>
+          <p id="active-profile-note" class="active-profile-note">Check the admin token first.</p>
+          <a id="active-profile-link" class="active-profile-link" hidden>Create one on the Profiles page</a>
+        </div>
+        <div class="sidebar-actions">
+          <div class="sidebar-action-row">
+            <button id="apply-button" class="primary" type="button">Start</button>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Start help" data-help="Starts everything you saved: device and group profiles and schedules and limits and service lists and access rules. Then saved changes apply on their own within a few seconds. Reset or Panic stops the profiles. Protected devices stay untouched.">?</span>
+          </div>
+          <p id="apply-summary" class="apply-summary" aria-live="polite" hidden></p>
+          <div class="sidebar-action-row">
+            <button id="reset-button" class="danger" type="button">Reset network</button>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Reset network help" data-help="Stops the profiles and removes their rules from the Pi so devices run normally. Household blocking of devices and sites stays on. Your saved settings are kept. Choose Start to run them again.">?</span>
+          </div>
+        </div>
+        <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
+        <p id="message" class="action-message" aria-live="off" aria-hidden="true" hidden>Ready.</p>
+        <div class="safety-bar">
+          <button id="panic-button" class="danger panic-button" type="button"
+            title="Turn off all profiles and household blocking now. Your saved settings are kept.">
+            <span>Panic</span><span id="panic-state" class="credential-state">Turn profiles and blocking off</span>
+          </button>
+          <div class="router-wifi-control">
+            <div><span id="router-wifi-label" class="router-wifi-label">Router Wi-Fi</span>
+              <p id="router-wifi-status" class="router-wifi-status" role="status" aria-live="polite">Enter router password</p>
+            </div>
+            <button id="router-wifi-toggle" class="router-wifi-toggle" type="button" role="switch"
+              aria-checked="false" aria-labelledby="router-wifi-label" aria-describedby="router-wifi-status" data-unknown="true" disabled>
+              <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+            </button>
+          </div>
+        </div>
+        <div class="router-wifi-copy">
+          <button id="sync-router-ap" class="primary" type="button" aria-describedby="router-action-message" disabled>Copy router Wi-Fi to Pi</button>
+          <p id="router-action-message" class="router-wifi-status" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+      <div class="sidebar-version">
+        <p id="sidebar-version" class="sidebar-version-text">Version unknown</p>
+        <a id="sidebar-update-link" class="sidebar-update-link" href="#updates" hidden></a>
+      </div>
+      <div class="sidebar-credentials">
+        <button id="open-admin-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
+          <span>Admin token</span><span id="admin-credential-state" class="credential-state">Needed</span>
+        </button>
+        <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
+          <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
+        </button>
+      </div>
+    </div>
+  </aside>
+  <main class="content" id="content">
+  <section class="notice address-move" id="address-move-card" aria-label="New address for one of your devices" hidden>
+    <p id="address-move-text" role="status"></p>
+    <label>Which device was it?
+      <select id="address-move-picker"></select>
+    </label>
+    <div class="connected-actions">
+      <button id="address-move-confirm" type="button">Yes, move it to this device</button>
+      <button id="address-move-dismiss" type="button">No, this is another device</button>
+    </div>
+    <p class="form-note">The old address is kept and marked as replaced. You can undo this under Dashboard access.</p>
+  </section>
+  <section class="card" id="dashboard-access-panel" aria-labelledby="dashboard-access-title">
+    <h2 id="dashboard-access-title">Dashboard access</h2>
+    <p id="dashboard-access-status" role="status">Open Admin token and choose Check token to sign in.</p>
+    <label>Device name (optional)<input id="dashboard-access-name" maxlength="64" autocomplete="off"></label>
+    <button id="allow-dashboard-device" type="button" disabled>Allow this device</button>
+    <p>Saved access keeps this dashboard usable during tests. Internet traffic still follows profiles.
+      A changed private Wi-Fi address needs a one-click move to the new address. The admin token is always required.</p>
+    <p id="address-type-note" class="form-note" hidden></p>
+    <details id="address-help" hidden>
+      <summary>Keep this device's Wi-Fi address from changing</summary>
+      <p class="form-note">On a Mac: System Settings, Wi-Fi, this network, Details, Private Wi-Fi address, Fixed.
+        On an iPhone or iPad: Settings, Wi-Fi, the (i) beside this network, Private Wi-Fi Address, Fixed.
+        On Android: Settings, Wi-Fi, this network, Privacy, Use device MAC.
+        A fixed address stays the same on this network, so saved access and protection keep working.</p>
+    </details>
+    <div id="dashboard-access-list" hidden></div>
+    <div id="address-move-replaced" hidden></div>
+    <p id="easy-address" class="form-note">One address works on the router Wi-Fi and on the test Wi-Fi:
+      <strong>@@EASY_ADDRESS@@</strong>. After signing in, Trust this Pi removes the certificate warning.</p>
+  <div id="one-address" class="one-address" role="group" aria-labelledby="one-address-title" hidden>
+    <h3 id="one-address-title">One address for both networks</h3>
+    <p class="one-address-text">Bookmark <strong id="one-address-url">@@EASY_ADDRESS@@</strong>, it works on both networks.</p>
+    <p id="one-address-nudge" class="form-note" hidden>You opened this page at <span id="one-address-current"></span>.
+      <a id="one-address-link" href="@@EASY_ADDRESS@@/">Open it at the one address</a>.
+      A remembered sign-in belongs to one address, so enter the admin token once there.</p>
+    <p id="one-address-problem" class="form-note" role="status" hidden></p>
+  </div>
+  <div id="trust-pi" aria-labelledby="trust-pi-title" role="group" hidden>
+    <h3 id="trust-pi-title">Trust this Pi</h3>
+    <p>Install the Pi's certificate on this device once and the dashboard opens without a certificate warning.
+      Use the one address <strong id="trust-address">...</strong> on either network.</p>
+    <div class="action-buttons">
+      <button id="trust-download-profile" class="primary" type="button">Download Apple profile (.mobileconfig)</button>
+      <button id="trust-download-crt" type="button">Download certificate (.crt)</button>
+    </div>
+    <h4>Mac</h4>
+    <ol id="trust-steps-mac" class="getting-started-steps"></ol>
+    <h4>iPhone and iPad</h4>
+    <ol id="trust-steps-iphone" class="getting-started-steps"></ol>
+    <p id="trust-status" class="form-note" role="status">Checking the certificate...</p>
+    <p class="form-note">Certificate fingerprint (SHA-256): <span id="trust-fingerprint">unknown</span>.
+      Only install it if it matches the fingerprint printed by the installer on the Pi.</p>
+  </div>
+  </section>
+  <div id="private-dashboard" hidden>
+  <p id="mode-notice" class="notice" role="status">Checking control mode...</p>
+  <section class="page" id="page-devices" data-page="devices" aria-label="Devices" tabindex="-1">
+  <section class="card getting-started" id="getting-started" hidden>
+    <h2>Getting started</h2>
+    <ol id="getting-started-steps" class="getting-started-steps"></ol>
+  </section>
+  <section class="card" aria-labelledby="general-profile-title">
+    <h2 id="general-profile-title">Everyone</h2>
+    <p>Apply a saved profile to every device on the test Wi-Fi except Protected devices. New arrivals are included.</p>
+    <div class="fields">
+      <label>Saved profile
+        <select id="general-profile-select" aria-describedby="general-profile-note" disabled>
+          <option value="">Choose a saved profile</option>
+        </select>
+      </label>
+    </div>
+    <div class="action-buttons">
+      <button id="general-profile-apply" class="primary" type="button" disabled>Apply to all</button>
+      <button id="general-profile-stop" type="button" disabled>Stop for everyone</button>
+    </div>
+    <p id="general-profile-status" role="status" aria-live="polite">Check the admin token to view the profile for everyone.</p>
+    <p id="general-profile-note" class="form-note">The speed limit is shared only by affected devices. Protected devices bypass it completely. Stopping this profile resumes saved device rules. Panic turns all profiles off.</p>
+  </section>
+  <section class="card connected-card">
+    <div class="section-heading">
+      <div>
+        <h2>Connected clients</h2>
+        <p>Devices on the Pi’s Wi-Fi. Devices on the router’s Wi-Fi are not listed here.</p>
+      </div>
+      <div class="connected-actions">
+        <span id="connected-count" class="count-badge">Check token</span>
+        <button id="check-devices" type="button">Check for devices</button>
+      </div>
+    </div>
+    <p id="connected-refresh-status" class="connected-refresh-status">
+      Refreshes every 5 seconds once the admin token is accepted.
+    </p>
+    <div id="connected-devices" class="connected-list" aria-live="polite">Enter the admin token and choose Check token to view connected devices.</div>
+  </section>
+  <section class="card" data-collapse="open">
+      <div class="section-heading"><h2>Saved devices</h2><p>Assigned test clients and their current conditions</p></div>
+      <p id="device-conditions-note" class="policy-note">Conditions load with the token.</p>
+      <div id="device-table" class="table-wrap">Loading...</div>
+    </section>
+  <section class="card" data-collapse="open">
+      <h2>Everyone else</h2>
+      <p class="form-note">Choose a profile for every test Wi-Fi client that isn't a saved
+        device or on the protected list. They share one connection, so a speed limit in
+        this profile is shared by all of them. A profile set for Everyone covers these clients too,
+        so the two cannot be used at the same time.</p>
+      <form id="everyone-else-form">
+        <div class="fields">
+          <label>Profile for everyone else
+            <select id="everyone-else-profile">
+              <option value="">None: normal connection</option>
+            </select>
+          </label>
+        </div>
+        <button type="submit">Save everyone-else profile</button>
+      </form>
+    </section>
+  <section class="card connected-card" data-collapse="closed" data-card-key="unaffected-by-profiles" aria-labelledby="unaffected-title">
+    <div class="section-heading">
+      <div>
+        <h2 id="unaffected-title">Protected devices</h2>
+        <p>Saved protection stays active when a device disconnects or changes IP. Global access rules still apply.</p>
+      </div>
+    </div>
+    <div id="unaffected-devices" class="connected-list" aria-live="polite">Check the admin token to view saved devices.</div>
+    <details>
+      <summary>Add an offline device</summary>
+      <form id="unaffected-form">
+        <div class="fields">
+          <div class="connected-picker">
+            <label>Connected device
+              <select id="unaffected-picker">
+                <option value="">Loading connected devices...</option>
+              </select>
+            </label>
+            <button type="button" data-refresh-connected>Refresh</button>
+          </div>
+          <label>Wi-Fi MAC address <input id="unaffected-mac" required placeholder="aa:bb:cc:dd:ee:ff"></label>
+          <label>Name <input id="unaffected-name" maxlength="64" placeholder="Optional name"></label>
+        </div>
+        <button type="submit">Save protection</button>
+      </form>
+    </details>
+    <p class="form-note">Use “Protect” beside a connected device to add it without typing an address. If a device changes its private Wi-Fi MAC, add its new address.</p>
+  </section>
+  </section><!-- /page:devices -->
+  <section class="page" id="page-profiles" data-page="profiles" aria-label="Profiles" tabindex="-1" hidden>
+    <section class="card" data-collapse="open" aria-labelledby="saved-profiles-title">
+      <h2 id="saved-profiles-title">Saved profiles</h2>
+      <div id="saved-profiles" class="connected-list" aria-live="polite">Check the admin token to view saved profiles.</div>
+    </section>
+    <section class="card" data-collapse="open">
+      <details>
+        <summary>Pair homepage test extension</summary>
+        <p>Use only test pages you control. The effect stays off until enabled in Chrome.</p>
+        <label for="homepage-extension-id">Chrome extension ID</label>
+        <input id="homepage-extension-id" maxlength="32" autocomplete="off">
+        <label for="homepage-pages">Controlled HTTPS test pages, one per line</label>
+        <textarea id="homepage-pages" rows="3" maxlength="4104"></textarea>
+        <button id="homepage-create-code" type="button">Create pairing code</button>
+        <button id="homepage-revoke" type="button">Revoke all homepage pairings</button>
+        <output id="homepage-code" aria-live="polite"></output>
+      </details>
+      <h2 id="profile-form-title">Save profile</h2>
+      <form id="profile-form">
+        <label><span class="field-label">Start from a preset<span class="help-icon" tabindex="0" role="img" aria-label="Profile preset help" data-help="Fills the form with rough values for a kind of network, such as a slow mobile connection. Change anything you like afterwards. Nothing is saved until you choose Save profile.">?</span></span>
+          <select id="profile-preset">
+            <option value="">Choose a preset...</option>
+          </select>
+        </label>
+        <p class="form-note">Presets fill the form with rough approximations of real networks.
+          Nothing is saved until you choose Save profile.</p>
+        <div class="fields">
+          <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Profile ID help" data-help="A short code that devices and schedules use to find this profile. Saving with an existing ID updates that profile and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read.">?</span></span>
+            <input id="profile-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}">
+          </label>
+          <label><span class="field-label">Name<span class="help-icon" tabindex="0" role="img" aria-label="Profile name help" data-help="The name people read in lists and menus. Use any words you like. The Profile ID is the short code behind it.">?</span></span> <input id="profile-name" required></label>
+        </div>
+        <h3>Upload</h3>
+        <div class="fields">
+          <label><span class="field-label">Delay (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Upload delay help" data-help="Extra waiting time added to every packet. 1000 ms is one second. Upload is traffic leaving the device and download is traffic arriving at it.">?</span></span> <input id="upload-delay" type="number" min="0" value="0" required></label>
+          <label><span class="field-label">Jitter (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Upload jitter help" data-help="How much each packet's delay can vary. With a 100 ms delay and 20 ms jitter each packet waits somewhere between 80 and 120 ms. High jitter makes calls and games feel choppy.">?</span></span>
+            <input id="upload-jitter" type="number" min="0" value="0" required>
+          </label>
+          <label><span class="field-label">Loss (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload loss help" data-help="The chance that a packet is lost on the way. 5% means about 1 packet in 20 never arrives. Many apps notice and send it again which slows them down.">?</span></span>
+            <input id="upload-loss" type="number" min="0" max="100" value="0" required>
+          </label>
+          <label>
+            <span class="field-label">Loss bursts (packets)<span
+              class="help-icon" tabindex="0" role="img" aria-label="Loss burst help"
+              data-help="0 loses packets independently. 4 makes losses arrive in runs of
+                about 4 packets, like a fading signal. The loss percentage stays the average."
+              >?</span></span>
+            <input id="upload-loss-burst" type="number" min="0" max="100" value="0">
+          </label>
+          <label><span class="field-label">Bandwidth (kbit/s, optional)<span class="help-icon" tabindex="0" role="img" aria-label="Upload bandwidth help" data-help="The top speed in kilobits per second. 1000 kbit/s is about 1 Mbit/s. Leave it empty for no limit.">?</span></span>
+            <input id="upload-bandwidth" type="number" min="1">
+          </label>
+        </div>
+        <h3>Download</h3>
+        <div class="fields">
+          <label><span class="field-label">Delay (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Download delay help" data-help="Extra waiting time added to every packet. 1000 ms is one second. Upload is traffic leaving the device and download is traffic arriving at it.">?</span></span>
+            <input id="download-delay" type="number" min="0" value="0" required>
+          </label>
+          <label><span class="field-label">Jitter (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Download jitter help" data-help="How much each packet's delay can vary. With a 100 ms delay and 20 ms jitter each packet waits somewhere between 80 and 120 ms. High jitter makes calls and games feel choppy.">?</span></span>
+            <input id="download-jitter" type="number" min="0" value="0" required>
+          </label>
+          <label><span class="field-label">Loss (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download loss help" data-help="The chance that a packet is lost on the way. 5% means about 1 packet in 20 never arrives. Many apps notice and send it again which slows them down.">?</span></span>
+            <input id="download-loss" type="number" min="0" max="100" value="0" required>
+          </label>
+          <label>
+            <span class="field-label">Loss bursts (packets)<span
+              class="help-icon" tabindex="0" role="img" aria-label="Loss burst help"
+              data-help="0 loses packets independently. 4 makes losses arrive in runs of
+                about 4 packets, like a fading signal. The loss percentage stays the average."
+              >?</span></span>
+            <input id="download-loss-burst" type="number" min="0" max="100" value="0">
+          </label>
+          <label><span class="field-label">Bandwidth (kbit/s, optional)<span class="help-icon" tabindex="0" role="img" aria-label="Download bandwidth help" data-help="The top speed in kilobits per second. 1000 kbit/s is about 1 Mbit/s. Leave it empty for no limit.">?</span></span>
+            <input id="download-bandwidth" type="number" min="1">
+          </label>
+        </div>
+        <details>
+          <summary>Randomness, outages and website access</summary>
+          <p class="form-note">Values are rerolled at each interval. Hover a question mark for an explanation. A 200 ms value with 30% variation can be rerolled anywhere from 140 to 260 ms. Enabled chance controls whether that feature is active for the interval.</p>
+          <div class="fields">
+            <label><span class="field-label">Reroll every (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Reroll interval help" data-help="The base time between new random values. Set this to 0 to keep the saved values fixed.">?</span></span>
+              <input id="profile-reroll" type="number" min="0" value="0">
+            </label>
+            <label><span class="field-label">Interval variation (%)<span class="help-icon" tabindex="0" role="img" aria-label="Interval variation help" data-help="The reroll interval can move this percentage below or above the base interval. For example, 20% of 5 minutes means 4 to 6 minutes.">?</span></span>
+              <input id="profile-reroll-variation" type="number" min="0" max="100" value="0">
+            </label>
+            <label><span class="field-label">Homepage bounce chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Homepage bounce help" data-help="The chance that an explicit test action in a paired Chrome extension opens the same site’s home page. Saving does not change an applied effect. Apply the profile after saving.">?</span></span>
+              <input id="profile-homepage-chance" type="number" min="0" max="100" step="1" value="0">
+              <span class="form-note">Only explicit test pages in a paired Chrome extension. Apply after saving.</span>
+            </label>
+            <label><span class="field-label">Outage chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Outage chance help" data-help="The chance that a device is disconnected when the outage check runs. A service list that uses this profile cuts only its listed services for every affected device.">?</span></span>
+              <input id="profile-outage-probability" type="number" min="0" max="100" value="0">
+            </label>
+            <label><span class="field-label">Outage length (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage length help" data-help="How long a selected outage lasts before the device is allowed to use the network again.">?</span></span>
+              <input id="profile-outage-duration" type="number" min="0" value="0">
+            </label>
+            <label><span class="field-label">Outage check interval (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage interval help" data-help="How often the Pi checks whether to start a new outage. Set this to 0 to use the reroll interval.">?</span></span>
+              <input id="profile-outage-interval" type="number" min="0" value="0">
+            </label>
+            <label><span class="field-label">Random seed (optional)<span class="help-icon" tabindex="0" role="img" aria-label="Random seed help" data-help="Makes the random changes repeat exactly. The same seed gives a device or a service list the same values in the same order every time. Leaving it empty is the same as 0. Pick another number for a different pattern.">?</span></span>
+              <input id="profile-seed" type="number" min="0">
+            </label>
+            <label><span class="field-label">Website mode<span class="help-icon" tabindex="0" role="img" aria-label="Website mode help" data-help="Unrestricted puts no site limit on this profile. Allow only listed domains limits the device to the sites named in Profile domains.">?</span></span>
+              <select id="profile-website-mode">
+                <option value="unrestricted">Unrestricted</option>
+                <option value="allow_only">Allow only listed domains</option>
+              </select>
+            </label>
+            <label><span class="field-label">Profile domains (comma separated)<span class="help-icon" tabindex="0" role="img" aria-label="Profile domains help" data-help="Only used when Website mode is Allow only listed domains. Separate names with commas. Each name is looked up exactly as typed so list www.example.com as well as example.com if you need both. An empty list lets the device reach no sites.">?</span></span>
+              <input id="profile-website-domains" placeholder="linkedin.com, chat.openai.com">
+            </label>
+            <label><span class="field-label">Website entry chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Website chance help" data-help="At each profile reroll, this chance controls whether each listed profile domain stays allowed for the next interval.">?</span></span>
+              <input id="profile-website-enabled" type="number" min="0" max="100" value="100">
+            </label>
+          </div>
+          <h3>Upload variation</h3>
+          <p class="form-note">Each card controls one feature. Value variation changes the base value. Enabled chance decides whether the feature is used after a reroll.</p>
+          <div class="fields">
+            <label><span class="field-label">Reorder (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload reorder help" data-help="The chance that a packet skips the delay and arrives ahead of packets sent before it. It does nothing unless the Delay in the same direction is above 0. Jitter alone is not enough.">?</span></span> <input id="upload-reorder" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Duplicate (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload duplicate help" data-help="The chance that a packet is delivered twice. Real networks do this occasionally and some apps handle it badly.">?</span></span> <input id="upload-duplicate" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Corrupt (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload corrupt help" data-help="The chance that a packet arrives with one damaged bit. Most devices spot the damage and throw the packet away so it behaves much like loss.">?</span></span> <input id="upload-corrupt" type="number" min="0" max="100" value="0"></label>
+          </div>
+          <div class="randomness-fields">
+            <div class="randomness-field">
+              <div class="randomness-title">Delay <span class="help-icon" tabindex="0" role="img" aria-label="Delay randomness help" data-help="Variation changes the base delay up or down. Enabled chance controls whether delay is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-delay-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-delay-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Jitter <span class="help-icon" tabindex="0" role="img" aria-label="Jitter randomness help" data-help="Variation changes the base jitter up or down. Enabled chance controls whether jitter is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-jitter-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-jitter-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Loss <span class="help-icon" tabindex="0" role="img" aria-label="Loss randomness help" data-help="Variation changes the base packet-loss percentage up or down. Enabled chance controls whether loss is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-loss-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-loss-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Bandwidth <span class="help-icon" tabindex="0" role="img" aria-label="Bandwidth randomness help" data-help="Variation changes the base speed limit up or down. Enabled chance controls whether the speed limit is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-bandwidth-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-bandwidth-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Reorder <span class="help-icon" tabindex="0" role="img" aria-label="Reorder randomness help" data-help="Variation changes the base packet-reorder percentage up or down. Enabled chance controls whether reorder is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-reorder-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-reorder-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Duplicate <span class="help-icon" tabindex="0" role="img" aria-label="Duplicate randomness help" data-help="Variation changes the base packet-duplicate percentage up or down. Enabled chance controls whether duplicate is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-duplicate-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-duplicate-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Corrupt <span class="help-icon" tabindex="0" role="img" aria-label="Corrupt randomness help" data-help="Variation changes the base packet-corruption percentage up or down. Enabled chance controls whether corruption is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-corrupt-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-corrupt-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+          </div>
+          <h3>Download variation</h3>
+          <div class="fields">
+            <label><span class="field-label">Reorder (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download reorder help" data-help="The chance that a packet skips the delay and arrives ahead of packets sent before it. It does nothing unless the Delay in the same direction is above 0. Jitter alone is not enough.">?</span></span> <input id="download-reorder" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Duplicate (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download duplicate help" data-help="The chance that a packet is delivered twice. Real networks do this occasionally and some apps handle it badly.">?</span></span> <input id="download-duplicate" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Corrupt (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download corrupt help" data-help="The chance that a packet arrives with one damaged bit. Most devices spot the damage and throw the packet away so it behaves much like loss.">?</span></span> <input id="download-corrupt" type="number" min="0" max="100" value="0"></label>
+          </div>
+          <div class="randomness-fields">
+            <div class="randomness-field">
+              <div class="randomness-title">Delay <span class="help-icon" tabindex="0" role="img" aria-label="Delay randomness help" data-help="Variation changes the base delay up or down. Enabled chance controls whether delay is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-delay-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-delay-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Jitter <span class="help-icon" tabindex="0" role="img" aria-label="Jitter randomness help" data-help="Variation changes the base jitter up or down. Enabled chance controls whether jitter is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-jitter-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-jitter-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Loss <span class="help-icon" tabindex="0" role="img" aria-label="Loss randomness help" data-help="Variation changes the base packet-loss percentage up or down. Enabled chance controls whether loss is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-loss-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-loss-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Bandwidth <span class="help-icon" tabindex="0" role="img" aria-label="Bandwidth randomness help" data-help="Variation changes the base speed limit up or down. Enabled chance controls whether the speed limit is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-bandwidth-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-bandwidth-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Reorder <span class="help-icon" tabindex="0" role="img" aria-label="Reorder randomness help" data-help="Variation changes the base packet-reorder percentage up or down. Enabled chance controls whether reorder is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-reorder-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-reorder-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Duplicate <span class="help-icon" tabindex="0" role="img" aria-label="Duplicate randomness help" data-help="Variation changes the base packet-duplicate percentage up or down. Enabled chance controls whether duplicate is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-duplicate-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-duplicate-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Corrupt <span class="help-icon" tabindex="0" role="img" aria-label="Corrupt randomness help" data-help="Variation changes the base packet-corruption percentage up or down. Enabled chance controls whether corruption is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-corrupt-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-corrupt-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+          </div>
+        </details>
+        <button type="submit">Save profile</button>
+        <button id="new-profile" type="button" hidden>New profile</button>
+      </form>
+    </section>
+    <section class="card">
+      <h2>Assign a device</h2>
+      <form id="device-form">
+        <div id="device-edit-bar" class="edit-bar" hidden>
+          <p id="device-edit-status" role="status"></p>
+          <button id="device-cancel-edit" type="button">Cancel editing</button>
+        </div>
+        <div class="fields">
+          <div class="connected-picker">
+            <label>Connected device
+              <select id="device-picker">
+                <option value="">Loading connected devices...</option>
+              </select>
+            </label>
+            <button type="button" data-refresh-connected>Refresh</button>
+          </div>
+          <label><span class="field-label">Device ID<span class="help-icon" tabindex="0" role="img" aria-label="Device ID help" data-help="A short code that identifies this device. Saving with an existing ID updates that device and a new ID adds a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read. Each device needs its own IP address.">?</span></span> <input id="device-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
+          <label>Name <input id="device-name" required></label>
+          <label>Reserved IPv4 address
+            <input id="device-ip" required placeholder="192.168.50.10">
+          </label>
+          <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Device profile ID help" data-help="The ID of a profile you already saved. It is the code you typed as Profile ID when saving that profile. Profile menus show the name, and add the code only when two profiles share a name.">?</span></span> <input id="device-profile" required></label>
+          <label>MAC address (optional)
+            <input id="device-mac" placeholder="aa:bb:cc:dd:ee:ff">
+          </label>
+        </div>
+        <button type="submit">Save device</button>
+      </form>
+    </section>
+    <section class="card">
+      <h2>Group devices</h2>
+      <p class="form-note">Select saved devices or connected clients. Choose a profile override when adding an unassigned client. A device can belong to one group.</p>
+      <form id="group-form">
+        <div class="fields">
+          <label><span class="field-label">Group ID<span class="help-icon" tabindex="0" role="img" aria-label="Group ID help" data-help="A short code that identifies this group. Saving with an existing ID updates that group and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Group name is what people read.">?</span></span> <input id="group-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="family"></label>
+          <label>Group name <input id="group-name" required placeholder="Family devices"></label>
+          <label>Profile override
+            <select id="group-profile"><option value="">Use each device profile</option></select>
+          </label>
+          <label>Devices
+            <select id="group-devices" multiple required size="5"></select>
+          </label>
+        </div>
+        <button type="submit">Save group</button>
+      </form>
+      <div id="group-list" class="quota-list" aria-live="polite">No groups saved.</div>
+    </section>
+  </section><!-- /page:profiles -->
+  <section class="page" id="page-schedules" data-page="schedules" aria-label="Schedules and limits" tabindex="-1" hidden>
+    <section class="card" data-collapse="open">
+      <h2>Schedule a profile</h2>
+      <form id="schedule-form">
+        <div class="fields">
+          <label><span class="field-label">Schedule ID<span class="help-icon" tabindex="0" role="img" aria-label="Schedule ID help" data-help="A short code that names this schedule in the list below. Saving with an existing ID updates that schedule and a new ID adds another one. Use only lowercase letters and digits and hyphens and underscores.">?</span></span> <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
+          <label>Applies to
+            <select id="schedule-device" required></select>
+          </label>
+          <label>Profile
+            <select id="schedule-profile" required></select>
+          </label>
+          <div class="day-field">
+            <span class="field-label">Days of the week</span>
+            <div id="schedule-day-picker" class="day-picker" role="group" aria-label="Days of the week">
+              <button class="day-toggle" type="button" data-day="0" aria-pressed="true">Mon</button>
+              <button class="day-toggle" type="button" data-day="1" aria-pressed="true">Tue</button>
+              <button class="day-toggle" type="button" data-day="2" aria-pressed="true">Wed</button>
+              <button class="day-toggle" type="button" data-day="3" aria-pressed="true">Thu</button>
+              <button class="day-toggle" type="button" data-day="4" aria-pressed="true">Fri</button>
+              <button class="day-toggle" type="button" data-day="5" aria-pressed="false">Sat</button>
+              <button class="day-toggle" type="button" data-day="6" aria-pressed="false">Sun</button>
+            </div>
+            <input id="schedule-days" type="hidden" value="0,1,2,3,4">
+            <p class="form-note">Click a day to select or deselect it. Choose at least one.</p>
+          </div>
+          <label>Start <input id="schedule-start" type="time" value="09:00" required></label>
+          <label>End <input id="schedule-end" type="time" value="17:00" required></label>
+        </div>
+        <label class="quota-check"><input id="schedule-enabled" type="checkbox" checked> Enabled</label>
+        <p id="schedule-clock" class="form-note"></p>
+        <p class="form-note">A device's own schedule wins over its group's. Timers and
+          progressions win over schedules.</p>
+        <button type="submit">Save schedule</button>
+      </form>
+      <div id="schedule-list" class="schedule-list" aria-live="polite">No schedules yet.</div>
+    </section>
+  <section class="card timer-card" data-collapse="closed">
+    <div class="section-heading">
+      <div>
+        <h2>Run a profile timer</h2>
+        <p>Temporarily use a profile for one device</p>
+      </div>
+      <span id="timer-count" class="count-badge">No active timers</span>
+    </div>
+    <form id="timer-form">
+      <div class="fields">
+        <label>Device
+          <select id="timer-device" required></select>
+        </label>
+        <label>Profile
+          <select id="timer-profile" required></select>
+        </label>
+        <label>Duration (minutes)
+          <input id="timer-duration" type="number" min="1" max="10080" value="10" required>
+        </label>
+      </div>
+      <p class="form-note">The timer starts when saved. It temporarily overrides schedules and the device’s normal profile. The selected profile’s rerolls, outages, website rules and other settings run during the timer then the device returns to its normal profile.</p>
+      <button class="primary" type="submit">Start timer</button>
+    </form>
+    <div id="timer-list" class="timer-list" aria-live="polite">No active timers.</div>
+  </section>
+  <section class="card scenario-card" data-collapse="closed">
+    <div class="section-heading">
+      <div>
+        <h2>Scenarios</h2>
+        <p>Profiles that follow each other for a device, a group or everyone else</p>
+      </div>
+      <span id="scenario-count" class="count-badge">None running</span>
+    </div>
+    <form id="scenario-start-form">
+      <div class="fields">
+        <label>Scenario <select id="scenario-start-scenario" required></select></label>
+        <label>Applies to <select id="scenario-start-target" required></select></label>
+      </div>
+      <p class="form-note">Choose Start before starting a scenario. Its clock starts
+        when you press Start. A running scenario takes over from schedules, as a timer does.
+        For a device, starting a timer or a scenario replaces the other and a device's own
+        timer or scenario wins over its group's. Data limits still win.</p>
+      <button class="primary" type="submit">Start scenario</button>
+    </form>
+    <div id="scenario-run-list" class="timer-list">No running scenarios.</div>
+    <h3>Saved scenarios</h3>
+    <div id="scenario-list" class="schedule-list">No scenarios yet.</div>
+    <form id="scenario-form">
+      <div class="fields">
+        <label><span class="field-label">Scenario ID<span class="help-icon" tabindex="0" role="img" aria-label="Scenario ID help" data-help="A short code that identifies this scenario. Saving with an existing ID updates that scenario and a new ID adds a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read.">?</span></span>
+          <input id="scenario-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}">
+        </label>
+        <label>Name <input id="scenario-name" required></label>
+      </div>
+      <div id="scenario-steps" class="scenario-steps"></div>
+      <button type="button" id="scenario-add-step">Add step</button>
+      <p id="scenario-duration" class="form-note" aria-live="polite"></p>
+      <label class="quota-check"><input id="scenario-loop" type="checkbox"> Repeat from the
+        first step until stopped</label>
+      <p class="form-note">Each step lasts 10 seconds to 24 hours. A scenario has up to 20
+        steps. Editing a running scenario changes it at once.</p>
+      <button type="submit">Save scenario</button>
+    </form>
+  </section>
+  <section class="card progression-card" data-collapse="closed">
+    <div class="section-heading">
+      <div>
+        <h2>Progression mode</h2>
+        <p>Move gradually from one profile to another</p>
+      </div>
+      <span id="progression-count" class="count-badge">No active progressions</span>
+    </div>
+    <form id="progression-form">
+      <div class="fields">
+        <label>Device
+          <select id="progression-device" required></select>
+        </label>
+        <label>Start profile
+          <select id="progression-start-profile" required></select>
+        </label>
+        <label>End profile
+          <select id="progression-end-profile" required></select>
+        </label>
+        <label>Mode
+          <select id="progression-mode">
+            <option value="time">Over time</option>
+            <option value="traffic">After DNS queries</option>
+            <option value="bytes">After device data</option>
+          </select>
+        </label>
+        <label>Duration limit (minutes)
+          <input id="progression-duration" type="number" min="1" max="10080" value="300" required>
+        </label>
+        <label id="progression-traffic-field" hidden>DNS queries to reach the end
+          <input id="progression-traffic-target" type="number" min="1" max="1000000000" value="1000">
+        </label>
+        <label id="progression-bytes-field" hidden>Device data to reach the end (MB)
+          <input id="progression-bytes-target" type="number" min="1" max="10000000" value="1000">
+        </label>
+      </div>
+      <label>Domains to block gradually (optional, comma separated)
+        <textarea id="progression-domains" placeholder="youtube.com, example.com"></textarea>
+      </label>
+      <p class="form-note">The start and end profiles are interpolated gradually. Existing randomness and outage settings continue to run. DNS mode counts observed queries. Device-data mode counts IPv4 upload and download bytes, so a long stream can advance it even when there are few new DNS queries. The device returns to its normal schedule or profile when the duration ends.</p>
+      <button class="primary" type="submit">Start progression</button>
+    </form>
+    <div id="progression-list" class="progression-list" aria-live="polite">No active progressions.</div>
+  </section>
+  <section class="card quota-card" data-collapse="open">
+    <div class="section-heading">
+      <div>
+        <h2>Device data limit</h2>
+        <p>Keep normal internet access until a device reaches its byte limit</p>
+      </div>
+      <span id="data-limit-count" class="count-badge">No limits</span>
+    </div>
+    <form id="data-limit-form">
+      <div class="fields">
+        <label>Device
+          <select id="data-limit-device" required></select>
+        </label>
+        <label>Fallback profile
+          <select id="data-limit-profile" required></select>
+        </label>
+        <label>Limit
+          <input id="data-limit-amount" type="number" min="1" step="1" value="1" required>
+        </label>
+        <label>Unit
+          <select id="data-limit-unit">
+            <option value="1048576">MB</option>
+            <option value="1073741824">GB</option>
+          </select>
+        </label>
+        <label>Reset
+          <select id="data-limit-reset-mode">
+            <option value="manual">Manual</option>
+            <option value="interval">After an interval</option>
+            <option value="daily">At fixed times each day</option>
+          </select>
+        </label>
+        <label id="data-limit-interval-field">Interval (minutes)
+          <input id="data-limit-interval" type="number" min="1" max="525600" value="60">
+        </label>
+        <label id="data-limit-times-field" hidden>Reset times (HH:MM, comma separated)
+          <input id="data-limit-times" placeholder="08:00, 20:00">
+        </label>
+        <label class="quota-check"><input id="data-limit-enabled" type="checkbox" checked> Enabled</label>
+      </div>
+      <p class="form-note">Editing a saved limit keeps its current usage. The fallback profile starts when the device total reaches the limit.</p>
+      <button class="primary" type="submit">Save device limit</button>
+    </form>
+    <div id="data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view limits.</div>
+  </section>
+  <section class="card quota-card" data-collapse="closed">
+    <div class="section-heading">
+      <div>
+        <h2>Shared group data limit</h2>
+        <p>Count the combined traffic of every device in a group</p>
+      </div>
+      <span id="group-data-limit-count" class="count-badge">No group limits</span>
+    </div>
+    <form id="group-data-limit-form">
+      <div class="fields">
+        <label>Group
+          <select id="group-data-limit-group" required></select>
+        </label>
+        <label>Fallback profile
+          <select id="group-data-limit-profile" required></select>
+        </label>
+        <label>Limit
+          <input id="group-data-limit-amount" type="number" min="1" step="1" value="1" required>
+        </label>
+        <label>Unit
+          <select id="group-data-limit-unit">
+            <option value="1048576">MB</option>
+            <option value="1073741824">GB</option>
+          </select>
+        </label>
+        <label>Reset
+          <select id="group-data-limit-reset-mode">
+            <option value="manual">Manual</option>
+            <option value="interval">After an interval</option>
+            <option value="daily">At fixed times each day</option>
+          </select>
+        </label>
+        <label id="group-data-limit-interval-field">Interval (minutes)
+          <input id="group-data-limit-interval" type="number" min="1" max="525600" value="60">
+        </label>
+        <label id="group-data-limit-times-field" hidden>Reset times (HH:MM, comma separated)
+          <input id="group-data-limit-times" placeholder="08:00, 20:00">
+        </label>
+        <label class="quota-check"><input id="group-data-limit-enabled" type="checkbox" checked> Enabled</label>
+      </div>
+      <p class="form-note">The shared limit adds the byte counters for all group members. A per-device limit takes priority if the same device has both.</p>
+      <button class="primary" type="submit">Save group limit</button>
+    </form>
+    <div id="group-data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view group limits.</div>
+  </section>
+  <section class="card quota-card" id="service-list-card" data-collapse="closed">
+    <div class="section-heading">
+      <div>
+        <h2>Service lists</h2>
+        <p>Give chosen apps and sites their own profile on every affected device</p>
+      </div>
+      <span id="service-list-count" class="count-badge">No service lists</span>
+    </div>
+    <form id="service-list-form">
+      <div class="fields">
+        <label><span class="field-label">List ID<span class="help-icon" tabindex="0" role="img" aria-label="List ID help" data-help="A short code that identifies this service list. Saving with an existing ID updates that list and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The List name is what people read.">?</span></span>
+          <input id="service-list-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="work-apps">
+        </label>
+        <label>List name
+          <input id="service-list-name" required placeholder="Work apps">
+        </label>
+        <label>Profile for these services
+          <select id="service-list-profile" required></select>
+        </label>
+        <label class="quota-check"><input id="service-list-enabled" type="checkbox" checked> Enabled</label>
+      </div>
+      <fieldset id="service-list-catalogue" class="service-catalogue">
+        <legend>Services</legend>
+      </fieldset>
+      <label>Extra hostnames, one per line
+        <textarea id="service-list-hostnames" rows="3" placeholder="intranet.example.com"></textarea>
+      </label>
+      <div class="service-observed">
+        <label>Names the Pi has seen
+          <select id="service-list-observed"></select>
+        </label>
+        <button type="button" id="service-list-add-observed">Add to hostnames</button>
+      </div>
+      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device profile or the profile for Everyone. Protected devices are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's random variation and random outages apply to the whole list: all affected devices get the same new values and the same outages. During an outage the listed services are unreachable while the Pi's DNS and the dashboard and other sites keep working. The profile's website list is not used for service lists.</p>
+      <button class="primary" type="submit">Save service list</button>
+    </form>
+    <div id="service-list-list" class="quota-list" aria-live="polite">Enter the admin token to view service lists.</div>
+  </section>
+  <section class="card quota-card" data-collapse="closed">
+    <div class="section-heading">
+      <div>
+        <h2>Browser service profile</h2>
+        <p>Apply a profile to named HTTPS sites on one managed test browser</p>
+      </div>
+      <span id="service-assignment-count" class="count-badge">No service profiles</span>
+    </div>
+    <form id="service-assignment-form">
+      <div class="fields">
+        <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Browser service profile ID help" data-help="A short code that identifies this browser service profile. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Service name is what people read.">?</span></span>
+          <input id="service-assignment-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="alice-video">
+        </label>
+        <label>Service name
+          <input id="service-assignment-name" required placeholder="Video sites">
+        </label>
+        <label>Test device
+          <select id="service-assignment-device" required></select>
+        </label>
+        <label>Profile for these sites
+          <select id="service-assignment-profile" required></select>
+        </label>
+        <label class="quota-check"><input id="service-assignment-enabled" type="checkbox" checked> Enabled</label>
+      </div>
+      <label>HTTPS hostnames, one per line
+        <textarea id="service-assignment-domains" rows="4" required placeholder="netflix.com&#10;google.com&#10;youtube.com"></textarea>
+      </label>
+      <p class="form-note">Includes subdomains of each name. Configure the Mac browser's HTTPS proxy as 192.168.50.1:3128 while connected to the test Wi-Fi. Other proxied sites keep the device profile. Apps and connections that bypass the proxy are outside this control.</p>
+      <button class="primary" type="submit">Save browser service profile</button>
+    </form>
+    <div id="service-assignment-list" class="quota-list" aria-live="polite">Enter the admin token to view service profiles.</div>
+  </section>
+  <section class="card quota-card" data-collapse="closed">
+    <div class="section-heading">
+      <div>
+        <h2>Service data limit</h2>
+        <p>Limit a service made up of several observed DNS domains</p>
+      </div>
+      <span id="service-quota-count" class="count-badge">No service limits</span>
+    </div>
+    <form id="service-quota-form">
+      <div class="fields">
+        <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Service data limit ID help" data-help="A short code that identifies this service data limit. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Service name is what people read.">?</span></span>
+          <input id="service-quota-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="alice-netflix">
+        </label>
+        <label>Service name
+          <input id="service-quota-name" required placeholder="Netflix">
+        </label>
+        <label>Device
+          <select id="service-quota-device" required></select>
+        </label>
+        <label>Fallback profile
+          <select id="service-quota-profile" required></select>
+        </label>
+        <label>Limit
+          <input id="service-quota-amount" type="number" min="1" step="1" value="1" required>
+        </label>
+        <label>Unit
+          <select id="service-quota-unit">
+            <option value="1048576">MB</option>
+            <option value="1073741824">GB</option>
+          </select>
+        </label>
+        <label><span class="field-label">Quota weight (×)<span class="help-icon" tabindex="0" role="img" aria-label="Quota weight help" data-help="A weight of 1.2 makes each matching byte count as 1.2 bytes. A weight of 0.8 makes it count as 0.8 bytes. The allowed range is 0.1× to 10×.">?</span></span>
+          <input id="service-quota-weight" type="number" min="0.1" max="10" step="0.1" value="1" required>
+        </label>
+        <label>Reset
+          <select id="service-quota-reset-mode">
+            <option value="manual">Manual</option>
+            <option value="interval">After an interval</option>
+            <option value="daily">At fixed times each day</option>
+          </select>
+        </label>
+        <label id="service-quota-interval-field">Interval (minutes)
+          <input id="service-quota-interval" type="number" min="1" max="525600" value="60">
+        </label>
+        <label id="service-quota-times-field" hidden>Reset times (HH:MM, comma separated)
+          <input id="service-quota-times" placeholder="08:00, 20:00">
+        </label>
+        <label class="quota-check"><input id="service-quota-enabled" type="checkbox" checked> Enabled</label>
+      </div>
+      <label>Observed domains for this service
+        <select id="service-quota-domains" class="quota-domain-picker" multiple required></select>
+      </label>
+      <p class="form-note">Only domains observed from the selected device appear here. Select all names used by the service. Matching direct traffic is counted together then multiplied by the quota weight. Browser proxy tunnels are outside this limit.</p>
+      <button class="primary" type="submit">Save service limit</button>
+    </form>
+    <div id="service-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view service limits.</div>
+  </section>
+  <section class="card quota-card" data-collapse="closed">
+    <div class="section-heading">
+      <div>
+        <h2>Service time limit</h2>
+        <p>Allow a service a set amount of active traffic time inside a timer window</p>
+      </div>
+      <span id="time-quota-count" class="count-badge">No time limits</span>
+    </div>
+    <form id="time-quota-form">
+      <div class="fields">
+        <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Service time limit ID help" data-help="A short code that identifies this service time limit. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Service name is what people read.">?</span></span>
+          <input id="time-quota-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="alice-netflix-time">
+        </label>
+        <label>Service name
+          <input id="time-quota-name" required placeholder="Netflix time">
+        </label>
+        <label>Device
+          <select id="time-quota-device" required></select>
+        </label>
+        <label>Fallback profile
+          <select id="time-quota-profile" required></select>
+        </label>
+        <label>Allowed active time
+          <input id="time-quota-amount" type="number" min="1" step="1" value="5" required>
+        </label>
+        <label>Time unit
+          <select id="time-quota-unit">
+            <option value="3600">Hours</option>
+            <option value="60">Minutes</option>
+          </select>
+        </label>
+        <label><span class="field-label">Timer window (minutes)<span class="help-icon" tabindex="0" role="img" aria-label="Timer window help" data-help="The quota can count service activity only while this timer is running. Starting the timer clears this quota's current usage and starts a fresh window.">?</span></span>
+          <input id="time-quota-window" type="number" min="1" max="10080" step="1" value="720" required>
+        </label>
+        <label>Reset
+          <select id="time-quota-reset-mode">
+            <option value="manual">Manual</option>
+            <option value="interval">After an interval</option>
+            <option value="daily">At fixed times each day</option>
+          </select>
+        </label>
+        <label id="time-quota-interval-field">Interval (minutes)
+          <input id="time-quota-interval" type="number" min="1" max="525600" value="60">
+        </label>
+        <label id="time-quota-times-field" hidden>Reset times (HH:MM, comma separated)
+          <input id="time-quota-times" placeholder="08:00, 20:00">
+        </label>
+        <label class="quota-check"><input id="time-quota-enabled" type="checkbox" checked> Enabled</label>
+      </div>
+      <label>Observed domains for this service
+        <select id="time-quota-domains" class="quota-domain-picker" multiple required></select>
+      </label>
+      <p class="form-note">Active time is counted when matching traffic is seen. A long video stream therefore keeps using the allowance even when there are no new clicks. Save the limit then start its timer from the saved row.</p>
+      <button class="primary" type="submit">Save time limit</button>
+    </form>
+    <div id="time-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view time limits.</div>
+  </section>
+  </section><!-- /page:schedules -->
+  <section class="page" id="page-router" data-page="router" aria-label="Router and Wi-Fi" tabindex="-1" hidden>
+    <section class="card wifi-name-card">
+    <h2>Wi-Fi name</h2>
+    <p>Restore the Pi's test network name to its default. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts. Use management access.</p>
+    <button id="reset-wifi-name" type="button" disabled aria-describedby="wifi-reset-status">
+      <span>Reset Wi-Fi name</span><span class="credential-state">Restore default</span>
+    </button>
+    <p id="wifi-reset-status" class="credential-state" role="status" aria-live="polite">Keep password and security</p>
+  </section>
+  <section class="card uplink-card" data-collapse="open">
+    <div class="section-heading">
+      <div>
+        <h2>Upstream router connection</h2>
+        <p>What the Pi can see through Ethernet</p>
+      </div>
+      <span id="uplink-state" class="count-badge">Check token</span>
+    </div>
+    <div id="uplink-details" class="uplink-grid" aria-live="polite">Enter the admin token and choose Check token to view the router connection.</div>
+    <p id="uplink-note" class="policy-note">The router controls use the TG3442DE local web interface. The Pi signs in with the router admin password when you run a router action.</p>
+    <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
+    <div class="router-controls">
+      <button id="open-router-credentials-inline" type="button" aria-controls="credentials-panel" aria-expanded="false">Enter router password</button>
+      <p class="policy-note">Use Copy router Wi-Fi to Pi in the left panel to copy the router's name, password and security together. Keep a separate management connection while the Pi Wi-Fi restarts. Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
+    </div>
+  </section>
+  <section class="card" data-collapse="closed">
+    <h2>Manual Pi access-point fallback</h2>
+    <form id="access-point-form">
+      <div class="fields">
+        <label>Test network name (SSID)
+          <input id="access-point-ssid" value="" maxlength="32" required>
+        </label>
+        <label>Test network password
+          <input id="access-point-password" type="password" minlength="8" maxlength="63" autocomplete="new-password" required>
+        </label>
+      </div>
+      <p class="policy-note">These values configure the Pi with WPA3. To keep the router's security type use Copy router Wi-Fi to Pi. To join the copied network use the router's Wi-Fi password. The password is not saved in the dashboard database.</p>
+      <button type="submit">Use these values on the Pi</button>
+    </form>
+    <p class="policy-note">To restore the default name without changing the password, use Reset Wi-Fi name above.</p>
+  </section>
+  <section class="card" data-collapse="open">
+    <div class="section-heading">
+      <div>
+        <h2>Router outage behavior</h2>
+        <p>Choose what happens when the Pi loses its router connection</p>
+      </div>
+    </div>
+    <p class="policy-note">When on, active profiles stay in place and return with the router. When off, a confirmed router outage stops profiles until you choose Apply. Saved profiles and schedules are kept. This setting does not change what happens after a Pi restart.</p>
+    <label class="quota-check"><input id="gateway-persistence-toggle" type="checkbox"> Keep active profiles through router outages</label>
+    <div class="action-buttons">
+      <button id="gateway-persistence-save" class="primary" type="button">Save outage behavior</button>
+    </div>
+    <p id="gateway-persistence-state" class="token-check-status" role="status" aria-live="polite">Checking the router connection...</p>
+  </section>
+  <section class="card" data-collapse="open">
+    <h2>Updates</h2>
+    <p class="policy-note">Checking for and installing new releases has its own page. <a id="router-updates-link" href="#updates">Open Updates</a></p>
+  </section>
+  </section><!-- /page:router -->
+  <section class="page" id="page-traffic" data-page="traffic" aria-label="Traffic" tabindex="-1" hidden>
+  <section class="card traffic-card" data-collapse="open" aria-labelledby="traffic-title">
+    <div class="section-heading">
+      <div>
+        <h2 id="traffic-title">Live traffic</h2>
+        <p>Recent traffic rates for assigned test devices</p>
+      </div>
+      <span id="traffic-window" class="count-badge">Last 60 seconds</span>
+    </div>
+    <div class="traffic-controls">
+      <label>Device
+        <select id="traffic-device">
+          <option value="@all">All assigned devices</option>
+        </select>
+      </label>
+      <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Check the admin token to start live traffic sampling.</p>
+    </div>
+    <form id="traffic-rate-form" class="traffic-rate-form">
+      <label>ISP download maximum (Mbit/s)
+        <input id="traffic-isp-download" type="number" min="0.1" max="1000" step="0.1" value="100.0">
+      </label>
+      <label>ISP upload maximum (Mbit/s)
+        <input id="traffic-isp-upload" type="number" min="0.1" max="1000" step="0.1" placeholder="Unknown">
+      </label>
+      <button class="primary" type="submit">Save speed references</button>
+      <p id="traffic-rate-status" class="traffic-rate-help" role="status" aria-live="polite"></p>
+      <p class="traffic-rate-help">These reference lines do not limit traffic. The ISP plan maximum is shared with other home devices.</p>
+    </form>
+    <div class="traffic-metrics">
+      <div class="traffic-metric"><span>Upload rate</span><strong id="traffic-upload-rate">—</strong></div>
+      <div class="traffic-metric"><span>Download rate</span><strong id="traffic-download-rate">—</strong></div>
+      <div class="traffic-metric"><span>Upload packet rate</span><strong id="traffic-upload-packets">—</strong></div>
+      <div class="traffic-metric"><span>Download packet rate</span><strong id="traffic-download-packets">—</strong></div>
+      <div class="traffic-metric">
+        <span>Dropped by the Pi</span><strong id="traffic-drop-rate">—</strong>
+      </div>
+      <div class="traffic-metric">
+        <span>Waiting on the Pi</span><strong id="traffic-queued">—</strong>
+      </div>
+    </div>
+    <div class="traffic-chart-wrap">
+      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at the Pi with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
+      <div class="traffic-legend" aria-label="Graph legend">
+        <button type="button" data-traffic-series="upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" data-traffic-series="download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" data-traffic-series="isp_upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" data-traffic-series="isp_download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" id="traffic-profile-upload-legend" data-traffic-series="profile_upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" id="traffic-profile-download-legend" data-traffic-series="profile_download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+      </div>
+      <p id="traffic-chart-detail" class="traffic-chart-detail">Hover a line or focus its legend label to inspect it. Click or tap a label to keep it highlighted. Escape clears the highlight.</p>
+    </div>
+    <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
+    <p class="traffic-note">Dropped and waiting show packets the Pi itself discarded or is still
+      delaying, in both directions.</p>
+    <p class="traffic-note">Solid lines show traffic counted at the Pi before its queues. They do not show the speed a device receives. Dashed lines show ISP plan references. Dotted lines show applied profile limits. Profile limits describe the default queue. Service-specific queues may use different limits. The ISP plan is shared with household traffic and is not a live measurement of spare capacity. Only assigned devices are included. Check the admin token to start. Sampling pauses when this tab is hidden.</p>
+  </section>
+  <section class="card observations-card" data-collapse="closed">
+    <div class="section-heading">
+      <div>
+        <h2>Traffic discovery</h2>
+        <p>Review DNS names observed from devices on the test network</p>
+      </div>
+      <div class="observation-actions">
+        <span id="observation-count" class="count-badge">No scan yet</span>
+        <button id="scan-observations" class="primary" type="button">Scan now</button>
+      </div>
+    </div>
+    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits. Protected devices are never monitored and never appear here. Block globally also blocks every name under a name (example.com also blocks www.example.com) while household access rules are on. Blocked and Unblock show on the exact name that was blocked.</p>
+    <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
+  </section>
+    <section class="card analytics-card" data-collapse="closed">
+      <div class="section-heading">
+        <div><h2>Random website choices</h2><p>Scheduled profile rerolls</p></div>
+        <button id="random-website-refresh" type="button">Refresh</button>
+      </div>
+      <p class="analytics-note">Counts whether each configured website stayed in or was removed from a device's profile list. Only saved choices appear here. These are not site visits or confirmed network blocks.</p>
+      <div class="analytics-controls">
+        <label for="random-website-device">Device
+          <select id="random-website-device"><option value="">All devices</option></select>
+        </label>
+        <label for="random-website-days">Date range
+          <select id="random-website-days">
+            <option value="7">Last 7 days</option>
+            <option value="30" selected>Last 30 days</option>
+          </select>
+        </label>
+      </div>
+      <p id="random-website-status" class="analytics-status" role="status" aria-live="polite">Enter the admin token to view randomized website choices.</p>
+      <div class="analytics-table-wrap">
+        <table class="analytics-table">
+          <thead><tr><th scope="col">Device</th><th scope="col">Website</th><th scope="col">Kept</th><th scope="col">Removed</th><th scope="col">Active days</th></tr></thead>
+          <tbody id="random-website-rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </section><!-- /page:traffic -->
+  <section class="page" id="page-measurements" data-page="measurements" aria-label="Measurements" tabindex="-1" hidden>
+  <section class="card" aria-labelledby="measurement-title">
+    <div class="section-heading">
+      <div>
+        <h2 id="measurement-title">Measurements</h2>
+        <p>Compare the delay, jitter and loss a test device measured</p>
+      </div>
+    </div>
+    <div class="measurement-actions">
+      <label>Result files
+        <input id="measurement-files" type="file" accept=".json,application/json" multiple>
+      </label>
+      <button id="copy-measurements" type="button" disabled>Copy table as Markdown</button>
+      <button id="clear-measurements" type="button" disabled>Clear</button>
+    </div>
+    <div id="measurement-table" class="table-wrap">Add result files to compare runs.</div>
+    <canvas id="measurement-chart" width="900" height="240" role="img"
+      aria-label="Round-trip time of every reply in each run">
+      Round-trip chart of the added runs.</canvas>
+    <p class="traffic-note">On a device connected to the test Wi-Fi, run
+      <code id="measure-command">the measure command</code>, change the device's profile here, run it again
+      with another label, then add both files. Comparison files stay in this browser. Attaching them to a test session saves a copy on the Pi.</p>
+  </section>
+  </section><!-- /page:measurements -->
+  <section class="page" id="page-activity" data-page="activity" aria-label="Activity" tabindex="-1" hidden>
+  <section class="card activity-card" data-collapse="open">
+    <div class="section-heading">
+      <div>
+        <h2>Activity log</h2>
+        <p>The last 500 network events, newest first. Rerolls are left out.</p>
+      </div>
+      <div class="activity-actions">
+        <button type="button" id="activity-copy">Copy as Markdown</button>
+        <button type="button" id="activity-download">Download Markdown</button>
+        <button type="button" id="activity-clear">Clear all</button>
+      </div>
+    </div>
+    <div class="fields">
+      <label>Event type <select id="activity-kind">
+        <option value="">All events</option>
+        <option value="apply">Apply</option><option value="reset">Reset</option>
+        <option value="schedule">Schedule</option><option value="timer">Timer</option>
+        <option value="scenario">Scenario</option><option value="progression">Progression</option>
+        <option value="limit">Limit</option><option value="outage">Outage</option>
+        <option value="address">Address change</option>
+      </select></label>
+      <label>Search events <input id="activity-search" type="search" placeholder="Device, group or event text"></label>
+    </div>
+    <p id="activity-count" class="form-note"></p>
+    <ol id="activity-list" class="activity-list" tabindex="0"
+      aria-label="Activity log events"></ol>
+    <p id="activity-empty" class="form-note">Loading...</p>
+    <textarea id="activity-markdown" class="activity-markdown" readonly hidden
+      aria-label="Activity log as Markdown"></textarea>
+  </section>
+  </section><!-- /page:activity -->
+  <section class="page" id="page-access" data-page="access" aria-label="Access and rules" tabindex="-1" hidden>
+    <section class="card" data-collapse="open">
+      <h2>Network access rules</h2>
+      <form id="policy-form">
+        <div class="policy-grid">
+          <div>
+            <h3>MAC filtering</h3>
+            <div class="fields">
+              <label>Mode
+                <select id="mac-mode">
+                  <option value="disabled">Disabled</option>
+                  <option value="allowlist">Allow only these MAC addresses</option>
+                  <option value="denylist">Block these MAC addresses</option>
+                </select>
+              </label>
+              <div class="connected-picker">
+                <label>Connected device
+                  <select id="mac-picker">
+                    <option value="">Loading connected devices...</option>
+                  </select>
+                </label>
+                <button type="button" data-refresh-connected>Refresh</button>
+              </div>
+              <div class="picker-actions">
+                <button type="button" id="mac-add-allowed">Add to allow list</button>
+                <button type="button" id="mac-add-blocked">Add to block list</button>
+              </div>
+              <label>Allowlist (comma separated)
+                <textarea id="mac-allowlist" placeholder="aa:bb:cc:dd:ee:ff"></textarea>
+              </label>
+              <label>Denylist (comma separated)
+                <textarea id="mac-denylist" placeholder="11:22:33:44:55:66"></textarea>
+              </label>
+            </div>
+          </div>
+          <div>
+            <h3>Website filtering</h3>
+            <div class="fields">
+              <label>Global mode
+                <select id="website-mode">
+                  <option value="unrestricted">Unrestricted</option>
+                  <option value="allow_only">Allow only these domains</option>
+                </select>
+              </label>
+              <label>Global allowed domains (comma separated)
+                <textarea id="website-allowlist" placeholder="example.com"></textarea>
+              </label>
+              <label>Global blocked domains (comma separated)
+                <textarea id="website-blocklist" placeholder="ads.example.com"></textarea>
+              </label>
+            </div>
+          </div>
+        </div>
+        <p class="policy-note">Website rules use resolved IPv4 destinations and are best effort. VPNs, encrypted DNS and direct IP connections can bypass them.</p>
+        <button id="save-policies" type="submit">Save access rules</button>
+      </form>
+    </section>
+  </section><!-- /page:access -->
+  <section class="page" id="page-diagnostics" data-page="diagnostics" aria-label="Diagnostics" tabindex="-1" hidden>
+    <section class="card impact-card" data-collapse="open" aria-labelledby="impact-title">
+      <div class="section-heading">
+        <div><h2 id="impact-title">Impact</h2><p>What the queues did in the last minute</p></div>
+        <span id="impact-state" class="count-badge">Check token</span>
+      </div>
+      <p id="impact-note" class="impact-note">Counts come from the Pi's queues. Delay, jitter, reorder, duplicate and corrupt are shown as configured because queue counters cannot measure them.</p>
+      <div id="impact-list" class="impact-list">Check the admin token to see the impact.</div>
+      <p id="impact-protected" class="impact-protected" hidden></p>
+      <p id="impact-status" class="impact-status" role="status"></p>
+    </section>
+    <section class="card" data-collapse="closed">
+      <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
+      <pre id="profiles-json">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card" data-collapse="closed">
+      <div class="section-heading"><h2>Devices</h2><p>Assigned test clients</p></div>
+      <pre id="devices-json">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card" data-collapse="closed">
+      <div class="section-heading"><h2>Compiled plan</h2><p>Current traffic rules</p></div>
+      <pre id="plan">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card" data-collapse="closed">
+      <div class="section-heading"><h2>Runtime state</h2><p>Last helper result</p></div>
+      <pre id="state">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card" data-collapse="closed">
+      <div class="section-heading"><h2>Access rules</h2><p>Saved MAC and website policy</p></div>
+      <pre id="policies">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card" data-collapse="open">
+      <div class="section-heading">
+        <div><h2>Diagnostics</h2><p>Runtime state and available traffic counters</p></div>
+        <button id="refresh-diagnostics" type="button">Refresh</button>
+      </div>
+      <pre id="diagnostics-json">Enter the admin token to inspect diagnostics.</pre>
+    </section>
+    <section class="card" data-collapse="closed">
+      <div class="section-heading">
+        <div><h2>Backup and action history</h2><p>Recent admin actions without request contents</p></div>
+        <button id="download-backup" type="button">Download backup</button>
+      </div>
+      <pre id="action-history">Enter the admin token to view recent actions.</pre>
+      <div class="row-actions transfer-actions">
+        <button id="export-settings" type="button">Export settings</button>
+        <button id="import-settings-button" type="button">Import settings...</button>
+        <input id="import-settings" type="file" accept=".json,application/json" hidden>
+      </div>
+      <p class="form-note">A settings export holds profiles, devices, groups, schedules,
+        access rules and limits, without usage or DNS history. Importing one replaces all
+        of them.</p>
+    </section>
+  </section><!-- /page:diagnostics -->
+  <section class="page" id="page-updates" data-page="updates" aria-label="Updates" tabindex="-1" hidden>
+  </section><!-- /page:updates -->
+  </div>
+  </main>
+  </div>
+  <script>__JITTERSIM_DASHBOARD_SCRIPT__</script>
+  <script>__JITTERSIM_NAVIGATION_SCRIPT__</script>
+</body>
+</html>
