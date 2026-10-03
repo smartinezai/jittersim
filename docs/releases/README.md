@@ -142,3 +142,17 @@ python3 deploy/raspberry-pi/prepare-locked-wheels.py \
 The wheelhouse option still enforces exact versions and hashes. It does not allow
 source packages or bypass a missing dependency. Physical Pi tests remain required
 because a clean Linux container does not prove Wi-Fi or legacy recovery behavior.
+
+## Source integration when hosted checks are unavailable
+
+This publisher does not decide whether a source change may be merged. An explicitly
+approved source merge can use the configured checks run locally when GitHub limits
+prevent hosted execution. Record the actual commands, source identity and results
+as local evidence. Do not describe them as green hosted runs.
+
+Automatic candidates and the stable publication gate currently require successful
+hosted main workflow evidence. There is no local-evidence override in this tool.
+A future manual stable route would need its own reviewed acceptance contract.
+Source merge approval never supplies physical Pi acceptance or approval of an
+untested final package. The inspected Pi order floor and owner-signed exact-package
+acceptance remain required before stable publication.

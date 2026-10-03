@@ -287,6 +287,19 @@ class Git:
         return command(["git", "show", commit + ":" + name], cwd=self.root)
 
 
+OFFICIAL_PUSH_URLS = {prefix + REPOSITORY + suffix
+                      for prefix in ("https://github.com/", "git@github.com:", "ssh://git@github.com/")
+                      for suffix in ("", ".git")}
+
+
+def verified_push_destination(git):
+    # get-url expands both insteadOf and pushInsteadOf and lists every push URL.
+    destinations = git.call("remote", "get-url", "--push", "--all", "origin").splitlines()
+    checked(len(destinations) == 1 and destinations[0] in OFFICIAL_PUSH_URLS,
+            "The effective push destination is not the single official repository.")
+    return destinations[0]
+
+
 class GitHub:
     def call(self, *arguments):
         return command(["gh", *arguments])
@@ -730,6 +743,7 @@ def publish(git, folder, trusted_key, github, confirm, dry_run=False):
                     and reservations[0]["state"] in {"reserved", "published"}, "The reservation is missing or retired.")
             tag = "v" + record["version"]
             checked(git.commit(tag) == record["commit"], "The local release tag changed.")
+            verified_push_destination(git)
             releases = github.api(f"repos/{REPOSITORY}/releases?per_page=100")
             checked(isinstance(releases, list) and len(releases) < 100, "Review older release history before publishing.")
             same = [release for release in releases if release.get("tag_name") == tag]
@@ -741,7 +755,7 @@ def publish(git, folder, trusted_key, github, confirm, dry_run=False):
             if dry_run:
                 return {"version": record["version"], "commit": record["commit"], "state": "verified-dry-run"}
             if not same:
-                git.call("push", "origin", f"refs/tags/{tag}:refs/tags/{tag}")
+                git.call("push", "--no-follow-tags", "--no-mirror", "origin", f"refs/tags/{tag}:refs/tags/{tag}")
                 checked(remote_tag(github, tag) == record["commit"], "The pushed release tag differs from the approved commit.")
                 note_file = snapshot / "notes.md"
                 note_file.write_text(notes(record, approval))

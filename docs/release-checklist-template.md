@@ -1,8 +1,8 @@
 # JitterSim stable release checklist
 
 Template for the stable release design approved on 2026-10-03. The release
-system is not implemented yet. Copy this for each numbered candidate once
-the system is operational. Mark a conditional
+system is implemented locally and awaits final source and physical acceptance.
+Copy this for each numbered candidate. Mark a conditional
 item inapplicable only with its written reason. An unchecked required item
 blocks stable publication. A release may proceed only with explicit
 approval of the completed record.

@@ -84,6 +84,7 @@ class GitFixture:
         self.root = root
         self.data = policy
         self.commands = []
+        self.push_urls = "https://github.com/smartinezai/jittersim.git"
 
     def source(self, commit, path):
         return json.dumps(self.data).encode()
@@ -96,6 +97,8 @@ class GitFixture:
 
     def call(self, *args):
         self.commands.append(args)
+        if args[:2] == ("remote", "get-url"):
+            return self.push_urls
         return ""
 
 
@@ -451,6 +454,7 @@ def test_release_input_rejects_links_and_pipes_without_reading(release, tmp_path
         release.read_bytes(path, 100)
 
 
+
 @pytest.mark.parametrize("exit_code", [0, 1])
 def test_closed_pipe_descendants_cannot_outlive_a_command(release, tmp_path, exit_code):
     import sys
@@ -489,6 +493,48 @@ def test_oversized_extensions_are_refused_before_tar_parser_allocation(release, 
         tracemalloc.stop()
 
 
+@pytest.mark.parametrize("urls", ["https://github.com/someone/fork.git", "/private/tmp/local-mirror",
+                                   "https://github.com/smartinezai/jittersim.git\nhttps://github.com/someone/fork.git"])
+def test_publication_verifies_push_destination_before_mutation(release, approved_package, urls):
+    git, github, folder, key = approved_package
+    git.push_urls = urls
+    with pytest.raises(release.ReleaseError, match="push"):
+        release.publish(git, folder, str(key) + ".pub", github, "0.2.0")
+    assert not any(call[0] == "push" for call in git.commands)
+    assert not github.calls
+
+
+
+@pytest.mark.parametrize("configuration", ["pushurl", "insteadOf", "pushInsteadOf", "multiple", "mirror"])
+def test_effective_push_settings_are_checked_without_remote_mutation(release, tmp_path, configuration):
+    git = release.Git(tmp_path)
+    git.call("init", "-q")
+    official = "https://github.com/smartinezai/jittersim.git"
+    fork = "https://github.com/someone/fork.git"
+    git.call("remote", "add", "origin", official)
+    if configuration == "pushurl":
+        git.call("config", "remote.origin.pushurl", fork)
+    if configuration in {"insteadOf", "pushInsteadOf"}:
+        git.call("config", "url." + fork + "." + configuration, official)
+    if configuration == "multiple":
+        git.call("config", "--add", "remote.origin.pushurl", official)
+        git.call("config", "--add", "remote.origin.pushurl", fork)
+    if configuration == "mirror":
+        git.call("config", "remote.origin.pushurl", str(tmp_path / "mirror"))
+    with pytest.raises(release.ReleaseError, match="push"):
+        release.verified_push_destination(git)
+    assert not (tmp_path / "mirror").exists()
+
+
+@pytest.mark.parametrize("url", ["https://github.com/smartinezai/jittersim.git", "git@github.com:smartinezai/jittersim.git",
+                                  "ssh://git@github.com/smartinezai/jittersim.git"])
+def test_official_https_and_ssh_push_destinations_are_accepted(release, tmp_path, url):
+    git = release.Git(tmp_path)
+    git.call("init", "-q")
+    git.call("remote", "add", "origin", url)
+    assert release.verified_push_destination(git) == url
+
+
 def test_successful_closed_pipe_child_finishes_before_command_returns(release, tmp_path):
     import sys
     marker = tmp_path / "finished"
@@ -522,6 +568,7 @@ def test_bundle_verifies_signature_before_parsing_archive(release, signed, monke
     monkeypatch.setattr(release, "archive_record", lambda *args, **kwargs: pytest.fail("An unverified archive was parsed"))
     with pytest.raises(release.ReleaseError):
         release.bundle(folder, str(key) + ".pub")
+
 
 
 @pytest.mark.parametrize("kind", ["size_override", "sparse", "chain", "truncated", "raw_limit"])
@@ -610,6 +657,7 @@ def test_archive_entrypoint_refuses_non_regular_files(release, tmp_path, kind):
         os.mkfifo(source)
     with pytest.raises(release.ReleaseError, match="regular file"):
         release.archive_record(source)
+
 
 
 def test_unconfirmed_group_is_refused_without_reaping_its_guardian(release, monkeypatch):
