@@ -16,12 +16,12 @@ from playwright.sync_api import expect, sync_playwright
 
 TOKEN = "browser-test"
 PAGES = ("devices", "profiles", "schedules", "router", "traffic", "access", "measurements",
-         "activity", "diagnostics")
+         "activity", "diagnostics", "updates")
 # The most requests per simulated minute each page may make while it is shown and nothing is
 # being edited. These sit a little above what the page makes now, so they catch a poller that
 # starts asking more, not a small change in timing.
 BUDGET = {"devices": 120, "profiles": 80, "schedules": 195, "router": 105, "traffic": 130,
-          "access": 110, "measurements": 95, "activity": 95, "diagnostics": 100}
+          "access": 110, "measurements": 95, "activity": 95, "diagnostics": 100, "updates": 125}
 
 
 def start_fixture():
@@ -78,11 +78,15 @@ def watch(page):
         path = request.url.split("://", 1)[1].split("/", 1)[1].split("?", 1)[0]
         seen["/" + path] += 1
 
+    observed = set()
+
     def opened(request):
-        OPEN["now"] += 1
+        observed.add(request)
+        OPEN["now"] = len(observed)
 
     def closed(request):
-        OPEN["now"] -= 1
+        observed.discard(request)
+        OPEN["now"] = len(observed)
 
     page.on("request", on_request)
     page.on("request", opened)
@@ -286,7 +290,7 @@ def check_panic_stays_enabled(page, seen):
     expect(page.locator("#panic-button")).to_be_enabled()
     seen.clear()
     page.locator("#panic-button").click()
-    expect(page.locator("#message")).to_contain_text("Panic is queued and runs as soon as the current change finishes")
+    expect(page.locator("#message")).to_contain_text("Panic is sent now. It runs as soon as the Pi can take it")
     page.wait_for_timeout(300)
     assert seen["/api/normal-access"] == 1, dict(seen)
     expect(page.locator("#panic-button")).to_be_enabled()
@@ -311,19 +315,26 @@ def check_token_form(page):
 
 
 def check_one_save_is_small(page, seen):
-    """Saving one thing reads back far less than the whole dashboard."""
+    """A scoped save reads substantially less than a full current dashboard refresh."""
 
     go_to(page, "profiles")
     advance(page, 2)
+    # Pause scheduled polls while measuring the save's own reads. Network replies still run.
+    page.clock.pause_at(page.evaluate("Date.now()"))
+    seen.clear()
+    page.evaluate("refresh()")
+    full = sum(count for path, count in seen.items() if path.startswith("/api/"))
+    assert full > 0, dict(seen)
     page.locator("#profile-name").fill("Slow bus")
     page.locator("#profile-id").fill("slow-bus")
     seen.clear()
     page.locator("#profile-form button[type='submit']").click()
-    page.wait_for_timeout(2500)
-    reads = sum(count for path, count in seen.items() if path.startswith("/api/") and
-                path != "/api/profiles")
+    page.wait_for_function("!dashboardRefresh && !recentWrites.size && profiles.some(p => p.id === 'slow-bus')")
+    reads = sum(count for path, count in seen.items() if path.startswith("/api/") and path != "/api/profiles")
     assert 0 < seen["/api/profiles"] <= 3, dict(seen)
-    assert reads <= 14, (reads, dict(seen))
+    assert 0 < reads <= full * 0.75, (reads, full, dict(seen))
+    assert seen["/api/diagnostics"] == 0, dict(seen)
+    print("save-refresh", json.dumps({"scoped_reads": reads, "full_reads": full, "paths":dict(seen)}))
 
 
 def run():

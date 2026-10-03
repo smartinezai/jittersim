@@ -2937,6 +2937,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     });
 
     function setPrivateDataPanels(message, state = "Check token") {
+      if (typeof invalidateAdminTools === "function") invalidateAdminTools();
       privateDataPanelIds.forEach((panelId) => {
         element(panelId).textContent = message;
       });
@@ -7381,6 +7382,10 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     async function loadRandomWebsiteAnalytics() {
+      const revision = adminTokenRevision;
+      const generation = adminToolsGeneration;
+      const current = () => revision === adminTokenRevision && generation === adminToolsGeneration &&
+        (adminTokenVerified || adminTokenChecking);
       const status = element("random-website-status");
       const rows = element("random-website-rows");
       if (!element("admin-token").value.trim()) {
@@ -7395,6 +7400,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       status.textContent = "Loading randomized website choices...";
       try {
         const deviceData = await request("/api/devices", "GET");
+        if (!current()) return {ok:false};
         const deviceSelect = element("random-website-device");
         const selectedDevice = deviceSelect.value;
         deviceSelect.replaceChildren();
@@ -7416,18 +7422,45 @@ DASHBOARD_HTML = r"""<!doctype html>
           device_id: deviceSelect.value
         });
         const data = await request("/api/random-website-analytics?" + parameters.toString(), "GET");
-        if (requestVersion === randomWebsiteAnalyticsRequestVersion) {
+        if (current() && requestVersion === randomWebsiteAnalyticsRequestVersion) {
           renderRandomWebsiteAnalytics(data);
+          return {ok:true};
         }
       } catch (error) {
-        if (requestVersion !== randomWebsiteAnalyticsRequestVersion) return;
+        if (!current() || requestVersion !== randomWebsiteAnalyticsRequestVersion) return {ok:false};
         rows.replaceChildren();
         status.className = "analytics-status error";
         status.textContent = "Could not load randomized website history: " + error.message;
+        return {ok:false};
       }
     }
 
+    let adminToolsPhysicalRead = null;
+
     async function loadAdminTools() {
+      const revision = adminTokenRevision;
+      const generation = adminToolsGeneration;
+      const active = adminToolsPhysicalRead;
+      if (active) {
+        if (active.revision === revision && active.generation === generation) return active.promise;
+        return active.promise.catch(() => null).then(() => {
+          if (revision !== adminTokenRevision || generation !== adminToolsGeneration) return {ok:false,stale:true};
+          return loadAdminTools();
+        });
+      }
+      const owner = {revision, generation, promise:null};
+      owner.promise = Promise.resolve().then(() => fetchAdminTools(owner)).finally(() => {
+        if (adminToolsPhysicalRead === owner) adminToolsPhysicalRead = null;
+      });
+      adminToolsPhysicalRead = owner;
+      return owner.promise;
+    }
+
+    async function fetchAdminTools(owner) {
+      const {revision, generation} = owner;
+      const current = () => revision === adminTokenRevision && generation === adminToolsGeneration &&
+        (adminTokenVerified || adminTokenChecking);
+      if (!current()) return {ok:false,stale:true};
       if (!element("admin-token").value.trim()) {
         element("diagnostics-json").textContent = "Enter the admin token to inspect diagnostics.";
         element("action-history").textContent = "Enter the admin token to view recent actions.";
@@ -7439,8 +7472,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       try {
         const data = await request("/api/diagnostics", "GET");
+        if (!current()) return {ok:false,stale:true};
         element("diagnostics-json").textContent = JSON.stringify(data, null, 2);
       } catch (error) {
+        if (!current()) return {ok:false,stale:true};
         element("diagnostics-json").textContent = error.message;
         element("action-history").textContent = error.message;
         randomWebsiteAnalyticsRequestVersion += 1;
@@ -7453,18 +7488,21 @@ DASHBOARD_HTML = r"""<!doctype html>
       let actionHistoryLoaded = true;
       try {
         const data = await request("/api/action-history", "GET");
+        if (!current()) return {ok:false,stale:true};
         element("action-history").textContent = data.actions.length
           ? data.actions.map((action) => new Date(action.happened_at * 1000).toLocaleString() +
               " — " + action.action + " — " + action.status_code).join("\n")
           : "No admin actions have been recorded.";
       } catch (error) {
+        if (!current()) return {ok:false,stale:true};
         element("action-history").textContent = error.message;
         actionHistoryLoaded = false;
       }
-      await loadRandomWebsiteAnalytics();
+      const analytics = await loadRandomWebsiteAnalytics();
+      if (!current()) return {ok:false,stale:true};
       return {
         ok: true,
-        refreshComplete: actionHistoryLoaded,
+        refreshComplete: actionHistoryLoaded && Boolean(analytics && analytics.ok),
         message: actionHistoryLoaded
           ? "Token accepted. Diagnostics loaded."
           : "Token accepted. Diagnostics loaded, but action history could not be loaded."
@@ -7529,6 +7567,8 @@ DASHBOARD_HTML = r"""<!doctype html>
             locked.status = 403;
             throw locked;
           }
+          if (typeof loadUpdateStateAfterSignIn === "function") await loadUpdateStateAfterSignIn();
+          if (tokenRevision !== adminTokenRevision || !adminTokenVerified) return;
           await loadTrafficSettings();
           if (tokenRevision !== adminTokenRevision) return;
           await startTrafficSampling();
@@ -10768,7 +10808,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const failed = results.find((result) => result.status === "rejected");
       if (failed) throw failed.reason;
       // The saved update preference is read once the token has opened the page.
-      if (!dashboardLoaded) await loadUpdateCheckPreference();
+      // Accepted sign-in owns the first private update reads.
       dashboardLoaded = true;
       renderGettingStarted();
       populateWorkflowMenus();

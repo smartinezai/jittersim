@@ -66,3 +66,25 @@ A successful availability read only establishes connectivity. Keep a timed-out
 save outcome explicitly unconfirmed. Its POST count remains one through
 recovery, page changes and subsequent status reads. No read marks the save as
 successful and no recovery path repeats it.
+
+## Additional source review requirements implemented
+
+Private traffic cache entries belong to their credential revision. A pending
+physical read retains its slot until completion. Old connected-device success
+and failure cannot restore private content. Panic retries retain the original
+sign-in and a later Panic invalidates an earlier Apply's presentation while
+that earlier operation still releases its own physical busy state.
+
+Setting reads have separate bounded category generations. A write invalidates
+older reads and uncertainty recovery waits for them before starting a new
+physical GET. Relevant controls stay disabled during confirmation, write and
+recovery. Ordinary writes are never replayed. Restore status without an
+identified attempt remains explicitly unconfirmed. Diagnostics receives its
+captured owner rather than sampling credentials in a deferred callback.
+
+The current workflow now runs both polling and update-recovery browser
+journeys. Polling covers Updates with its actual bounded request counts and
+zero hidden-tab requests. Save measurement compares a scoped refresh with the
+actual full refresh while scheduled polls are paused, requiring at least a
+25 percent reduction and no unrelated diagnostics read. Earlier failed counts
+and browser attempts remain evidence rather than being relabeled as passes.

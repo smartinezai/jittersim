@@ -990,7 +990,7 @@ def test_diagnostics_failures_report_their_http_status():
         pytest.skip("Node.js is required to exercise the served dashboard")
     script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
     real = script[
-        script.index("async function loadAdminTools()") : script.index(
+        script.index("let adminToolsPhysicalRead =") : script.index(
             "async function checkAdminToken()"
         )
     ]
@@ -999,6 +999,7 @@ def test_diagnostics_failures_report_their_http_status():
 const assert = require("node:assert/strict");
 const nodes = new Map();
 let randomWebsiteAnalyticsRequestVersion = 0;
+let adminTokenRevision=0,adminToolsGeneration=0,adminTokenVerified=true,adminTokenChecking=false;
 let failure = null;
 function element(id) {
   if (!nodes.has(id)) nodes.set(id, {value: "fixture token", textContent: "", className: "",

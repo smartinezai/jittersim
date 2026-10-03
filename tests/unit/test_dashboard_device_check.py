@@ -32,6 +32,7 @@ const rendered = [];
 const openedCredentials = [];
 let adminTokenVerified = true;
 let adminTokenChecking = false;
+let adminTokenRevision = 0;
 let connectedDevicesRequestInFlight = false;
 let connectedRenderKey = null;
 let lastConnectedData = null;
@@ -46,6 +47,7 @@ function element(id) {
     removeAttribute(key) {this.attributes.delete(key)},
     getAttribute(key) {return this.attributes.get(key)},
     addEventListener(kind, callback) {this.listeners.set(kind, callback)},
+    replaceChildren() {},
     contains() {return false},
     querySelector() {return null}
   });
