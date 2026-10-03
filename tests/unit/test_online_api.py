@@ -333,8 +333,14 @@ def test_the_page_script_has_the_online_controls_and_never_a_token_field():
                    "online-daily-check", "online-install-automatically"):
         assert needle in script
     lowered = script.lower()
-    assert 'type="password"' not in lowered and "update-token" not in lowered
-    assert "set-token" in script
+    assert 'type="password"' not in lowered
+    # A command label is allowed. Credential inputs and submission fields are not.
+    import re
+    assert not re.search(r'<(?:input|textarea)\b[^>]*(?:token|password)', lowered)
+    assert not re.search(r'(?:name|id)=["\'](?:github-token|online-token)["\']', lowered)
+    assert 'id="update-token-command"' in script
+    from jittersim.api.server import DASHBOARD_HTML
+    assert 'brandInfo.command + " update set-token"' in DASHBOARD_HTML
     result = run_node("new Function(require('fs').readFileSync(%r,'utf8'))" % str(
         ROOT / "src/jittersim/api/workflows.js"))
     assert result.returncode == 0, result.stderr

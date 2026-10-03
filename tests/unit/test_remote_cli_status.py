@@ -30,7 +30,7 @@ def test_status_lists_every_affected_device_with_the_general_profile(dashboard, 
     assert code == 0
     prompt.assert_called_once()
     assert "Running. Your saved settings are applied. New changes apply on their own." in out
-    assert "General profile: Slow connection · active" in out
+    assert "Everyone: Slow connection · active" in out
     assert "7 devices affected:" in out
     assert "  Phone 7: Slow connection" in out
     assert "Protected laptop" not in out
@@ -50,7 +50,7 @@ def test_status_uses_each_device_profile_and_the_group_profile_first(dashboard, 
     serve_status(dashboard, general=None, clients=clients)
     code, out, _, _ = run(dashboard, capsys, "status")
     assert code == 0
-    assert "General profile: none" in out
+    assert "Everyone: none" in out
     assert "2 devices affected:" in out
     assert "  Tablet: Lossy" in out and "  Phone: Slow connection" in out
     assert "Guest" not in out
@@ -62,7 +62,7 @@ def test_status_when_the_network_is_reset(dashboard, capsys):
     code, out, _, _ = run(dashboard, capsys, "status")
     assert code == 0
     assert "Off. No traffic shaping is running." in out
-    assert "General profile: Slow connection · paused" in out
+    assert "Everyone: Slow connection · paused" in out
     assert "Profiles off" in out
     assert "Phone" not in out
 
