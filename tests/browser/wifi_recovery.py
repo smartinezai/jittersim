@@ -45,7 +45,7 @@ def check_wifi_recovery(page):
     expect(button).to_be_disabled()
     assert len(held) == 1
     held[0].continue_()
-    expect(field).to_have_value("JitterSim")
+    expect(field).to_have_value("TestNet")
     expect(button).to_be_enabled()
     assert len(requests) == 2
     page.unroute("**/api/access-point/reset-name")

@@ -97,7 +97,7 @@ def run():
                     expect(page.locator("#update-token-command")).to_have_text("sudo jittersim update set-token")
                     expect(page.locator("#release-status")).not_to_have_text("Sign in to read update status.")
                     assert any(url.endswith("/api/updates") for url in requested)
-                    expect(page.locator("#access-point-ssid")).to_have_value("JitterSim")
+                    expect(page.locator("#access-point-ssid")).to_have_value("TestNet")
                     sidebar_control(page, "#open-admin-credentials").click()
                     page.locator("#remember-admin-token").check()
                     page.locator("#close-credentials").click()

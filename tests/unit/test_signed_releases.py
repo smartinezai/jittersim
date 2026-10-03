@@ -861,8 +861,7 @@ def test_the_installer_turns_passwordless_staging_on_only_when_asked():
     assert lines[index + 1] == "fi"
     # After the manager that writes the rule is installed and never written by hand.
     assert index > lines.index(
-        'install -m 0644 -o root -g root "$SOURCE_DIR/src/jittersim/updates.py" '
-        "/usr/local/lib/jittersim-update.py")
+        'python3 -I "$SOURCE_DIR/src/jittersim/updates.py" bootstrap-manager')
     commands = "\n".join(line for line in lines if not line.startswith("#"))
     assert "sudoers" not in commands and "visudo" not in commands
     assert "NOPASSWD" not in commands

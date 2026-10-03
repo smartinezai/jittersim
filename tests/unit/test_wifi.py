@@ -23,7 +23,7 @@ class WifiRecoveryTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.executor.settings["802-11-wireless.ssid"] = name
                 result = self.applier.reset_wifi_name()
-                self.assertEqual(result, {"ssid": "JitterSim", "security": "WPA/WPA2"})
+                self.assertEqual(result, {"ssid": "TestNet", "security": "WPA/WPA2"})
                 self.assertEqual(self.executor.settings["802-11-wireless-security.psk"],
                                  "fixture-wifi-password")
                 self.assertEqual(self.executor.settings["802-11-wireless-security.proto"], "wpa,rsn")

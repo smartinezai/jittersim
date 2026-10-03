@@ -75,7 +75,7 @@ class SecurityCopyTests(unittest.TestCase):
                 self.assertEqual(self.executor.settings["802-11-wireless-security.proto"], proto)
                 before = dict(self.executor.settings)
                 reset = self.applier.reset_wifi_name()
-                before["802-11-wireless.ssid"] = "JitterSim"
+                before["802-11-wireless.ssid"] = "TestNet"
                 self.assertEqual(self.executor.settings, before)
                 self.assertEqual(reset["security"], mode)
                 self.assertFalse(self.executor.backups)

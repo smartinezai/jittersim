@@ -888,7 +888,7 @@ def _wifi_command(argv: Sequence[str]) -> int:
     arguments = parser.parse_args(argv)
     if not arguments.yes:
         try:
-            answer = input("Restore the Wi-Fi name to JitterSim and disconnect test clients? "
+            answer = input(f"Restore the Wi-Fi name to {DEFAULT_WIFI_NAME} and disconnect test clients? "
                            "The password stays the same. Type yes to continue: ")
         except EOFError:
             answer = ""
@@ -905,7 +905,7 @@ def _wifi_command(argv: Sequence[str]) -> int:
               "Check sudo systemctl status jittersim-helper.service "
               "and sudo nmcli connection show jittersim-ap.", file=sys.stderr)
         return 1
-    print("Wi-Fi name restored to JitterSim with " + result["security"] + ". "
+    print(f"Wi-Fi name restored to {DEFAULT_WIFI_NAME} with " + result["security"] + ". "
           "Reconnect test devices using the same password.")
     return 0
 

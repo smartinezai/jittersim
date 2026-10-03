@@ -121,4 +121,4 @@ def test_the_name_is_only_served_after_the_token_is_accepted(served):
     brand = json.loads(body)
     assert brand["name"] == "JitterSim"
     assert brand["command"] == "jittersim"
-    assert brand["default_ssid"] == "JitterSim"
+    assert brand["default_ssid"] == "TestNet"

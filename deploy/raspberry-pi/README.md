@@ -451,7 +451,7 @@ for current command behavior.
 
 To recover from a copied router network name, run `sudo jittersim wifi reset`
 on the Pi through its management connection or a local terminal. Add `--yes`
-to confirm without a prompt. The command restores `JitterSim` and keeps the
+to confirm without a prompt. The command restores `TestNet` and keeps the
 current password and security type. It restarts test Wi-Fi and needs the
 helper but works with the dashboard stopped. The dashboard has the same
 **Reset Wi-Fi name** control on its **Router and Wi-Fi** page.
@@ -523,7 +523,7 @@ sudo jittersim wifi reset --yes
 
 Use either command on the Pi through a management connection or local terminal.
 The first asks for confirmation. The second confirms without a prompt. Both
-restore the name to `JitterSim`, keep the current password and restart test
+restore the name to `TestNet`, keep the current password and restart test
 Wi-Fi. They require the helper service but work with the dashboard stopped.
 Saved profiles and household access rules are preserved.
 
@@ -1039,3 +1039,17 @@ backup from the same recovery point.
 Hardware acceptance still needs two Wi-Fi clients and the actual Pi: verify
 client isolation, DHCP and management access, a changed client address,
 startup restoration, normal access and any supported association rejection.
+
+Initial Wi-Fi setup preserves every existing credentials file. An empty,
+unreadable or nonregular `ap.env` needs recovery through management access.
+Setup also refuses an existing `jittersim-ap` profile assigned to another
+interface so it cannot move a possible management connection. Confirm the
+intended test interface before repairing that configuration.
+
+A setup interrupted during first profile creation leaves a secured inactive
+profile with `connection.stable-id` set to `jittersim-initial-ap-pending:<UUID>`.
+The installer refuses to reuse it. Through management access inspect the exact
+UUID, interface, AP mode, SAE security and disabled automatic connection.
+Recover the saved credentials or remove only that confirmed incomplete profile
+before running setup again. Do not remove an unrelated profile or the shared
+update lock file.
