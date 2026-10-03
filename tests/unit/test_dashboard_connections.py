@@ -1,6 +1,7 @@
 """Real HTTPS regressions for interrupted dashboard clients."""
 
 import json
+import logging
 import shutil
 import socket
 import ssl
@@ -279,6 +280,82 @@ class DashboardConnectionTests(unittest.TestCase):
 
     def test_incomplete_authenticated_body_makes_no_change(self) -> None:
         self._assert_next_client_recovers("body")
+
+    def _assert_expired_reader_request(self, phase: str, *, buffered: bool = False) -> None:
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(handler, record):
+                records.append(record)
+
+        capture = Capture()
+        api.LOGGER.addHandler(capture)
+        method = "parse_request" if phase == "headers" else "_read_json_body"
+        original = getattr(api.ControlRequestHandler, method)
+        expired = []
+        payload = b'{"enabled":true,"admin_password":"isolated-password"}'
+
+        def expire_reader(handler, *args, **kwargs):
+            if not expired:
+                if buffered:
+                    self.assertGreaterEqual(len(handler.rfile.peek(len(payload))), len(payload))
+                # Expire the real input reader. No exception is injected and a complete
+                # body already in the buffer remains valid after the input deadline.
+                handler.rfile.raw.extend_to(time.monotonic() - 1)
+                expired.append(True)
+            return original(handler, *args, **kwargs)
+
+        worker = threading.Thread(
+            target=self.server.serve_forever, kwargs={"poll_interval": 0.05}
+        )
+        try:
+            with patch.object(api.ControlRequestHandler, method, expire_reader), patch.object(
+                self.server, "handle_error", wraps=self.server.handle_error
+            ) as unhandled:
+                worker.start()
+                with self._connect() as client:
+                    if phase == "headers":
+                        client.sendall(b"GET /api/health HTTP/1.0\r\nHost: 127.0.0.1")
+                    else:
+                        client.sendall(
+                            b"POST /api/router/wifi HTTP/1.0\r\nHost: 127.0.0.1\r\n"
+                            b"Authorization: Bearer test-admin\r\nContent-Length: "
+                            + str(len(payload)).encode() + b"\r\n\r\n"
+                            + (payload if buffered else b"")
+                        )
+                    response = self._response(client)
+                with self._connect() as client:
+                    client.sendall(b"GET /api/health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+                    self.assertTrue(self._response(client).startswith(b"HTTP/1.0 200 OK"))
+                self._wait_for_idle_server()
+                unhandled.assert_not_called()
+            self.assertEqual(expired, [True])
+            self.assertFalse([record for record in records if record.levelno >= logging.ERROR])
+            if buffered:
+                self.assertTrue(response.startswith(b"HTTP/1.0 200 OK"), response)
+                self.assertEqual(self.helper_calls, [True])
+                history = self.repository.list_recent_actions()
+                self.assertEqual(len(history), 1)
+                self.assertEqual(history[0]["status_code"], 200)
+            else:
+                self.assertEqual(response, b"")
+                self.assertEqual(self.helper_calls, [])
+                self.assertEqual(self.repository.list_recent_actions(), ())
+            self.assertEqual(self.repository.list_profiles(), ())
+        finally:
+            self.server.shutdown()
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+            api.LOGGER.removeHandler(capture)
+
+    def test_expired_header_reader_closes_without_an_internal_error(self) -> None:
+        self._assert_expired_reader_request("headers")
+
+    def test_expired_body_reader_closes_without_a_failed_action(self) -> None:
+        self._assert_expired_reader_request("body")
+
+    def test_complete_buffered_body_remains_valid_after_the_input_deadline(self) -> None:
+        self._assert_expired_reader_request("body", buffered=True)
 
     def test_header_bytes_cannot_extend_the_input_deadline(self) -> None:
         self._assert_next_client_recovers("headers", drip=True)

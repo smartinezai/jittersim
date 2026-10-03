@@ -5120,7 +5120,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
     def handle(self) -> None:
         try:
             super().handle()
-        except (ConnectionError, ssl.SSLError):
+        except (ConnectionError, TimeoutError, socket.timeout, ssl.SSLError):
             self.close_connection = True
             LOGGER.info("dashboard client disconnected")
 
@@ -5185,7 +5185,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.INTERNAL_SERVER_ERROR
             content_type = "application/json"
             body = _json_bytes({"error": "stored configuration could not be read"})
-        except (ConnectionError, socket.timeout, ssl.SSLError):
+        except (ConnectionError, TimeoutError, socket.timeout, ssl.SSLError):
             raise
         except Exception:
             LOGGER.exception("control-plane response for %s failed", path)
@@ -5330,7 +5330,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.CONFLICT
             content_type = "application/json"
             body = _json_bytes({"error": "configuration could not be saved"})
-        except (ConnectionError, socket.timeout, ssl.SSLError):
+        except (ConnectionError, TimeoutError, socket.timeout, ssl.SSLError):
             raise
         except Exception:
             LOGGER.exception("control-plane request for %s failed", path)
