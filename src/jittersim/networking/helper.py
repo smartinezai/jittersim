@@ -26,6 +26,7 @@ from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_pa
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, NetworkPlan
 from jittersim.updates import UpdateError, request_update, stage_upload, update_status
 from jittersim.release_uploads import UploadBusy, prepare_lock
+from jittersim.request_workers import RequestWorkers
 
 from .access import AccessManager
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
@@ -1350,6 +1351,7 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
         self.operation_lock = threading.Lock()
         self.release_stage_lock = threading.Lock()
         self._request_slots = threading.BoundedSemaphore(MAX_HELPER_CONNECTIONS)
+        self._request_workers = RequestWorkers("jittersim-helper-request")
         self._prepare_socket_path()
         try:
             super().__init__(str(socket_path), HelperRequestHandler)
@@ -1359,6 +1361,7 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
             raise HelperError("could not create the helper socket") from error
 
     def process_request(self, request, client_address) -> None:
+        self._request_workers.reap()
         if not self._request_slots.acquire(blocking=False):
             try:
                 self._drain_rejected_request(request)
@@ -1371,10 +1374,12 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
                 self.shutdown_request(request)
             return
         try:
-            super().process_request(request, client_address)
-        except BaseException:
-            self._request_slots.release()
-            raise
+            self._request_workers.start(
+                lambda: self.process_request_thread(request, client_address),
+                abandon=lambda: self.shutdown_request(request), release=self._request_slots.release,
+            )
+        except Exception:
+            LOGGER.exception("helper worker startup failed")
 
     @staticmethod
     def _drain_rejected_request(request) -> None:
@@ -1391,15 +1396,10 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
                 return
             remaining -= len(chunk)
 
-    def process_request_thread(self, request, client_address) -> None:
-        try:
-            super().process_request_thread(request, client_address)
-        finally:
-            self._request_slots.release()
-
     def server_close(self) -> None:
         """Close the socket and remove it only when it is still a socket."""
 
+        self._request_workers.close()
         super().server_close()
         self._remove_socket_path()
 

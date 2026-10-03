@@ -30,6 +30,7 @@ from typing import Any, Collection, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim import release_uploads, updates
+from jittersim.request_workers import RequestWorkers
 from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.device_labels import (
@@ -11626,6 +11627,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         self._stop_connections = threading.Event()
         self._workers_lock = threading.Lock()
         self._active_workers = 0
+        self._request_workers = RequestWorkers("jittersim-request", self._uncertain_worker_start)
         self._reserved_requests: Set[socket.socket] = set()
         super().__init__(server_address, ControlRequestHandler)
 
@@ -11633,10 +11635,12 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     def active_workers(self) -> int:
         """Return how many requests are being handled right now."""
 
+        self._request_workers.reap()
         with self._workers_lock:
             return self._active_workers
 
     def process_request(self, request: socket.socket, client_address: Any) -> None:
+        self._request_workers.reap()
         with self._workers_lock:
             accepted = self._active_workers < MAX_DASHBOARD_WORKERS + RESERVED_PANIC_WORKERS
             if accepted:
@@ -11648,28 +11652,29 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             self._refuse_request(request)
             return
         try:
-            threading.Thread(
-                target=self._serve_request, args=(request, client_address),
-                name="jittersim-request", daemon=True,
-            ).start()
-        except BaseException:
-            with self._workers_lock:
-                self._active_workers -= 1
-            self.shutdown_request(request)
-            raise
+            self._request_workers.start(
+                lambda: self.process_request_thread(request, client_address),
+                abandon=lambda: self.shutdown_request(request), release=self._release_worker,
+            )
+        except Exception:
+            # The worker manager retains ambiguous ownership. The accept loop must
+            # not close a socket that a started worker may still be handling.
+            LOGGER.exception("dashboard worker startup failed")
+
+    def _release_worker(self) -> None:
+        with self._workers_lock:
+            self._active_workers -= 1
+
+    def _uncertain_worker_start(self) -> None:
+        self._stop_connections.set()
+        if self.scheduler is not None:
+            self.scheduler.halt()
 
     def is_reserved_request(self, request: socket.socket) -> bool:
         """Tell whether this request runs in a slot that is kept for Panic."""
 
         with self._workers_lock:
             return request in self._reserved_requests
-
-    def _serve_request(self, request: socket.socket, client_address: Any) -> None:
-        try:
-            self.process_request_thread(request, client_address)
-        finally:
-            with self._workers_lock:
-                self._active_workers -= 1
 
     def _refuse_request(self, request: socket.socket) -> None:
         """Tell a client over the limit to retry instead of leaving it hanging."""
@@ -13346,6 +13351,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         self._request_inputs.clear()
         self.router_operations.close()
         self.wifi_operations.close()
+        self._request_workers.close()
         super().server_close()
 
     def _record_wifi_outcome(self) -> None:
