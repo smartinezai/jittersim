@@ -295,3 +295,14 @@ on the coordinator's reviewed branch. Correct this checkout's authentication
 test setup and weak ETag expectation without duplicating the other owners'
 changes. The final combined candidate still needs its configured workflows.
 Focused checks and local receipts must not be described as hosted CI passing.
+
+### First-install source contract
+
+The first installer attempt starts from an already verified official signed
+archive extracted by root into a new private source folder outside all live
+appliance paths. `/root/jittersim-install-source` is the manual example. Its
+files remain root-owned with no group or other write permission. No credentials
+are copied into it. Installation and recovery receipts must name the final
+combined source. The manual instructions describe the accepted source contract.
+They do not claim a physical first-install pass. The update owner still owns
+the Mac bootstrap path and its exact final-source verification.
