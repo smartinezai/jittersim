@@ -55,7 +55,10 @@ jobs:
       - run: pip install . 'playwright==1.63.0'
       - run: python -m playwright install --with-deps chromium
       - run: python -m tests.browser.wifi_recovery
+      - run: python -m tests.browser.wifi_restart_reconnect
       - run: python -m tests.browser.dashboard_access
+      - run: python -m tests.browser.address_move
+      - run: python -m tests.browser.address_move_privacy
       - run: python -m tests.browser.general_profile
       - run: python -m tests.browser.saved_profiles
       - run: python -m tests.browser.dashboard_navigation

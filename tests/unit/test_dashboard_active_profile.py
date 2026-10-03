@@ -14,8 +14,8 @@ HTML = DASHBOARD_HTML.split("<script>")[0]
 NEEDS_NODE = pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
 SLOW = {"id": "slow", "name": "Slow office"}
 LOSSY = {"id": "lossy", "name": "Lossy mobile"}
-APPLIED = "General profile applied. Protected devices remain unaffected."
-STOPPED = "General profile stopped. Saved device rules resumed."
+APPLIED = "Profile applied for everyone. Protected devices keep normal access."
+STOPPED = "Stopped the profile for everyone. Saved device rules resumed."
 
 
 def between(start, end):
@@ -240,7 +240,7 @@ def test_stop_uses_the_saved_list_request_and_messages():
         "console.log(JSON.stringify({sent, messages, control: control()}));",
     )
     assert result["sent"] == [["/api/general-profile/stop", "POST", {}]]
-    assert result["messages"] == [["Stopping the general profile...", "working"], [STOPPED, "success"]]
+    assert result["messages"] == [["Stopping the profile for everyone...", "working"], [STOPPED, "success"]]
     assert result["control"]["value"] == ""
     assert result["control"]["button"] == "Apply to all devices" and result["control"]["disabled"] is True
 

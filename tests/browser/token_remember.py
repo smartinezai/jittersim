@@ -5,6 +5,7 @@ The page runs on a fake clock so the journey can move a day on in a moment.
 
 import json
 import os
+import re
 import selectors
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from playwright.sync_api import expect, sync_playwright
 
 TOKEN = "browser-test"
 KEY = "jittersim.remembered.admin-token"
+CHOICE_KEY = "jittersim.remembered.duration"
 MINUTE_MS = 60 * 1000
 HOUR_MS = 60 * MINUTE_MS
 DAY_MS = 24 * HOUR_MS
@@ -62,6 +64,11 @@ def run_width(browser, base, width, height):
     note = page.locator("#remember-admin-token-note")
 
     page.locator("#open-admin-credentials").click()
+    # Every browser starts with 24 hours and a plain warning about shared computers.
+    duration = page.locator("#remember-admin-duration")
+    expect(duration).to_have_value("24")
+    expect(duration.locator("option")).to_have_text(["24 hours", "7 days", "30 days"])
+    expect(page.locator("#remember-length-note")).to_contain_text("Longer is less safe on a shared computer")
     box.check()
     expect(note).to_have_text("Will be remembered for 24 hours once accepted.")
     check_token(page)
@@ -98,6 +105,33 @@ def run_width(browser, base, width, height):
     expect(box).not_to_be_checked()
     assert saved_entry(page) is None
     expect(page.locator("#admin-token")).to_have_value(TOKEN)
+
+    # A longer time can be chosen. The choice belongs to this browser and the token keeps it.
+    duration.select_option("168")
+    assert page.evaluate("(key) => window.localStorage.getItem(key)", CHOICE_KEY) == "168"
+    box.check()
+    expect(note).to_contain_text("Remembered until")
+    # A week away needs the date. A weekday alone could mean this week or next month.
+    expect(note).to_contain_text(re.compile(r"Remembered until \w{3},? \d{1,2} \w{3}"))
+    week = saved_entry(page)
+    assert week["value"] == TOKEN and week["hours"] == 168, week
+    assert 7 * DAY_MS - 2 * MINUTE_MS < week["expires"] - page.evaluate("Date.now()") <= 7 * DAY_MS, week
+    page.clock.fast_forward(6 * DAY_MS)
+    expect(box).to_be_checked()
+    assert saved_entry(page) == week
+    # Choosing 30 days starts the new time at once. Going back to 24 hours shortens it.
+    duration.select_option("720")
+    expect(note).to_contain_text("Remembered until")
+    month = saved_entry(page)
+    assert month["hours"] == 720, month
+    duration.select_option("24")
+    plain = saved_entry(page)
+    assert "hours" not in plain and sorted(plain) == ["expires", "value"], plain
+    assert_a_day_from_now(page, plain)
+    page.clock.fast_forward(25 * HOUR_MS)
+    expect(note).to_have_text("Forgot the saved token after 24 hours.")
+    assert saved_entry(page) is None
+    page.screenshot(path=f"test-results/token-remember-choice-{width}.png")
 
     assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
     assert not errors, errors

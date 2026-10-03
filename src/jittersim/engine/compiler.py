@@ -68,7 +68,7 @@ def compile_plan(
     """Compile device assignments into deterministic marks and directional queues."""
 
     if general_profile is not None and everyone_else is not None:
-        raise PlanError("a general profile already covers everyone else")
+        raise PlanError("a profile set for Everyone already covers everyone else")
 
     if len(protected_mac_addresses) > MAX_UNAFFECTED_DEVICES:
         raise PlanError("a plan cannot contain more than 256 protected MAC addresses")

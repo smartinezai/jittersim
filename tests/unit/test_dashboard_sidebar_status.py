@@ -78,7 +78,7 @@ def test_empty_input_gives_quiet_lines():
     assert result == {
         "visible": True,
         "loading": False,
-        "general": {"text": "General profile: none", "tone": "muted"},
+        "general": {"text": "Everyone: none", "tone": "muted"},
         "devices": {"summary": "Not running", "items": [], "more": 0},
         "lists": {"text": ""},
     }
@@ -116,7 +116,7 @@ def test_a_locked_dashboard_stays_hidden_while_loading():
 )
 def test_no_general_profile(state):
     assert status(generalState=state)["general"] == {
-        "text": "General profile: none",
+        "text": "Everyone: none",
         "tone": "muted",
     }
 
@@ -148,7 +148,7 @@ def test_general_profile_wording_follows_the_runtime_state(running, state, activ
         running=running, runtimeState=state, generalState=general(active=active, observed=state)
     )
     assert result["general"] == {
-        "text": "General profile: Shared slow · " + wording,
+        "text": "Everyone: Shared slow · " + wording,
         "tone": tone,
     }
 
@@ -160,7 +160,7 @@ def test_a_saved_change_does_not_make_the_general_profile_look_unapplied():
         running=True,
         clients=[client("Laptop", "02:00:00:00:00:01")],
     )
-    assert result["general"] == {"text": "General profile: Shared slow · active", "tone": "on"}
+    assert result["general"] == {"text": "Everyone: Shared slow · active", "tone": "on"}
     assert result["devices"]["items"] == [{"name": "Laptop", "profile": "Shared slow"}]
 
 
@@ -400,7 +400,7 @@ def test_an_unavailable_device_list_is_not_reported_as_no_affected_devices(gener
     assert "Laptop" not in json.dumps(result)
     # The lines that do not depend on the device list keep working.
     assert result["general"]["text"].startswith(
-        "General profile: " + ("Shared slow" if general_state else "none")
+        "Everyone: " + ("Shared slow" if general_state else "none")
     )
     assert result["lists"]["text"] == "Service lists: Video (every unprotected device)"
 
@@ -445,7 +445,7 @@ def test_names_are_returned_as_plain_text_for_the_page_to_insert_safely():
         generalState=general(name="<b>Bad</b>", active=True),
         clients=[client("<img src=x onerror=alert(1)>", "02:00:00:00:00:01")],
     )
-    assert result["general"]["text"] == "General profile: <b>Bad</b> · active"
+    assert result["general"]["text"] == "Everyone: <b>Bad</b> · active"
     assert result["devices"]["items"][0]["name"] == "<img src=x onerror=alert(1)>"
 
 

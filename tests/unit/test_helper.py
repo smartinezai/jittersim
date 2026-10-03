@@ -2750,7 +2750,7 @@ class GeneralProfileSupportClientTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(
-            HelperClientError, "Update the Pi helper before applying a general profile"
+            HelperClientError, "Update the Pi helper before applying a profile for everyone"
         ):
             client.check_general_profile_support()
 
@@ -2760,7 +2760,7 @@ class GeneralProfileSupportClientTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(
-            HelperClientError, "Update the Pi helper before applying a general profile"
+            HelperClientError, "Update the Pi helper before applying a profile for everyone"
         ):
             client.check_general_profile_support()
 

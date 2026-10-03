@@ -129,7 +129,7 @@ def check_access_and_help(page):
     page.get_by_label("Domains to block", exact=True).fill("unfinished.example.com")
     # Polling status must not overwrite an unfinished domain list.
     page.locator("#apply-button").click()
-    expect(page.locator("#message")).to_contain_text(re.compile(r"^(Started|Re-applied)"))
+    expect(page.locator("#message")).to_contain_text(re.compile(r"^(Started|Started)"))
     expect(page.get_by_label("Domains to block", exact=True)).to_have_value("unfinished.example.com")
     page.set_viewport_size({"width": 320, "height": 740})
     page.get_by_role("link", name="Profiles", exact=True).click()
@@ -328,7 +328,7 @@ def run():
                 draft.fill("unsaved.example")
                 # On a phone Start is in the Controls sheet of the bar at the bottom.
                 sidebar_control(page, "#apply-button").click()
-                expect(page.locator("#message")).to_contain_text(re.compile(r"^(Started|Re-applied)"))
+                expect(page.locator("#message")).to_contain_text(re.compile(r"^(Started|Started)"))
                 expect(draft).to_have_value("unsaved.example")
                 close_controls(page)
                 page.get_by_role("link", name=DEVICES_LINK).click()
@@ -555,7 +555,7 @@ def run():
                     ).click()
                 page.locator("#apply-button").click()
                 expect(page.locator("#message")).to_contain_text(
-                    re.compile(r"^(Started|Re-applied)")
+                    re.compile(r"^(Started|Started)")
                 )
                 page.set_viewport_size({"width": 390, "height": 844})
                 page.get_by_role("link", name=DEVICES_LINK).click()
