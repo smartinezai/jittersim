@@ -114,6 +114,7 @@ function setButtonBusy() {}
 function updateGeneralProfileControls() {}
 function updateTrafficDeviceOptions() {}
 function updateGroupMemberOptions() {}
+function updateGroupFormControls() {}
 function applyProfileToDevice() {}
 function connectedControlAction() {}
 function saveConnectedDeviceLabel() {}

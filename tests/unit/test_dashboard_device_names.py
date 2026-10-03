@@ -77,10 +77,10 @@ def test_the_raw_name_expressions_are_gone_from_the_dashboard(old):
 
 @pytest.mark.parametrize(
     "function",
-    ["updateTrafficDeviceOptions", "updateGroupMemberOptions", "loadDevicesForSchedule"],
+    ["updateTrafficDeviceOptions", "groupMemberOptions", "loadDevicesForSchedule"],
 )
 def test_each_device_picker_uses_the_picker_label(function):
-    assert "option.textContent = devicePickerLabel(device);" in function_body(function)
+    assert "devicePickerLabel(device)" in function_body(function)
 
 
 def test_the_traffic_discovery_card_title_uses_the_display_name():

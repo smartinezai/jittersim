@@ -701,7 +701,7 @@ def test_the_loaders_that_feed_the_line_refresh_it_and_say_they_loaded():
          "unaffectedMacs = data.devices"),
         ("async function loadDevicesForSchedule(", "async function loadGroups(",
          "savedDevicesLoaded = true;"),
-        ("function renderGroups(", "function renderGroupDataLimits(", "groupsLoaded = true;"),
+        ("function renderGroups(", "function renderGroupDataLimits(", "groupsLoaded = !data.error;"),
         ("async function loadPolicies(", "async function loadState(", "accessRulesSaved ="),
     ]
     for start, end, flag in loaders:

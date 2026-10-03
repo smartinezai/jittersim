@@ -110,6 +110,7 @@ function showMessage(text, kind) { messages.push([text, kind]); }
 function refreshAfterSuccess(message) { messages.push([message, "success"]); }
 function revealElement(node) { revealed.push(node); }
 function updateGeneralProfileControls() { renderSavedProfiles(); }
+function updateGroupFormControls() {}
 function setActionBusy(busy) { networkActionBusy = busy; updateGeneralProfileControls(); }
 async function loadPrivateDataPanel() {}
 async function loadGeneralProfile() {}

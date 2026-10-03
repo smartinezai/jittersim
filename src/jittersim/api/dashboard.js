@@ -3170,26 +3170,165 @@
       element("ad-blocking-status").textContent = "";
     });
 
-    function updateGroupMemberOptions() {
-      const select = element("group-devices");
-      if (document.activeElement === select) return;
-      const selected = new Set(Array.from(select.selectedOptions).map((option) => option.value));
-      select.replaceChildren();
-      savedDevices.forEach((device) => {
-        const option = document.createElement("option");
-        option.value = device.id;
-        option.textContent = devicePickerLabel(device);
-        option.selected = selected.has(option.value);
-        select.appendChild(option);
-      });
-      connectedClients.filter((device) => !device.assigned_device_id && device.association_verified && device.ipv4_address && !device.unaffected).forEach((device) => {
-        const option = document.createElement("option");
-        option.value = "live:" + device.mac_address;
-        option.textContent = (device.display_name || device.mac_address) + " (connected · unassigned)";
-        option.selected = selected.has(option.value);
-        select.appendChild(option);
+    let editingGroupId = null;
+    let groupSubmitting = false;
+    let groupSaveError = "";
+    const groupSelectedMembers = new Set();
+    let groupMemberChoices = new Map();
+
+    function groupFormProblem() {
+      if (!adminTokenVerified || !savedDevicesLoaded || !groupsLoaded || !profilesLoaded) {
+        return "Device, group and profile details are unavailable. Check your access or refresh the dashboard.";
+      }
+      if (editingGroupId && !groups.some((group) => group.id === editingGroupId)) {
+        return "This group no longer exists. Cancel these edits and create a new group.";
+      }
+      const profileId = element("group-profile").value;
+      if (profileId && !profiles.some((profile) => profile.id === profileId)) {
+        return "The selected profile is no longer available. Choose another profile.";
+      }
+      if (!groupSelectedMembers.size) {
+        return editingGroupId ? "A group needs at least one device. Delete the group to remove it." : "Select at least one device.";
+      }
+      if (groupSelectedMembers.size > 15) return "Select at most 15 devices.";
+      for (const key of groupSelectedMembers) {
+        const choice = groupMemberChoices.get(key);
+        if (!choice || choice.unavailable) return "A selected device is unavailable. Remove it or refresh to verify it again.";
+        if (choice.otherGroup) return "A selected device already belongs to " + choice.otherGroup + ". Remove it from that group first.";
+        if (choice.live && !profileId) return "Choose a group profile to add a device without a saved profile. It will also become the device's saved profile.";
+      }
+      return "";
+    }
+
+    function updateGroupFormControls() {
+      const count = groupSelectedMembers.size;
+      element("group-member-count").textContent = count + " of 15 selected";
+      const problem = groupFormProblem();
+      element("group-validation").textContent = problem || groupSaveError;
+      element("group-save").disabled = groupSubmitting || Boolean(problem);
+      element("group-cancel-edit").disabled = groupSubmitting;
+      element("group-profile-help").textContent = element("group-profile").value
+        ? "This replaces members' saved profiles while the group applies. Other active settings may take priority."
+        : "Choose one profile for the group or keep each device's saved profile.";
+      element("group-devices").querySelectorAll("input").forEach((input) => {
+        const choice = groupMemberChoices.get(input.value);
+        input.checked = groupSelectedMembers.has(input.value);
+        input.disabled = groupSubmitting || (!input.checked && (count >= 15 || Boolean(choice.otherGroup) || choice.unavailable));
       });
     }
+
+    function groupMemberOptions() {
+      const membership = new Map();
+      groups.forEach((group) => {
+        group.device_ids.forEach((id) => membership.set(id, group));
+      });
+      const choices = new Map();
+      const profileLabels = profileOptionLabels(profiles);
+      savedDevices.forEach((device) => {
+        const group = membership.get(device.id);
+        choices.set(device.id, {
+          name: devicePickerLabel(device),
+          otherGroup: group && group.id !== editingGroupId ? group.name : null,
+          detail: unaffectedMacs && unaffectedMacs.includes(device.mac_address)
+            ? "Protected from profiles" : "Saved profile: " + (profileLabels.get(device.profile_id) || device.profile_id)
+        });
+      });
+      if (connectedClientsAvailable) connectedClients.filter((device) =>
+        !device.assigned_device_id && device.association_verified && device.ipv4_address && !device.unaffected
+      ).forEach((device) => {
+        choices.set("live:" + device.mac_address, {
+          name: (device.display_name || device.mac_address) + " (" + device.ipv4_address + ")",
+          detail: "Connected · Needs a profile", live: true
+        });
+      });
+      groupSelectedMembers.forEach((key) => {
+        if (!choices.has(key)) choices.set(key, {
+          name: groupMemberChoices.get(key)?.name || key,
+          detail: "Unavailable · Uncheck to remove", unavailable: true
+        });
+      });
+      return choices;
+    }
+
+    function updateGroupMemberOptions() {
+      const container = element("group-devices");
+      const choices = groupMemberOptions();
+      groupMemberChoices = choices;
+      const rows = new Map(Array.from(container.querySelectorAll("label"), (row) => [row.querySelector("input").value, row]));
+      rows.forEach((row, key) => { if (!choices.has(key)) row.remove(); });
+      choices.forEach((choice, key) => {
+        let row = rows.get(key);
+        if (!row) {
+          row = document.createElement("label");
+          row.className = "group-device-choice";
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.value = key;
+          input.id = "group-member-" + encodeURIComponent(key);
+          input.addEventListener("change", () => {
+            groupSaveError = "";
+            if (input.checked) groupSelectedMembers.add(key);
+            else groupSelectedMembers.delete(key);
+            updateGroupFormControls();
+          });
+          const text = document.createElement("span");
+          text.append(document.createElement("strong"), document.createElement("small"));
+          row.append(input, text);
+          container.appendChild(row);
+        }
+        row.querySelector("strong").textContent = choice.name;
+        row.querySelector("small").textContent = choice.otherGroup
+          ? "Already in " + choice.otherGroup + ". Remove it from that group first." : choice.detail;
+      });
+      let empty = container.querySelector(".group-empty");
+      if (!choices.size) {
+        if (!empty) {
+          empty = document.createElement("p");
+          empty.className = "group-empty form-note";
+          container.appendChild(empty);
+        }
+        empty.textContent = savedDevicesLoaded ? "No eligible devices. Save a device or connect an unprotected device to the Pi's Wi-Fi." : "Loading devices…";
+      } else if (empty) empty.remove();
+      updateGroupFormControls();
+    }
+
+    function resetGroupEditing() {
+      editingGroupId = null;
+      groupSaveError = "";
+      groupSelectedMembers.clear();
+      groupMemberChoices.clear();
+      element("group-id").readOnly = false;
+      element("group-save").textContent = "Save group";
+      element("group-edit-status").hidden = true;
+      element("group-edit-status").textContent = "";
+      element("group-cancel-edit").hidden = true;
+      element("group-removal-help").hidden = true;
+      updateGroupMemberOptions();
+    }
+
+    element("group-form").addEventListener("reset", () => queueMicrotask(resetGroupEditing));
+    element("group-form").addEventListener("input", (event) => {
+      if (event.target.type === "checkbox") return;
+      groupSaveError = "";
+      updateGroupFormControls();
+    });
+    element("group-profile").addEventListener("change", updateGroupFormControls);
+    element("group-cancel-edit").addEventListener("click", () => stopEditing("group"));
+    privateDataLockHooks.push(() => {
+      savedDevices = [];
+      groups = [];
+      profiles = [];
+      connectedClients = [];
+      connectedClientsAvailable = false;
+      savedDevicesLoaded = false;
+      groupsLoaded = false;
+      profilesLoaded = false;
+      element("group-list").replaceChildren();
+      element("group-form").reset();
+      resetGroupEditing();
+      element("group-profile").replaceChildren(new Option("Keep each device's own profile", ""));
+      if (typeof clearDraft === "function") clearDraft("group-form");
+    });
 
     // A busy helper answers 502 for a moment. The list stays as it was, with a note, until the
     // third answer in a row fails or the server itself says the information is unavailable.
@@ -4135,7 +4274,8 @@
 
     function renderGroups(data) {
       groups = data.groups || [];
-      groupsLoaded = true;
+      groupsLoaded = !data.error;
+      updateGroupMemberOptions();
       renderApplySummary();
       const container = element("group-list");
       container.replaceChildren();
@@ -4157,16 +4297,17 @@
           : "Each device keeps its profile";
         heading.append(title, profile);
         const members = document.createElement("span");
-        members.textContent = "Devices: " + group.devices.map((device) => deviceDisplayName(device)).join(", ");
+        members.textContent = group.device_ids.length + (group.device_ids.length === 1 ? " device: " : " devices: ") +
+          group.devices.map((device) => deviceDisplayName(device)).join(", ");
         const actions = document.createElement("div");
         actions.className = "quota-actions";
         const editButton = document.createElement("button");
         editButton.type = "button";
-        editButton.textContent = "Edit";
+        editButton.textContent = "Edit devices";
         editButton.addEventListener("click", () => editGroup(group));
         const deleteButton = document.createElement("button");
         deleteButton.type = "button";
-        deleteButton.textContent = "Delete";
+        deleteButton.textContent = "Delete group";
         deleteButton.addEventListener("click", () => deleteGroup(group, deleteButton));
         actions.append(editButton, deleteButton);
         row.append(heading, members, actions);
@@ -4449,19 +4590,49 @@
     }
 
     function editGroup(group) {
+      if (groupSubmitting) {
+        showMessage("Wait for the group save to finish before editing another group.", "working");
+        return;
+      }
       if (typeof guardDraft === "function" && guardDraft("group-form", () => editGroup(group))) return;
+      editingGroupId = group.id;
+      groupSaveError = "";
       element("group-id").value = group.id;
+      element("group-id").readOnly = true;
       element("group-id").dataset.typed = "true";
       element("group-name").value = group.name;
       element("group-profile").value = group.profile_id || "";
-      Array.from(element("group-devices").options).forEach((option) => {
-        option.selected = group.device_ids.includes(option.value);
-      });
+      if (group.profile_id && !profiles.some((profile) => profile.id === group.profile_id)) {
+        element("group-profile").add(new Option(group.profile_id + " (no longer available)", group.profile_id));
+        element("group-profile").value = group.profile_id;
+      }
+      groupSelectedMembers.clear();
+      group.device_ids.forEach((id) => groupSelectedMembers.add(id));
+      element("group-save").textContent = "Save changes";
+      element("group-edit-status").textContent = "Editing " + group.name;
+      element("group-edit-status").hidden = false;
+      element("group-cancel-edit").hidden = false;
+      element("group-removal-help").hidden = false;
+      updateGroupMemberOptions();
       revealElement(element("group-form"));
     }
 
-    function deleteGroup(group, button) {
-      deleteItem("/api/groups/delete", { id: group.id }, "Device group deleted.", button);
+    async function deleteGroup(group, button) {
+      if (groupSubmitting) {
+        showMessage("Wait for the group save to finish before deleting a group.", "working");
+        return;
+      }
+      if (!window.confirm("Delete " + group.name + "? Members keep their saved profiles. The group's shared data limit, schedules and running scenarios are deleted.")) return;
+      setButtonBusy(button, true);
+      try {
+        await request("/api/groups/delete", "POST", { id: group.id });
+        if (editingGroupId === group.id) stopEditing("group");
+        refreshAfterSuccess("Device group deleted. Saved device profiles remain.");
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
     }
 
     function editGroupDataLimit(quota) {
@@ -4725,6 +4896,8 @@
         data = await request("/api/profiles", "GET");
       } catch (error) {
         if (revision !== profilesRequestRevision) return;
+        profilesLoaded = false;
+        updateGroupFormControls();
         setDeviceProfileAvailability("Could not load profiles. Choose Refresh profiles to try again.", false, true);
         throw error;
       }
@@ -4735,7 +4908,7 @@
       renderSidebarStatus();
       element("profiles-json").textContent = JSON.stringify(profiles, null, 2);
       const emptyLabels = {
-        "group-profile": "Use each device profile",
+        "group-profile": "Keep each device's own profile",
         "general-profile-select": "Choose a saved profile",
         "device-profile": profiles.length ? "Choose a saved profile" : "No saved profiles",
         "everyone-else-profile": "None: normal connection"
@@ -4775,7 +4948,10 @@
         const known = profiles.some((profile) => profile.id === previousSelection) ||
           (previousSelection === "" && emptyLabels[selectId] !== undefined);
         if (known) profileSelect.value = previousSelection;
-        else if (selectId === "general-profile-select" || selectId === "device-profile") profileSelect.value = "";
+        else if (selectId === "group-profile" && previousSelection) {
+          profileSelect.add(new Option(previousSelection + " (no longer available)", previousSelection));
+          profileSelect.value = previousSelection;
+        } else if (selectId === "general-profile-select" || selectId === "device-profile") profileSelect.value = "";
         if (selectId === "device-profile") {
           setDeviceProfileAvailability(!profiles.length
             ? "No saved profiles. Save a profile above first."
@@ -4784,6 +4960,7 @@
               : "", profiles.length > 0);
         }
       });
+      updateGroupFormControls();
       profilesLoadedHooks.forEach((hook) => hook());
       updateGeneralProfileControls();
     }
@@ -4810,7 +4987,14 @@
     }
 
     async function loadDevicesForSchedule() {
-      const data = await request("/api/devices", "GET");
+      let data;
+      try {
+        data = await request("/api/devices", "GET");
+      } catch (error) {
+        savedDevicesLoaded = false;
+        updateGroupFormControls();
+        throw error;
+      }
       savedDevices = data.devices;
       savedDevicesLoaded = true;
       renderApplySummary();
@@ -6146,15 +6330,24 @@
 
     element("group-form").addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (groupSubmitting) return;
+      const form = event.currentTarget;
       try {
-        const selectedIds = Array.from(element("group-devices").selectedOptions).map((option) => option.value);
+        const problem = groupFormProblem();
+        if (problem) throw new Error(problem);
+        const selectedIds = Array.from(groupSelectedMembers);
         const deviceIds = selectedIds.filter((id) => !id.startsWith("live:"));
         const connected = selectedIds.filter((id) => id.startsWith("live:")).map((id) => {
           const client = connectedClients.find((device) => "live:" + device.mac_address === id);
-          if (!client) throw new Error("A selected client disconnected. Refresh the list.");
+          if (!connectedClientsAvailable || !client || !client.association_verified || !client.ipv4_address || client.unaffected) {
+            throw new Error("A selected client is unavailable. Remove it or refresh to verify it again.");
+          }
           return {ipv4_address: client.ipv4_address, mac_address: client.mac_address};
         });
         if (!selectedIds.length) throw new Error("Select at least one device for the group.");
+        groupSubmitting = true;
+        form.querySelectorAll("input, select").forEach((field) => { field.disabled = true; });
+        updateGroupFormControls();
         const result = await request("/api/groups", "POST", {
           id: element("group-id").value,
           name: element("group-name").value,
@@ -6164,10 +6357,20 @@
         });
         savedDevices.filter((device) => deviceIds.includes(device.id)).forEach((device) => clearConnectedDrafts.add(device.mac_address));
         connected.forEach((device) => clearConnectedDrafts.add(device.mac_address));
-        refreshAfterSuccess((result.live_applied ? "Device group saved and applied." : result.message || "Device group saved.") + (result.warning ? " " + result.warning : ""));
+        const count = result.group.device_ids.length;
+        stopEditing("group");
+        refreshAfterSuccess((result.live_applied ? "Device group saved and applied." : result.message || "Device group saved.") +
+          " " + count + (count === 1 ? " device." : " devices.") + (result.warning ? " " + result.warning : ""));
       } catch (error) {
+        groupSaveError = error.message;
         showMessage(error.message, "error");
         await Promise.all([loadGroups(), loadConnectedDevices()]);
+      } finally {
+        groupSubmitting = false;
+        form.querySelectorAll("input, select").forEach((field) => { field.disabled = false; });
+        if (pendingFormSubmitButton === element("group-save")) pendingFormSubmitButton = null;
+        element("group-save").removeAttribute("aria-busy");
+        updateGroupFormControls();
       }
     });
 

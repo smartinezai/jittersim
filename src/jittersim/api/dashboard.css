@@ -464,6 +464,21 @@
       align-items: start;
     }
     label { display: grid; align-content: start; gap: 0.3rem; color: #c7d7eb; font-size: 0.88rem; }
+    .group-members { min-width: 0; margin: 1.2rem 0; padding: 0; border: 0; }
+    .group-members legend { color: #c7d7eb; font-weight: 600; }
+    .group-device-list { max-height: 22rem; overflow-y: auto; margin-top: 0.65rem; }
+    .group-device-choice {
+      display: flex; align-items: center; gap: 0.75rem; min-height: 3rem;
+      padding: 0.65rem; border-bottom: 1px solid #293e55; cursor: pointer;
+    }
+    .group-device-choice:has(input:checked) { background: #1b3046; }
+    .group-device-choice:has(input:focus-visible) { outline: 2px solid #91caff; outline-offset: -2px; }
+    .group-device-choice input { flex: 0 0 1.2rem; width: 1.2rem; height: 1.2rem; accent-color: #91caff; }
+    .group-device-choice span { min-width: 0; overflow-wrap: anywhere; }
+    .group-device-choice strong, .group-device-choice small { display: block; }
+    .group-device-choice small { margin-top: 0.2rem; color: #b6c8db; font-weight: 400; }
+    #group-validation:empty { display: none; }
+    .group-validation { color: #ffb2b2; }
     input {
       width: 100%;
       max-width: 100%;
@@ -700,7 +715,7 @@
       button { transition: none; }
       .toast.working .toast-icon, button[aria-busy="true"]::after { animation: none; }
     }
-  
+
 
     /* Cards and controls that arrived with main's dashboard. */
     .activity-card { margin-top: 1rem; }

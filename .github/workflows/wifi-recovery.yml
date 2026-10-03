@@ -74,6 +74,7 @@ jobs:
       - run: python -m tests.browser.dashboard_navigation
       - run: python -m tests.browser.protected_clients
       - run: python -m tests.browser.ad_blocking
+      - run: python -m tests.browser.group_devices
       - run: python -m tests.browser.impact_check
       - run: python -m tests.browser.sidebar_status
       - run: python -m tests.browser.apply_clarity

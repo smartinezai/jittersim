@@ -616,19 +616,29 @@
     </section>
     <section class="card">
       <h2>Group devices</h2>
-      <p class="form-note">Select saved devices or connected clients. Choose a profile override when adding an unassigned client. A device can belong to one group.</p>
+      <p class="form-note">Choose the devices in a group and the profiles they use. Each device can belong to one group.</p>
       <form id="group-form">
+        <p id="group-edit-status" class="form-note" hidden></p>
         <div class="fields">
           <label><span class="field-label">Group ID<span class="help-icon" tabindex="0" role="img" aria-label="Group ID help" data-help="A short code that identifies this group. Saving with an existing ID updates that group and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Group name is what people read.">?</span></span> <input id="group-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="family"></label>
           <label>Group name <input id="group-name" required placeholder="Family devices"></label>
-          <label>Profile override
-            <select id="group-profile"><option value="">Use each device profile</option></select>
-          </label>
-          <label>Devices
-            <select id="group-devices" multiple required size="5"></select>
+          <label>Profile for this group
+            <select id="group-profile" aria-describedby="group-profile-help"><option value="">Keep each device's own profile</option></select>
           </label>
         </div>
-        <button type="submit">Save group</button>
+        <p id="group-profile-help" class="form-note">Choose one profile for the group or keep each device's saved profile.</p>
+        <fieldset class="group-members">
+          <legend>Devices in this group</legend>
+          <p id="group-member-help" class="form-note">Check devices to add them. Uncheck devices to remove them. Changes take effect when you save.</p>
+          <p id="group-member-count" class="form-note" aria-live="polite">0 of 15 selected</p>
+          <div id="group-devices" class="group-device-list" aria-describedby="group-member-help"></div>
+        </fieldset>
+        <p id="group-removal-help" class="form-note" hidden>Removing a device keeps its saved profile. Other active settings may still apply.</p>
+        <p id="group-validation" class="group-validation" role="status"></p>
+        <div class="quota-actions">
+          <button id="group-save" type="submit">Save group</button>
+          <button id="group-cancel-edit" type="button" hidden>Cancel</button>
+        </div>
       </form>
       <div id="group-list" class="quota-list" aria-live="polite">No groups saved.</div>
     </section>
