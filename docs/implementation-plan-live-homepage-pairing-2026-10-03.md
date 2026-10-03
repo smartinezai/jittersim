@@ -39,8 +39,10 @@ capacity for Stop and Panic. A navigation already issued cannot be recalled.
   guard does not allow it. Pairing can be unavailable during recovery.
 - Before an older package starts, the installer converts the current profile
   JSON to the target package's supported fields and retains a private SQLite
-  backup. Conversion is idempotent and preserves other current settings.
-  It must be checked using the target reader before services start.
+  backup. Conversion is idempotent and preserves supported settings in the
+  database presented to it. Explicit updater rollback restores the selected
+  complete copy so later ordinary edits can revert. Check conversion using
+  the target reader before services start.
 
 ## Work and verification
 

@@ -81,5 +81,7 @@
     "The new dashboard browser step is registered but hosted CI has not run."
   ],
   "remote_changes": false,
-  "live_pi_changes": false
+  "live_pi_changes": false,
+  "rollback_documentation": "The converter preserves supported values in the presented database. Explicit updater rollback presents the selected complete recovery-copy database. This is a documentation clarification without changing the converter or updater.",
+  "rollback_contract_source": "61f65d83df5af0d3fee057cdc5bf6259875e75a4:src/jittersim/updates.py:2748"
 }
