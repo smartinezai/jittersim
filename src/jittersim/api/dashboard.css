@@ -87,7 +87,7 @@
     }
     button:hover:not(:disabled) { background: #233b55; border-color: #557391; }
     button:active:not(:disabled) { background: #132238; }
-    button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible, .help-icon:focus-visible {
+    button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible, .help-icon:focus-visible, #diagnostics-json:focus-visible {
       outline: 2px solid #70b7ff;
       outline-offset: 2px;
     }

@@ -9,6 +9,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.draft_navigation import check_draft_navigation
+from tests.browser.diagnostics_keyboard import check_diagnostics_keyboard
 
 PAGES = ("devices", "profiles", "schedules", "router", "traffic", "access", "diagnostics")
 
@@ -157,6 +158,7 @@ def run():
                     check_reveal(page)
                     if width == 1440:
                         check_draft_navigation(page)
+                        check_diagnostics_keyboard(page)
                     page.locator('[data-page-link="devices"]').click()
                     page.screenshot(path=f"test-results/dashboard-devices-{width}.png")
                     if width == 1280:
