@@ -430,14 +430,69 @@ def _write_signers(config, signers):
 
 def _forget_kept(root, name):
     """Drop the copy an interrupted restore kept so it can never come back later."""
-    (root / "keep" / name).unlink(missing_ok=True)
+    keep = _trust_keep_directory(root)
+    try:
+        (keep / name).unlink()
+    except FileNotFoundError:
+        return
+    _fsync_folder(keep)
+
+
+def _trust_keep_directory(root, *, create=False):
+    keep = root / "keep"
+    if create:
+        keep.mkdir(mode=0o700, exist_ok=True)
+    try:
+        info = keep.lstat()
+    except FileNotFoundError:
+        return keep
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        raise UpdateError("the saved current trust directory must belong to the administrator "
+                          "and must not be a link or writable by others")
+    if create:
+        _fsync_folder(root)
+    record = keep / ".trust-format.json"
+    if not record.exists() and not record.is_symlink():
+        if any(keep.iterdir()):
+            raise UpdateError("unfinished trust recovery was made by an older manager. "
+                              "Use administrator access to inspect its saved current settings "
+                              "before trying recovery again")
+        if create:
+            _replace_file(keep, ".format-", record, json.dumps({"version": 1}), 0o600)
+    else:
+        _check_trust_file(record)
+        if read_json(record) != {"version": 1}:
+            raise UpdateError("the saved current trust record is not understood")
+    return keep
+
+
+def _check_trust_file(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        raise UpdateError("saved current trust settings must be regular administrator-owned "
+                          "files and must not be writable by others")
+    if path.name == TOKEN_NAME and info.st_mode & 0o077:
+        raise UpdateError("the saved current update token must be private to the administrator")
+
+
+def _keys_for_change(config, root):
+    """Recovery hides the live list until it finishes. Root may still change the
+    saved current list so a revocation also applies to the next restore."""
+    path = config / SIGNERS_NAME
+    keep = _trust_keep_directory(root)
+    if not path.exists() and not path.is_symlink() and read_json(root / "request.json").get("rollback"):
+        return trusted_keys(keep)
+    return trusted_keys(config)
 
 
 def trust_key(text, *, label=None, config=CONFIG_ROOT, root=UPDATE_ROOT):
     """Add one public key to the trusted key list."""
     signer = parse_public_key(text, label)
     with update_lock(root):
-        signers = trusted_keys(config)
+        signers = _keys_for_change(config, root)
         for existing in signers:
             if existing.key == signer.key:
                 raise UpdateError(f"this key is already trusted as {existing.label}")
@@ -460,7 +515,7 @@ def untrust_key(name, *, config=CONFIG_ROOT, root=UPDATE_ROOT, sudoers=SUDOERS_P
     release it signed is removed."""
     messages = []
     with update_lock(root):
-        signers = trusted_keys(config)
+        signers = _keys_for_change(config, root)
         removed = [signer for signer in signers if name in (signer.label, signer.fingerprint)]
         if not removed:
             raise UpdateError(
@@ -1084,13 +1139,35 @@ def apply_update(
             """Copy the trust settings aside before the configuration is replaced. An
             interruption then leaves them out (nothing is trusted) and never brings back
             an older list."""
-            keep = root / "keep"
-            keep.mkdir(mode=0o700, exist_ok=True)
+            keep = _trust_keep_directory(root, create=True)
+            # Validate existing snapshots before changing any live folder.
+            for name in PRESERVED_CONFIG:
+                _check_trust_file(keep / name)
+            trusted_keys(keep)
             for name in PRESERVED_CONFIG:
                 current = config / name
+                _check_trust_file(current)
+                # The filtered restore never copies old trust into the live
+                # configuration. A live file therefore includes any later root
+                # change even if that change was interrupted before deleting keep.
                 if current.is_file() and not current.is_symlink():
-                    shutil.copy2(current, keep / name)
+                    copy_trust_setting(current, keep / name)
+            trusted_keys(keep)
             return keep
+
+        def copy_trust_setting(source, destination):
+            """A failed copy must not leave a partial token or key list for retry."""
+            descriptor, temporary = tempfile.mkstemp(prefix=".trust-", dir=destination.parent)
+            os.close(descriptor)
+            try:
+                shutil.copy2(source, temporary)
+                Path(temporary).chmod(0o600 if destination.name == TOKEN_NAME else 0o644)
+                with open(temporary, "rb") as handle:
+                    os.fsync(handle.fileno())
+                os.replace(temporary, destination)
+                _fsync_folder(destination.parent)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
 
         def put_back_trust_settings(keep):
             for name in PRESERVED_CONFIG:
@@ -1099,8 +1176,9 @@ def apply_update(
                 if restored.is_symlink() or restored.exists():
                     restored.unlink()
                 if (keep / name).is_file():
-                    shutil.copy2(keep / name, restored)
+                    copy_trust_setting(keep / name, restored)
             shutil.rmtree(keep)
+            _fsync_folder(root)
 
         def restore():
             if not (backup / "complete.json").exists():
@@ -1121,7 +1199,13 @@ def apply_update(
             for name, destination in (("code", code), ("config", config), ("data", data)):
                 if destination.exists():
                     shutil.rmtree(destination)
-                shutil.copytree(backup / name, destination, symlinks=True)
+                # Older recovery copies contain the signer list and token. They
+                # must never become live even if a later copy is interrupted.
+                ignore = (
+                    lambda folder, names: PRESERVED_CONFIG
+                    if Path(folder) == backup / "config" else ()
+                ) if name == "config" else None
+                shutil.copytree(backup / name, destination, symlinks=True, ignore=ignore)
                 if name in ownership:
                     uid, gid = ownership[name]
                     for entry in [destination, *destination.rglob("*")]:
@@ -1152,8 +1236,8 @@ def apply_update(
                     uid, gid = ownership["access"]
                     for entry in [access, *access.rglob("*")]:
                         os.chown(entry, uid, gid, follow_symlinks=False)
-            if (backup / "manager.py").exists():
-                install_manager(backup / "manager.py", manager)
+            # The recovery manager is separate from the application. Rolling it
+            # back could undo trust protections needed by later recovery attempts.
             restart_services()
 
         def wait_healthy():
