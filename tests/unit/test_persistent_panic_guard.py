@@ -147,7 +147,22 @@ def test_damaged_or_untrusted_record_never_becomes_clear_initial_state(tmp_path,
 def test_first_provision_migrates_retained_panic_and_preserves_concurrent_stop(tmp_path):
     persistent = guard(tmp_path)
     legacy = tmp_path / "gateway.json"
-    legacy.write_text(json.dumps({"version": 1, **stopped_state(True)}))
+    legacy.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "persistence_enabled": True,
+                "gateway_state": "available",
+                "outage_observed": False,
+                "outage_stop_latched": False,
+                "reset_pending": False,
+                "recovery_pending": False,
+                "consecutive_failures": 0,
+                "consecutive_successes": 2,
+                **stopped_state(True),
+            }
+        )
+    )
     assert persistent.provision(legacy) == stopped_state(True)
     clear = {
         "version": 1,
@@ -289,3 +304,49 @@ def test_failed_gateway_save_is_preserved_in_persistent_guard_after_runtime_loss
     with helper(short_path, panic_guard=persistent) as (_, client):
         with pytest.raises(helper_module.HelperClientError, match="recovery is not confirmed"):
             client.control_revision()
+
+
+@pytest.mark.parametrize("entry", ["access-boot", "helper"])
+@pytest.mark.parametrize("legacy", [{"version": 1}, {"version": True}])
+def test_malformed_present_legacy_gateway_never_provisions_clear_or_enables_saved_policy(
+    short_path, monkeypatch, entry, legacy
+):
+    persistent = guard(short_path)
+    legacy_path = short_path / "gateway-state.json"
+    legacy_path.write_text(json.dumps(legacy))
+    manager = access.AccessManager(
+        executor=AccessExecutor(short_path),
+        topology=Topology("eth0", "wlan0"),
+        directory=short_path / "access",
+        runtime_path=short_path / "runtime.json",
+    )
+    manager.directory.mkdir()
+    saved = AccessPlan()
+    manager.apply(replace(saved, options=replace(saved.options, enabled=True)))
+    calls = []
+    original = manager.apply
+
+    def apply(plan, **kwargs):
+        calls.append(plan)
+        assert plan is not None and not plan.options.enabled
+        return original(plan, **kwargs)
+
+    monkeypatch.setattr(manager, "apply", apply)
+    if entry == "access-boot":
+        monkeypatch.setattr(access, "AccessManager", lambda **kwargs: manager)
+        monkeypatch.setattr(access, "PanicGuard", lambda: persistent)
+        monkeypatch.setattr(access, "ACCESS_RUNTIME", short_path / "access-policy.json")
+        assert access.main([]) == 0
+    else:
+        service = helper_module.HelperService(
+            NetworkApplier(executor=FakeExecutor(), topology=Topology("eth0", "wlan0")),
+            access_manager=manager,
+            gateway_state_path=legacy_path,
+            panic_guard=persistent,
+        )
+        assert helper_module.restore_access_at_start(
+            manager, panic_stopped=service._panic_stop_latched
+        )
+        assert service._panic_recovery_failed
+    assert calls and all(plan is not None and not plan.options.enabled for plan in calls)
+    assert persistent.read() is None

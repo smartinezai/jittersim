@@ -1,6 +1,7 @@
 """Root-only stop intent kept outside runtime files and release backups."""
 
 import fcntl
+import hashlib
 import json
 import os
 import secrets
@@ -15,6 +16,12 @@ PANIC_GUARD_FIELDS = (
     "panic_recovery_failed",
     "control_revision_required",
 )
+PANIC_COMPATIBILITY_FILES = (
+    "src/jittersim/panic_guard.py",
+    "src/jittersim/networking/helper.py",
+    "src/jittersim/networking/access.py",
+)
+PANIC_COMPATIBILITY_MAX_FILE_BYTES = 1024 * 1024
 
 
 class PanicGuardError(OSError):
@@ -35,6 +42,71 @@ def validate_panic_guard(state):
     ):
         raise PanicGuardError("Panic stop state is inconsistent")
     return dict(state)
+
+
+def check_panic_candidate(state, candidate_code, approved_sources, *, owner_uid=0):
+    """Require exact reviewed startup consumers once Panic protection is required."""
+
+    state = validate_panic_guard(state)
+    if not any(state[field] for field in PANIC_GUARD_FIELDS):
+        return
+    refused = "The selected package cannot preserve Panic protection. Keep the current package."
+    if (
+        not isinstance(approved_sources, (list, tuple))
+        or not 1 <= len(approved_sources) <= 32
+        or any(
+            not isinstance(bundle, dict)
+            or set(bundle) != set(PANIC_COMPATIBILITY_FILES)
+            or any(
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+                for value in bundle.values()
+            )
+            for bundle in approved_sources
+        )
+    ):
+        raise PanicGuardError(refused)
+    observed = {}
+    for name in PANIC_COMPATIBILITY_FILES:
+        descriptors = []
+        try:
+            current = os.open(candidate_code, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            descriptors.append(current)
+            for component in Path(name).parts[:-1]:
+                current = os.open(
+                    component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current
+                )
+                descriptors.append(current)
+            for directory in descriptors:
+                metadata = os.fstat(directory)
+                if metadata.st_uid != owner_uid or metadata.st_mode & 0o022:
+                    raise PanicGuardError(refused)
+            descriptor = os.open(
+                Path(name).name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=current
+            )
+            with os.fdopen(descriptor, "rb") as source:
+                metadata = os.fstat(source.fileno())
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                    or metadata.st_uid != owner_uid
+                    or metadata.st_mode & 0o022
+                ):
+                    raise PanicGuardError(refused)
+                contents = source.read(PANIC_COMPATIBILITY_MAX_FILE_BYTES + 1)
+            if len(contents) > PANIC_COMPATIBILITY_MAX_FILE_BYTES:
+                raise PanicGuardError(refused)
+            observed[name] = hashlib.sha256(contents).hexdigest()
+        except OSError as error:
+            raise PanicGuardError(refused) from error
+        finally:
+            for directory in reversed(descriptors):
+                os.close(directory)
+    # The standalone update manager owns the reviewed allowlist. Never learn
+    # compatibility from candidate labels or imports into a replaced environment.
+    if not any(bundle == observed for bundle in approved_sources):
+        raise PanicGuardError(refused)
 
 
 class PanicGuard:
@@ -175,7 +247,26 @@ class PanicGuard:
                     raise PanicGuardError("Existing Panic stop record is too large")
                 try:
                     old = json.loads(contents.decode("utf-8"))
-                    if not isinstance(old, dict) or old.get("version") != 1:
+                    if (
+                        not isinstance(old, dict)
+                        or type(old.get("version")) is not int
+                        or old["version"] != 1
+                        or old.get("gateway_state") not in ("unknown", "available", "unavailable")
+                        or any(
+                            type(old.get(field)) is not bool
+                            for field in (
+                                "persistence_enabled",
+                                "outage_observed",
+                                "outage_stop_latched",
+                                "reset_pending",
+                                "recovery_pending",
+                            )
+                        )
+                        or type(old.get("consecutive_failures")) is not int
+                        or not 0 <= old["consecutive_failures"] <= 3
+                        or type(old.get("consecutive_successes")) is not int
+                        or not 0 <= old["consecutive_successes"] <= 2
+                    ):
                         raise ValueError("invalid state")
                     for field in PANIC_GUARD_FIELDS:
                         if field in old:
