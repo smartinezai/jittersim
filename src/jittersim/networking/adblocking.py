@@ -5,11 +5,13 @@ import fcntl
 import grp
 import json
 import os
+import pwd
 import re
 import secrets
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -38,6 +40,7 @@ from .executor import CommandExecutionError, SubprocessExecutor
 from .topology import Topology
 
 POLICY_FILE = Path("/etc/jittersim/adblocking.json")
+INTENT_FILE = Path("/var/lib/jittersim-control/adblocking-intent.json")
 LOCK_FILE = Path("/run/jittersim/adblocking.lock")
 STATUS_FILE = Path("/run/jittersim/adblocking-status.json")
 LIST_INFO_FILE = Path("/var/lib/jittersim-adblocking/list.json")
@@ -159,6 +162,7 @@ class AdStore:
         active_path=ACTIVE_FILE,
         status_path=STATUS_FILE,
         group_id=None,
+        intent_path=INTENT_FILE,
     ):
         self.routing = routing
         self.path = path
@@ -166,6 +170,7 @@ class AdStore:
         self.active_path = active_path
         self.status_path = status_path
         self.group_id = group_id
+        self.intent_path = intent_path
 
     @contextmanager
     def lock(self):
@@ -190,7 +195,7 @@ class AdStore:
             {
                 "mac_addresses": [],
                 "allowed_domains": [],
-                "running": True,
+                "running": False,
                 "generation": "",
                 "update_request": "",
             },
@@ -206,7 +211,18 @@ class AdStore:
             raise ValueError("Invalid ad-blocking generation")
         if not isinstance(value.get("update_request"), str) or len(value["update_request"]) > 32:
             raise ValueError("Invalid blocklist update request")
+        # Release recovery restores settings but must never reverse a later stop.
+        intent = read_json(self.intent_path, {"version": 1, "running": False})
+        if (
+            type(intent.get("version")) is not int or intent["version"] != 1
+            or type(intent.get("running")) is not bool
+        ):
+            raise ValueError("Invalid ad-blocking stop intent")
+        value["running"] = intent["running"]
         return value
+
+    def _intent(self, running):
+        write_json(self.intent_path, {"version": 1, "running": running})
 
     def _clear(self):
         self.routing.clear()
@@ -233,10 +249,13 @@ class AdStore:
                     state["update_request"] = secrets.token_hex(8)
                 write_json(self.path, state, self.group_id)
                 self._clear()
+                if resume:
+                    self._intent(True)
         return self.status()
 
     def pause(self):
         with self.lock():
+            self._intent(False)
             state = self.read()
             state.update(running=False, generation=secrets.token_hex(8))
             write_json(self.path, state, self.group_id)
@@ -267,6 +286,7 @@ class AdStore:
                 state.update(running=True, generation=secrets.token_hex(8))
                 write_json(self.path, state, self.group_id)
                 self._clear()
+                self._intent(True)
 
     def status(self):
         desired = self.read()
@@ -283,18 +303,18 @@ class AdStore:
             status, ready = {}, False
         message = status.get("message", "Waiting for the ad-blocking service.")
         ready = ready and not desired["suspended"]
-        if not desired["running"]:
+        if not desired["mac_addresses"]:
+            message = "Ad blocking is off."
+        elif not desired["running"]:
             message = "Ad blocking is paused."
         elif desired["suspended"]:
             message = "Waiting for household DNS rules to finish applying."
-        elif not desired["mac_addresses"]:
-            message = "Ad blocking is off."
         elif not ready and message.startswith("Ad blocking is active."):
             message = "Waiting for the ad-blocking service."
         return {
             "available": True,
             "ready": bool(ready),
-            "paused": not desired["running"],
+            "paused": bool(desired["mac_addresses"]) and not desired["running"],
             "domain_count": status.get("domain_count", 0),
             "updated_at": status.get("updated_at", 0),
             "message": message,
@@ -356,7 +376,7 @@ def healthy():
         return False
 
 
-def download_domains():
+def download_bytes():
     deadline = time.monotonic() + MAX_DOWNLOAD_SECONDS
     data = bytearray()
     with requests.get(
@@ -368,7 +388,20 @@ def download_domains():
             if time.monotonic() >= deadline or len(data) + len(chunk) > MAX_LIST_BYTES:
                 raise ValueError("The blocklist download exceeded its limit")
             data.extend(chunk)
-    domains = parse_hosts(bytes(data))
+    return bytes(data)
+
+
+def download_domains():
+    # DNS resolution and a slow partial HTTP chunk must share the same deadline.
+    # A killed fetch cannot occupy the single worker or delay a later refresh.
+    result = subprocess.run(
+        [sys.executable, "-m", "jittersim.networking.adblocking", "--fetch-domains"],
+        check=True,
+        timeout=MAX_DOWNLOAD_SECONDS,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    domains = parse_hosts(result.stdout)
     if len(domains) < 100:
         raise ValueError("The downloaded blocklist is unexpectedly small")
     return domains
@@ -514,8 +547,10 @@ class AdController:
             ):
                 committed = False
                 with self.store.lock():
+                    latest = self.store.read()
                     if (
-                        self.store.read()["generation"] == desired["generation"]
+                        latest["running"] and not latest["suspended"]
+                        and latest["generation"] == desired["generation"]
                         and read_access(self.access_path).digest() == key[2]
                     ):
                         self.store.routing.refresh(desired["mac_addresses"])
@@ -548,9 +583,22 @@ class AdController:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run optional ad blocking for protected devices.")
-    parser.add_argument("--test-interface", required=True)
+    parser.add_argument("--test-interface")
     parser.add_argument("--clear-only", action="store_true")
+    parser.add_argument("--fetch-domains", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.fetch_domains:
+        if args.test_interface or args.clear_only:
+            parser.error("A list fetch cannot change routing")
+        if os.geteuid() == 0:
+            account = pwd.getpwnam("jittersim")
+            os.setgroups([account.pw_gid])
+            os.setgid(account.pw_gid)
+            os.setuid(account.pw_uid)
+        sys.stdout.buffer.write(download_bytes())
+        return 0
+    if not args.test_interface:
+        parser.error("--test-interface is required")
     store = AdStore(AdRouting(args.test_interface), group_id=grp.getgrnam("jittersim").gr_gid)
     if args.clear_only:
         with store.lock():
@@ -581,3 +629,7 @@ def main(argv=None):
     finally:
         controller.close()
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

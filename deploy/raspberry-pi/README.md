@@ -1247,6 +1247,8 @@ Household rule changes suspend ads until the new rules finish applying.
 
 The list comes from the fixed [StevenBlack hosts source](https://github.com/StevenBlack/hosts).
 Downloads have an 8 MiB limit, a 200,000-domain limit and one worker.
+A separate process enforces a 20-second deadline including DNS resolution
+and slow partial replies. It drops root identity before network access.
 The resolver uses one shared advertising tree, bounded caches and 256
 concurrent query slots. Updates replace a validated list atomically and
 retain the last list on download failure. After three failed automatic
@@ -1256,6 +1258,10 @@ No arbitrary remote source URL is accepted.
 Removing protection also removes the device's switch. The configuration
 database and root settings are covered by existing recovery copies.
 The downloaded list is a reproducible cache in `/var/lib/jittersim-adblocking`.
+The durable run or stop choice is kept outside recovery copies in the
+root-private `/var/lib/jittersim-control/adblocking-intent.json`.
+Restoring earlier settings cannot reverse a later Panic. Missing intent
+keeps selected devices paused until explicit Start or enabling a switch.
 The updater includes the new unit in stop, health and rollback handling.
 Recovery to a release without the feature removes the added unit while
 preserving compatibility with older recovery metadata. The five-second

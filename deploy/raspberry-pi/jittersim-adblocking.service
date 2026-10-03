@@ -25,7 +25,7 @@ ProtectHome=true
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
-ReadWritePaths=/etc/jittersim /var/lib/jittersim-adblocking /run/jittersim
+ReadWritePaths=/etc/jittersim /var/lib/jittersim-adblocking /var/lib/jittersim-control /run/jittersim
 RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
 
 [Install]

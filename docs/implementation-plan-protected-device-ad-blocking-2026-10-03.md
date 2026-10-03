@@ -134,12 +134,20 @@ settings generations and control revisions prevent a stale health check or
 queued switch change from reversing Panic. Reset and Panic pause ads without
 deleting switches. Explicit Start or enabling a switch can resume blocking.
 Automatic profile refresh cannot resume it.
+The durable run or stop choice is stored in the root-private
+`/var/lib/jittersim-control/adblocking-intent.json` outside release recovery
+copies. Restoring older settings cannot reverse a later Panic. Missing or
+unreadable intent cannot grant routing permission. Explicit Start or enable
+publishes permission only after saving settings and clearing old routing.
 
 Domain downloads have fixed byte, domain, worker and retry limits. The
 current public list was accepted with 72,233 domains in 2,220,527 bytes.
 Downloads are limited to 8 MiB and 200,000 domains. One worker downloads a
 fixed HTTPS source with no redirects. Three failed automatic attempts defer
 further attempts for a day. The last validated list is retained on failure.
+A separate fetch process has a hard 20-second deadline that also covers DNS
+resolution and a response trickling too slowly to complete a read. It drops
+root identity before fetching. Killing it frees the single update worker.
 There are at most 256 allowed domains and 256 selected devices. Root state
 files are limited to 128 KiB. DNS caches and concurrent work are bounded.
 The advertising tree is stored once rather than copied into every view.
@@ -189,6 +197,10 @@ restart blocking. A fresh explicit enable can resume it. Missing ad settings
 after a latched Panic start paused when they are reconstructed. An access
 transition clears ad routing while household rules change. It retains the
 latest saved pause choice even if Panic arrives during that transition.
+The final routing check verifies current run permission as well as the
+settings generation. A restored older generation cannot renew a lease after
+Panic. Focused tests restore backed-up settings both after a stop and during
+the health probe. They also verify absent and invalid stop intent.
 
 The updater still verifies exact reviewed source digests before migrating
 persistent Panic state. The feature records its helper and access digests
@@ -207,3 +219,8 @@ passed. Another 156 update and compatibility checks passed with one expected
 platform skip. The first full diagnostic run found the retired button word,
 a redundant capability and source digest updates. Those were corrected.
 The final full run must use the complete corrected source.
+
+The switch save journey checks a saved change whose reply is lost. A fresh
+read restores the actual saved choice without repeating the write and keeps
+keyboard focus. Newer notices and signing out take priority over a late
+reply. The desktop and phone browser checks cover these cases.

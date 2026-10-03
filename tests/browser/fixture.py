@@ -299,7 +299,7 @@ def main():
         topology = Topology("eth0", "wlan0")
         ad_blocking = AdStore(AdRouting("wlan0", executor), path=root / "ad-policy.json",
                               lock_path=root / "ad-lock", active_path=root / "ad-active.json",
-                              status_path=root / "ad-status.json")
+                              status_path=root / "ad-status.json", intent_path=root / "ad-intent.json")
         # Household access rules run against the same simulated commands.
         access_manager = FixtureAccessManager(
             executor=executor, topology=topology, directory=root / "access",

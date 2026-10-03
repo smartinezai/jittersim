@@ -429,7 +429,7 @@ class HelperService:
                         return refused
                     if payload.get("resume") and self._panic_recovery_failed:
                         return {"ok": False, "error": "Retry Panic before resuming ad blocking."}
-                    if self._panic_stop_latched and not self._ad_blocking_store.path.exists():
+                    if self._panic_stop_latched and not self._ad_blocking_store.intent_path.exists():
                         self._ad_blocking_store.pause()
                 status = (
                     self._ad_blocking_store.configure(

@@ -28,6 +28,7 @@ from jittersim.networking.adblocking import (
     AdRouting,
     AdStore,
     atomic_write,
+    download_bytes,
     download_domains,
     filtering_config,
     read_json,
@@ -47,6 +48,7 @@ def store(tmp_path):
         lock_path=tmp_path / "lock",
         active_path=tmp_path / "active.json",
         status_path=tmp_path / "status.json",
+        intent_path=tmp_path / "intent.json",
     )
 
 
@@ -257,8 +259,76 @@ def test_maximum_valid_choices_fit_the_owned_state_files(store):
     assert store.path.stat().st_size < 128 * 1024
 
 
+def test_restoring_settings_cannot_reverse_a_durable_stop(store, tmp_path):
+    assert store.status()["message"] == "Ad blocking is off."
+    assert not store.status()["paused"]
+    store.configure([ALICE], ["working.test"], resume=True)
+    snapshot = store.path.read_bytes()
+    store.pause()
+    store.path.write_bytes(snapshot)
+    restored = AdStore(
+        store.routing, path=store.path, lock_path=store.lock_path,
+        active_path=store.active_path, status_path=store.status_path,
+        intent_path=store.intent_path,
+    )
+    assert restored.read()["mac_addresses"] == (ALICE,)
+    assert restored.read()["allowed_domains"] == ("working.test",)
+    assert restored.status()["paused"]
+    item = controller(restored, tmp_path)
+    with patch("jittersim.networking.adblocking.subprocess.Popen") as child:
+        item.tick()
+        child.assert_not_called()
+        assert item.future is None
+    item.close()
+    restored.resume()
+    assert restored.read()["running"] is True
+    restored.intent_path.unlink()
+    assert restored.read()["running"] is False
+    assert restored.status()["paused"]
+
+
+def test_invalid_stop_state_never_grants_permission_and_panic_can_replace_it(store):
+    store.configure([ALICE], [], resume=True)
+    write_json(store.intent_path, {"version": True, "running": True})
+    with pytest.raises(ValueError):
+        store.read()
+    store.pause()
+    assert store.read()["running"] is False
+    # Save stop intent even when unrelated backed-up settings cannot be read.
+    store.resume()
+    store.path.write_bytes(b"broken settings")
+    with pytest.raises(ValueError):
+        store.pause()
+    assert read_json(store.intent_path)["running"] is False
+
+
+def test_settings_restored_during_a_probe_cannot_renew_a_stopped_lease(store, tmp_path):
+    store.configure([ALICE], [], resume=True)
+    snapshot = store.path.read_bytes()
+    applied(store, tmp_path)
+    item = controller(store, tmp_path)
+    child = Mock()
+    child.poll.return_value = None
+
+    def stop_then_restore():
+        store.pause()
+        store.path.write_bytes(snapshot)
+        return True
+
+    with (
+        patch("jittersim.networking.adblocking.subprocess.run"),
+        patch("jittersim.networking.adblocking.subprocess.Popen", return_value=child),
+        patch("jittersim.networking.adblocking.healthy", side_effect=stop_then_restore),
+    ):
+        item.tick()
+    assert store.status()["paused"]
+    assert not store.status()["ready"]
+    assert read_json(store.active_path)["expires_at"] == 0
+    item.close()
+
+
 def test_access_transition_keeps_panic_and_saved_preferences_on_failure(store, tmp_path):
-    store.configure([ALICE], [])
+    store.configure([ALICE], [], resume=True)
     applied(store, tmp_path)
     with pytest.raises(RuntimeError), store.access_transition():
         assert not store.status()["ready"]
@@ -307,7 +377,7 @@ def test_nft_rules_are_local_selected_expiring_and_do_not_collect_history(store)
 
 
 def test_healthy_controller_commits_only_current_generation(store, tmp_path):
-    store.configure([ALICE], [])
+    store.configure([ALICE], [], resume=True)
     applied(store, tmp_path)
     item = controller(store, tmp_path)
     child = Mock()
@@ -331,7 +401,7 @@ def test_healthy_controller_commits_only_current_generation(store, tmp_path):
 
 
 def test_failed_dns_validation_has_a_bounded_restart_rate(store, tmp_path):
-    store.configure([ALICE], [])
+    store.configure([ALICE], [], resume=True)
     applied(store, tmp_path)
     item = controller(store, tmp_path)
     with patch("jittersim.networking.adblocking.subprocess.run", side_effect=OSError) as check:
@@ -344,7 +414,7 @@ def test_failed_dns_validation_has_a_bounded_restart_rate(store, tmp_path):
 
 
 def test_unhealthy_or_changed_config_cannot_receive_routing_lease(store, tmp_path):
-    store.configure([ALICE], [])
+    store.configure([ALICE], [], resume=True)
     applied(store, tmp_path)
     item = controller(store, tmp_path)
     item._list()
@@ -365,7 +435,7 @@ def test_unhealthy_or_changed_config_cannot_receive_routing_lease(store, tmp_pat
 
 
 def test_failed_update_keeps_list_and_bounds_retries(store, tmp_path):
-    store.configure([ALICE], [])
+    store.configure([ALICE], [], resume=True)
     applied(store, tmp_path)
     item = controller(store, tmp_path)
     item._list()
@@ -389,10 +459,10 @@ def test_download_is_fixed_https_bounded_and_rejects_redirects():
     response.status_code = 302
     with patch("jittersim.networking.adblocking.requests.get", return_value=response) as get:
         with pytest.raises(ValueError):
-            download_domains()
+            download_bytes()
         assert get.call_args.kwargs == {"stream": True, "timeout": (5, 5), "allow_redirects": False}
         assert get.call_args.args[0].startswith("https://raw.githubusercontent.com/StevenBlack/")
         response.status_code = 200
         response.iter_content.return_value = [b"#" * (MAX_LIST_BYTES + 1)]
         with pytest.raises(ValueError):
-            download_domains()
+            download_bytes()

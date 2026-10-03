@@ -675,6 +675,7 @@ initial download leaves normal DNS available. **Reset network** and
 **Panic** pause blocking while keeping the saved switches. **Start**
 resumes it. Explicitly enabling a switch also resumes
 blocking. Turning off a switch keeps profile protection.
+Restoring earlier settings preserves a later Panic stop.
 
 ### Traffic discovery
 

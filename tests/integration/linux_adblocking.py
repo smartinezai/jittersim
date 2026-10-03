@@ -65,7 +65,7 @@ settings = json.loads(sys.argv[1])
 root = Path(settings["directory"])
 store = AdStore(AdRouting("ads0"), path=root/"policy.json", lock_path=root/"lock",
                 active_path=root/"active.json", status_path=root/"status.json",
-                group_id=settings["group_id"])
+                group_id=settings["group_id"], intent_path=root/"intent.json")
 item = AdController(store, domains_path=root/"domains", info_path=root/"info",
                     config_path=root/"filtered.conf", access_path=root/"access-policy.json")
 item.update_request = store.read()["update_request"]
@@ -140,9 +140,10 @@ def main():
             active_path=root / "active.json",
             status_path=root / "status.json",
             group_id=group_id,
+            intent_path=root / "intent.json",
         )
         store.routing.initialize()
-        store.configure([ALICE], [])
+        store.configure([ALICE], [], resume=True)
         atomic_write(root / "domains", domain_bytes(("advert.example.net",)), group_id)
         write_json(root / "info", {"updated_at": int(time.time()), "domain_count": 1}, group_id)
         item = AdController(

@@ -34,6 +34,7 @@ def control(tmp_path):
         lock_path=tmp_path / "lock",
         active_path=tmp_path / "active",
         status_path=tmp_path / "status",
+        intent_path=tmp_path / "intent",
     )
 
     class Helper(ClientsHelper):
@@ -160,6 +161,7 @@ def test_helper_rejects_injection_and_panic_pauses_saved_policy(tmp_path):
         lock_path=tmp_path / "lock",
         active_path=tmp_path / "active",
         status_path=tmp_path / "status",
+        intent_path=tmp_path / "intent",
     )
     manager = AccessManager(
         executor=AccessExecutor(tmp_path),
@@ -183,6 +185,7 @@ def test_helper_rejects_injection_and_panic_pauses_saved_policy(tmp_path):
             client.configure_ad_blocking([ALICE], [], resume=True, control_revision=revision)
         assert store.read()["running"] is False
         store.path.unlink()
+        store.intent_path.unlink()
         assert client.configure_ad_blocking([ALICE], [])["paused"]
         assert store.read()["running"] is False
         assert client.configure_ad_blocking([ALICE], [], resume=True)["available"]
@@ -212,6 +215,7 @@ def test_proxy_blocks_before_lookup_only_for_selected_identity_without_active_pr
         lock_path=tmp_path / "lock",
         active_path=tmp_path / "active",
         status_path=tmp_path / "status",
+        intent_path=tmp_path / "intent",
     )
     state = applied(store, tmp_path)
     active = ActiveBlocking(store.active_path, tmp_path / "domains")
