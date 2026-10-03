@@ -441,6 +441,52 @@ def test_automatic_reset_falls_back_only_after_explicit_unknown_action(error, re
             assert requests == ["recover-reset"]
 
 
+def test_offline_startup_keeps_old_cache_unconfirmed_after_helper_reconnect(tmp_path):
+    guard = provision_guard(tmp_path)
+    store = AdStore(
+        AdRouting("wlan0", FakeExecutor()), path=tmp_path / "policy",
+        lock_path=tmp_path / "lock", active_path=tmp_path / "active",
+        status_path=tmp_path / "status", intent_path=tmp_path / "intent", panic_guard=guard,
+    )
+    manager = AccessManager(
+        executor=AccessExecutor(tmp_path), topology=Topology("eth0", "wlan0"),
+        directory=tmp_path / "access", runtime_path=tmp_path / "access-policy",
+        ad_blocking_store=store,
+    )
+
+    def service(applier):
+        return HelperService(applier, ad_blocking_store=store, access_manager=manager, panic_guard=guard)
+
+    with ConfigRepository(tmp_path / "config.db") as repo:
+        repo.save_unaffected_device(UnaffectedDevice(ALICE, "Alice", 1))
+        repo.set_ad_blocking(ALICE, True)
+        with serving(service) as (client, _):
+            client.configure_ad_blocking([ALICE], [], resume=True)
+            repo.delete_unaffected_device(ALICE)
+        permission = store.intent_path.read_bytes()
+        restarted = ControlServer(("127.0.0.1", 0), repo, helper_client=client, admin_token="fixture-token")
+        restarted.helper_startup_wait_seconds = 0
+        try:
+            restarted.recover_saved_network_state()
+            with serving(service) as (reconnected, _):
+                restarted.helper_client = reconnected
+                applied(store, tmp_path)
+                assert reconnected.ad_blocking_status()["ready"]
+                before = json.loads(restarted.response_for("/api/ad-blocking")[2])
+                assert before["mac_addresses"] == []
+                assert not before["service"]["ready"]
+                assert "could not be confirmed" in before["service"]["message"]
+                assert store.read()["mac_addresses"] == (ALICE,)
+                assert store.intent_path.read_bytes() == permission
+                restarted.recover_saved_network_state()
+                assert store.read()["mac_addresses"] == ()
+                assert store.intent_path.read_bytes() == permission
+                after = json.loads(restarted.response_for("/api/ad-blocking")[2])
+                assert "could not be confirmed" not in after["service"]["message"]
+        finally:
+            restarted.server_close()
+
+
 def test_household_changes_preserve_only_current_permission_and_start_renews_after_guard(tmp_path):
     guard = provision_guard(tmp_path)
     store = AdStore(

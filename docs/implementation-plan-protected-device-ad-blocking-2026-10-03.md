@@ -311,3 +311,8 @@ regression and verify that reconciliation never changes run-permission bytes.
 If synchronization fails, retain a visible unconfirmed status even if a later
 helper status read reports that its older configuration is active. A later
 successful settings copy clears that warning. No status read applies settings.
+Mark that warning before waiting for the helper too. An unavailable helper
+must not bypass it through startup's early return. Verify a real disconnected
+socket, reconnect with an older active cache and a removed saved selection.
+Read-only status remains unconfirmed until a complete settings copy succeeds.
+The permission file stays unchanged throughout this recovery.

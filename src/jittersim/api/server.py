@@ -4982,6 +4982,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
 
         if self.helper_client is None:
             return
+        self._ad_blocking_sync_pending = True
         if not self._wait_for_helper():
             LOGGER.error("network helper did not answer, so network state was not recovered")
             return
