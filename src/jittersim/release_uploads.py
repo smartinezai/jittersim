@@ -44,7 +44,7 @@ class UploadBusy(UpdateError):
 
 
 def _now():
-    return time.monotonic()
+    return time.clock_gettime(time.CLOCK_MONOTONIC)
 
 
 def _boot_id():
@@ -180,7 +180,7 @@ def _read_record(spool):
         if not finite:
             raise UpdateError("the upload record has invalid times")
     maximum = MAX_READY_SECONDS if record["phase"] == "ready" else MAX_RECEIVE_SECONDS
-    if not 0 < record["expires"] - record["started"] <= maximum:
+    if not record["started"] < record["expires"] <= record["started"] + maximum:
         raise UpdateError("the upload record exceeds its time limit")
     return record
 
@@ -206,7 +206,7 @@ def _write_record(spool, record):
 def _live(record):
     now = _now()
     return (record["boot"] == _boot_id() and record["started"] <= now < record["expires"]
-            and record["expires"] - now <= MAX_READY_SECONDS)
+            and record["expires"] <= now + MAX_READY_SECONDS)
 
 
 def _remove_folder(parent, name, opened=None):

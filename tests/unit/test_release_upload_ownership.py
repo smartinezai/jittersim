@@ -2,6 +2,9 @@
 
 import json
 import os
+import shutil
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -27,6 +30,18 @@ def received(handoff):
         (receipt.folder / UPLOAD_SIGNATURE).write_bytes(b"test signature")
         receipt.ready()
         return receipt.identifier
+
+
+@pytest.mark.skipif(not shutil.which("python3"), reason="a separate Python process is required")
+def test_upload_clock_is_shared_with_a_separate_system_python_process():
+    source = Path(__file__).resolve().parents[2] / "src"
+    before = time.clock_gettime(time.CLOCK_MONOTONIC)
+    result = subprocess.run(
+        ["python3", "-c", "from jittersim.release_uploads import _now; print(_now())"],
+        env={**os.environ, "PYTHONPATH": str(source)}, capture_output=True, text=True,
+        check=True, timeout=5)
+    after = time.clock_gettime(time.CLOCK_MONOTONIC)
+    assert before <= float(result.stdout) <= after
 
 
 def root_inputs(handoff, identifier):
@@ -60,6 +75,14 @@ def test_active_root_keeps_inputs_after_lease_expiry(handoff):
                 pass
         assert archive.read_bytes() == b"test archive"
         assert (spool / identifier / UPLOAD_ARCHIVE).exists()
+
+
+@pytest.mark.parametrize("started", [65416.1, 65416.11, 65416.12, 65416.13, 65500.1])
+def test_fractional_clock_crossing_a_float_precision_boundary_accepts_its_own_receipt(handoff, started):
+    handoff[3]["now"] = started
+    identifier = received(handoff)
+    with root_inputs(handoff, identifier) as (archive, _):
+        assert archive.read_bytes() == b"test archive"
 
 
 def test_late_root_call_cannot_start_after_an_uncertain_call_is_discarded(handoff):
