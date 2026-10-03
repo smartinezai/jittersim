@@ -26,6 +26,7 @@ from tests.unit.test_deploy_from_mac import (
     make_fakes,
     printed_sha,
     short_head,
+    version_head,
     tools,
 )
 
@@ -270,9 +271,9 @@ def checkout(tmp_path):
     (folder / "src" / "jittersim").mkdir(parents=True)
     for script in (BUILD, SIGN):
         shutil.copy(script, folder / "deploy" / "raspberry-pi")
-    (folder / "pyproject.toml").write_text("[project]\nname = 'jittersim'\n")
+    (folder / "pyproject.toml").write_text("[project]\nname = 'jittersim'\nversion = \"0.2.0\"\n")
     (folder / "README.md").write_text("release\n")
-    (folder / "src" / "jittersim" / "__init__.py").write_text("")
+    (folder / "src" / "jittersim" / "__init__.py").write_text('__version__ = "0.2.0"\n')
     for arguments in (("init", "-q"), ("add", "-A"), ("commit", "-q", "-m", "first")):
         subprocess.run(["git", "-C", str(folder), "-c", "user.name=Test",
                         "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
@@ -299,7 +300,7 @@ def test_build_release_writes_the_signed_manifest_and_prints_the_checksum_last(
         manifest = json.loads(bundle.extractfile("deploy/RELEASE").read())
         tops = {Path(name).parts[0] for name in bundle.getnames()}
     assert manifest == {"format": 1, "commit": git(checkout, "rev-parse", "HEAD"),
-                        "version": git(checkout, "rev-parse", "--short", "HEAD"),
+                        "version": "0.2.0.dev+" + git(checkout, "rev-parse", "--short", "HEAD"),
                         "sequence": 1790000000}
     # Managers from before signed releases accept only these names.
     assert tops <= {"src", "deploy", "README.md", "pyproject.toml"}
@@ -385,13 +386,13 @@ def test_passwordless_staging_runs_the_exact_allowed_command_without_a_terminal(
     assert signature.exists()
     staged = stage_on(tmp_path, archive, public_key(pi_fakes), signature=signature,
                       sha256=printed_sha(result.stdout))
-    assert staged["version"] == short and staged["signer_label"] == "mac-test"
+    assert staged["version"] == version_head() and staged["signer_label"] == "mac-test"
 
 
 @needs_a_checkout
 def test_passwordless_install_waits_for_the_update_service_and_checks_the_release(pi_fakes):
     short = short_head()
-    result, calls = signed_deploy(pi_fakes, "--install", FAKE_INSTALLED=short)
+    result, calls = signed_deploy(pi_fakes, "--install", FAKE_INSTALLED=version_head())
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "scp", "ssh", "ssh"]
     assert calls[3]["argv"][-1] == (
@@ -399,13 +400,13 @@ def test_passwordless_install_waits_for_the_update_service_and_checks_the_releas
         "sudo -n /usr/local/bin/jittersim update install --yes --wait")
     assert calls[3]["argv"][:2] == ["-o", "BatchMode=yes"]
     assert calls[4]["argv"][-1] == "jittersim update check"
-    assert f"The Pi now runs release {short}." in result.stdout
+    assert f"The Pi now runs release {version_head()}." in result.stdout
 
 
 @needs_a_checkout
 def test_without_passwordless_staging_the_pi_asks_for_its_sudo_password(pi_fakes):
     result, calls = signed_deploy(pi_fakes, "--install", markers=SIGNED_PI,
-                                  FAKE_INSTALLED=short_head())
+                                  FAKE_INSTALLED=version_head())
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "scp", "ssh", "ssh"]
     assert calls[3]["argv"] == [*TERMINAL_OPTIONS, "-i", str(pi_fakes["key"]), "--", HOST,
@@ -469,7 +470,7 @@ def test_a_pi_from_before_signed_releases_gets_the_old_staging_command(pi_fakes)
     assert calls[1]["argv"][-1] == f"{HOST}:jittersim-release-{short}.tar.gz"
     assert calls[2]["argv"][-1].startswith(
         f"sudo /usr/bin/python3 -I /usr/local/lib/jittersim-update.py stage "
-        f"jittersim-release-{short}.tar.gz --version {short} --sha256 ")
+        f"jittersim-release-{short}.tar.gz --version {version_head()} --sha256 ")
 
 
 @needs_a_checkout
@@ -489,7 +490,7 @@ def test_a_dry_run_with_a_signing_key_shows_the_signed_path_and_runs_nothing(pi_
 @needs_a_checkout
 @pytest.mark.parametrize("shell", SHELLS)
 def test_the_signed_path_runs_under_each_shell(pi_fakes, shell):
-    result, calls = signed_deploy(pi_fakes, "--install", shell=shell, FAKE_INSTALLED=short_head())
+    result, calls = signed_deploy(pi_fakes, "--install", shell=shell, FAKE_INSTALLED=version_head())
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "scp", "ssh", "ssh"]
 

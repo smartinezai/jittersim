@@ -33,9 +33,10 @@ def setup(tmp_path):
     gh.chmod(0o755)
     repo = tmp_path / "repo"
     shutil.copytree(ROOT / "deploy", repo / "deploy")
-    for name in ("pyproject.toml", "README.md"):
-        (repo / name).write_text(name)
-    (repo / "src").mkdir()
+    (repo / "pyproject.toml").write_text("[project]\nname = 'jittersim'\nversion = \"0.2.0\"\n")
+    (repo / "README.md").write_text("test release\n")
+    (repo / "src/jittersim").mkdir(parents=True)
+    (repo / "src/jittersim/__init__.py").write_text('__version__ = "0.2.0"\n')
     (repo / "src" / "a.py").write_text("x = 1\n")
     env = {"PATH": f"{bin_directory}:{os.environ['PATH']}", "HOME": str(tmp_path / "home"),
            "FAKE_LOG": str(tmp_path / "gh.log"), "TMPDIR": str(tmp_path),
