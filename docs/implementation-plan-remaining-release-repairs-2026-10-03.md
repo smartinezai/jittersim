@@ -5,8 +5,9 @@
 Combine the independently reviewed reconnect, device address and update repairs
 with the delivered dashboard at 0a41c2f. Preserve current credentials, signing
 trust, network recovery and saved profile data. Every combined source needs
-its own checks before publication. Main release and Pi deployment require a
-verified management connection and recovery route. Live homepage pairing stays
+its own checks before publication. Reviewed main source may merge after complete
+local workflow equivalents. Pi deployment separately requires a verified
+management connection and recovery route. Live homepage pairing stays
 disabled until trusted HTTPS and physical acceptance are established.
 
 Risk is high. Changes cross the dashboard, privileged helper, SQLite storage,
@@ -97,3 +98,16 @@ radio or management network through the test connection to manufacture access.
 If management remains unreachable, finish publishable source work and preserve
 the factual deployment blocker. Do not claim live identity, normal HTTPS trust
 or physical phone acceptance from simulated fixtures.
+
+## Recovery confirmation wording
+
+Explicit rollback uses the selected complete recovery copy. Later ordinary
+profiles, protection, access and usage edits can revert. The compatibility
+hook preserves supported values in the presented database. It does not make
+rollback preserve the newest database. Retain the existing dashboard restore
+warning. Show the same warning for a rollback retry and in the command-line
+restore confirmation. Other recovery retries may only restart services, so
+state conditionally that a restored backup replaces later changes. This changes only the words presented
+before confirmation, not admission, saved requests or recovery behavior.
+Verify JavaScript syntax and the existing actual browser update checks. The
+final complete workflow still applies.

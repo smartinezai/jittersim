@@ -36,7 +36,7 @@ from jittersim.updates import (
     stage_upload,
     update_status,
 )
-from jittersim.panic_guard import PanicGuard
+from jittersim.panic_guard import PANIC_GUARD_FORMAT, PanicGuard
 from jittersim.request_workers import RequestWorkers, WorkersStillRunning
 from jittersim.socket_deadlines import DeadlineReader, read_line
 
@@ -169,13 +169,16 @@ class HelperService:
         gateway_state_path: Optional[Path] = None,
         access_manager: Optional[AccessManager] = None,
         panic_guard: Optional[PanicGuard] = None,
+        homepage_database: Optional[Path] = None,
     ) -> None:
         self._applier = applier
+        self._homepage_database = homepage_database
         self._active_plan_path = active_plan_path
         self._active_plan: Optional[NetworkPlan] = None
         # A new boot nonce and a count of applied plans tell the dashboard when the
         # queues were replaced even if the settings stayed the same.
         self._boot_nonce = secrets.token_hex(4)
+        self._homepage_epoch = secrets.token_bytes(16).hex()
         self._plan_count = 0
         self._queue_read_error: Optional[str] = None
         self._service_addresses = ServiceAddressBook(clock=service_address_clock)
@@ -196,6 +199,7 @@ class HelperService:
         self._outage_observed = False
         self._outage_stop_latched = False
         self._panic_stop_latched = False
+        self._household_stop_latched = False
         self._panic_recovery_failed = False
         self._control_revision = secrets.token_bytes(16).hex()
         self._revision_lock = threading.Lock()
@@ -213,6 +217,7 @@ class HelperService:
             try:
                 guard = panic_guard.provision(gateway_state_path)
                 self._panic_stop_latched = guard["panic_stop_latched"]
+                self._household_stop_latched = guard["household_stop_latched"]
                 self._panic_recovery_failed = guard["panic_recovery_failed"]
                 self._control_revision_required = guard["control_revision_required"]
                 if (self._panic_stop_latched and self._active_plan_path is not None
@@ -222,6 +227,7 @@ class HelperService:
             except OSError:
                 LOGGER.exception("persistent Panic stop state could not be read")
                 self._panic_stop_latched = True
+                self._household_stop_latched = True
                 self._panic_recovery_failed = True
                 self._control_revision_required = True
                 self._panic_guard_error = True
@@ -260,6 +266,7 @@ class HelperService:
                     self._control_revision = secrets.token_bytes(16).hex()
                     self._control_revision_required = True
                     self._panic_stop_latched = True
+                    self._household_stop_latched = True
                     self._panic_recovery_failed = True
                 self._write_panic_guard()
                 self._write_gateway_state(durable=True)
@@ -305,6 +312,19 @@ class HelperService:
                     if self._panic_recovery_failed:
                         return {"ok": False, "error": "Retry Panic before applying access rules."}
                     result = self._access_manager.apply(access_from_payload(payload.get("policy")))
+                    self._household_stop_latched = False
+                    saved = self._write_gateway_state(durable=True)
+                    saved = self._write_panic_guard() and saved
+                    if not saved:
+                        self._block_unconfirmed_intent()
+                        self._handle_reset()
+                        try:
+                            self._access_manager.disable()
+                        except (OSError, ValueError, CommandExecutionError):
+                            LOGGER.exception("household cleanup failed after stop state save failure")
+                        self._write_panic_guard()
+                        self._write_gateway_state(durable=True)
+                        return {"ok": False, "error": "Household recovery state could not be saved. Retry Panic."}
                 return {"ok": True, **result}
             except (OSError, ValueError, CommandExecutionError):
                 LOGGER.exception("persistent access operation failed")
@@ -374,6 +394,9 @@ class HelperService:
             except (OSError, ValueError):
                 LOGGER.exception("online release check could not be handled")
                 return {"ok": False, "error": "online release check could not be completed"}
+        if action in ("homepage-snapshot", "homepage-confirm"):
+            from .homepage import helper_confirm, helper_snapshot
+            return helper_confirm(self, payload) if action == "homepage-confirm" else helper_snapshot(self, payload)
         if action == "ping":
             return {"ok": True, "action": "ping"}
         if action == "capabilities":
@@ -386,6 +409,7 @@ class HelperService:
                 "service_list_outages": True,
                 "protected_dns_capture": True,
                 "identified_release_uploads": True,
+                "homepage_policy_version": 1,
             }
         if action == "dashboard-access":
             if not self._access_lock.acquire(blocking=False):
@@ -661,15 +685,16 @@ class HelperService:
                 or not 0 <= successes <= GATEWAY_SUCCESSES_TO_UP
             ):
                 raise ValueError("gateway probe count is invalid")
-            for field in ("panic_stop_latched", "panic_recovery_failed", "control_revision_required"):
+            for field in ("panic_stop_latched", "household_stop_latched", "panic_recovery_failed", "control_revision_required"):
                 if field in state and not isinstance(state[field], bool):
                     raise ValueError("Panic recovery state is invalid")
             self._panic_stop_latched = state.get("panic_stop_latched", False)
+            self._household_stop_latched = state.get("household_stop_latched", self._panic_stop_latched)
             self._panic_recovery_failed = state.get("panic_recovery_failed", False)
             self._control_revision_required = state.get("control_revision_required", self._panic_stop_latched)
-            if self._panic_stop_latched:
+            if self._panic_stop_latched or self._household_stop_latched:
                 self._control_revision_required = True
-            if self._panic_recovery_failed and not self._panic_stop_latched:
+            if self._panic_recovery_failed and not (self._panic_stop_latched and self._household_stop_latched):
                 raise ValueError("Panic recovery state is inconsistent")
             self._persistence_enabled = state["persistence_enabled"]
             self._persistence_mode_initialized = True
@@ -696,6 +721,7 @@ class HelperService:
             self._persistence_mode_initialized = True
             self._outage_stop_latched = True
             self._panic_stop_latched = True
+            self._household_stop_latched = True
             self._panic_recovery_failed = True
             self._control_revision_required = True
             self._reset_pending = True
@@ -711,13 +737,22 @@ class HelperService:
                     "reason": "control-changed"}
         return None
 
+    def _block_unconfirmed_intent(self):
+        with self._revision_lock:
+            self._control_revision = secrets.token_bytes(16).hex()
+            self._control_revision_required = True
+            self._panic_stop_latched = True
+            self._household_stop_latched = True
+            self._panic_recovery_failed = True
+
     def _write_panic_guard(self, *, panic_recovery_failed=None):
         if self._panic_guard is None:
             return True
         try:
             self._panic_guard.write({
-                "version": 1,
+                "version": PANIC_GUARD_FORMAT,
                 "panic_stop_latched": self._panic_stop_latched,
+                "household_stop_latched": self._household_stop_latched,
                 "panic_recovery_failed": (self._panic_recovery_failed
                                           if panic_recovery_failed is None
                                           else panic_recovery_failed),
@@ -738,6 +773,7 @@ class HelperService:
             "outage_observed": self._outage_observed,
             "outage_stop_latched": self._outage_stop_latched,
             "panic_stop_latched": self._panic_stop_latched,
+            "household_stop_latched": self._household_stop_latched,
             "control_revision_required": self._control_revision_required,
             "panic_recovery_failed": self._panic_recovery_failed,
             "reset_pending": self._reset_pending,
@@ -758,6 +794,7 @@ class HelperService:
             "outage_observed": self._outage_observed,
             "outage_stop_latched": self._outage_stop_latched,
             "panic_stop_latched": self._panic_stop_latched,
+            "household_stop_latched": self._household_stop_latched,
             "control_revision_required": self._control_revision_required,
             "panic_recovery_failed": (self._panic_recovery_failed if panic_recovery_failed is None
                                       else panic_recovery_failed),
@@ -1042,7 +1079,7 @@ class HelperService:
                 "ok": False,
                 "error": "the router gateway is unavailable; profiles cannot start in this mode",
             }
-        if plan.access is not None and update_access:
+        if plan.access is not None and update_access and not self._household_stop_latched:
             if self._access_manager is None:
                 return {"ok": False, "error": "persistent access controls are unavailable"}
             try:
@@ -1117,8 +1154,7 @@ class HelperService:
         self._write_gateway_state(durable=explicit_apply)
         guard_saved = self._write_panic_guard() if explicit_apply else True
         if (self._gateway_state_error or not guard_saved) and explicit_apply:
-            self._panic_stop_latched = True
-            self._panic_recovery_failed = True
+            self._block_unconfirmed_intent()
             self._outage_stop_latched = True
             self._reset_pending = True
             self._next_reset_retry_at = 0.0
@@ -1500,6 +1536,15 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "request must be valid JSON"})
             return
         action = payload.get("action") if isinstance(payload, dict) else None
+        if self.server.policy_only:
+            if action not in ("homepage-snapshot", "homepage-confirm"):
+                self._send_response({"ok": False, "error": "action unavailable"})
+            else:
+                self._send_response(self.server.service.handle_payload(payload))
+            return
+        if action in ("homepage-snapshot", "homepage-confirm"):
+            self._send_response({"ok": False, "error": "use the policy socket"})
+            return
         if action in ("ping", "control-revision", "dashboard-access", "update-retry") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
             self._send_response(self.server.service.handle_payload(payload))
             return
@@ -1537,13 +1582,14 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
 class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     """Serve the helper protocol through a filesystem-protected Unix socket."""
 
-    def __init__(self, socket_path: Path, service: HelperService) -> None:
+    def __init__(self, socket_path: Path, service: HelperService, *, policy_only: bool = False) -> None:
         self.socket_path = socket_path
+        self.policy_only = policy_only
         self.service = service
         self.operation_lock = threading.Lock()
         self.release_stage_lock = threading.Lock()
-        self._request_slots = threading.BoundedSemaphore(MAX_HELPER_CONNECTIONS)
-        self._request_workers = RequestWorkers("jittersim-helper-request", daemon=False)
+        self._request_slots = threading.BoundedSemaphore(2 if policy_only else MAX_HELPER_CONNECTIONS)
+        self._request_workers = RequestWorkers("jittersim-helper-request", daemon=policy_only)
         self._prepare_socket_path()
         try:
             super().__init__(str(socket_path), HelperRequestHandler)
@@ -1771,7 +1817,7 @@ class HelperClient:
         return self._request(
             {
                 "action": "apply",
-                "plan": plan_to_payload(plan),
+                "plan": self._homepage_wire_plan(plan),
                 "explicit_apply": explicit_apply,
                 "expected_control_revision": revision,
             },
@@ -1799,6 +1845,42 @@ class HelperClient:
             raise HelperClientError("Normal access recovery is not confirmed. Retry Panic before Start.")
         return revision
 
+    def _homepage_wire_plan(self, plan: NetworkPlan) -> Dict[str, Any]:
+        payload = plan_to_payload(plan)
+        rules = plan.mark_rules + plan.service_list_rules + plan.service_assignment_rules + plan.service_quota_rules
+        rules += tuple(rule for rule in (plan.general_profile, plan.everyone_else) if rule)
+        supported = False
+        if any(rule.homepage_bounce_percent for rule in rules):
+            try:
+                capabilities = self._request({"action": "capabilities"})
+                supported = capabilities.get("homepage_policy_version") == 1
+            except HelperClientError as error:
+                if error.reason == "helper-busy":
+                    raise
+        if not supported:
+            payload.pop("homepage_policy_version", None)
+            for name in ("mark_rules", "service_list_rules", "service_assignment_rules", "service_quota_rules"):
+                for rule in payload[name]:
+                    rule.pop("homepage_bounce_percent", None)
+            for name in ("general_profile", "everyone_else"):
+                if payload[name] is not None:
+                    payload[name].pop("homepage_bounce_percent", None)
+        return payload
+
+    def homepage_snapshot(self, *, peer: str, host=None, addresses=(), expected=None) -> dict:
+        """Use separate admission and a total socket deadline for policy reads."""
+        from .homepage import policy_request
+        return policy_request(Path(str(self.socket_path) + ".homepage"), {
+            "action": "homepage-snapshot", "peer": peer, "host": host,
+            "addresses": list(addresses), "expected": expected,
+        })
+
+    def homepage_confirm(self, receipt: dict) -> bool:
+        from .homepage import policy_request
+        return policy_request(Path(str(self.socket_path) + ".homepage"), {
+            "action": "homepage-confirm", "receipt": receipt,
+        }).get("verified") is True
+
     def gateway_status(self) -> Dict[str, Any]:
         """Read the helper's bounded gateway and persistence state."""
 
@@ -1815,7 +1897,7 @@ class HelperClient:
         ):
             if not isinstance(result.get(field), bool):
                 raise HelperClientError("helper returned invalid gateway persistence state")
-        for field in ("panic_stop_latched", "panic_recovery_failed"):
+        for field in ("panic_stop_latched", "household_stop_latched", "panic_recovery_failed"):
             if field in result and not isinstance(result[field], bool):
                 raise HelperClientError("helper returned invalid Panic recovery state")
         if "control_revision" in result:
@@ -1914,7 +1996,7 @@ class HelperClient:
         revision = self.control_revision() if control_revision is None else control_revision
         self._check_plan_support(plan)
         return self._request(
-            {"action": "apply-experiment", "plan": plan_to_payload(plan), "expected_control_revision": revision}, timeout_seconds=60
+            {"action": "apply-experiment", "plan": self._homepage_wire_plan(plan), "expected_control_revision": revision}, timeout_seconds=60
         )
 
     def normal_access(self) -> Dict[str, Any]:
@@ -2406,6 +2488,7 @@ def run_helper(
     timeout_seconds: float = 10.0,
     enable_hardware: bool = False,
     router_factory: Optional[Callable[[str, str], TG3442DERouter]] = None,
+    homepage_database: Path = Path("/var/lib/jittersim/jittersim.db"),
 ) -> None:
     """Run the helper only after an explicit hardware-mode opt-in."""
 
@@ -2430,10 +2513,11 @@ def run_helper(
         gateway_state_path=gateway_state_path,
         access_manager=access,
         panic_guard=PanicGuard(),
+        homepage_database=homepage_database,
     )
-    restored = restore_access_at_start(access, panic_stopped=service._panic_stop_latched)
-    if not restored and service._panic_stop_latched:
-        service._panic_recovery_failed = True
+    restored = restore_access_at_start(access, panic_stopped=service._household_stop_latched)
+    if not restored:
+        service._block_unconfirmed_intent()
         service._write_panic_guard()
         service._write_gateway_state(durable=True)
     stopped = threading.Event()
@@ -2482,6 +2566,20 @@ def run_helper(
         name="gateway-persistence",
     )
     gateway_worker.start()
+    policy_server = None
+    policy_worker = None
+    try:
+        policy_server = UnixHelperServer(Path(str(socket_path) + ".homepage"), service, policy_only=True)
+        policy_worker = threading.Thread(target=policy_server.serve_forever, daemon=True, name="homepage-helper")
+        policy_worker.start()
+    except (HelperError, RuntimeError):
+        if policy_server is not None:
+            if policy_worker is not None and policy_worker.is_alive():
+                policy_server.shutdown()
+            policy_server.server_close()
+        policy_server = None
+        policy_worker = None
+        LOGGER.warning("Homepage helper socket unavailable. Control socket remains available.")
     with UnixHelperServer(socket_path, service) as server:
         try:
             server.serve_forever()
@@ -2489,6 +2587,10 @@ def run_helper(
             pass
         finally:
             stopped.set()
+            if policy_server is not None:
+                policy_server.shutdown()
+                policy_server.server_close()
+                policy_worker.join(timeout=1)
             worker.join(timeout=5)
             gateway_worker.join(timeout=5)
             release_worker.join(timeout=5)
@@ -2501,6 +2603,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-interface", required=True)
     parser.add_argument("--timeout-seconds", type=float, default=10.0)
     parser.add_argument("--enable-hardware", action="store_true")
+    parser.add_argument("--homepage-database", type=Path, default=Path("/var/lib/jittersim/jittersim.db"))
     return parser
 
 
@@ -2511,6 +2614,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     run_helper(
         socket_path=arguments.socket,
+        homepage_database=arguments.homepage_database,
         topology=Topology(
             uplink_interface=arguments.uplink,
             test_interface=arguments.test_interface,

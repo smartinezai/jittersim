@@ -203,33 +203,47 @@ dashboard_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (p = 1; p <= NF; 
 if [ -z "$dashboard_ip" ]; then
     dashboard_ip=127.0.0.1
 fi
-# The certificate is named after the Pi and also covers the jittersim.local
-# name that the Avahi publisher announces on the management network and the
-# test Wi-Fi gateway address that browsers on the test Wi-Fi use.
+# The dashboard certificate comes from a small local certificate authority that is
+# created once and kept across upgrades and rollbacks (the recovery copy holds the
+# current verified identity is retained separately during recovery). Devices that
+# trust the authority open the dashboard without a warning. Fresh certificates use
+# neutral addresses. Existing valid aliases stay usable. The test Wi-Fi certificate
+# contains only neutral names and the gateway.
+# The same two commands run in the dashboard update. The first keeps the name
+# setting and the resolver record. The second keeps the authority and renews the
+# certificates. Only root reads the authority key.
+"$INSTALL_DIR/.venv/bin/python" -m jittersim.localca recover-adoption --config-dir "$CONFIG_DIR" >&2
+dns_name_state=$("$INSTALL_DIR/.venv/bin/python" -m jittersim.localname install \
+    --config-dir "$CONFIG_DIR" --group jittersim)
+local_name=$(printf '%s\n' "$dns_name_state" | sed -n 1p)
+dns_name_changed=no
+if [ "$(printf '%s\n' "$dns_name_state" | sed -n 2p)" = changed ]; then
+    dns_name_changed=yes
+fi
 dashboard_host="$(hostname -s).local"
-dashboard_cert_matches=false
-if [ -s "$CONFIG_DIR/dashboard.crt" ] && [ -s "$CONFIG_DIR/dashboard.key" ]; then
-    dashboard_cert_text=$(openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text 2>/dev/null || true)
-    if printf '%s\n' "$dashboard_cert_text" | grep -Fq "IP Address:$dashboard_ip" \
-        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "DNS:$dashboard_host" \
-        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "DNS:jittersim.local" \
-        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "IP Address:192.168.50.1"; then
-        dashboard_cert_matches=true
-    fi
+"$INSTALL_DIR/.venv/bin/python" -m jittersim.localca ensure \
+    --config-dir "$CONFIG_DIR" --host-name "$dashboard_host" \
+    --neutral-name "$local_name" --ethernet-ip "$dashboard_ip" --group jittersim >&2
+
+# The one neutral dashboard name is announced with mDNS on Ethernet and on the test
+# Wi-Fi, so the control firewall below lets mDNS in on the test Wi-Fi. Avahi cannot
+# limit its own publishing to one network. It is therefore limited first and
+# publishes nothing by itself (no host name, no services). The name publisher adds
+# one record per network. This is optional. A failure leaves the dashboard open by its
+# IP address, and the name publisher is then not started.
+prepare_dashboard_name_service() {
+    apt-get install -y avahi-daemon avahi-utils python3-dbus || return 1
+    "$INSTALL_DIR/.venv/bin/python" -m jittersim.mdnsname configure \
+        --uplink "$JITTERSIM_UPLINK" --test-interface "$JITTERSIM_TEST_INTERFACE" || return 1
+    systemctl restart avahi-daemon.service || return 1
+}
+dashboard_name_ready=yes
+if ! prepare_dashboard_name_service; then
+    dashboard_name_ready=no
+    echo "Warning: Avahi could not be prepared for the dashboard name. Use the Pi's Ethernet address." >&2
+    echo "Avahi is stopped so it cannot announce the Pi on the test Wi-Fi with its own settings." >&2
+    systemctl stop avahi-daemon.service avahi-daemon.socket || true
 fi
-if [ "$dashboard_cert_matches" = false ]; then
-    umask 077
-    openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 825 \
-        -keyout "$CONFIG_DIR/dashboard.key" \
-        -out "$CONFIG_DIR/dashboard.crt" \
-        -subj "/CN=$dashboard_host" \
-        -addext "subjectAltName=DNS:$dashboard_host,DNS:jittersim.local,IP:$dashboard_ip,IP:192.168.50.1" \
-        -addext "extendedKeyUsage=serverAuth"
-fi
-chown root:jittersim "$CONFIG_DIR/dashboard.key"
-chmod 0640 "$CONFIG_DIR/dashboard.key"
-chown root:root "$CONFIG_DIR/dashboard.crt"
-chmod 0644 "$CONFIG_DIR/dashboard.crt"
 
 sed \
     -e "s/@UPLINK_INTERFACE@/$JITTERSIM_UPLINK/g" \
@@ -247,6 +261,15 @@ install -m 0644 -o root -g root \
 install -m 0644 -o root -g root \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-dashboard.service" \
     /etc/systemd/system/jittersim-dashboard.service
+# Keep this compatibility hook across a rollback to an older dashboard unit.
+install -m 0644 -o root -g root \
+    "$SOURCE_DIR/deploy/raspberry-pi/homepage-profile-compat.py" \
+    /usr/local/lib/jittersim-profile-compat.py
+install -d -m 0755 -o root -g root /etc/systemd/system/jittersim-dashboard.service.d
+install -m 0644 -o root -g root \
+    "$SOURCE_DIR/deploy/raspberry-pi/homepage-compat.conf" \
+    /etc/systemd/system/jittersim-dashboard.service.d/homepage-compat.conf
+
 install -m 0644 -o root -g root \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-browser-proxy.service" \
     /etc/systemd/system/jittersim-browser-proxy.service
@@ -309,7 +332,7 @@ systemctl restart jittersim-control-firewall.service
 systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service jittersim-service-watch.service
 systemctl restart jittersim-helper.service
 if [ "$ap_active_connection" = jittersim-ap ]; then
-    if [ "$ap_settings_before" != "$ap_settings_after" ]; then
+    if [ "$ap_settings_before" != "$ap_settings_after" ] || [ "$dns_name_changed" = yes ]; then
         echo "AP settings were saved but the active Wi-Fi was not restarted." >&2
         echo "To use them now, run: sudo nmcli connection up jittersim-ap" >&2
         echo "Test Wi-Fi devices reconnect after a few seconds. A reboot also works." >&2
@@ -322,14 +345,10 @@ systemctl restart jittersim-service-watch.service
 systemctl restart jittersim-dashboard.service
 
 setup_dashboard_name_service() {
-    apt-get install -y avahi-daemon avahi-utils || return 1
     install -d -m 0755 -o root -g root /etc/NetworkManager/dispatcher.d || return 1
     install -m 0644 -o root -g root \
         "$SOURCE_DIR/deploy/raspberry-pi/jittersim-mdns.service" \
         /etc/systemd/system/jittersim-mdns.service || return 1
-    install -m 0755 -o root -g root \
-        "$SOURCE_DIR/deploy/raspberry-pi/publish-dashboard-name.sh" \
-        "$INSTALL_DIR/deploy/raspberry-pi/publish-dashboard-name.sh" || return 1
     install -m 0755 -o root -g root \
         "$SOURCE_DIR/deploy/raspberry-pi/jittersim-mdns-dispatcher" \
         /etc/NetworkManager/dispatcher.d/80-jittersim-mdns || return 1
@@ -338,19 +357,30 @@ setup_dashboard_name_service() {
     systemctl restart jittersim-mdns.service || return 1
 }
 
-if setup_dashboard_name_service; then
-    if systemctl is-active --quiet jittersim-mdns.service; then
-        echo "Dashboard name publisher is active. Confirm jittersim.local from the management network." >&2
+if [ "$dashboard_name_ready" = yes ]; then
+    if setup_dashboard_name_service; then
+        echo "Dashboard name publisher started. Check it with: sudo jittersim diagnostics" >&2
     else
-        echo "Warning: dashboard name publication is not active. Use the Pi's Ethernet address." >&2
+        echo "Warning: local dashboard name setup failed. Use the Pi's Ethernet address." >&2
     fi
-else
-    echo "Warning: local dashboard name setup failed. Use the Pi's Ethernet address." >&2
 fi
+
+adoption_finished=$("$INSTALL_DIR/.venv/bin/python" -m jittersim.localca finish-adoption --config-dir "$CONFIG_DIR")
+if [ "$adoption_finished" = completed ]; then
+    # Complete the original candidate before renewing an address that changed
+    # while installation was interrupted. The authority and valid key stay.
+    "$INSTALL_DIR/.venv/bin/python" -m jittersim.localca ensure \
+        --config-dir "$CONFIG_DIR" --host-name "$dashboard_host" \
+        --neutral-name "$local_name" --ethernet-ip "$dashboard_ip" --group jittersim >&2
+    systemctl restart jittersim-dashboard.service
+fi
+"$INSTALL_DIR/.venv/bin/python" -m jittersim.localca check-health --config-dir "$CONFIG_DIR" >&2
 
 echo "Installed JitterSim $("$INSTALL_DIR/.venv/bin/python" -c 'import jittersim; print(jittersim.__version__)')" >&2
 echo "JitterSim installed. Read the generated credentials locally from:" >&2
 echo "  $CONFIG_DIR/control.env" >&2
 echo "  $CONFIG_DIR/ap.env" >&2
-echo "Dashboard certificate fingerprint (verify before trusting):" >&2
-openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -fingerprint -sha256 >&2
+echo "Dashboard address, the same on the router network and the test Wi-Fi: https://$local_name:8080" >&2
+echo "Certificate authority fingerprint (verify before trusting):" >&2
+openssl x509 -in "$CONFIG_DIR/ca/ca.crt" -noout -fingerprint -sha256 >&2
+echo "After signing in, the dashboard offers this certificate to trust on a Mac or iPhone." >&2

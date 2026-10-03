@@ -68,6 +68,12 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - run: python -m pytest tests/test_homepage_reference_fixture.py
       - run: python -m tests.browser.homepage_bounce_reference
+      - run: node tests/browser/homepage-live/dashboard.cjs
+        env:
+          JITTERSIM_PLAYWRIGHT_MODULE: ${{ github.workspace }}/experiments/homepage-bounce-reference/node_modules/playwright
+      - run: node tests/browser/homepage-live/journey.cjs
+        env:
+          JITTERSIM_PLAYWRIGHT_MODULE: ${{ github.workspace }}/experiments/homepage-bounce-reference/node_modules/playwright
 
   gui-baseline:
     name: GUI baseline

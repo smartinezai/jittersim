@@ -67,3 +67,10 @@ select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
   .help-icon::before { width: 2.75rem; height: 2.75rem; }
   .sidebar .sidebar-action-row .help-icon { margin: 0 0.75rem; }
 }
+.one-address { margin: 1rem 0; padding: .8rem 1rem; border: 1px solid #3f6a97; border-left-width: 4px; border-radius: 6px; background: rgba(63, 106, 151, .14); }
+.one-address h3 { margin: 0 0 .3rem; }
+.one-address .one-address-text { margin: 0; font-size: 1.05rem; overflow-wrap: anywhere; }
+.one-address .one-address-text strong { color: #edf5ff; }
+#easy-address strong, #trust-address, #trust-fingerprint { overflow-wrap: anywhere; }
+.one-address[hidden], .one-address [hidden] { display: none; }
+@media (max-width: 480px) { .one-address { padding: .7rem .8rem; } }

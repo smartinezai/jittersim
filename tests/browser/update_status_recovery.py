@@ -132,6 +132,15 @@ def run():
                 expect(page.locator("#release-retry")).to_be_enabled()
                 assert counts[("POST", "api/updates/retry")] == 0
                 checks.append("cancelled retained retry sends no write")
+                state["operation"]["retry"]["recovering"] = True
+                page.evaluate("loadReleaseStatus({force:true})")
+                page.locator("#release-retry").click()
+                expect(page.locator("dialog")).to_contain_text("If recovery restores the saved backup, later changes will be replaced.")
+                page.locator("dialog").get_by_role("button", name="Cancel", exact=True).click()
+                assert counts[("POST", "api/updates/retry")] == 0
+                checks.append("recovery retry warns about replaced edits before cancellation without a write")
+                state["operation"] = failed_operation()
+                page.evaluate("loadReleaseStatus({force:true})")
                 page.locator("#release-retry").click()
                 state["operation"]["retry"]["id"] = "d" * 64
                 page.locator("dialog").get_by_role("button", name="Continue", exact=True).click()

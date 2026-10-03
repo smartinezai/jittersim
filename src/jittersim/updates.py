@@ -10,10 +10,14 @@ import argparse
 import ast
 import base64
 import fcntl
+import contextvars
+import functools
 import gzip
+import grp
 import hashlib
 import http.client
 import io
+import ipaddress
 import json
 import logging
 import math
@@ -156,7 +160,8 @@ SERVICE_STEPS = (
     ("restart", "jittersim-dashboard.service"),
 )
 # install.sh publishes the dashboard name as a best effort. A failure only
-# means the name is not announced.
+# means the name is not announced. Avahi is limited first (see prepare_name_service
+# in apply_update), because the control firewall lets mDNS in on the test Wi-Fi.
 NAME_STEPS = (
     ("daemon-reload",),
     ("enable", NAME_UNIT),
@@ -198,9 +203,6 @@ def version_key(version):
 def release_files(*, code, units, dispatcher):
     """Files install.sh copies from a release as (source, destination, mode)."""
     files = [(PI + unit, units / unit, 0o644) for unit in UNITS]
-    files.append(
-        (PI + "publish-dashboard-name.sh", code / PI / "publish-dashboard-name.sh", 0o755)
-    )
     files.append((PI + "jittersim-mdns-dispatcher", dispatcher, 0o755))
     return files
 
@@ -211,6 +213,696 @@ class UpdateError(RuntimeError):
 
 class NotNewerError(UpdateError):
     """The signed release is not newer than the installed one."""
+
+
+CERTIFICATE_FILES = (
+    "ca/ca.crt", "ca/ca.key", "dashboard.crt", "dashboard.key",
+    "dashboard-wifi.crt", "trust.env",
+)
+CERTIFICATE_LIMIT = 64 * 1024
+CERTIFICATE_SECONDS = 60.0
+CERTIFICATE_FORMAT = 1
+_CERTIFICATE_TIME = contextvars.ContextVar("certificate_recovery_time", default=None)
+_CERTIFICATE_RUN = contextvars.ContextVar("certificate_recovery_runner", default=None)
+
+
+class CertificateMaterial(bytes):
+    """Keep diagnostic representations free of private certificate material."""
+
+    def __repr__(self):
+        return "<certificate material: %d bytes>" % len(self)
+
+
+class CertificateFiles(dict):
+    def __repr__(self):
+        return "<certificate identity files: %s>" % ", ".join(sorted(self))
+
+
+def _certificate_check():
+    timing = _CERTIFICATE_TIME.get()
+    if timing is not None:
+        deadline, budget = timing
+        if budget is not None:
+            budget.check()
+        if time.monotonic() >= deadline:
+            raise UpdateError("certificate recovery exceeded its total time allowance")
+
+
+def _certificate_operation(function):
+    @functools.wraps(function)
+    def checked(*args, **kwargs):
+        if function.__name__ == "verify_certificate_identity" and args:
+            args = (CertificateFiles({name: CertificateMaterial(content) for name, content in args[0].items()}),) + args[1:]
+        parent = _CERTIFICATE_TIME.get()
+        budget = kwargs.get("budget") or (parent[1] if parent else None)
+        now = time.monotonic()
+        deadline = kwargs.get("deadline")
+        deadline = deadline if deadline is not None else now + CERTIFICATE_SECONDS
+        if parent:
+            deadline = min(deadline, parent[0])
+        if budget is not None:
+            budget.check()
+            deadline = min(deadline, now + budget.limit(CERTIFICATE_SECONDS))
+        kwargs["deadline"] = deadline
+        kwargs["budget"] = budget
+        token = _CERTIFICATE_TIME.set((deadline, budget))
+        try:
+            _certificate_check()
+            result = function(*args, **kwargs)
+            _certificate_check()
+            return result
+        finally:
+            _CERTIFICATE_TIME.reset(token)
+    return checked
+
+
+def _certificate_directory(path, *, private=False, create=False):
+    _certificate_check()
+    if create:
+        path.mkdir(mode=0o700, exist_ok=True)
+    info = path.lstat()
+    forbidden = 0o077 if private else 0o022
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or
+            info.st_mode & forbidden):
+        raise UpdateError("certificate recovery directories must belong to the administrator and not be links")
+    return path
+
+
+def _certificate_bytes(path, *, private=False):
+    _certificate_check()
+    parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                     getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(parent)
+        if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise UpdateError("certificate files must be in an administrator-owned directory")
+        descriptor = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                             getattr(os, "O_NONBLOCK", 0), dir_fd=parent)
+        try:
+            info = os.fstat(descriptor)
+            forbidden = 0o077 if private else 0o022
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+                    info.st_mode & forbidden or info.st_size > CERTIFICATE_LIMIT):
+                raise UpdateError("certificate recovery files must be bounded regular administrator-owned files")
+            with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                content = CertificateMaterial(handle.read(CERTIFICATE_LIMIT + 1))
+            if len(content) > CERTIFICATE_LIMIT:
+                raise UpdateError("certificate recovery file is too large")
+            _certificate_check()
+            return content
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent)
+
+
+def _certificate_command(arguments, deadline):
+    _certificate_check()
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise UpdateError("certificate verification exceeded its total time allowance")
+    try:
+        run = _CERTIFICATE_RUN.get() or capture_command
+        answer = run(["openssl", *arguments], remaining, limit=CERTIFICATE_LIMIT)
+    except CommandNotStopped:
+        raise
+    except (OSError, subprocess.SubprocessError, UpdateError) as error:
+        if isinstance(error, UpdateError) and type(error) is not UpdateError:
+            raise
+        _certificate_check()
+        raise UpdateError("certificate identity or trust verification failed") from error
+    _certificate_check()
+    return answer
+
+
+def _certificate_section(text, title):
+    match = re.search(r"^[ \t]*X509v3 " + re.escape(title) + r"[^\n]*\n(.*?)(?=^[ \t]*X509v3 |^[ \t]*Signature Algorithm:|\Z)",
+                      text, re.M | re.S)
+    return match.group(0) if match else ""
+
+
+def _certificate_names(text):
+    section = _certificate_section(text, "Subject Alternative Name")
+    names = tuple(re.findall(r"DNS:([^,\s]+)", section))
+    label = r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
+    if (len(names) > 32 or len(set(names)) != len(names) or
+            any(len(name) > 253 or not re.fullmatch(label + r"(?:\." + label + r")*", name)
+                for name in names)):
+        raise UpdateError("dashboard certificate names are invalid")
+    addresses = re.findall(r"IP Address:([^,\s]+)", section)
+    try:
+        if len(addresses) > 8 or len(set(addresses)) != len(addresses):
+            raise ValueError("too many or repeated addresses")
+        for address in addresses:
+            ipaddress.ip_address(address)
+    except ValueError as error:
+        raise UpdateError("dashboard certificate addresses are invalid") from error
+    if not names and not addresses:
+        raise UpdateError("the dashboard certificate has no usable names or addresses")
+    return names
+
+
+def _certificate_settings(content):
+    values = {}
+    try:
+        lines = content.decode("utf-8").splitlines()
+    except UnicodeError as error:
+        raise UpdateError("the saved dashboard settings are unreadable") from error
+    for line in lines:
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if separator and key in ("JITTERSIM_DASHBOARD_NAME", "JITTERSIM_LOCAL_NAME"):
+            if key in values:
+                raise UpdateError("the saved dashboard name is repeated")
+            value = value.strip().strip("'\"").lower().rstrip(".")
+            suffix = r"\.local" if key == "JITTERSIM_DASHBOARD_NAME" else r"\.(?:local|home\.arpa)"
+            if (not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" + suffix, value) or
+                    "jittersim" in value.replace("-", "")):
+                raise UpdateError("the saved dashboard name is invalid")
+            values[key] = value
+    return values
+
+
+@_certificate_operation
+def verify_certificate_identity(files, *, authority_only=False, deadline=None, budget=None):
+    """Verify only the supplied identity with no installed-package dependency."""
+    deadline = deadline if deadline is not None else time.monotonic() + CERTIFICATE_SECONDS
+    if set(files) - set(CERTIFICATE_FILES) or any(len(value) > CERTIFICATE_LIMIT for value in files.values()):
+        raise UpdateError("certificate identity contains unsupported or oversized files")
+    ca_present = "ca/ca.crt" in files or "ca/ca.key" in files
+    if ca_present and not all(name in files for name in CERTIFICATE_FILES[:2]):
+        raise UpdateError("the current certificate authority is incomplete")
+    pair = ("dashboard.crt" in files, "dashboard.key" in files)
+    if not authority_only and pair[0] != pair[1]:
+        raise UpdateError("the current dashboard certificate and key are incomplete")
+    if not authority_only and ca_present and not all(pair):
+        raise UpdateError("the current authority has no complete dashboard identity")
+    if not authority_only and ca_present and "dashboard-wifi.crt" not in files:
+        raise UpdateError("the current authority has no complete Wi-Fi identity")
+    if not authority_only and "dashboard-wifi.crt" in files and not all(pair):
+        raise UpdateError("the Wi-Fi certificate has no matching dashboard key")
+    settings = _certificate_settings(files.get("trust.env", b""))
+    with tempfile.TemporaryDirectory(prefix="certificate-verify-") as temporary:
+        root = Path(temporary)
+        empty = root / "empty-trust"
+        empty.mkdir(mode=0o700)
+        paths = {}
+        for name, content in files.items():
+            path = root / name.replace("/", "-")
+            path.write_bytes(content)
+            path.chmod(0o600)
+            paths[name] = str(path)
+        version = _certificate_command(["version"], deadline)
+        no_store = ["-no-CAstore"] if version.startswith((b"OpenSSL 3.", b"OpenSSL 4.")) else []
+
+        def text(name):
+            return _certificate_command(["x509", "-in", paths[name], "-noout", "-text"], deadline).decode("utf-8")
+
+        def public(name, certificate):
+            args = ["x509", "-in", paths[name], "-noout", "-pubkey"] if certificate else ["pkey", "-in", paths[name], "-pubout"]
+            return _certificate_command(args, deadline)
+
+        authority = paths.get("ca/ca.crt") if ca_present else paths.get("dashboard.crt")
+        if authority:
+            anchor = ["-CAfile", authority, "-CApath", str(empty), *no_store]
+            identity_lines = _certificate_command(
+                ["x509", "-in", authority, "-noout", "-issuer", "-subject", "-nameopt", "RFC2253"],
+                deadline).decode("utf-8").splitlines()
+            fields = dict(line.split("=", 1) for line in identity_lines if "=" in line)
+            if not fields.get("issuer") or fields.get("issuer") != fields.get("subject"):
+                raise UpdateError("the retained trust anchor is not self-signed")
+        if ca_present:
+            ca_text = text("ca/ca.crt")
+            basic = _certificate_section(ca_text, "Basic Constraints")
+            usage = _certificate_section(ca_text, "Key Usage")
+            constraints = _certificate_section(ca_text, "Name Constraints")
+            dns = set(re.findall(r"DNS:([^\s,]+)", constraints))
+            networks = re.findall(r"IP:([^\s,]+)", constraints)
+            if (not basic or not usage or "critical" not in basic.splitlines()[0] or "CA:TRUE, pathlen:0" not in basic or
+                    "critical" not in usage.splitlines()[0] or "Certificate Sign" not in usage or
+                    "CRL Sign" not in usage or not constraints or "critical" not in constraints.splitlines()[0] or
+                    "Permitted:" not in constraints or "Excluded:" in constraints or
+                    not dns or not dns <= {"local", "home.arpa"} or not 1 <= len(networks) <= 2 or
+                    "prime256v1" not in ca_text):
+                raise UpdateError("the retained authority constraints are not supported")
+            try:
+                ranges = tuple(ipaddress.IPv4Network(network) for network in networks)
+            except ValueError as error:
+                raise UpdateError("the retained authority address constraints are invalid") from error
+            private = tuple(ipaddress.IPv4Network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+            if (ipaddress.IPv4Network("192.168.50.0/24") not in ranges or
+                    any(not any(network.subnet_of(block) for block in private) and network.prefixlen < 24
+                        for network in ranges)):
+                raise UpdateError("the retained authority address ranges are too broad")
+            if public("ca/ca.crt", True) != public("ca/ca.key", False):
+                raise UpdateError("the retained authority key does not match its certificate")
+            _certificate_command(["verify", *anchor, "-check_ss_sig", authority], deadline)
+        if not authority_only and all(pair):
+            key = public("dashboard.key", False)
+            for name in ("dashboard.crt", "dashboard-wifi.crt"):
+                if name not in files:
+                    continue
+                cert_text = text(name)
+                names = _certificate_names(cert_text)
+                if public(name, True) != key:
+                    raise UpdateError("the dashboard certificate does not match the retained key")
+                _certificate_command(["verify", *anchor, "-purpose", "sslserver",
+                                      *([] if ca_present else ["-check_ss_sig"]), paths[name]], deadline)
+                if name == "dashboard-wifi.crt" and any("jittersim" in item.lower().replace("-", "") for item in names):
+                    raise UpdateError("the Wi-Fi certificate contains a private dashboard name")
+                required = settings.values() if ca_present else (
+                    [settings["JITTERSIM_LOCAL_NAME"]] if "JITTERSIM_LOCAL_NAME" in settings else []
+                )
+                if any(value not in names for value in required):
+                    raise UpdateError("the certificate does not cover the saved dashboard names")
+            return "ca" if ca_present else "legacy"
+    return "ca" if ca_present else "none"
+
+
+def _certificate_write(path, content, *, mode=0o600):
+    content = CertificateMaterial(content)
+    _certificate_check()
+    descriptor, temporary = tempfile.mkstemp(prefix=".certificate-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), mode)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _certificate_check()
+        os.replace(temporary, path)
+        _fsync_folder(path.parent)
+        _certificate_check()
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _certificate_record(path):
+    try:
+        return json.loads(_certificate_bytes(path, private=True))
+    except (ValueError, UnicodeError) as error:
+        raise UpdateError("the certificate recovery record is damaged") from error
+
+
+@contextmanager
+def _certificate_lock(root, deadline):
+    namespace = _certificate_directory(root / "certificate-recovery", private=True, create=True)
+    descriptor = os.open(namespace / "lock", os.O_RDWR | os.O_CREAT |
+                         getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), 0o600)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise UpdateError("the certificate recovery lock is not private")
+        while True:
+            _certificate_check()
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise UpdateError("certificate recovery lock exceeded its time allowance")
+                time.sleep(min(0.02, remaining))
+        _certificate_clean_temporary(namespace, {"a", "b", "lock", "current.json"})
+        yield namespace
+    finally:
+        os.close(descriptor)
+
+
+def _certificate_pointer(namespace):
+    path = namespace / "current.json"
+    if not os.path.lexists(path):
+        return None
+    value = _certificate_record(path)
+    if (not isinstance(value, dict) or set(value) != {"format", "slot", "transaction", "active"} or
+            type(value["format"]) is not int or value["format"] != CERTIFICATE_FORMAT or value["slot"] not in ("a", "b") or
+            not isinstance(value["active"], bool) or
+            not isinstance(value["transaction"], str) or
+            not re.fullmatch(r"[0-9a-f]{64}", value["transaction"])):
+        raise UpdateError("the certificate recovery pointer is not understood")
+    return value
+
+
+def _certificate_slot(namespace, slot):
+    return _certificate_directory(namespace / slot, private=True)
+
+
+def _certificate_slot_names(directory):
+    allowed = {name.replace("/", "-") for name in CERTIFICATE_FILES} | {"complete.json"}
+    return _certificate_clean_temporary(directory, allowed)
+
+
+def _certificate_clean_temporary(directory, allowed):
+    with os.scandir(directory) as entries:
+        names = []
+        temporary = []
+        count = 0
+        for entry in entries:
+            _certificate_check()
+            count += 1
+            if count > len(allowed) + 2:
+                raise UpdateError("certificate recovery generation contains too many files")
+            if re.fullmatch(r"\.certificate-[a-zA-Z0-9_]{8}", entry.name):
+                _certificate_bytes(directory / entry.name, private=True)
+                temporary.append(entry.name)
+            elif entry.name in allowed:
+                names.append(entry.name)
+            else:
+                raise UpdateError("certificate recovery generation contains unknown files")
+    for name in temporary:
+        _certificate_check()
+        (directory / name).unlink()
+    if temporary:
+        _fsync_folder(directory)
+    return names
+
+
+def _certificate_remove_slot(namespace, slot):
+    path = namespace / slot
+    if not os.path.lexists(path):
+        return
+    directory = _certificate_slot(namespace, slot)
+    names = _certificate_slot_names(directory)
+    for name in names:
+        _certificate_check()
+        _certificate_bytes(directory / name, private=True)
+    for name in names:
+        (directory / name).unlink()
+    directory.rmdir()
+    _fsync_folder(namespace)
+
+
+def _certificate_load_slot(namespace, pointer, deadline):
+    directory = _certificate_slot(namespace, pointer["slot"])
+    names = _certificate_slot_names(directory)
+    manifest = _certificate_record(directory / "complete.json")
+    if (not isinstance(manifest, dict) or set(manifest) != {"format", "transaction", "identity", "files"} or
+            type(manifest["format"]) is not int or manifest["format"] != CERTIFICATE_FORMAT or manifest["transaction"] != pointer["transaction"] or
+            manifest["identity"] not in ("ca", "legacy", "none") or
+            not isinstance(manifest["files"], dict) or set(manifest["files"]) - set(CERTIFICATE_FILES) or
+            set(names) != {name.replace("/", "-") for name in manifest["files"]} | {"complete.json"}):
+        raise UpdateError("the complete certificate recovery generation is not understood")
+    files = CertificateFiles()
+    for name, expected in manifest["files"].items():
+        _certificate_check()
+        content = _certificate_bytes(directory / name.replace("/", "-"), private=True)
+        if not isinstance(expected, str) or hashlib.sha256(content).hexdigest() != expected:
+            raise UpdateError("the certificate recovery generation has changed")
+        files[name] = content
+    if verify_certificate_identity(files, deadline=deadline) != manifest["identity"]:
+        raise UpdateError("the retained certificate identity has changed")
+    return files
+
+
+def _certificate_live_files(config):
+    _certificate_directory(config)
+    if os.path.lexists(config / "ca"):
+        _certificate_directory(config / "ca")
+        if not all(os.path.lexists(config / name) for name in CERTIFICATE_FILES[:2]):
+            raise UpdateError("the current certificate authority is incomplete")
+    files = CertificateFiles()
+    for name in CERTIFICATE_FILES:
+        _certificate_check()
+        path = config / name
+        if os.path.lexists(path):
+            try:
+                files[name] = _certificate_bytes(path, private=name == "ca/ca.key")
+            except OSError as error:
+                raise UpdateError("the current certificate identity could not be read") from error
+    return files
+
+
+@_certificate_operation
+def keep_certificate_identity(root, config, transaction, *, deadline=None, budget=None):
+    """Durably retain the identity immediately before destructive restoration."""
+    deadline = deadline if deadline is not None else time.monotonic() + CERTIFICATE_SECONDS
+    if not re.fullmatch(r"[0-9a-f]{64}", transaction):
+        raise UpdateError("certificate recovery needs a stable restore identifier")
+    with _certificate_lock(root, deadline) as namespace:
+        return _keep_certificate_locked(namespace, config, transaction, deadline)
+
+
+def _keep_certificate_locked(namespace, config, transaction, deadline):
+    previous = _certificate_pointer(namespace)
+    if previous and previous["active"]:
+        if previous["transaction"] != transaction:
+            raise UpdateError("an earlier certificate recovery still needs to finish")
+        _certificate_load_slot(namespace, previous, deadline)
+        return previous
+    files = _certificate_live_files(config)
+    kind = verify_certificate_identity(files, deadline=deadline)
+    slot = "b" if previous and previous["slot"] == "a" else "a"
+    _certificate_remove_slot(namespace, slot)
+    directory = namespace / slot
+    directory.mkdir(mode=0o700)
+    for name, content in files.items():
+        _certificate_write(directory / name.replace("/", "-"), content)
+    manifest = {"format": CERTIFICATE_FORMAT, "transaction": transaction,
+                "identity": kind,
+                "files": {name: hashlib.sha256(content).hexdigest() for name, content in files.items()}}
+    _certificate_write(directory / "complete.json", json.dumps(manifest).encode("utf-8"))
+    _fsync_folder(directory)
+    _fsync_folder(namespace)
+    pointer = {"format": CERTIFICATE_FORMAT, "slot": slot,
+               "transaction": transaction, "active": True}
+    _certificate_write(namespace / "current.json", json.dumps(pointer).encode("utf-8"))
+    if previous:
+        _certificate_remove_slot(namespace, previous["slot"])
+    return pointer
+
+
+@_certificate_operation
+def prepare_certificate_restore(root, config, transaction, *, deadline=None, budget=None):
+    """Recover an owned adoption before capturing a new destructive restore."""
+    if not isinstance(transaction, str) or not re.fullmatch(r"[0-9a-f]{64}", transaction):
+        raise UpdateError("certificate recovery needs a stable restore identifier")
+    with _certificate_lock(root, deadline) as namespace:
+        previous = _certificate_pointer(namespace)
+        if not previous or not previous["active"]:
+            recover_incomplete_certificate_adoption(config, deadline=deadline)
+        return _keep_certificate_locked(namespace, config, transaction, deadline)
+
+
+def _certificate_permissions(config, files):
+    try:
+        gid = grp.getgrnam("jittersim").gr_gid if os.geteuid() == 0 else os.getgid()
+        owner = os.geteuid()
+        modes = [(config, 0o750, gid)]
+        if "ca/ca.crt" in files:
+            modes.append((config / "ca", 0o750, gid))
+        for name in files:
+            mode = 0o600 if name == "ca/ca.key" else 0o640 if name in ("dashboard.key", "trust.env") else 0o644
+            file_gid = gid if name in ("dashboard.key", "trust.env") else 0 if owner == 0 else os.getgid()
+            modes.append((config / name, mode, file_gid))
+        for path, mode, group in modes:
+            _certificate_check()
+            if path.is_symlink():
+                raise UpdateError("certificate restoration cannot change permissions through a link")
+            os.chown(path, owner, group, follow_symlinks=False)
+            os.chmod(path, mode, follow_symlinks=False)
+            info = path.lstat()
+            if info.st_uid != owner or info.st_gid != group or stat.S_IMODE(info.st_mode) != mode:
+                raise UpdateError("certificate ownership or permissions could not be restored")
+    except (OSError, LookupError) as error:
+        raise UpdateError("certificate ownership or permissions could not be restored") from error
+
+
+@_certificate_operation
+def restore_certificate_identity(root, config, retained, *, deadline=None, budget=None):
+    """Restore verified current files before starting any application package."""
+    deadline = deadline if deadline is not None else time.monotonic() + CERTIFICATE_SECONDS
+    with _certificate_lock(root, deadline) as namespace:
+        pointer = _certificate_pointer(namespace)
+        if pointer != retained or not pointer["active"]:
+            raise UpdateError("certificate recovery no longer belongs to this restore")
+        files = _certificate_load_slot(namespace, pointer, deadline)
+        _restore_certificate_files(config, files)
+
+
+def _restore_certificate_files(config, files):
+    _certificate_directory(config)
+    if "ca/ca.crt" in files:
+        (config / "ca").mkdir(mode=0o700, exist_ok=True)
+        _certificate_directory(config / "ca")
+    for name in CERTIFICATE_FILES:
+        destination = config / name
+        if name in files:
+            _certificate_write(destination, files[name])
+        elif os.path.lexists(destination):
+            _certificate_bytes(destination)
+            destination.unlink()
+            _fsync_folder(destination.parent)
+    if "ca/ca.crt" not in files and os.path.lexists(config / "ca"):
+        directory = _certificate_directory(config / "ca")
+        with os.scandir(directory) as entries:
+            if next(entries, None) is not None:
+                raise UpdateError("an unexpected authority remains after absent-identity restoration")
+        directory.rmdir()
+        _fsync_folder(config)
+    _certificate_permissions(config, files)
+    if _certificate_live_files(config) != files:
+        raise UpdateError("the restored certificate identity does not match its retained generation")
+
+
+def _adoption_files(directory, expected):
+    _certificate_directory(directory, private=True)
+    names = _certificate_clean_temporary(directory, {name.replace("/", "-") for name in CERTIFICATE_FILES})
+    if set(names) != {name.replace("/", "-") for name in expected}:
+        raise UpdateError("the adoption candidate generation is incomplete")
+    files = CertificateFiles()
+    for name, digest in expected.items():
+        content = _certificate_bytes(directory / name.replace("/", "-"), private=True)
+        if hashlib.sha256(content).hexdigest() != digest:
+            raise UpdateError("the owned adoption candidate has changed")
+        files[name] = content
+    return files
+
+
+def _adoption_proof(root, pointer, namespace, deadline):
+    proof = _certificate_record(root / "adoption.json")
+    if (not isinstance(proof, dict) or
+            set(proof) != {"format", "transaction", "state", "original", "candidate"} or
+            type(proof["format"]) is not int or proof["format"] != CERTIFICATE_FORMAT or
+            proof["transaction"] != pointer["transaction"] or
+            proof["state"] not in ("publishing", "restoring") or
+            any(not isinstance(proof[key], dict) or set(proof[key]) - set(CERTIFICATE_FILES) or
+                any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                    for value in proof[key].values()) for key in ("original", "candidate"))):
+        raise UpdateError("the active certificate adoption proof is not understood")
+    original = _certificate_load_slot(namespace, pointer, deadline)
+    if (verify_certificate_identity(original, deadline=deadline) != "legacy" or
+            {name: hashlib.sha256(content).hexdigest() for name, content in original.items()} != proof["original"]):
+        raise UpdateError("certificate adoption does not own a complete legacy identity")
+    candidate = _adoption_files(root / "candidate", proof["candidate"])
+    if verify_certificate_identity(candidate, deadline=deadline) != "ca":
+        raise UpdateError("certificate adoption has no verified candidate authority")
+    return proof, original, candidate
+
+
+def _adoption_current(config, original, candidate):
+    current = _certificate_live_files_for_adoption(config)
+    for name, content in current.items():
+        if content != original.get(name) and content != candidate.get(name):
+            raise UpdateError("certificate adoption cannot replace an unrelated current identity")
+    if set(original) - set(current):
+        raise UpdateError("legacy identity files are missing outside an owned publication point")
+    return current
+
+
+def _certificate_live_files_for_adoption(config):
+    # The only allowed incomplete directory belongs to the recorded new CA.
+    _certificate_directory(config)
+    if os.path.lexists(config / "ca"):
+        directory = _certificate_directory(config / "ca")
+        _certificate_clean_temporary(directory, {"ca.crt", "ca.key"})
+    files = CertificateFiles()
+    for name in CERTIFICATE_FILES:
+        if os.path.lexists(config / name):
+            files[name] = _certificate_bytes(config / name, private=name == "ca/ca.key")
+    return files
+
+
+@_certificate_operation
+def publish_certificate_adoption(config, candidate=None, *, required_names=(), required_addresses=(),
+                                 deadline=None, budget=None):
+    """Publish only a verified candidate belonging to an explicit legacy transition."""
+    root = _certificate_directory(config / ".certificate-adoption", private=True, create=True)
+    with _certificate_lock(root, deadline) as namespace:
+        pointer = _certificate_pointer(namespace)
+        if pointer and pointer["active"]:
+            proof, original, owned = _adoption_proof(root, pointer, namespace, deadline)
+            if proof["state"] != "publishing":
+                raise UpdateError("the earlier certificate adoption recovery must finish first")
+        else:
+            if candidate is None:
+                return False
+            original = _certificate_live_files(config)
+            if verify_certificate_identity(original, deadline=deadline) != "legacy":
+                raise UpdateError("certificate adoption requires a complete legacy identity")
+            if verify_certificate_identity(candidate, deadline=deadline) != "ca":
+                raise UpdateError("certificate adoption requires a complete candidate authority")
+            directory = root / "candidate"
+            if os.path.lexists(directory):
+                _certificate_directory(directory, private=True)
+                names = _certificate_clean_temporary(directory, {name.replace("/", "-") for name in CERTIFICATE_FILES})
+                for name in names:
+                    _certificate_bytes(directory / name, private=True)
+                for name in names:
+                    _certificate_check()
+                    (directory / name).unlink()
+                directory.rmdir()
+            directory.mkdir(mode=0o700)
+            owned = CertificateFiles({name: CertificateMaterial(content) for name, content in candidate.items()})
+            for name, content in owned.items():
+                _certificate_write(directory / name.replace("/", "-"), content)
+            _fsync_folder(directory)
+            proof = {"format": CERTIFICATE_FORMAT, "transaction": os.urandom(32).hex(),
+                     "state": "publishing",
+                     "original": {name: hashlib.sha256(content).hexdigest() for name, content in original.items()},
+                     "candidate": {name: hashlib.sha256(content).hexdigest() for name, content in owned.items()}}
+            _certificate_write(root / "adoption.json", json.dumps(proof).encode())
+            pointer = _keep_certificate_locked(namespace, config, proof["transaction"], deadline)
+            proof, original, owned = _adoption_proof(root, pointer, namespace, deadline)
+        certificate_text = _certificate_command(
+            ["x509", "-in", str(root / "candidate/dashboard.crt"), "-noout", "-text"], deadline).decode("utf-8")
+        if (any(name not in _certificate_names(certificate_text) for name in required_names) or
+                any("IP Address:" + address not in _certificate_section(certificate_text, "Subject Alternative Name")
+                    for address in required_addresses)):
+            raise UpdateError("the requested address changed during certificate adoption")
+        _adoption_current(config, original, owned)
+        _restore_certificate_files(config, owned)
+        return True
+
+
+@_certificate_operation
+def recover_incomplete_certificate_adoption(config, *, deadline=None, budget=None):
+    """Recover an interrupted owned transition without using historical snapshots."""
+    root = config / ".certificate-adoption"
+    if not os.path.lexists(root):
+        return False
+    _certificate_directory(root, private=True)
+    with _certificate_lock(root, deadline) as namespace:
+        pointer = _certificate_pointer(namespace)
+        if not pointer or not pointer["active"]:
+            return False
+        proof, original, candidate = _adoption_proof(root, pointer, namespace, deadline)
+        current = _adoption_current(config, original, candidate)
+        try:
+            kind = verify_certificate_identity(current, deadline=deadline)
+        except UpdateError as error:
+            if type(error) is not UpdateError:
+                raise
+            _certificate_check()
+            kind = None
+        if kind == "ca" and proof["state"] == "publishing":
+            return False
+        proof["state"] = "restoring"
+        _certificate_write(root / "adoption.json", json.dumps(proof).encode())
+        _restore_certificate_files(config, original)
+        return True
+
+
+@_certificate_operation
+def finish_certificate_recovery(root, *, retained=None, deadline=None, budget=None):
+    """Mark recovery complete only after the owning flow confirms healthy startup."""
+    path = root / "certificate-recovery"
+    if not os.path.lexists(path):
+        return
+    with _certificate_lock(root, deadline) as namespace:
+        pointer = _certificate_pointer(namespace)
+        if pointer is None or not pointer["active"]:
+            return
+        if retained is not None and pointer != retained:
+            raise UpdateError("certificate completion belongs to a different transition")
+        _certificate_load_slot(namespace, pointer, deadline)
+        if root.name == ".certificate-adoption":
+            proof, original, candidate = _adoption_proof(root, pointer, namespace, deadline)
+            current = _adoption_current(root.parent, original, candidate)
+            expected = candidate if proof["state"] == "publishing" else original
+            if current != expected:
+                raise UpdateError("the owned certificate adoption has not completed")
+        pointer["active"] = False
+        _certificate_write(namespace / "current.json", json.dumps(pointer).encode("utf-8"))
 
 
 def atomic_json(path, value):
@@ -2913,7 +3605,19 @@ def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080, budget=None):
             if line.startswith("JITTERSIM_ADMIN_TOKEN=")
         )
         hostname = socket.gethostname().split(".")[0] + ".local"
-        context = ssl.create_default_context(cafile=str(config / "dashboard.crt"))
+        # The dashboard certificate is issued by the local authority. An older
+        # self-signed one is its own authority.
+        authority = config / "ca" / "ca.crt"
+        saved = config / "trust.env"
+        values = _certificate_settings(_certificate_bytes(saved)) if saved.exists() else {}
+        if authority.exists():
+            earlier = values.get("JITTERSIM_LOCAL_NAME", "")
+            hostname = values.get("JITTERSIM_DASHBOARD_NAME") or (
+                earlier if earlier.endswith(".local") else "netlab.local")
+        elif "JITTERSIM_LOCAL_NAME" in values:
+            hostname = values["JITTERSIM_LOCAL_NAME"]
+        context = ssl.create_default_context(
+            cafile=str(authority if authority.exists() else config / "dashboard.crt"))
         connection = http.client.HTTPSConnection(hostname, port, timeout=remaining(), context=context)
         connection.response_class = DeadlineResponse
         try:
@@ -3027,8 +3731,36 @@ def apply_update(
         def present(names):
             return [name for name in names if (units / name).exists()]
 
-        def restart_services():
+        def prepare_name_service():
+            """Limit Avahi like install.sh, before the firewall lets mDNS in.
+
+            Avahi cannot limit its own publishing to one network. If it cannot be
+            limited it is stopped, so it never announces the Pi on the test Wi-Fi
+            with its own settings, and the name service is not started.
+            """
+            try:
+                uplink, test_interface = runtime_interfaces(config)
+                run(
+                    [str(code / ".venv/bin/python"), "-m", "jittersim.mdnsname", "configure",
+                     "--uplink", uplink, "--test-interface", test_interface],
+                    60,
+                )
+                run(["systemctl", "restart", "avahi-daemon.service"], 120)
+                return True
+            except CommandNotStopped:
+                raise
+            except UpdateError:
+                try:
+                    run(["systemctl", "stop", "avahi-daemon.service", "avahi-daemon.socket"], 60)
+                except CommandNotStopped:
+                    raise
+                except UpdateError:
+                    pass
+                return False
+
+        def restart_services(prepare_name=False):
             """Run the systemctl steps of install.sh for the units installed now."""
+            name_ready = prepare_name_service() if prepare_name else True
             try:
                 wifi = query(
                     ["nmcli", "-g", "GENERAL.CONNECTION", "device", "show",
@@ -3047,7 +3779,7 @@ def apply_update(
                 if action == "start" and wifi == "jittersim-ap":
                     continue
                 run(["systemctl", action, *installed], 120)
-            if present([NAME_UNIT]):
+            if name_ready and present([NAME_UNIT]):
                 for action, *names in NAME_STEPS:
                     try:
                         run(["systemctl", action, *names], 120)
@@ -3118,17 +3850,32 @@ def apply_update(
                     targets.append((name, units / name[6:]))
                 else:
                     raise UpdateError("the recovery copy names an unknown file")
+            certificate_deadline = time.monotonic() + CERTIFICATE_SECONDS
+            transaction = hashlib.sha256(
+                _certificate_bytes(backup / "complete.json") +
+                str(request.get("version", "")).encode("utf-8")
+            ).hexdigest()
+            retained_certificate = prepare_certificate_restore(
+                root, config, transaction, deadline=certificate_deadline
+            )
             keep = keep_trust_settings()
             for name, destination in (("code", code), ("config", config), ("data", data)):
                 if destination.exists():
                     remove_tree(destination, budget)
+                preserved = PRESERVED_CONFIG + (
+                    ".certificate-adoption", "ca", "dashboard.crt", "dashboard.key",
+                    "dashboard-wifi.crt", "trust.env",
+                ) if name == "config" else ()
                 snapshot_tree(backup / name, destination, budget, links=name == "code",
-                              ignore=PRESERVED_CONFIG if name == "config" else ())
+                              ignore=preserved)
                 if name in ownership:
                     uid, gid = ownership[name]
                     for entry, _, _ in tree_entries(destination, budget, links=name == "code"):
                         os.chown(entry, uid, gid, follow_symlinks=False)
             put_back_trust_settings(keep)
+            restore_certificate_identity(
+                root, config, retained_certificate, deadline=certificate_deadline
+            )
             for name, destination in targets:
                 budget.check()
                 saved = backup / name
@@ -3279,6 +4026,7 @@ def apply_update(
                 cleanup_generations(root, budget)
                 recovered = True
                 progress("rolled-back", "Previous installation restored and health check passed.")
+                finish_certificate_recovery(root)
                 keep_request = False
                 return
             progress("backing-up", "Saving the stopped installation and settings.")
@@ -3349,6 +4097,12 @@ def apply_update(
                     entry.chmod(info.st_mode & ~0o022)
             run(["runuser", "-u", "jittersim", "--", python, "-I", "-c", IMPORT_CHECK], 120)
             run([python, str(code / BOOTSTRAP)], 60)
+            # Like install.sh: keep the dashboard name setting and the local
+            # certificate authority, and renew the dashboard certificates.
+            run([python, "-m", "jittersim.localname", "install",
+                 "--config-dir", str(config), "--group", "jittersim"], 60)
+            run([python, "-m", "jittersim.localca", "ensure",
+                 "--config-dir", str(config), "--group", "jittersim"], 120)
             link_command(str(code / ".venv/bin/jittersim"), command)
             render_firewall(staged / FIREWALL_TEMPLATE, config / FIREWALL_RULES,
                             uplink, test_interface)
@@ -3356,8 +4110,15 @@ def apply_update(
             for source, destination, mode in release_files(code=code, units=units, dispatcher=dispatcher):
                 budget.check()
                 install_file(staged / source, destination, mode)
+            compatibility = code / "deploy/raspberry-pi/homepage-profile-compat.py"
+            if compatibility.exists():
+                install_file(compatibility, manager.with_name("jittersim-profile-compat.py"), 0o644)
+                dropins = units / "jittersim-dashboard.service.d"
+                dropins.mkdir(mode=0o755, parents=True, exist_ok=True)
+                install_file(code / "deploy/raspberry-pi/homepage-compat.conf",
+                             dropins / "homepage-compat.conf", 0o644)
             progress("checking", "Restarting services and checking the dashboard and helper.")
-            restart_services()
+            restart_services(prepare_name=True)
             if not wait_healthy():
                 raise UpdateError("updated services failed their health check")
             _raise_floor(root, record["sequence"])
@@ -3365,6 +4126,7 @@ def apply_update(
             install_manager(code / "src/jittersim/updates.py", manager)
             cleanup_generations(root, budget)
             progress("complete", "Release installed. Dashboard and helper health checks passed.")
+            finish_certificate_recovery(config / ".certificate-adoption")
             keep_request = False
         except OperationOwnershipUnknown:
             progress("failed", "An update command could not be confirmed. Recovery will wait for it.")
@@ -3425,6 +4187,8 @@ def apply_update(
             else:
                 message = "Update or recovery failed. Check the update service log."
             progress("rolled-back" if recovered and needs_recovery else "failed", message)
+            if recovered and needs_recovery:
+                finish_certificate_recovery(root)
             raise
         finally:
             if not keep_request:

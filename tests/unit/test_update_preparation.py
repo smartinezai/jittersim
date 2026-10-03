@@ -436,6 +436,12 @@ def test_health_body_has_a_total_deadline_even_when_bytes_keep_arriving(monkeypa
     monkeypatch.setattr(updates.time, "monotonic", lambda: clock[0])
 
     class MemoryFile:
+        def __truediv__(self, name):
+            return self
+
+        def exists(self):
+            return False
+
         def read_text(self):
             return "JITTERSIM_ADMIN_TOKEN=throwaway-health-test\n"
 
@@ -581,14 +587,14 @@ def test_manual_manager_publication_requires_the_shared_lock_and_is_atomic(tmp_p
             with pytest.raises(updates.UpdateError, match="ownership"):
                 updates.bootstrap_manager(source, destination, root=root, descriptor=unrelated.fileno())
         assert destination.read_text() == "previous manager"
-        original = updates.os.replace
+        original = Path.replace
 
         def interrupted(old, new):
             if Path(new) == destination:
                 raise OSError("controlled publication interruption")
             return original(old, new)
 
-        with patch.object(updates.os, "replace", interrupted), pytest.raises(OSError):
+        with patch.object(Path, "replace", interrupted), pytest.raises(OSError):
             updates.bootstrap_manager(source, destination, root=root, descriptor=owner.fileno())
         assert destination.read_text() == "previous manager"
         updates.bootstrap_manager(source, destination, root=root, descriptor=owner.fileno())

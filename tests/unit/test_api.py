@@ -4415,7 +4415,11 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "text/html; charset=utf-8")
-        self.assertEqual(body.decode("utf-8"), DASHBOARD_HTML)
+        # Only the neutral easy address is filled in. Scripts and styles stay as they are.
+        self.assertEqual(
+            body.decode("utf-8"),
+            DASHBOARD_HTML.replace("@@EASY_ADDRESS@@", "https://netlab.local:%d" % self.server.server_port),
+        )
         self.assertIn("Checking control mode", DASHBOARD_HTML)
         self.assertIn("Save profile", DASHBOARD_HTML)
         self.assertIn("Save device", DASHBOARD_HTML)

@@ -1313,6 +1313,7 @@ class RuntimeScheduler:
                 mark=0,
                 upload_impairment=roll.runtime_profile.upload,
                 download_impairment=roll.runtime_profile.download,
+                homepage_bounce_percent=roll.runtime_profile.homepage_bounce_percent,
                 unaffected_macs=clients.protected_macs,
                 blocked=roll.outage_until > now,
             )
@@ -1390,6 +1391,7 @@ class RuntimeScheduler:
                     mark=0,
                     upload_impairment=profile.upload,
                     download_impairment=profile.download,
+                    homepage_bounce_percent=profile.homepage_bounce_percent,
                 )
             )
         plan = compile_plan(
@@ -1634,6 +1636,7 @@ class RuntimeScheduler:
                     mark=0,
                     upload_impairment=fallback_profile.upload,
                     download_impairment=fallback_profile.download,
+                    homepage_bounce_percent=fallback_profile.homepage_bounce_percent,
                     active=quota.used_bytes >= quota.limit_bytes,
                 )
             )
@@ -1663,6 +1666,7 @@ class RuntimeScheduler:
                     mark=0,
                     upload_impairment=fallback_profile.upload,
                     download_impairment=fallback_profile.download,
+                    homepage_bounce_percent=fallback_profile.homepage_bounce_percent,
                     active=(
                         self._time_quota_window_is_active(quota, now)
                         and quota.used_seconds >= quota.limit_seconds

@@ -10,6 +10,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from typing import Optional
 
 from jittersim.config.models import AccessOptions
 from jittersim.engine.access import (
@@ -20,6 +21,8 @@ from jittersim.engine.access import (
     domain_matches,
 )
 from jittersim.panic_guard import PanicGuard
+
+from jittersim.localname import GATEWAY_ADDRESS, read_local_name, resolver_names, validate_local_name
 
 from .commands import Command
 from .executor import CommandExecutionError, SubprocessExecutor
@@ -69,8 +72,20 @@ def read_access(path: Path) -> AccessPlan:
     return access_from_payload(json.loads(content))
 
 
-def render_dns(plan: AccessPlan) -> str:
+def _local_name_records(name: str) -> list:
+    """The dashboard's neutral names, answered here whatever the rules block."""
+    records = []
+    for item in resolver_names(name):
+        records += [
+            f'  local-zone: "{item}." static',
+            f'  local-data: "{item}. 60 IN A {GATEWAY_ADDRESS}"',
+        ]
+    return records
+
+
+def render_dns(plan: AccessPlan, local_name: Optional[str] = None) -> str:
     """Use Unbound views to check each client's rules before answering from cache."""
+    local = validate_local_name(local_name) if local_name else read_local_name()
     lines = [
         "server:",
         f"  interface: 127.0.0.1@{DNS_PORT}",
@@ -102,6 +117,7 @@ def render_dns(plan: AccessPlan) -> str:
         f"  local-data: 'jittersim-policy.invalid. 0 IN TXT \"{plan.digest()}\"'",
         '  access-control-view: 192.168.50.0/24 "everyone"',
     ]
+    lines += _local_name_records(local)
     views = {plan.blocked_domains() if plan.options.enabled else (): "everyone"}
     if plan.options.enabled:
         for client in plan.clients:
@@ -114,6 +130,7 @@ def render_dns(plan: AccessPlan) -> str:
     lines += ["forward-zone:", '  name: "."', "  forward-addr: 192.168.50.1@53"]
     for blocked, name in views.items():
         lines += ["view:", f'  name: "{name}"', "  view-first: no"]
+        lines += _local_name_records(local)
         if plan.options.enabled and plan.websites.mode == "allow_only":
             lines.append('  local-zone: "." always_nxdomain')
             for domain in plan.websites.allowed_domains:
@@ -160,6 +177,10 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
     lines.append(
         f'add rule inet {table} input iifname "{interface}" tcp dport {DASHBOARD_PORT} '
         'accept comment "keep dashboard sign-in reachable"'
+    )
+    lines.append(
+        f'add rule inet {table} input iifname "{interface}" ip daddr 192.168.50.1 '
+        'tcp dport 8443 accept comment "allow verified homepage policy reads"'
     )
     if plan.options.dns_failure_percent:
         # nftables' random generator returns values from 0 to 99. At 100%,
@@ -592,7 +613,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         guard = PanicGuard().provision(ACCESS_RUNTIME.parent / "gateway-state.json")
-        stopped = guard["panic_stop_latched"]
+        stopped = guard["household_stop_latched"]
     except OSError:
         LOGGER.exception("Panic state was not readable. Household rules remain disabled.")
         stopped = True

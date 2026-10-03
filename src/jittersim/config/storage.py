@@ -140,6 +140,8 @@ def _serialize_profile_settings(profile: Profile) -> str:
     settings = asdict(profile)
     for field_name in ("id", "name", "upload", "download", "random_seed"):
         settings.pop(field_name, None)
+    if profile.homepage_bounce_percent == 0:
+        settings.pop("homepage_bounce_percent", None)
     return json.dumps(settings, sort_keys=True)
 
 

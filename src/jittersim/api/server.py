@@ -4,7 +4,9 @@ import argparse
 import base64
 import gzip
 import hashlib
+import html
 import hmac
+import ipaddress
 import io
 import json
 import logging
@@ -33,6 +35,8 @@ from jittersim import release_uploads, updates
 from jittersim.request_workers import RequestWorkers, WorkersStillRunning
 from jittersim.socket_deadlines import DeadlineReader as _DeadlineReader
 from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
+from jittersim.api.trust import TRUST_DOWNLOADS, dashboard_name_report, easy_address, read_trust_api
+from jittersim.localname import read_local_name
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.device_labels import (
     DeviceLabelError,
@@ -160,6 +164,8 @@ RESPONSE_SEND_TIMEOUT_SECONDS = 5.0
 MAX_IMPORT_BODY_BYTES = 1024 * 1024
 WRITE_PATHS = frozenset(
     (
+        "/api/homepage/pairing-code",
+        "/api/homepage/revoke",
         "/api/profiles",
         "/api/general-profile",
         "/api/general-profile/stop",
@@ -1149,6 +1155,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p id="remember-length-note" class="credential-note">Longer is less safe on a shared computer: anyone who can use this browser can open the dashboard until the time is up. Choose Clear token to forget it sooner.</p>
     <details class="credential-help">
       <summary>How to get the admin token</summary>
+      <p id="sign-in-address" class="credential-note">Open the dashboard at <strong>@@EASY_ADDRESS@@</strong>
+        on the router Wi-Fi or on the test Wi-Fi. It is the same address on both, so one saved sign-in
+        covers both.</p>
       <pre id="admin-token-help"></pre>
     </details>
     <div id="router-credentials">
@@ -1293,6 +1302,32 @@ DASHBOARD_HTML = r"""<!doctype html>
     </details>
     <div id="dashboard-access-list" hidden></div>
     <div id="address-move-replaced" hidden></div>
+    <p id="easy-address" class="form-note">One address works on the router Wi-Fi and on the test Wi-Fi:
+      <strong>@@EASY_ADDRESS@@</strong>. After signing in, Trust this Pi removes the certificate warning.</p>
+  <div id="one-address" class="one-address" role="group" aria-labelledby="one-address-title" hidden>
+    <h3 id="one-address-title">One address for both networks</h3>
+    <p class="one-address-text">Bookmark <strong id="one-address-url">@@EASY_ADDRESS@@</strong>, it works on both networks.</p>
+    <p id="one-address-nudge" class="form-note" hidden>You opened this page at <span id="one-address-current"></span>.
+      <a id="one-address-link" href="@@EASY_ADDRESS@@/">Open it at the one address</a>.
+      A remembered sign-in belongs to one address, so enter the admin token once there.</p>
+    <p id="one-address-problem" class="form-note" role="status" hidden></p>
+  </div>
+  <div id="trust-pi" aria-labelledby="trust-pi-title" role="group" hidden>
+    <h3 id="trust-pi-title">Trust this Pi</h3>
+    <p>Install the Pi's certificate on this device once and the dashboard opens without a certificate warning.
+      Use the one address <strong id="trust-address">...</strong> on either network.</p>
+    <div class="action-buttons">
+      <button id="trust-download-profile" class="primary" type="button">Download Apple profile (.mobileconfig)</button>
+      <button id="trust-download-crt" type="button">Download certificate (.crt)</button>
+    </div>
+    <h4>Mac</h4>
+    <ol id="trust-steps-mac" class="getting-started-steps"></ol>
+    <h4>iPhone and iPad</h4>
+    <ol id="trust-steps-iphone" class="getting-started-steps"></ol>
+    <p id="trust-status" class="form-note" role="status">Checking the certificate...</p>
+    <p class="form-note">Certificate fingerprint (SHA-256): <span id="trust-fingerprint">unknown</span>.
+      Only install it if it matches the fingerprint printed by the installer on the Pi.</p>
+  </div>
   </section>
   <div id="private-dashboard" hidden>
   <p id="mode-notice" class="notice" role="status">Checking control mode...</p>
@@ -1391,6 +1426,17 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div id="saved-profiles" class="connected-list" aria-live="polite">Check the admin token to view saved profiles.</div>
     </section>
     <section class="card" data-collapse="open">
+      <details>
+        <summary>Pair homepage test extension</summary>
+        <p>Use only test pages you control. The effect stays off until enabled in Chrome.</p>
+        <label for="homepage-extension-id">Chrome extension ID</label>
+        <input id="homepage-extension-id" maxlength="32" autocomplete="off">
+        <label for="homepage-pages">Controlled HTTPS test pages, one per line</label>
+        <textarea id="homepage-pages" rows="3" maxlength="4104"></textarea>
+        <button id="homepage-create-code" type="button">Create pairing code</button>
+        <button id="homepage-revoke" type="button">Revoke all homepage pairings</button>
+        <output id="homepage-code" aria-live="polite"></output>
+      </details>
       <h2 id="profile-form-title">Save profile</h2>
       <form id="profile-form">
         <label><span class="field-label">Start from a preset<span class="help-icon" tabindex="0" role="img" aria-label="Profile preset help" data-help="Fills the form with rough values for a kind of network, such as a slow mobile connection. Change anything you like afterwards. Nothing is saved until you choose Save profile.">?</span></span>
@@ -1459,6 +1505,10 @@ DASHBOARD_HTML = r"""<!doctype html>
             </label>
             <label><span class="field-label">Interval variation (%)<span class="help-icon" tabindex="0" role="img" aria-label="Interval variation help" data-help="The reroll interval can move this percentage below or above the base interval. For example, 20% of 5 minutes means 4 to 6 minutes.">?</span></span>
               <input id="profile-reroll-variation" type="number" min="0" max="100" value="0">
+            </label>
+            <label><span class="field-label">Homepage bounce chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Homepage bounce help" data-help="The chance that an explicit test action in a paired Chrome extension opens the same site’s home page. Saving does not change an applied effect. Apply the profile after saving.">?</span></span>
+              <input id="profile-homepage-chance" type="number" min="0" max="100" step="1" value="0">
+              <span class="form-note">Only explicit test pages in a paired Chrome extension. Apply after saving.</span>
             </label>
             <label><span class="field-label">Outage chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Outage chance help" data-help="The chance that a device is disconnected when the outage check runs. A service list that uses this profile cuts only its listed services for every affected device.">?</span></span>
               <input id="profile-outage-probability" type="number" min="0" max="100" value="0">
@@ -2707,6 +2757,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("private-dashboard").hidden = !allowed;
       element("dashboard-access-list").hidden = !allowed;
       if (typeof applyBrand === "function") applyBrand(allowed);
+      element("trust-pi").hidden = !allowed;
+      element("one-address").hidden = !allowed;
+      element("easy-address").hidden = allowed;
+      if (allowed && typeof loadTrustDetails === "function") loadTrustDetails();
       document.body.classList.toggle("dashboard-locked", !allowed);
     }
 
@@ -7564,6 +7618,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           // Remember an accepted token now. The refresh below can take seconds and a
           // reload in between would otherwise forget it.
           updateCredentialStatus();
+          if (typeof loadTrustDetails === "function") loadTrustDetails();
           await refresh();
           if (tokenRevision !== adminTokenRevision) return;
           if (!adminTokenVerified) {
@@ -7922,6 +7977,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const upload = profileDirectionSummary(profile.upload);
       const download = profileDirectionSummary(profile.download);
       const parts = [upload === download ? "↕ " + upload : "↑ " + upload + " · ↓ " + download];
+      if (profile.homepage_bounce_percent > 0) parts.push("homepage bounce " + profile.homepage_bounce_percent + "%");
       if (profile.outage_probability > 0) parts.push("outages " + profile.outage_probability + "%");
       if (profile.website_mode === "allow_only") {
         const sites = profile.website_domains.length;
@@ -7956,6 +8012,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       set("profile-seed", profile.random_seed);
       set("profile-reroll", profile.reroll_interval_seconds);
       set("profile-reroll-variation", profile.reroll_interval_randomness.variation_percent);
+      set("profile-homepage-chance", profile.homepage_bounce_percent || 0);
       set("profile-outage-probability", profile.outage_probability);
       set("profile-outage-duration", profile.outage_duration_seconds);
       set("profile-outage-interval", profile.outage_interval_seconds);
@@ -7995,6 +8052,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           variation_percent: Number(element("profile-reroll-variation").value),
           enabled_probability: base ? base.reroll_interval_randomness.enabled_probability : 100
         },
+        homepage_bounce_percent: Number(element("profile-homepage-chance").value),
         outage_probability: Number(element("profile-outage-probability").value),
         outage_duration_seconds: Number(element("profile-outage-duration").value),
         outage_interval_seconds: Number(element("profile-outage-interval").value),
@@ -8167,6 +8225,94 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (focusedKey && buttons.has(focusedKey)) buttons.get(focusedKey).focus();
     }
 
+    let homepageUiGeneration = 0;
+    let homepageRequestOwner = null;
+    let homepageRequestPending = false;
+    let homepageCodeTimer = null;
+
+    function clearHomepagePairingUi() {
+      homepageUiGeneration += 1;
+      homepageRequestOwner = null;
+      homepageRequestPending = false;
+      clearTimeout(homepageCodeTimer);
+      homepageCodeTimer = null;
+      element("homepage-code").textContent = "";
+      element("homepage-extension-id").value = "";
+      element("homepage-pages").value = "";
+      element("homepage-create-code").disabled = false;
+      element("homepage-revoke").disabled = false;
+    }
+
+    privateDataLockHooks.push(clearHomepagePairingUi);
+
+    function homepageRequestCurrent(owner) {
+      return owner === homepageRequestOwner && owner.revision === adminTokenRevision &&
+        owner.generation === homepageUiGeneration && adminTokenVerified &&
+        !element("private-dashboard").hidden;
+    }
+
+    function beginHomepageRequest() {
+      if (homepageRequestPending || !adminTokenVerified || element("private-dashboard").hidden) return null;
+      const owner = {revision: adminTokenRevision, generation: homepageUiGeneration,
+        started: performance.now()};
+      homepageRequestOwner = owner;
+      homepageRequestPending = true;
+      clearTimeout(homepageCodeTimer);
+      homepageCodeTimer = null;
+      element("homepage-code").textContent = "";
+      element("homepage-create-code").disabled = true;
+      element("homepage-revoke").disabled = true;
+      return owner;
+    }
+
+    function finishHomepageRequest(owner) {
+      if (!homepageRequestCurrent(owner)) return;
+      homepageRequestPending = false;
+      element("homepage-create-code").disabled = false;
+      element("homepage-revoke").disabled = false;
+    }
+
+    element("homepage-create-code").addEventListener("click", async () => {
+      const owner = beginHomepageRequest();
+      if (!owner) return;
+      const output = element("homepage-code");
+      try {
+        const result = await request("/api/homepage/pairing-code", "POST", {
+          extension_id: element("homepage-extension-id").value.trim(),
+          pages: element("homepage-pages").value.split(/\n/).map(value => value.trim()).filter(Boolean)
+        });
+        if (!homepageRequestCurrent(owner)) return;
+        if (!result || typeof result.code !== "string" || !/^[a-f0-9]{32}$/.test(result.code) ||
+            !Number.isInteger(result.expires_in) || result.expires_in <= 0 || result.expires_in > 120) {
+          throw new Error("Pairing unavailable. Create a new code.");
+        }
+        const remaining = result.expires_in * 1000 - (performance.now() - owner.started);
+        if (remaining <= 0) {
+          output.textContent = "Code expired.";
+          return;
+        }
+        output.textContent = "Pair within two minutes: " + result.code;
+        homepageCodeTimer = setTimeout(() => {
+          if (!homepageRequestCurrent(owner)) return;
+          output.textContent = "Code expired.";
+          homepageCodeTimer = null;
+        }, remaining);
+      } catch (error) {
+        if (homepageRequestCurrent(owner)) showMessage(error.message, "error");
+      } finally { finishHomepageRequest(owner); }
+    });
+
+    element("homepage-revoke").addEventListener("click", async () => {
+      const owner = beginHomepageRequest();
+      if (!owner) return;
+      try {
+        await request("/api/homepage/revoke", "POST", {});
+        if (!homepageRequestCurrent(owner)) return;
+        element("homepage-code").textContent = "All homepage pairings revoked.";
+      } catch (error) {
+        if (homepageRequestCurrent(owner)) showMessage(error.message, "error");
+      } finally { finishHomepageRequest(owner); }
+    });
     element("profile-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
@@ -9137,7 +9283,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         })
       );
       return Boolean(
-        profile.reroll_interval_seconds || profile.outage_probability ||
+        profile.homepage_bounce_percent || profile.reroll_interval_seconds || profile.outage_probability ||
         profile.random_seed !== null || profile.website_mode !== "unrestricted" ||
         profile.website_domains.length ||
         advancedImpairment(profile.upload) || advancedImpairment(profile.download)
@@ -9481,6 +9627,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("profile-reroll").value = profile.reroll_interval_seconds;
       element("profile-reroll-variation").value =
         profile.reroll_interval_randomness.variation_percent;
+      element("profile-homepage-chance").value = profile.homepage_bounce_percent || 0;
       element("profile-outage-probability").value = profile.outage_probability;
       element("profile-outage-duration").value = profile.outage_duration_seconds;
       element("profile-outage-interval").value = profile.outage_interval_seconds;
@@ -11443,22 +11590,23 @@ DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).
 _DASHBOARD_PAGE_CACHE: Dict[str, Tuple[str, bytes, bytes, str]] = {}
 
 
-def _dashboard_page() -> Tuple[bytes, bytes, str]:
+def _dashboard_page(page_html: Optional[str] = None) -> Tuple[bytes, bytes, str]:
     """Return the page bytes, a gzip copy and an ETag, made once for each page text."""
 
+    page = DASHBOARD_HTML if page_html is None else page_html
     cached = _DASHBOARD_PAGE_CACHE.get("page")
-    if cached is None or cached[0] is not DASHBOARD_HTML:
-        raw = DASHBOARD_HTML.encode("utf-8")
+    if cached is None or cached[0] != page:
+        raw = page.encode("utf-8")
         etag = 'W/"' + hashlib.sha256(raw).hexdigest()[:32] + '"'
-        cached = (DASHBOARD_HTML, raw, gzip.compress(raw, 6, mtime=0), etag)
+        cached = (page, raw, gzip.compress(raw, 6, mtime=0), etag)
         _DASHBOARD_PAGE_CACHE["page"] = cached
     return cached[1], cached[2], cached[3]
 
 
-def dashboard_page_bytes() -> bytes:
+def dashboard_page_bytes(page_html: Optional[str] = None) -> bytes:
     """The page as sent without compression. _send_response recognises this exact object."""
 
-    return _dashboard_page()[0]
+    return _dashboard_page(page_html)[0]
 
 
 def _accepts_gzip(header: str) -> bool:
@@ -11476,6 +11624,9 @@ def _accepts_gzip(header: str) -> bool:
         (explicit if name == "gzip" else wildcard).append(quality)
     choices = explicit if explicit else wildcard
     return bool(choices) and min(choices) > 0
+
+
+DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("trust.js").read_text(encoding="utf-8") + "\n    startDashboard();")
 
 
 def _inline_source_hashes(tag: str, page: str = DASHBOARD_HTML) -> str:
@@ -12065,22 +12216,41 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         scheduler: Optional[RuntimeScheduler] = None,
         tls_certfile: Optional[Path] = None,
         tls_keyfile: Optional[Path] = None,
+        homepage_host: Optional[str] = None,
+        homepage_port: int = 8443,
+        homepage_certfile: Path = Path("/etc/jittersim/dashboard-wifi.crt"),
+        tls_wifi_certfile: Optional[Path] = None,
+        tls_wifi_network: str = "192.168.50.0/24",
+        trust_ca_path: Optional[Path] = None,
+        local_name: Optional[str] = None,
+        name_status_path: Optional[Path] = None,
     ) -> None:
         if admin_token == "":
             raise ValueError("admin_token must not be empty")
         if (tls_certfile is None) != (tls_keyfile is None):
             raise ValueError("TLS certificate and key must be provided together")
         tls_context = None
+        wifi_context = None
         if tls_certfile is not None and tls_keyfile is not None:
             tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
             tls_context.load_cert_chain(str(tls_certfile), str(tls_keyfile))
+            if tls_wifi_certfile is not None:
+                # Devices on the test Wi-Fi see a certificate that names only the
+                # neutral name and the gateway, before they sign in.
+                wifi_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                wifi_context.minimum_version = ssl.TLSVersion.TLSv1_2
+                wifi_context.load_cert_chain(str(tls_wifi_certfile), str(tls_keyfile))
+        wifi_network = ipaddress.ip_network(tls_wifi_network)
         bind_host = server_address[0]
         if tls_context is None and bind_host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("TLS is required when the dashboard listens beyond this device")
         self.repository = repository
         WorkflowStore(repository).checkpoint("Initial settings")
         self.admin_token = admin_token
+        self.trust_ca_path = trust_ca_path
+        self.local_name = local_name or read_local_name()
+        self.name_status_path = name_status_path
         self.helper_client = helper_client
         self.scheduler = scheduler
         self.router_operations = RouterOperations(
@@ -12090,6 +12260,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         self.wifi_operations = WifiOperations()
         self.secure_transport = tls_context is not None
         self._tls_context = tls_context
+        self._tls_wifi_context = wifi_context
+        self._tls_wifi_network = wifi_network
         self._pending_connections: Dict[socket.socket, _PendingConnection] = {}
         self._request_inputs: Dict[socket.socket, Tuple[bytes, float]] = {}
         self._stop_connections = threading.Event()
@@ -12097,7 +12269,37 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         self._active_workers = 0
         self._request_workers = RequestWorkers("jittersim-request", self._uncertain_worker_start)
         self._reserved_requests: Set[socket.socket] = set()
+        self.homepage_store = None
+        self.homepage_server = None
+        self.homepage_worker = None
         super().__init__(server_address, ControlRequestHandler)
+        if homepage_host is not None and tls_context is not None and helper_client is not None:
+            from .homepage import PairingStore, PolicyServer
+            try:
+                if homepage_host != "192.168.50.1" or homepage_port != 8443 or not admin_token:
+                    raise ValueError("Homepage pairing requires the AP address, port 8443 and admin authentication")
+                store = PairingStore(helper_client)
+                policy_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                policy_context.minimum_version = ssl.TLSVersion.TLSv1_2
+                policy_context.load_cert_chain(str(homepage_certfile), str(tls_keyfile))
+                listener = PolicyServer((homepage_host, homepage_port), store, policy_context)
+                worker = threading.Thread(target=listener.serve_forever,
+                    daemon=True, name="homepage-policy")
+                worker.start()
+                self.homepage_store = store
+                self.homepage_server = listener
+                self.homepage_worker = worker
+            except (OSError, ValueError, RuntimeError):
+                if 'listener' in locals():
+                    if 'worker' in locals() and worker.is_alive():
+                        listener.shutdown()
+                    listener.server_close()
+                if 'store' in locals():
+                    store.close()
+                LOGGER.warning("Homepage pairing listener unavailable. Dashboard controls remain available.")
+        self.dashboard_page_html = DASHBOARD_HTML.replace(
+            "@@EASY_ADDRESS@@", html.escape(easy_address(self), quote=True)
+        )
 
     @property
     def active_workers(self) -> int:
@@ -12208,6 +12410,22 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     self._close_pending(connection)
         raise OSError("dashboard is stopping")
 
+    def tls_context_for(self, local_address: str, peer_address: str) -> Optional[ssl.SSLContext]:
+        """The certificate set for one connection.
+
+        A client on the test Wi-Fi gets the neutral certificate, whichever of the
+        Pi's addresses it reached (the firewall lets it reach the dashboard port
+        on the Ethernet address too), so it never reads the other names.
+        """
+        if self._tls_wifi_context is not None:
+            for text in (peer_address, local_address):
+                try:
+                    if ipaddress.ip_address(str(text).split("%")[0]) in self._tls_wifi_network:
+                        return self._tls_wifi_context
+                except ValueError:
+                    continue
+        return self._tls_context
+
     def _accept_connection(self) -> None:
         connection, address = self.socket.accept()
         if len(self._pending_connections) >= MAX_PENDING_DASHBOARD_CONNECTIONS:
@@ -12216,7 +12434,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         try:
             connection.setblocking(False)
             if self._tls_context is not None:
-                connection = self._tls_context.wrap_socket(
+                context = self.tls_context_for(connection.getsockname()[0], address[0])
+                connection = context.wrap_socket(
                     connection, server_side=True, do_handshake_on_connect=False)
             now = time.monotonic()
             self._pending_connections[connection] = _PendingConnection(
@@ -12345,6 +12564,9 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         workflow = read_workflow(self, path)
         if workflow is not None:
             return workflow
+        trust = read_trust_api(self, path)
+        if trust is not None:
+            return trust
         if path == "/api/wifi-operation/request-id":
             identifier = issue_request_id()
             return HTTPStatus.OK, "application/json", _json_bytes({"request_id": identifier})
@@ -12354,7 +12576,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             status, data = self.wifi_operations.last(identifier)
             return status, "application/json", _json_bytes(data)
         if path == "/":
-            return HTTPStatus.OK, "text/html; charset=utf-8", dashboard_page_bytes()
+            return HTTPStatus.OK, "text/html; charset=utf-8", dashboard_page_bytes(self.dashboard_page_html)
         if path == "/favicon.ico":
             return HTTPStatus.OK, "image/x-icon", NEUTRAL_ICON
         if path == "/api/brand":
@@ -12975,6 +13197,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     else None
                 ),
                 "warnings": [],
+                "dashboard_name": dashboard_name_report(self),
             }
             if self.helper_client is not None:
                 try:
@@ -12992,6 +13215,17 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+        control_intent = None
+        live_access = path in ACCESS_WRITES and path not in (
+            "/api/normal-access", "/api/site-blocks", "/api/site-blocks/delete"
+        )
+        live_global = path in ("/api/observations/add-global-block", "/api/observations/remove-global-block")
+        if path == "/api/apply" or live_access or live_global:
+            generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
+            refused, revision = self._capture_control_intent(generation)
+            if refused is not None:
+                return refused
+            control_intent = (generation, revision)
         # Panic skips the write lock so it never queues behind an apply in flight.
         operation = (
             self.scheduler.exclusive()
@@ -13001,16 +13235,22 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         with operation:
             before = self.repository.get_runtime_state().configuration_version
             try:
-                access_response = write_access_api(self, path, payload)
+                access_response = (
+                    write_access_api(self, path, payload, control_intent=control_intent)
+                    if live_access else write_access_api(self, path, payload)
+                )
                 if access_response is not None:
                     return access_response
                 workflow = write_workflow(self, path, payload, _settings_from_payload)
-                return workflow if workflow is not None else self._write_response_for(path, payload)
+                if workflow is not None:
+                    return workflow
+                return (self._write_response_for(path, payload, control_intent=control_intent)
+                        if path == "/api/apply" or live_global else self._write_response_for(path, payload))
             finally:
                 if self.repository.get_runtime_state().configuration_version != before:
                     WorkflowStore(self.repository).checkpoint(path.removeprefix("/api/").replace("/", " "))
 
-    def _write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+    def _write_response_for(self, path: str, payload: Dict[str, Any], *, control_intent=None) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
 
         if path == "/api/gateway-persistence":
@@ -13187,6 +13427,21 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 )
             self.repository.delete_connected_device_label(mac_address=mac_address)
             return HTTPStatus.OK, "application/json", _json_bytes({"deleted": True})
+
+        if path in ("/api/homepage/pairing-code", "/api/homepage/revoke"):
+            if self.homepage_store is None:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes({"error": "Trusted homepage pairing is not enabled"})
+            try:
+                if path.endswith("revoke") and payload == {}:
+                    self.homepage_store.revoke()
+                    result = {"revoked": True}
+                elif path.endswith("pairing-code") and set(payload) == {"extension_id", "pages"}:
+                    result = self.homepage_store.create(payload["extension_id"], payload["pages"])
+                else:
+                    raise ValueError("invalid pairing request")
+                return HTTPStatus.OK, "application/json", _json_bytes(result)
+            except (ValueError, RuntimeError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": "Pairing unavailable. Check the extension ID and controlled HTTPS pages."})
 
         if path == "/api/profiles":
             try:
@@ -13791,10 +14046,12 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             return self._add_observation_to_profile(payload)
 
         if path == "/api/observations/add-global-block":
-            return self._add_observation_to_global_block(payload)
+            arguments = {"control_intent": control_intent} if control_intent is not None else {}
+            return self._add_observation_to_global_block(payload, **arguments)
 
         if path == "/api/observations/remove-global-block":
-            return self._remove_observation_from_global_block(payload)
+            arguments = {"control_intent": control_intent} if control_intent is not None else {}
+            return self._remove_observation_from_global_block(payload, **arguments)
 
         if path == "/api/activity/clear":
             self.repository.clear_activity()
@@ -13803,7 +14060,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         # Saved changes apply the plan too, but only these buttons count as
         # an Apply or a Reset in the activity log.
         if path == "/api/apply":
-            status, content_type, body = self._apply_configuration(explicit_apply=True)
+            arguments = {"control_intent": control_intent} if control_intent is not None else {}
+            status, content_type, body = self._apply_configuration(explicit_apply=True, **arguments)
             if status == HTTPStatus.OK:
                 self._record_activity("apply", "Configuration applied")
             return status, content_type, body
@@ -13820,6 +14078,12 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         deadline = time.monotonic() + self.shutdown_timeout_seconds
         if self.scheduler is not None:
             self.scheduler.begin_shutdown()
+        if self.homepage_store is not None:
+            self.homepage_store.close()
+        if self.homepage_server is not None:
+            self.homepage_server.shutdown()
+            self.homepage_server.server_close()
+            self.homepage_worker.join(timeout=1)
         self._stop_connections.set()
         self._request_workers.stop_admission()
         self.router_operations.begin_shutdown()
@@ -14238,7 +14502,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         )
 
     def _add_observation_to_global_block(
-        self, payload: Dict[str, Any]
+        self, payload: Dict[str, Any], *, control_intent=None
     ) -> Tuple[int, str, bytes]:
         try:
             names = _domains_from_payload(payload)
@@ -14255,7 +14519,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             self.repository.save_website_policy(updated)
         except (KeyError, TypeError, ValueError, StorageError) as error:
             return _bad_request("could not add domain to global block list", error)
-        failed = self._apply_household_block_list()
+        arguments = {"control_intent": control_intent} if control_intent is not None else {}
+        failed = self._apply_household_block_list(**arguments)
         if failed is not None:
             return failed
         return HTTPStatus.OK, "application/json", _json_bytes(
@@ -14263,7 +14528,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         )
 
     def _remove_observation_from_global_block(
-        self, payload: Dict[str, Any]
+        self, payload: Dict[str, Any], *, control_intent=None
     ) -> Tuple[int, str, bytes]:
         try:
             names = _domains_from_payload(payload)
@@ -14275,14 +14540,15 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                 {"error": "could not remove domain from global block list"}
             )
-        failed = self._apply_household_block_list()
+        arguments = {"control_intent": control_intent} if control_intent is not None else {}
+        failed = self._apply_household_block_list(**arguments)
         if failed is not None:
             return failed
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}
         )
 
-    def _apply_household_block_list(self) -> Optional[Tuple[int, str, bytes]]:
+    def _apply_household_block_list(self, *, control_intent=None) -> Optional[Tuple[int, str, bytes]]:
         """Bring the filtered resolver in line with a changed global block list.
 
         Block globally and Unblock act at once like main's device quick action. Main's
@@ -14292,8 +14558,12 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         the addresses of each listed name within a second while JitterSim runs.
         """
 
-        generation = getattr(self.scheduler, "apply_generation", 0)
-        refused, revision = self._capture_control_intent(generation)
+        if control_intent is None:
+            generation = getattr(self.scheduler, "apply_generation", 0)
+            refused, revision = self._capture_control_intent(generation)
+        else:
+            generation, revision = control_intent
+            refused = self._apply_refused(generation)
         if refused is not None:
             return refused
         settings = self.repository.access_settings()
@@ -15590,14 +15860,20 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 )
         return self._apply_configuration()
 
-    def _apply_configuration(self, *, explicit_apply: bool = False) -> Tuple[int, str, bytes]:
+    def _apply_configuration(self, *, explicit_apply: bool = False, control_intent=None) -> Tuple[int, str, bytes]:
+        if control_intent is None:
+            generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
+            refused, revision = self._capture_control_intent(generation)
+            if refused is not None:
+                return refused
+            control_intent = (generation, revision)
         # Scheduled applies, manual applies and resets never interleave.
         operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
         with operation:
-            return self._apply_configuration_locked(explicit_apply=explicit_apply)
+            return self._apply_configuration_locked(explicit_apply=explicit_apply, control_intent=control_intent)
 
     def _apply_configuration_locked(
-        self, connected_snapshot=None, *, sample_usage=True, explicit_apply: bool = False
+        self, connected_snapshot=None, *, sample_usage=True, explicit_apply: bool = False, control_intent=None
     ) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
             return (
@@ -15605,8 +15881,12 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 "application/json",
                 _json_bytes({"error": "network helper is not configured"}),
             )
-        halts_at_start = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
-        refused, control_revision = self._capture_control_intent(halts_at_start)
+        if control_intent is None:
+            halts_at_start = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
+            refused, control_revision = self._capture_control_intent(halts_at_start)
+        else:
+            halts_at_start, control_revision = control_intent
+            refused = self._apply_refused(halts_at_start)
         if refused is not None:
             return refused
         try:
@@ -16024,6 +16304,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         downloads = {
             "/api/backup": "jittersim-backup.db",
             "/api/export": "jittersim-settings.json",
+            **{trust_path: trust_file for trust_path, (_, trust_file) in TRUST_DOWNLOADS.items()},
         }
         headers = (
             {"Content-Disposition": f'attachment; filename="{downloads[path]}"'}
@@ -16101,7 +16382,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
-        if (path.startswith("/api/router/") or path in ("/api/access-point/reset-name",
+        if (path.startswith(("/api/router/", "/api/homepage/")) or path in ("/api/access-point/reset-name",
                     "/api/dashboard-access/register-self", "/api/dashboard-access/remove",
                     "/api/dashboard-access/move", "/api/dashboard-access/move-undo")) and (
             self.headers.get("Sec-Fetch-Site") == "cross-site"
@@ -16119,7 +16400,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 max_bytes=(
                     MAX_IMPORT_BODY_BYTES
                     if path in ("/api/import", "/api/test-sessions/save")
-                    else MAX_JSON_BODY_BYTES
+                    else (8192 if path.startswith("/api/homepage/") else MAX_JSON_BODY_BYTES)
                 ),
             )
             if path in ("/api/dashboard-access/move", "/api/dashboard-access/move-undo"):
@@ -16501,6 +16782,7 @@ def _profile_from_payload(payload: Dict[str, Any]) -> Profile:
         reroll_interval_randomness=_randomness_from_payload(
             payload.get("reroll_interval_randomness")
         ),
+        homepage_bounce_percent=payload.get("homepage_bounce_percent", 0),
         outage_probability=payload.get("outage_probability", 0),
         outage_duration_seconds=payload.get("outage_duration_seconds", 0),
         outage_duration_randomness=_randomness_from_payload(
@@ -17067,6 +17349,10 @@ def run_server(
     helper_timeout_seconds: float = 8.0,
     tls_certfile: Optional[Path] = None,
     tls_keyfile: Optional[Path] = None,
+    homepage_host: Optional[str] = None,
+    homepage_certfile: Path = Path("/etc/jittersim/dashboard-wifi.crt"),
+    tls_wifi_certfile: Optional[Path] = None,
+    trust_ca_path: Optional[Path] = None,
 ) -> None:
     """Run the dashboard until the process receives Ctrl-C."""
 
@@ -17084,6 +17370,8 @@ def run_server(
         server = ControlServer(
             (host, port), repository, admin_token=admin_token, helper_client=helper_client,
             scheduler=scheduler, tls_certfile=tls_certfile, tls_keyfile=tls_keyfile,
+            homepage_host=homepage_host, homepage_certfile=homepage_certfile,
+            tls_wifi_certfile=tls_wifi_certfile, trust_ca_path=trust_ca_path,
         )
     except BaseException:
         repository.close()
@@ -17122,6 +17410,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--helper-timeout-seconds", type=float, default=8.0)
     parser.add_argument("--tls-cert", type=Path)
     parser.add_argument("--tls-key", type=Path)
+    parser.add_argument("--homepage-cert", type=Path, default=Path("/etc/jittersim/dashboard-wifi.crt"))
+    parser.add_argument("--homepage-host", choices=("192.168.50.1",),
+                        default=os.environ.get("JITTERSIM_HOMEPAGE_HOST"))
+    parser.add_argument("--tls-cert-wifi", type=Path,
+                        help="certificate for test Wi-Fi clients (neutral names only)")
+    parser.add_argument("--trust-ca", type=Path,
+                        help="public certificate of the local authority offered for download")
     parser.add_argument(
         "--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO"
     )
@@ -17145,5 +17440,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         helper_timeout_seconds=arguments.helper_timeout_seconds,
         tls_certfile=arguments.tls_cert,
         tls_keyfile=arguments.tls_key,
+        homepage_host=arguments.homepage_host,
+        homepage_certfile=arguments.homepage_cert,
+        tls_wifi_certfile=arguments.tls_cert_wifi,
+        trust_ca_path=arguments.trust_ca,
     )
     return 0

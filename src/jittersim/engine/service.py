@@ -99,6 +99,7 @@ def _compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=Non
                     mark=0,
                     upload_impairment=profile.upload,
                     download_impairment=profile.download,
+                    homepage_bounce_percent=profile.homepage_bounce_percent,
                     active=quota.used_bytes >= quota.limit_bytes,
                 )
             )
@@ -119,6 +120,7 @@ def _compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=Non
                 mark=0,
                 upload_impairment=profile.upload,
                 download_impairment=profile.download,
+                homepage_bounce_percent=profile.homepage_bounce_percent,
             )
         )
     everyone_else = None
@@ -133,6 +135,7 @@ def _compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=Non
             mark=0,
             upload_impairment=profile.upload,
             download_impairment=profile.download,
+            homepage_bounce_percent=profile.homepage_bounce_percent,
             unaffected_macs=tuple(
                 unaffected.mac_address for unaffected in repository.list_unaffected_devices()
             ),
