@@ -7,6 +7,7 @@ import threading
 import re
 import time
 import unittest
+from dataclasses import replace
 from ipaddress import IPv4Address
 from pathlib import Path
 from unittest import mock
@@ -2558,7 +2559,9 @@ class QueueReadAndWriteTests(unittest.TestCase):
         self.assertFalse(reader_thread.is_alive())
         self.assertEqual(writer["result"]["action"], "apply")
         self.assertIn("result", reader)
-        self.assertEqual(self.service._active_plan, plan)
+        # Ordinary plans omit homepage negotiation on the wire. All their actual
+        # traffic rules must still reach the helper unchanged after the read.
+        self.assertEqual(self.service._active_plan, replace(plan, homepage_policy_version=0))
         self.assertEqual(self.service._plan_count, 2)
 
     def test_general_profile_apply_waits_for_a_slow_queue_read(self) -> None:
