@@ -159,3 +159,25 @@ and an independent isolated acceptance. The final screenshot layouts were
 inspected. All application, deployment, unit, kernel and workflow files remain
 byte-identical to804. Freeze the corrected test source and rebuild its exact
 inputs before the renewed full Linux sequence. This is not physical Pi proof.
+
+## Read-only preview classification correction
+
+The exacte28 Linux run passed5461 Python3.13 tests with40 expected kernel
+skips and12 browser journeys including the corrected Wi-Fi recovery. The
+navigation keyboard check then classified the range preview POST as a write.
+The endpoint returns calculated values before scheduler, save and helper
+paths. The existing read-only regression confirms unchanged stored settings.
+The incomplete run and stopped follower are retained with copy and cleanup0.
+
+The keyboard detector now exempts only POST to the exact range-preview path.
+Every other non-GET request remains rejected. All focus, arrow key, accessible
+name and desktop/phone assertions remain. Full host navigation and the
+read-only regression pass. Application, deployment, unit, kernel and workflow
+bytes remain unchanged. Rebuild the clean frozen inputs and repeat the final
+Linux sequence after independent review of these final test bytes.
+
+Independent full navigation passes for the exact corrected test. AST comparison
+confirms only the import and precise request exemption change behavior. Controlled
+method/path checks confirm configuration, router, access-point, ad-blocking and
+Panic writes remain detected. The enlarged-phone diagnostics capture was
+inspected. The complete final Linux sequence remains required.

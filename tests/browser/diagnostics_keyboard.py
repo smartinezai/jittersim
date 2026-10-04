@@ -1,6 +1,7 @@
 """Read raw diagnostics with Tab and arrow keys at desktop and phone widths."""
 
 import json
+from urllib.parse import urlsplit
 
 from playwright.sync_api import expect
 
@@ -12,7 +13,8 @@ def check_diagnostics_keyboard(page):
     writes = []
 
     def record_write(request):
-        if request.method != "GET":
+        preview = request.method == "POST" and urlsplit(request.url).path == "/api/profiles/ranges"
+        if request.method != "GET" and not preview:
             writes.append(request.url)
 
     def diagnostics(route):
@@ -41,15 +43,25 @@ def check_diagnostics_keyboard(page):
             assert raw.evaluate("node => getComputedStyle(node).outlineWidth") == "2px"
             assert raw.evaluate("node => node.scrollWidth > node.clientWidth")
             page.keyboard.press("ArrowRight")
-            page.wait_for_function("() => document.getElementById('diagnostics-json').scrollLeft > 0")
+            page.wait_for_function(
+                "() => document.getElementById('diagnostics-json').scrollLeft > 0"
+            )
             assert raw.evaluate("node => node.getBoundingClientRect().bottom") <= height
             if width == 375:
                 bar = page.locator(".safety-bar")
                 expect(bar).to_be_visible()
                 expect(page.locator("#panic-button")).to_be_in_viewport(ratio=1)
                 expect(page.locator("#router-wifi-toggle")).to_be_in_viewport(ratio=1)
-                assert raw.bounding_box()["y"] + raw.bounding_box()["height"] <= bar.bounding_box()["y"]
-            page.screenshot(path=f"test-results/diagnostics-keyboard-{width}-{'large' if enlarged else 'normal'}.png")
+                assert (
+                    raw.bounding_box()["y"] + raw.bounding_box()["height"]
+                    <= bar.bounding_box()["y"]
+                )
+            page.screenshot(
+                path=(
+                    f"test-results/diagnostics-keyboard-{width}-"
+                    f"{'large' if enlarged else 'normal'}.png"
+                )
+            )
             assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
         assert writes == [], writes
     finally:
