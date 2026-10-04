@@ -36,7 +36,6 @@ from jittersim.updates import (
     stage_upload,
     update_status,
 )
-from jittersim.router_audit import RouterAudit
 from jittersim.panic_guard import PANIC_GUARD_FORMAT, PanicGuard
 from jittersim.request_workers import RequestWorkers, WorkersStillRunning
 from jittersim.socket_deadlines import DeadlineReader, read_line
@@ -174,12 +173,9 @@ class HelperService:
         homepage_database: Optional[Path] = None,
         ad_blocking_store: Optional[AdStore] = None,
         allow_router_wifi_changes: bool = False,
-        router_audit: Optional[RouterAudit] = None,
     ) -> None:
         self._applier = applier
         self._allow_router_wifi_changes = allow_router_wifi_changes is True
-        self._router_audit = router_audit
-        self._router_operation_number = 0
         self._homepage_database = homepage_database
         self._ad_blocking_store = ad_blocking_store
         self._active_plan_path = active_plan_path
@@ -251,29 +247,11 @@ class HelperService:
             if not self._router_lock.acquire(blocking=False):
                 return {"ok": False, "error": "Another router operation is running. Try again shortly.",
                         "reason": "helper-busy"}
-            self._router_operation_number += 1
-            started = time.monotonic()
-            self._record_router(payload, "start", started)
-            outcome = "failure"
             try:
-                result = self._handle_payload(payload)
-                outcome = "success" if result.get("ok") is True else "failure"
-                if result.get("reason") == "router-control-disabled":
-                    outcome = "refused"
-                return result
+                return self._handle_payload(payload)
             finally:
-                self._record_router(payload, outcome, started)
                 self._router_lock.release()
         return self._handle_payload(payload)
-
-    def _record_router(self, payload, outcome, started):
-        if self._router_audit is not None:
-            try:
-                self._router_audit.record(payload.get("action"), payload.get("enabled"),
-                                          outcome, time.monotonic() - started, self._router_operation_number)
-            except Exception:
-                # Diagnostic storage must never block recovery or router refusal.
-                pass
 
     def _handle_payload(self, payload: Any) -> Dict[str, Any]:
 
@@ -2620,7 +2598,6 @@ def run_helper(
         applier,
         router_factory=router_factory,
         allow_router_wifi_changes=allow_router_wifi_changes,
-        router_audit=RouterAudit.open(Path("/var/log/jittersim-router")),
         active_plan_path=active_plan_path,
         access_store=AccessStore(ACCESS_FILE, group_id=grp.getgrnam("jittersim").gr_gid),
         gateway_state_path=gateway_state_path,

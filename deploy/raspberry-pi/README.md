@@ -1286,12 +1286,6 @@ For a separately reviewed setup, the root-owned helper service command can
 explicitly include --allow-router-wifi-changes. This is never enabled by the
 installer or a dashboard request. The dashboard switch stays read only.
 
-The helper writes fixed router-operation records under
-/var/log/jittersim-router/operations.jsonl with one rotated backup. Each file
-is limited to 64 KiB. Files are private to root and remain after rollback.
-Records include action, requested on/off state where applicable, operation
-number, process and boot identity, time, duration and result category. They
-exclude passwords, tokens, request bodies and response text. Diagnostic
-storage failure does not prevent refusal, Reset or Panic. These records
-identify JitterSim requests, not changes made by other router users or the
-router itself. Do not claim previous outage causation from this repair.
+Additional private operation logging is deferred. This repair adds no logging
+I/O to privileged requests or startup. The original outage cause remains
+unconfirmed. Keep router Wi-Fi on during recovery acceptance.
