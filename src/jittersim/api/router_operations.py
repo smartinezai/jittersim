@@ -8,6 +8,7 @@ import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from .wifi_operations import valid_request_id
+from jittersim.diagnostic_records import Operation, status_outcome
 from jittersim.request_workers import RequestWorkers
 
 
@@ -116,6 +117,8 @@ class RouterOperations:
                 if self._active is operation:
                     self._active = None
                 return
+        diagnostic = Operation("router-wifi" if operation["path"] == "/api/router/wifi" else
+                               "router-copy", "router") if operation["path"] in ("/api/router/wifi", "/api/router/sync-ap") else None
         try:
             status, _, body = self._execute(operation["path"], payload)
             data = json.loads(body)
@@ -125,6 +128,8 @@ class RouterOperations:
             status, data = 502, {"error": "Router operation failed. Check its state before trying again."}
         finally:
             payload.clear()
+        if diagnostic:
+            diagnostic.finish(status_outcome(status))
         with self._lock:
             if self._closed:
                 self._active = None

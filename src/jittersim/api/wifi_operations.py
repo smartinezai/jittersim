@@ -8,6 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
+from jittersim.diagnostic_records import Operation, status_outcome
 from jittersim.request_workers import RequestWorkers
 
 ACTION_PATHS = {
@@ -131,6 +132,8 @@ class WifiOperations:
             if self._closed or not self._active or self._current["id"] != identifier or self._entered:
                 return False
             self._entered = True
+            action = {"reset-name": "wifi-reset", "access-point": "wifi-change", "router-copy": "router-copy"}.get(self._current["kind"])
+            self._current["_diagnostic"] = Operation(action, "wifi")
             return True
 
     def finish(self, identifier: str, outcome: WifiOutcome) -> None:
@@ -138,6 +141,9 @@ class WifiOperations:
             current = self._current
             if not self._active or not current or current["id"] != identifier:
                 return
+            diagnostic = current.get("_diagnostic")
+            if diagnostic:
+                diagnostic.finish(status_outcome(outcome.status))
             succeeded = outcome.status == 200
             current.update(
                 state="succeeded" if succeeded else "failed", status=outcome.status,
@@ -212,6 +218,9 @@ class WifiOperations:
         with self._lock:
             self._closed = True
             if self._active and self._entered:
+                diagnostic = self._current.get("_diagnostic")
+                if diagnostic:
+                    diagnostic.finish("uncertain")
                 self._current.update(state="uncertain", message="Service stopped while Wi-Fi work was running. Check current settings before another change.")
             if self._active and not self._entered:
                 self._current.update(state="failed", status=503, finished_at=self._clock(),
