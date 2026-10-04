@@ -20,24 +20,32 @@ def quantize_value(value: Union[Number, Decimal], places: int) -> Number:
     return int(rounded) if rounded == rounded.to_integral_value() else float(rounded)
 
 
-def feature_range(impairment: Impairment, feature: str) -> Optional[Tuple[Number, Number]]:
-    """Return precisely the supported endpoints used by this feature's selector."""
-
-    field, lower, upper, places, _ = FEATURE_LIMITS[feature]
+def _raw_feature_range(impairment: Impairment, feature: str) -> Optional[Tuple[Number, Number]]:
+    field = FEATURE_LIMITS[feature][0]
     randomness = getattr(impairment, feature + "_randomness")
     value = getattr(impairment, field)
     if randomness.mode == "range":
-        low, high = randomness.minimum, randomness.maximum
-    elif value is None:
+        return randomness.minimum, randomness.maximum
+    if value is None:
         return None
-    else:
-        base = Decimal(str(value))
-        variation = base * Decimal(str(randomness.variation_percent)) / 100
-        low, high = base - variation, base + variation
-    return (
-        max(lower, min(upper, quantize_value(low, places))),
-        max(lower, min(upper, quantize_value(high, places))),
-    )
+    # Keep the original arithmetic so existing seeds choose the same values.
+    variation = value * randomness.variation_percent / 100
+    return value - variation, value + variation
+
+
+def _applied_feature_value(value: Number, feature: str) -> Number:
+    _, lower, upper, places, _ = FEATURE_LIMITS[feature]
+    rounded = round(value) if places == 0 else quantize_value(value, places)
+    return max(lower, min(upper, rounded))
+
+
+def feature_range(impairment: Impairment, feature: str) -> Optional[Tuple[Number, Number]]:
+    """Show possible final values without changing the relative selection range."""
+
+    bounds = _raw_feature_range(impairment, feature)
+    if bounds is None:
+        return None
+    return _applied_feature_value(bounds[0], feature), _applied_feature_value(bounds[1], feature)
 
 
 def impairment_range_preview(impairment: Impairment) -> dict:
@@ -65,14 +73,14 @@ def reroll_impairment(*, impairment: Impairment, generator: random.Random) -> Im
     selected = {}
     # Keep the established draw order so adding fields does not reorder seed use.
     for feature in ("bandwidth", "delay", "jitter", "loss", "reorder", "duplicate", "corrupt"):
-        field, _, _, places, _ = FEATURE_LIMITS[feature]
-        bounds = feature_range(impairment, feature)
+        field = FEATURE_LIMITS[feature][0]
+        bounds = _raw_feature_range(impairment, feature)
         randomness = getattr(impairment, feature + "_randomness")
         if bounds is None or not _is_enabled(randomness, generator):
             selected[field] = None if feature == "bandwidth" else 0
         else:
             low, high = bounds
-            selected[field] = quantize_value(generator.uniform(low, high), places)
+            selected[field] = _applied_feature_value(generator.uniform(low, high), feature)
     return Impairment(**selected, loss_burst_packets=impairment.loss_burst_packets)
 
 

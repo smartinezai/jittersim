@@ -224,3 +224,92 @@ def test_helper_rejects_unsupported_fractional_packet_values(value):
     payload["corrupt_percent"] = value
     with pytest.raises(HelperClientError):
         _clean_queue_impairment(payload)
+
+
+def _prior_relative_result(impairment, generator):
+    # Preserve the formula and draw order from 0a41c2f's _reroll_integer.
+    fields = (
+        ("bandwidth_kbit", "bandwidth_randomness", 1, 1_000_000),
+        ("delay_ms", "delay_randomness", 0, 60_000),
+        ("jitter_ms", "jitter_randomness", 0, 60_000),
+        ("loss_percent", "loss_randomness", 0, 100),
+        ("reorder_percent", "reorder_randomness", 0, 100),
+        ("duplicate_percent", "duplicate_randomness", 0, 100),
+        ("corrupt_percent", "corrupt_randomness", 0, 100),
+    )
+    selected = {}
+    for field, control, minimum, maximum in fields:
+        value = getattr(impairment, field)
+        settings = getattr(impairment, control)
+        if value is None or not generator.random() * 100 < settings.enabled_probability:
+            selected[field] = None if field == "bandwidth_kbit" else 0
+        else:
+            variation = value * settings.variation_percent / 100
+            sampled = round(generator.uniform(value - variation, value + variation))
+            selected[field] = max(minimum, min(maximum, sampled))
+    return Impairment(**selected, loss_burst_packets=impairment.loss_burst_packets)
+
+
+@pytest.mark.parametrize(
+    "feature, field, base, variation, chance",
+    [
+        ("corrupt", "corrupt_percent", 5, 10, 100),
+        ("loss", "loss_percent", 5, 10, 100),
+        ("corrupt", "corrupt_percent", 99, 20, 66),
+        ("loss", "loss_percent", 100, 100, 100),
+        ("delay", "delay_ms", 60_000, 100, 100),
+        ("jitter", "jitter_ms", 5, 10, 37),
+        ("bandwidth", "bandwidth_kbit", 1, 100, 100),
+        ("bandwidth", "bandwidth_kbit", 1_000_000, 100, 20),
+        ("duplicate", "duplicate_percent", 99, 20, 0),
+        ("reorder", "reorder_percent", 5, 10, 100),
+    ],
+)
+def test_relative_seed_outputs_match_the_prior_sampler(feature, field, base, variation, chance):
+    impairment = Impairment(**{field: base, feature + "_randomness": Randomness(variation, chance)})
+    for seed in range(200):
+        assert reroll_impairment(impairment=impairment, generator=random.Random(seed)) == (
+            _prior_relative_result(impairment, random.Random(seed))
+        ), seed
+
+
+def test_relative_mixed_chances_preserve_prior_draw_order_and_burst_length():
+    impairment = Impairment(
+        delay_ms=5,
+        jitter_ms=60_000,
+        loss_percent=99,
+        bandwidth_kbit=1,
+        reorder_percent=5,
+        duplicate_percent=99,
+        corrupt_percent=100,
+        loss_burst_packets=4,
+        delay_randomness=Randomness(10, 23),
+        jitter_randomness=Randomness(100, 72),
+        loss_randomness=Randomness(20, 76),
+        bandwidth_randomness=Randomness(100, 20),
+        reorder_randomness=Randomness(10, 79),
+        duplicate_randomness=Randomness(20, 80),
+        corrupt_randomness=Randomness(100, 66),
+    )
+    for seed in range(200):
+        assert reroll_impairment(impairment=impairment, generator=random.Random(seed)) == (
+            _prior_relative_result(impairment, random.Random(seed))
+        ), seed
+
+
+def test_rounding_displayed_bounds_does_not_expand_the_relative_draw():
+    impairment = Impairment(loss_percent=5, loss_randomness=Randomness(10))
+    assert feature_range(impairment, "loss") == (4, 6)
+    values = {
+        reroll_impairment(impairment=impairment, generator=random.Random(seed)).loss_percent
+        for seed in range(1000)
+    }
+    assert values == {5}
+
+
+@pytest.mark.parametrize("first,last,expected", [(10, 11, 10), (10.25, 10.75, 10.5)])
+def test_relative_progression_keeps_legacy_whole_variation(first, last, expected):
+    start = Impairment(corrupt_percent=5, corrupt_randomness=Randomness(first))
+    end = Impairment(corrupt_percent=5, corrupt_randomness=Randomness(last))
+    middle = interpolate_impairment(start=start, end=end, factor=0.5)
+    assert middle.corrupt_randomness.variation_percent == expected

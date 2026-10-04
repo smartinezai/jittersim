@@ -156,8 +156,13 @@ def _interpolate_randomness(
     end: Randomness,
     factor: float,
 ) -> Randomness:
+    interpolate_variation = (
+        _interpolate_integer
+        if float(start.variation_percent).is_integer() and float(end.variation_percent).is_integer()
+        else _interpolate_percent
+    )
     return Randomness(
-        variation_percent=_interpolate_percent(
+        variation_percent=interpolate_variation(
             start.variation_percent,
             end.variation_percent,
             factor,

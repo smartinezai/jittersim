@@ -73,12 +73,17 @@ missing endpoints and reversed bounds.
 
 ## Shared selection and preview
 
-Calculate the effective bounds once on the server. Derive relative bounds
-from the base value, round to the supported step and clamp to feature limits.
-For custom ranges, validate the endpoints against those same limits and
-steps. Select from the displayed supported range with one bounded draw.
-Keep the established feature draw order and deterministic seed construction.
-Seeded outcomes are repeatable within a software version.
+Calculate raw relative bounds with the original base and variation arithmetic.
+Sample from those unrounded bounds, then round and clamp the selected value
+as before. Do not round or clip the range before selecting a relative value.
+That would change the old distribution and seeded outcomes. Display the
+possible final bounds using the same rounding and clamping as selection.
+For custom ranges, validate the endpoints against feature limits and steps
+before sampling those explicit endpoints. Keep the established feature draw
+order and deterministic seed construction. Preserve exact whole-valued
+relative outcomes for existing seeds. Whole-valued progression variation
+also keeps its previous interpolation. Fractional endpoints use the new
+precision only when the person actually configured fractional variation.
 
 Expose one authenticated POST preview for both directions. It is pure math
 with at most 14 ranges. Bypass settings writes, scheduler locking, helper
@@ -173,3 +178,11 @@ because it would expand a security boundary beyond this feature's current
 authorization. The command did not run. Restore the original helper and keep
 whole packet values instead. Preserve the rejection and earlier receipts.
 The final whole-value checks must be recorded separately.
+
+Release source review of `e4490f5` and `78c872a` found that sampling the
+rounded endpoints changed relative-mode results. The original 5% base with
+10% variation samples 4.5% to 5.5% before rounding. Sampling 4% to 6% instead
+creates a different distribution. Reproduce this with exact-seed comparisons
+against the original formula and draw order at half values and clipped
+boundaries. Keep the prior complete host receipts as historical. The final
+combined Linux checks belong to the coordinated release run.
