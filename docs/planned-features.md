@@ -69,6 +69,12 @@ The things the owner has to try on the Pi are in the [Pi acceptance checklist](p
   - The code lives in `networking/router.py` and `api/router_operations.py` and the `/api/router/` routes. Do not change router switching without asking.
   - Keep the Pi on Ethernet during the check. The router's own admin page is the way back.
 
+### 13. Preserve logs for outage investigations
+
+- **Status:** taken (a fresh chat was requested on 2026-10-04). Implementation has not started.
+- **Why:** two household outages required a Vodafone router restart. The Pi retained only the current boot journal so evidence from before its reset was unavailable. The cause remains unproven.
+- **Notes:** retain useful Pi system and service logs across restarts with limits on disk use, age and repeated messages. Record profile apply/reset, scheduler changes and Wi-Fi operations with times and matching operation identifiers. Keep passwords, tokens and browsing history out of diagnostic exports. Add a bounded manual export for comparing the current boot with the previous boot. Reuse existing action records and avoid automatic router contact. Plan and release checks are in the [outage logging plan](implementation-plan-outage-logging-2026-10-04.md). The owner requested implementation, testing, pushing and merging in a separate chat so this can become ready for deployment quickly. Keep it separate from the frozen release candidate until the release owner accepts it.
+
 ## In progress
 
 ### 6. Remote command line and one-command deploy from the Mac
