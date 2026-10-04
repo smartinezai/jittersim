@@ -998,6 +998,85 @@ class RouterFormTests(unittest.TestCase):
                 self.assertEqual(form.controls, controls)
 
 
+    def test_unverified_legacy_destinations_are_refused_before_any_write(self) -> None:
+        for action, method in (
+            ("http://example.invalid/php/save_wifi.php", "post"),
+            ("//example.invalid/php/save_wifi.php", "post"),
+            ("https://192.168.0.1/php/save_wifi.php", "post"),
+            ("http://user@192.168.0.1/php/save_wifi.php", "post"),
+            ("http://192.168.0.1:8080/php/save_wifi.php", "post"),
+            ("http://192.168.0.1.example.invalid/php/save_wifi.php", "post"),
+            ("/php/%2e%2e/reset.php", "post"),
+            ("/php/reset.php", "post"),
+            ("/php/save_wifi.php?reset=1", "post"),
+            ("/php/save_wifi.php#action", "post"),
+            ("", "post"),
+            ("http://[invalid", "post"),
+            ("/php/save_wifi.php", "get"),
+        ):
+            with self.subTest(action=action, method=method):
+                controls = {"wifi_ssid24": "Test", "wifi_password24": "test-password",
+                            "wifi_on_state": "1"}
+                form = _Form(action=action, method=method, controls=dict(controls))
+                router = object.__new__(TG3442DERouter)
+                router.base_url = "http://192.168.0.1"
+                router._wifi_form = lambda: (form, "")
+                router._read_wifi_data = lambda: (_ for _ in ()).throw(
+                    _EndpointUnavailable("older firmware")
+                )
+                with patch.object(router, "_request", return_value="") as request:
+                    with self.assertRaises(RouterError) as caught:
+                        router.set_wifi_enabled(enabled=False)
+                self.assertEqual(caught.exception.reason, "unsupported")
+                request.assert_not_called()
+                self.assertEqual(form.controls, controls)
+
+    def test_legacy_form_without_post_method_is_refused(self) -> None:
+        for method_attribute in ("", 'method=""'):
+            with self.subTest(method_attribute=method_attribute):
+                parser = _FormParser()
+                parser.feed(
+                    '<form action="/php/save_wifi.php" ' + method_attribute + '>'
+                    '<input name="wifi_ssid24" value="Test">'
+                    '<input name="wifi_password24" value="test-password">'
+                    '<input name="wifi_on_state" value="1"></form>'
+                )
+                form = parser.forms[0]
+                before = dict(form.controls)
+                router = object.__new__(TG3442DERouter)
+                router.base_url = "http://192.168.0.1"
+                router._wifi_form = lambda: (form, "")
+                router._read_wifi_data = lambda: (_ for _ in ()).throw(
+                    _EndpointUnavailable("older firmware")
+                )
+                with patch.object(router, "_request", return_value="") as request:
+                    with self.assertRaises(RouterError) as caught:
+                        router.set_wifi_enabled(enabled=False)
+                self.assertEqual(caught.exception.reason, "unsupported")
+                request.assert_not_called()
+                self.assertEqual(form.controls, before)
+
+    def test_verified_relative_and_absolute_legacy_destinations_work(self) -> None:
+        for action in ("/php/save_wifi.php", "php/save_wifi.php",
+                       "http://192.168.0.1/php/save_wifi.php"):
+            with self.subTest(action=action):
+                form = _Form(action=action, method="post", controls={
+                    "wifi_ssid24": "Test", "wifi_password24": "test-password",
+                    "wifi_on_state": "1",
+                })
+                router = object.__new__(TG3442DERouter)
+                router.base_url = "http://192.168.0.1"
+                router._wifi_form = lambda: (form, "")
+                router._read_wifi_data = lambda: (_ for _ in ()).throw(
+                    _EndpointUnavailable("older firmware")
+                )
+                with patch.object(router, "_request", return_value="") as request:
+                    self.assertFalse(router.set_wifi_enabled(enabled=False).enabled)
+                request.assert_called_once()
+                self.assertEqual(request.call_args.args[:2],
+                                 ("post", "http://192.168.0.1/php/save_wifi.php"))
+
+
 class RouterPasswordCheckMessageTests(unittest.TestCase):
     def test_check_failures_map_to_fixed_guidance(self) -> None:
         for reason, expected in (

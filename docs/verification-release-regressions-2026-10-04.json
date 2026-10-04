@@ -31,5 +31,27 @@
     "tests/unit/test_dashboard_phone_layout.py": "760576c01eb224273f0e562e85d3da143dc78e0b470cc477103e4892c18306a9",
     "src/jittersim/networking/router.py": "2fa9ea14fc49c861e40b64fc4df30c891dc392832a6f3d8a6ee4f9d9652aef5a",
     "tests/unit/test_router.py": "206d000d0ee1d042d2d42025e11c8091302d6062386e05405f58c60423d1a638"
+  },
+  "final_router_destination": {
+    "status": "Reviewed final paired source. Complete final release checks still required.",
+    "source_hashes": {
+      "src/jittersim/networking/router.py": "bef3ced7f14f8ac36a8ac2be68131cc98e503119a0bf2d2e5e12fdc8499b5d3c",
+      "tests/unit/test_router.py": "1ddccdff6bad7b901ed027012ad26f918b118c5db1a51609103b48da26102d4c"
+    },
+    "independent_review_sha256": "305658e790aadc665633bf22cf5ef4972f3501ce52895d04b53a49d7176dd590",
+    "checks": {
+      "jittersim-router-destination-method-final-python312": {
+        "passed": 197,
+        "xml_sha256": "4bdbcfbed446c4649812373d751129c752c5bc979f8749184ff8c94f73ffd8e5",
+        "log_sha256": "0f757f47f2b56ace2e11809ef8c0174133ccf20bb8b6a9119dab670234aaef55"
+      },
+      "jittersim-router-destination-method-final-python39": {
+        "passed": 197,
+        "xml_sha256": "dadfea654a9e2168fcaae68ef6b58dbd1c2a3582f102902b5b7a733050868e7e",
+        "log_sha256": "69e95e0a98d6b7833f9c2c9574f5ac3d326b70bfb8d602a6841ca7139a806280"
+      }
+    },
+    "independent_router_checks": "57 passed with no skips on Python3.9 and3.12",
+    "stopped_50db_run": "Explicit root stop for source safety correction, exit143 copy0 cleanup0. No full test completion."
   }
 }

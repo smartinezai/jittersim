@@ -112,3 +112,27 @@ Freeze this repaired source, rebuild the exact wheel and source inputs then
 repeat every final configured Linux check. None of the earlier full-source
 results substitutes for this changed candidate. Keep normal publication and
 management/recovery gates.
+
+## Paired field and destination safety review
+
+The early50db rerun was deliberately stopped after independent review exposed
+the other legacy boundary: recognized fields could still be posted to an
+unverified form destination. A mock-only check proved synthetic Wi-Fi password,
+session header and cookie forwarding to another host. No real request or
+credential was used. The stopped run returned exit143 with artifact copy and
+owned-container cleanup0. It is retained as incomplete evidence.
+
+The final paired guard now requires the known same-router Wi-Fi save endpoint
+and an explicit POST before changing any controls. Other origins, routes,
+ports, queries, fragments, malformed addresses and misleading names are refused.
+The parser uses the HTML GET default for absent or empty methods. Redirect
+refusal and all other fixed authentication paths remain unchanged. Recognized
+relative and absolute forms still work and read-only imports are preserved.
+Unknown older forms require the router's own settings page.
+
+Final router/helper/copy suites pass197 cases on Python3.9 and3.12. Independent
+whole-source review and57 router fixtures pass without skips on both versions.
+It verifies the exact final paired source, the earlier timeout repair and
+unchanged approved Panic tuple, kernel/workflow trees and verification drivers.
+Destination and omitted-method regressions each failed before their repairs.
+Freeze these exact files and repeat the full configured Linux pipeline.
