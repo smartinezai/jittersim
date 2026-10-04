@@ -1,0 +1,18 @@
+{
+  "base": "80485e93d86d6ca1ced737ebb30e729557d0f295",
+  "status": "Exact test-only correction approved andhostjourney passed. Wholefinalpipeline remainsrequired.",
+  "test_sha256": "514b4c5c27f16e43d6473cdecd4a23e8401b3df876cfbd29c4352aa08d31c29b",
+  "root_host_log_sha256": "dd5b79cbf56e7f6c2df4eacc77c1fd2971f2b5849c9f9c701d0c9420751670bc",
+  "independent_review_sha256": "1299b721b8701a7dd20ab39999547341932d3abbef39ec4c416a23847848b336",
+  "production_and_unit_kernel_workflows_unchanged": true,
+  "preserved_failed_runs": [
+    "804 full313 pass5461 kernel40, browserwifi staleexpectationfailure",
+    "firstmanualhostheldrouterrequestrace",
+    "secondmanualhostheldresetrequestrace"
+  ],
+  "screenshots": {
+    "wifi-pi-phone.png": "9eb138b75dcc5aec9a6f81c13add3dec35c8219d0fac77353944459db8108075",
+    "wifi-pi-laptop.png": "8b682c761c98b52b5b2d188c260c344114c2b7a48dd81ae7f55a9d8d44e86582",
+    "wifi-pi-desktop.png": "a940d83ebeb5f2d053666c0173d7ba62fee7493f018c78b2488b969dc00f7c65"
+  }
+}

@@ -136,3 +136,26 @@ It verifies the exact final paired source, the earlier timeout repair and
 unchanged approved Panic tuple, kernel/workflow trees and verification drivers.
 Destination and omitted-method regressions each failed before their repairs.
 Freeze these exact files and repeat the full configured Linux pipeline.
+
+## Manual router browser acceptance correction
+
+The exact804 Linux run passed5461 Python3.13 tests with40 expected kernel
+skips, lint, the reference fixture, GUI unit checks and the first two browser
+journeys. Wi-Fi recovery then failed because its test expected automatic
+router status. That incomplete run and its stopped follower are retained.
+Artifact return and owned cleanup both succeeded.
+
+The recovery journey now asserts the unknown disabled switch and explicitly
+checks status before switching. It repeats that deliberate check after reload.
+The first status request must refresh and any completion reads remain passive.
+It also waits for each held write request. The busy notice precedes the
+request-identity read and is not proof a write has reached its interceptor.
+Two host race failures are retained before that synchronization correction.
+Cancellation, exactly two switch writes, held writes, healthy management and
+all desktop/laptop/phone assertions remain.
+
+The final test-only correction passes the full root host browser acceptance
+and an independent isolated acceptance. The final screenshot layouts were
+inspected. All application, deployment, unit, kernel and workflow files remain
+byte-identical to804. Freeze the corrected test source and rebuild its exact
+inputs before the renewed full Linux sequence. This is not physical Pi proof.
