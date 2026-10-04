@@ -64,6 +64,10 @@ def run():
                     expect(page.locator("#upload-delay-random-preview")).to_contain_text(
                         "fixed at 1 ms"
                     )
+                    page.locator(stem + "variation").fill("7.255")
+                    assert not page.locator(stem + "variation").evaluate(
+                        "(input) => input.checkValidity()"
+                    )
                     page.locator(stem + "mode").select_option("range")
                     expect(page.locator(stem + "relative-label")).to_be_hidden()
                     page.locator(stem + "minimum").fill("")
@@ -98,6 +102,7 @@ def run():
                     assert saved.value.ok
                     profile = saved.value.json()["profile"]
                     assert profile["upload"]["corrupt_randomness"]["mode"] == "range"
+                    assert profile["upload"]["corrupt_randomness"]["variation_percent"] == 0
                     assert profile["download"]["loss_percent"] == 25
                     assert profile["upload"]["corrupt_randomness"]["enabled_probability"] == 66
                     page.reload()
@@ -116,6 +121,7 @@ def run():
                     page.locator(stem + "maximum").fill("12")
                     expect(preview).to_contain_text("5%–12%")
                     page.locator(stem + "mode").select_option("relative")
+                    page.locator(stem + "variation").fill("7.25")
                     expect(preview).to_contain_text("fixed at 6%")
                     assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
                     if page.locator("#toast-dismiss").is_visible():

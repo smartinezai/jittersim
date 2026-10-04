@@ -128,6 +128,7 @@
         enabled_probability: Number(enabled.value)
       } : { variation_percent: 0, enabled_probability: 100 };
       if (mode && mode.value === "range") {
+        delete result.variation_percent;
         result.mode = "range";
         result.minimum = optionalNumber(prefix + "-" + feature + "-random-minimum");
         result.maximum = optionalNumber(prefix + "-" + feature + "-random-maximum");
