@@ -980,6 +980,12 @@ PANIC_APPROVED_SOURCES = ({
     "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
     "src/jittersim/networking/helper.py": "84683fdeb036d0b4872ab32d8f1539bbeb32f8f8879af3caf507f23bc4205e7e",
     "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
+}, {
+    # Dashboard status admission only changes the wait policy. The same reviewed
+    # Panic and access-control consumers remain in this approved bundle.
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "a396c6660ceab42bc2f36226c27ee3ae08c65ed5d627bc18d30a6642a696f6b0",
+    "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
 },)
 
 

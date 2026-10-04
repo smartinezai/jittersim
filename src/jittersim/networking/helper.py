@@ -75,6 +75,7 @@ MAX_HELPER_CONNECTIONS = 8
 # Apply access rules and the device quick action so a poll must not refuse it either.
 WRITE_ACTIONS = ("apply", "apply-experiment", "reset", "recover-reset", "normal-access", "access-apply", "ad-blocking-configure")
 WRITE_LOCK_WAIT_SECONDS = 3.0
+ACCESS_STATUS_LOCK_WAIT_SECONDS = 0.5
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
 ROUTER_ACTIONS = (
     "router-sync-ap",
@@ -455,7 +456,14 @@ class HelperService:
                 if acquired:
                     self._network_lock.release()
         if action == "dashboard-access":
-            if not self._access_lock.acquire(blocking=False):
+            operation = payload.get("operation", "status")
+            if operation == "status":
+                # Allow a short burst of dashboard refreshes to take turns while
+                # keeping access changes serialized with each authorization check.
+                acquired = self._access_lock.acquire(timeout=ACCESS_STATUS_LOCK_WAIT_SECONDS)
+            else:
+                acquired = self._access_lock.acquire(blocking=False)
+            if not acquired:
                 return {"ok": False, "error": "Device verification is busy. Try again.",
                         "reason": "helper-busy"}
             try:

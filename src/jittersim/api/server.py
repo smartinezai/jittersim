@@ -5197,8 +5197,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             else:
                 status, content_type, body = self.server.response_for(path, query=parsed_path.query)
         except HelperClientError as error:
-            status, content_type, body = (HTTPStatus.SERVICE_UNAVAILABLE, "application/json",
-                                          _json_bytes({"error": str(error)}))
+            if path == "/api/dashboard-access/status" and error.reason == "helper-busy":
+                status, content_type, body = (
+                    HTTPStatus.CONFLICT,
+                    "application/json",
+                    _json_bytes({"error": str(error), "code": "helper-busy"}),
+                )
+            else:
+                status, content_type, body = (HTTPStatus.SERVICE_UNAVAILABLE, "application/json",
+                                              _json_bytes({"error": str(error)}))
         except (PlanError, StorageError):
             LOGGER.exception("could not build control-plane response for %s", path)
             status = HTTPStatus.INTERNAL_SERVER_ERROR
