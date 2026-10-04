@@ -12,6 +12,20 @@ and failed to connect to Vodafone Wi-Fi with its password. The INTERNET light
 state is uncertain. This supports a household router failure beyond normal
 profile effects on selected Pi clients. It does not identify the trigger.
 
+The user clarified that during the problem the Vodafone router's Wi-Fi was
+off. The Pi had copied the router's Wi-Fi name and password and advertised
+the Vodafone name rather than JitterSim. The distinct names and reachable
+services observed later followed resets of both the Pi and router.
+
+These are separate stages. During the initial failure a Vodafone-named network
+could be the Pi access point. Later the user enabled the router's Wi-Fi and
+removed the Pi yet still could not connect until the router was restarted.
+Do not treat the post-reset address ranges or service health as proof of the
+incident configuration. They cannot rule out an address, DHCP or connection
+path problem during the failure. Verify whether the Unaffected device rules
+matched the actual clients on the copied network before relying on those
+labels to establish that profile effects were bypassed during the incident.
+
 The installed dashboard repeatedly signs in to the router while a visible tab
 has its password. A tested containment change makes router checks manual.
 This removes repeated management traffic as a possible trigger. It does not
@@ -20,7 +34,7 @@ prove that this traffic caused either failure or that router stability is fixed.
 The change is local. Publication and installation remain with the release owner.
 No router settings, test profiles or live services were changed in this investigation.
 
-## Verified evidence
+## Verified observations after recovery
 
 - The Pi answers at `192.168.0.17` through the Vodafone management network.
   The Mac route uses `en0` and gateway `192.168.0.1`.
@@ -32,7 +46,8 @@ No router settings, test profiles or live services were changed in this investig
 - The wired Pi address is `192.168.0.17/24`. Test Wi-Fi is `192.168.50.1/24`
   with client addresses `.100` through `.199`. IPv6 is disabled on test Wi-Fi.
   DNS is configured to listen at the test Wi-Fi address. No bridge appeared
-  in the inspected interfaces. This configuration supports isolation but does
+  in the inspected interfaces. These observations describe the recovered
+  configuration. They do not establish the incident's address ranges and do
   not replace a physical check for DHCP traffic on the wired connection.
 - The available kernel log shows the wired link up. Available memory was
   about 669 MiB and swap use was zero. No memory exhaustion appeared in the

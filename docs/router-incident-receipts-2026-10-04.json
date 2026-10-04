@@ -29,7 +29,8 @@
     "gateway": "192.168.0.1",
     "mac_route": "en0",
     "ssh_user": "jittersim",
-    "sudo_without_password": false
+    "sudo_without_password": false,
+    "observation_phase": "after recovery"
   },
   "live_mutations": [],
   "cause": "unproven",
@@ -188,5 +189,15 @@
       "jittersim_action_order": "uncertain",
       "CLIENTTOOL_identity": "unknown"
     }
+  },
+  "incident_setup_user_clarification": {
+    "vodafone_router_wifi_during_problem": "off",
+    "pi_ap_name_during_problem": "copied Vodafone router Wi-Fi name",
+    "pi_ap_password_during_problem": "copied Vodafone router Wi-Fi password, value not retained",
+    "later_observations": "after user reset both Pi and router",
+    "incident_subnets": "not captured",
+    "incident_device_bypass_matches": "not independently verified",
+    "interpretation": "post-reset isolation observations cannot rule out an incident address or DHCP conflict",
+    "later_router_only_failure": "user reports router Wi-Fi association still failed with Pi unplugged until router restart"
   }
 }
