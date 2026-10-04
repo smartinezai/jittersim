@@ -805,9 +805,12 @@ def _run_operations(raw_arguments: Sequence[str]) -> int:
         return _set_persistence_mode(arguments)
     if arguments.operation == "diagnostics":
         if arguments.diagnostics_command == "export":
-            from jittersim.diagnostic_export import build_export
+            from jittersim.diagnostic_export import UnsupportedHostError, build_export
             try:
                 raw = build_export(arguments.database.absolute())
+            except UnsupportedHostError:
+                print("Diagnostic export requires Linux. Run this command on the Pi.", file=sys.stderr)
+                return 1
             except PermissionError:
                 print("Run sudo jittersim diagnostics export.", file=sys.stderr)
                 return 1

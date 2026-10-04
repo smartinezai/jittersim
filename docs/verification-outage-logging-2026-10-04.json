@@ -10,13 +10,14 @@
   "source_sha256": {
     "src/jittersim/diagnostic_records.py": "d40a3b15302ae2428727181dbe7fb69ad52f2a1dbb1650a1fb89853d84d2f0d8",
     "src/jittersim/diagnostic_privacy.py": "add098a0a8fa879795cda12e70bfc9acfdc8801b1bf1a7e983ff85674c9d8193",
-    "src/jittersim/diagnostic_export.py": "9bd71fa4145c0a630b73e485a339bfee0d0ee633230d30785f04d185f97f2f20",
+    "src/jittersim/diagnostic_export.py": "bc9ce22a734ba903095bf451658c13c00f1657b5c1e5aa19352dcdc2d03556c3",
     "src/jittersim/journal_policy.py": "85d3030bc3b7d36462555e6d697df4a4dbf0f73351b956f1a9c72cc6242730ae",
     "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
     "src/jittersim/networking/helper.py": "9ae2544e0aead364dd189a1d683a05a2132ecbf0259ddb5dd43acdee07f38de7",
     "src/jittersim/networking/access.py": "ddc801a896afa2b977c12662bdb34388680502350b8b5b16099cbc3978725ddd",
     "src/jittersim/updates.py": "290cc8965f3edf7cf9b324239b42ef617a1073a65f271049c92517142efb3704",
-    "deploy/raspberry-pi/install.sh": "d049ad21c03c64818f32a32d5254576bd1985704fcfa847ab47b11d72c7d086f"
+    "deploy/raspberry-pi/install.sh": "d049ad21c03c64818f32a32d5254576bd1985704fcfa847ab47b11d72c7d086f",
+    "src/jittersim/cli.py": "91347a9dca3e37fa9776b4bfa3659dc1b59ac30fa69c84c0e96511b981c2d89b"
   },
   "checks": [
     {
@@ -57,7 +58,8 @@
       "check": "locked package preparation, clean source, fresh builder and checker",
       "status": "passed",
       "wheel_sha256": "b6a1c574b6b1e4d64851f69b4676ecb30a44e5144c530121644a61752b8cfd96",
-      "content": "all packaged Python and dashboard assets match this working source"
+      "content": "all packaged Python and dashboard assets match this working source",
+      "scope": "prior source before the unsupported-host export correction"
     }
   ],
   "full_run_failures": [
@@ -96,5 +98,17 @@
       "archive_copy_bytes": 100663296
     },
     "method": "Keep the one-day rotation and seven-day retention settings. Preserve prior evidence then advance only the verified guest clock by two and eight days. Check automatic rotation and cleanup without a manual age vacuum."
+  },
+  "unsupported_host_correction": {
+    "status": "focused correction verified locally",
+    "artifact": "test-results/outage-logging/unsupported-host-export.xml",
+    "passed": 44,
+    "failed": 0,
+    "previous_export_sha256": "9bd71fa4145c0a630b73e485a339bfee0d0ee633230d30785f04d185f97f2f20",
+    "export_sha256": "bc9ce22a734ba903095bf451658c13c00f1657b5c1e5aa19352dcdc2d03556c3",
+    "cli_sha256": "91347a9dca3e37fa9776b4bfa3659dc1b59ac30fa69c84c0e96511b981c2d89b",
+    "behavior": "Non-Linux hosts or missing root identity support return a clear Linux/Pi requirement before evidence reads. Linux still requires root.",
+    "proof": "A controlled child deletes os.geteuid and receives exit status 1 with a fixed message and no traceback or private reads.",
+    "limits": "Previous full-suite and wheel results cover their earlier source freezes. Final accepted-source checks and source admission remain pending."
   }
 }

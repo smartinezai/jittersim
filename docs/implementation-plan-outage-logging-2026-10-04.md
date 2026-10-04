@@ -321,3 +321,14 @@ choice. Abrupt termination can interrupt restoration, so discard the disposable
 VM if the proof is killed or its state is uncertain. Never run this test on the
 Pi, a host system or a container. The host and shared Docker clock remain outside
 the proof. Actual rotation and cleanup evidence is still pending.
+
+## Unsupported export host correction
+
+Export now refuses non-Linux hosts or unavailable root identity support with a
+clear Linux/Pi requirement before reading evidence. The existing Linux root
+check and all privacy limits remain in place. A controlled child process with
+`os.geteuid` removed receives exit status 1 without a traceback or private
+reads. The focused export and CLI run passed 44 tests. The new exact export
+and CLI hashes are recorded in the verification file. Earlier full-suite and
+wheel evidence keeps its original source scope. Final accepted-source checks
+and the independent admission gate remain pending.

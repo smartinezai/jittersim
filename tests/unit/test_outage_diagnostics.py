@@ -169,7 +169,7 @@ def test_repeated_messages_have_a_fixed_window_limit():
 
 
 def test_root_check_happens_before_private_reads():
-    with patch.object(export.os, "geteuid", return_value=1000), patch.object(export, "_actions") as actions:
+    with patch.object(export.sys, "platform", "linux"), patch.object(export.os, "geteuid", return_value=1000), patch.object(export, "_actions") as actions:
         with pytest.raises(PermissionError): export.build_export()
         actions.assert_not_called()
 
@@ -192,7 +192,7 @@ def test_export_has_a_strict_output_budget_and_reports_boot_gaps(tmp_path):
             if not accept(export.summarize(entry())): break
             count += 1
         return {"boot_offset": boot, "read": count, "status": "output-limit"}
-    with patch.object(export.os, "geteuid", return_value=0):
+    with patch.object(export.sys, "platform", "linux"), patch.object(export.os, "geteuid", return_value=0):
         raw = export.build_export(tmp_path / "missing", reader=reader)
     assert len(raw) <= export.MAX_BYTES
     assert len(json.loads(raw)["entries"]) < 6000
@@ -268,7 +268,7 @@ def test_completed_history_storage_failure_does_not_stop_next_recovery():
 
 def test_non_root_command_cannot_export_private_journals(capsys):
     from jittersim.cli import main
-    with patch.object(export.os, "geteuid", return_value=1000), patch.object(export, "_journal") as journal:
+    with patch.object(export.sys, "platform", "linux"), patch.object(export.os, "geteuid", return_value=1000), patch.object(export, "_journal") as journal:
         assert main(["diagnostics", "export"]) == 1
         journal.assert_not_called()
     assert "sudo jittersim diagnostics export" in capsys.readouterr().err
@@ -316,3 +316,38 @@ def test_wall_clock_changes_cannot_change_operation_duration():
         operation.finish("succeeded")
     assert emitted[-1]["elapsed_ms"] == 5000
     assert emitted[0]["operation"] == emitted[-1]["operation"]
+
+
+@pytest.mark.parametrize("platform,identity", [("win32", None), ("darwin", None), ("linux", None)])
+def test_unsupported_hosts_refuse_before_root_or_evidence_reads(platform, identity):
+    with patch.object(export.sys, "platform", platform), patch.object(export.os, "geteuid", identity), \
+         patch.object(export, "_actions") as actions, patch.object(export, "_journal") as journal:
+        with pytest.raises(export.UnsupportedHostError, match="requires Linux"):
+            export.build_export()
+        actions.assert_not_called()
+        journal.assert_not_called()
+
+
+def test_non_linux_refusal_does_not_call_the_root_identity_check():
+    with patch.object(export.sys, "platform", "darwin"), patch.object(export.os, "geteuid") as identity:
+        with pytest.raises(export.UnsupportedHostError, match="requires Linux"):
+            export.build_export()
+        identity.assert_not_called()
+
+
+def test_missing_root_identity_returns_a_clear_cli_refusal_in_an_isolated_child():
+    import subprocess
+    script = """from jittersim import diagnostic_export as export
+from jittersim.cli import main
+export.sys.platform = 'linux'
+delattr(export.os, 'geteuid')
+def forbidden(*args, **kwargs):
+    raise AssertionError('private evidence was read')
+export._actions = forbidden
+export._journal = forbidden
+raise SystemExit(main(['diagnostics', 'export']))
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=5, check=False)
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == b"Diagnostic export requires Linux. Run this command on the Pi.\n"

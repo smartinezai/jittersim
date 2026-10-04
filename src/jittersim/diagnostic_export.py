@@ -6,6 +6,7 @@ import re
 import selectors
 import sqlite3
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -27,6 +28,10 @@ ACTION_NAMES = frozenset((
     "/api/router/wifi", "/api/router/sync-ap", "/api/general-profile",
 ))
 FIELDS = "__REALTIME_TIMESTAMP,__MONOTONIC_TIMESTAMP,_BOOT_ID,_SYSTEMD_UNIT,_TRANSPORT,PRIORITY,SYSLOG_IDENTIFIER,JITTERSIM_EVENT,JITTERSIM_DROPPED,MESSAGE"
+
+
+class UnsupportedHostError(RuntimeError):
+    """The command needs Linux journal support and a root identity check."""
 
 
 def _number(value, maximum=2**63-1):
@@ -199,7 +204,10 @@ def _actions(database, deadline):
 
 
 def build_export(database=Path("/var/lib/jittersim/jittersim.db"), reader=_journal):
-    if os.geteuid() != 0:
+    root_identity = getattr(os, "geteuid", None)
+    if not sys.platform.startswith("linux") or not callable(root_identity):
+        raise UnsupportedHostError("Diagnostic export requires Linux. Run this command on the Pi.")
+    if root_identity() != 0:
         raise PermissionError("Run sudo jittersim diagnostics export.")
     deadline = time.monotonic() + READ_SECONDS
     result = {"format": 1, "entries": [], "boots": [], "actions": [],
