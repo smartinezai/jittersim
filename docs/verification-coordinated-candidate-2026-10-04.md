@@ -71,3 +71,12 @@ multiple-client acceptance need their own evidence. Hosted billing-only
 pre-step failures may use complete local counterparts under the current
 human authorization. Real source failures and missing deployment access remain
 gates.
+
+## Capture readiness correction before the full run
+
+The initial desktop range screenshot showed the short updating notice despite
+the journey completing successfully. The browser checks now wait for the latest
+preview status and expected value after focus changes before capturing either
+range method. This strengthens the displayed-value check without changing
+application source. Preserve the earlier source preparation as preparation
+only and rebuild the exact test-source bundle before the final Linux run.

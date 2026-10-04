@@ -126,10 +126,13 @@ def run():
                     assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
                     if page.locator("#toast-dismiss").is_visible():
                         page.locator("#toast-dismiss").click()
+                    expect(page.locator("#profile-range-status")).to_have_text("Value ranges updated.")
+                    expect(preview).to_contain_text("fixed at 6%")
                     page.locator(stem + "card").screenshot(
                         path=f"test-results/random-range-{width}.png"
                     )
                     page.locator(stem + "mode").select_option("range")
+                    expect(page.locator("#profile-range-status")).to_have_text("Value ranges updated.")
                     expect(preview).to_contain_text("5%–12%")
                     page.locator(stem + "card").screenshot(
                         path=f"test-results/custom-range-{width}.png"
