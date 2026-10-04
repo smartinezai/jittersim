@@ -26,9 +26,11 @@ This improves future evidence. It does not identify or repair the cause of the
 two Vodafone outages and cannot recover already lost logs. A controlled reboot
 of a disposable Linux VM is required before claiming reboot persistence.
 
-Review status: initial source review complete. Awaiting Samantha's feedback on
-this summary and the findings below before production code, as required by the
-personal working agreement. Implementation, one final push, PR review and merge
+Review status: source review complete with concrete coordination feedback.
+Samantha's direct 24-hour authorization was verified in the coordination chat
+turn `01a10087-c3bd-73f0-aef4-998f9305bd8c`, message
+`01a10087-c3eb-74e1-9480-33c35f9fc687`. It waives repeated plan pauses through
+06:51:13 UTC on 4 October. Local implementation is proceeding. Implementation, one final push, PR review and merge
 are authorized after this plan review. Live Pi installation and network changes
 remain outside this chat.
 
@@ -214,3 +216,77 @@ Correct operation results and useful incident evidence are separate checks.
 After the authorized implementation, evaluate what can be concluded from a
 start record without an outcome and why clock time alone cannot order events
 across an unsynchronized reboot. Keep that check focused on these decisions.
+
+## Later release safety gate
+
+The update manager admits exact reviewed Panic producer and consumer file
+identities. Changing the helper for logging changes that identity even when
+Panic behavior is intended to stay the same. Before admitting the new helper,
+review the complete producer and consumer files, run recovery regression checks
+and obtain an independent complete-file review through release coordination.
+Keep the original production identity accepted. Do not add a new identity merely
+because its hash was calculated. This gate follows the accepted main source
+and does not change the current frozen release.
+
+## Implemented local design
+
+The first local implementation keeps project policy in
+`/etc/jittersim-outage-journal` and its journal link under
+`/usr/local/lib/systemd/journald.conf.d`. A small root-owned policy utility is
+retained at `/usr/local/lib/jittersim-outage-journal.py`. It is outside the
+application replacement and signing-trust recovery paths so an older release
+can restore the prior journal storage behavior. It adds no service.
+
+If persistence was previously off, removal retains a small project-owned
+`Storage=volatile` compatibility file. Deleting that file while the shared
+journal directory remains could turn persistence back on through
+`Storage=auto`. If persistence was previously on, removal deletes only the owned
+link and policy files. Neither path deletes previous logs. A new administrator
+policy or edited owned file is preserved and causes optional setup to stop.
+
+Messages use native nonblocking journal writes on Linux. Fixed log templates
+keep numeric details but omit string arguments and exception text. Unknown
+templates are omitted. Scheduler and ordinary messages have a separate bounded
+budget from manual operations and recovery. Diagnostic identities use a bounded
+local sequence and process seed, not authentication identifiers or random-token
+generation. No extra database or network reads enrich operation records.
+
+The VM reboot proof is prepared in
+`tests/integration/linux_outage_journal.py`. It records safe markers under a
+known unit, records module hashes, requires a changed kernel boot identity and
+checks both markers in the previous boot after reboot. It has not run yet. The
+release owner's active pipeline still owns the resource slot.
+
+Local macOS checks do not establish Linux installation or reboot persistence.
+The final Linux checks, accepted-main update, independent complete-file Panic
+review, source admission, final push, PR review and merge remain required.
+
+## Local verification checkpoint
+
+The local implementation is complete but is not ready to install or merge.
+The exact source identities and check results are recorded in
+`docs/verification-outage-logging-2026-10-04.json`.
+
+The first frozen macOS run passed 5,492 tests, skipped 41 and failed 12. Eleven
+failures came from the unchanged Panic source review gate. The other phone
+help-tip assertion also failed on an isolated archive of the untouched base.
+No frontend source or assertion was changed for this feature. Earlier focused
+checks passed 800 tests. After the vendor-policy and repeated-removal corrections
+181 focused checks passed. The exact final diagnostic and policy modules passed
+60 focused checks. Error lint, shell syntax, compile and whitespace checks passed.
+A locked package build from a fresh source directory passed with fresh build
+and checking environments. All packaged modules and dashboard assets matched
+the final source. These macOS checks do not replace the configured Linux jobs.
+
+Local review also closed raw socket-server traceback paths and unhandled
+service or thread failure messages. Safe logging is configured by access
+recovery and ad-blocking entry points. Unexpected failures use a fixed message
+without claiming that a whole service stopped. Explicit main journal policy
+is preserved in vendor and runtime locations too. Repeated removal avoids an
+unnecessary second logging-service restart.
+
+The release owner still controls the accepted base and serial resource slot.
+No VM was started. The prepared VM configuration passed Lima validation.
+Independent complete-file approval, final source admission, Linux checks, an
+actual reboot, rotation and age cleanup remain prerequisites. No remote push,
+PR creation, merge, Pi installation or household network change occurred.
