@@ -395,6 +395,41 @@ def test_a_call_that_hangs_is_stopped_at_its_deadline(fakes, hang, words):
 
 
 @pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("outcome", ["delayed-timeout", "failed-termination", "completed"])
+def test_deadline_decision_survives_parent_cleanup(tmp_path, shell, outcome):
+    function = SCRIPT.read_text().split("with_deadline() {", 1)[1].split(
+        "\n# Show a command and run it with a deadline", 1,
+    )[0]
+    wrapper = r'''kill() {
+        if [ "$1" = "-TERM" ] && [ "$2" = "$child" ]; then
+            if [ "$outcome" = "failed-termination" ]; then return 1; fi
+            command kill "$@"
+            killed=$?
+            if [ "$killed" -eq 0 ]; then sleep 0.2; fi
+            return "$killed"
+        fi
+        command kill "$@"
+    }
+'''
+    command = "sleep 5" if outcome == "delayed-timeout" else "sleep 0.15"
+    if outcome == "completed":
+        command = "true"
+    script = (
+        "with_deadline() {" + function + wrapper
+        + '\nwith_deadline 0.05 sh -c "$deadline_command"\n'
+        + 'result=$?\nprintf "%s\\n" "$result"\n'
+    )
+    result = subprocess.run(
+        [shell], input=script, capture_output=True, text=True, timeout=10,
+        env={**os.environ, "work": str(tmp_path), "outcome": outcome,
+             "deadline_command": command},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ("124" if outcome == "delayed-timeout" else "0")
+    assert not (tmp_path / "deadline").exists()
+
+
+@pytest.mark.parametrize("shell", SHELLS)
 def test_ctrl_c_also_stops_a_running_call(fakes, tmp_path, shell):
     """Background calls ignore Ctrl-C: the script stops them itself."""
 

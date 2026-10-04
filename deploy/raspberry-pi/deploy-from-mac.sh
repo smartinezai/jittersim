@@ -141,7 +141,6 @@ run() {
 with_deadline() {
     limit=$1
     shift
-    rm -f "$work/deadline"
     "$@" &
     child=$!
     (
@@ -149,9 +148,12 @@ with_deadline() {
         sleep "$limit" &
         sleeper=$!
         wait "$sleeper"
+        # Finish the timeout decision before the caller can stop this watchdog.
+        trap '' TERM
         if kill -TERM "$child" 2>/dev/null; then
-            : > "$work/deadline"
+            exit 124
         fi
+        exit 0
     ) </dev/null >/dev/null 2>&1 &
     watchdog=$!
     # Background calls ignore Ctrl-C so it stops them here.
@@ -166,12 +168,12 @@ with_deadline() {
     result=$?
     kill -TERM "$watchdog" 2>/dev/null
     wait "$watchdog" 2>/dev/null
+    deadline_result=$?
     trap 'exit 1' HUP INT TERM
     if [ "$errexit" = yes ]; then
         set -e
     fi
-    if [ -e "$work/deadline" ]; then
-        rm -f "$work/deadline"
+    if [ "$deadline_result" -eq 124 ]; then
         return 124
     fi
     return "$result"
