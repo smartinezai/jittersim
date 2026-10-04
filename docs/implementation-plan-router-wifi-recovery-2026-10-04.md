@@ -145,3 +145,38 @@ The complete credential-state file and HTTP refusal cases then passed all
 whitespace checks passed. The broader suite was not repeated after these
 test-only changes. This is not a green release pipeline. The exact-source
 review and admission gate remains unresolved. No push or deployment occurred.
+
+
+## Independent review correction on 2026-10-05
+
+The first independent source review rejected admission because the new audit
+writer performed unbounded storage I/O during helper startup and while holding
+the router lock. A storage stall or nonregular log file could prevent recovery
+rather than merely lose diagnostic evidence. Exception handling did not cover
+blocked I/O. The emergency scope now excludes that audit writer entirely.
+Existing logging behavior remains unchanged. A separately reviewed bounded
+logging design is deferred. The helper dispatch body is restored byte-for-byte
+to the installed base. Default router-write refusal, trusted startup opt-in and
+the read-only dashboard remain. All earlier results describe their recorded
+revisions and do not establish approval of this revised source.
+
+
+## Revised source admission and validation
+
+Independent complete-source review approved helper hash e940fc8f after audit
+removal. Panic and access source bytes still equal the previously admitted
+base. The exact tuple is recorded in the 2026-10-05 review receipt and admitted
+without removing any source checks or earlier accepted tuples.
+
+283 related tests pass on macOS Python 3.12 and Linux Python 3.13. All 117
+installer and recovery checks pass on macOS. Linux passed 114 of that group
+initially. Three installer cases stopped at the existing free-space check
+because the test container had only a 128 MiB temporary disk. All 12 source-gate
+checks pass with a 2 GiB temporary disk. No production free-space requirement
+was changed. Error lint, JavaScript syntax and whitespace checks pass.
+
+A clean isolated wheel build matches the changed source bytes and excludes
+the deleted audit module. An earlier warm build retained a stale audit file
+and is excluded from release use. The accepted clean wheel hash is recorded
+in the verification JSON. Complete release checks on revised source and live
+Pi acceptance remain pending. Nothing was pushed or deployed.

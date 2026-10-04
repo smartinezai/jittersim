@@ -6,14 +6,8 @@
   "javascript_syntax": "passed",
   "isolated_wheel_build": "passed",
   "wheel_changed_files_match": true,
-  "source_sha256": {
-    "src/jittersim/networking/helper.py": "a4007a5e80482a4ce3f33b658518f3ded7760269270355f5d90127ad0ac0912c",
-    "src/jittersim/router_audit.py": "deb99d7ac11baf62a59a53f26ec8019af914a3ab167e5b6b27979a0389b34e59",
-    "src/jittersim/api/dashboard.js": "016f29353b6b0772fa663225d2505c2a83275f55149a86ff8e49c70f81c87f53",
-    "src/jittersim/api/dashboard.html": "66930a93e6de9e2c308e7e4f03e65be5c60041de2d19114c8e8678161e0e8b80"
-  },
-  "guarded_update_tests_failed": 11,
-  "guarded_update_failure": "Exact helper source is not yet admitted by the Panic protection gate",
+  "guarded_update_tests_failed": 0,
+  "guarded_update_failure": "Resolved after independent revised-source approval and exact admission",
   "linux_validation": {
     "python": "3.13",
     "focused_tests_passed": 204,
@@ -30,22 +24,8 @@
   "deployed": false,
   "pushed": false,
   "original_outage_cause_confirmed": false,
-  "review_status": "Internal change review complete. Independent complete helper review and exact Panic-source admission pending.",
+  "review_status": "Revised exact helper tuple independently approved after synchronous audit removal",
   "additional_recovery_tests_passed": 105,
-  "source_comparison": {
-    "unchanged_functions": 116,
-    "panic_and_normal_access_function_bodies_unchanged": true,
-    "changed_functions": [
-      "HelperService.__init__",
-      "HelperService.handle_payload",
-      "HelperService._handle_router_wifi",
-      "run_helper",
-      "_build_parser",
-      "main"
-    ],
-    "new_function": "HelperService._record_router",
-    "comparison": "AST comparison against installed revision, not independent source approval"
-  },
   "http_integration_validation": {
     "macos_python_3_12_passed": 25,
     "linux_python_3_13_passed": 25,
@@ -73,5 +53,56 @@
     "linux_python_3_13_passed": 62,
     "remaining_known_failures": "11 exact-source admission checks",
     "full_suite_rerun_after_test_only_changes": false
+  },
+  "historical_source_sha256": {
+    "src/jittersim/networking/helper.py": "a4007a5e80482a4ce3f33b658518f3ded7760269270355f5d90127ad0ac0912c",
+    "src/jittersim/router_audit.py": "deb99d7ac11baf62a59a53f26ec8019af914a3ab167e5b6b27979a0389b34e59",
+    "src/jittersim/api/dashboard.js": "016f29353b6b0772fa663225d2505c2a83275f55149a86ff8e49c70f81c87f53",
+    "src/jittersim/api/dashboard.html": "66930a93e6de9e2c308e7e4f03e65be5c60041de2d19114c8e8678161e0e8b80"
+  },
+  "source_sha256": {
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "e940fc8f8da5149cf18fd25f230c1702110f1c3445362be9209a4d8f382e0499",
+    "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
+    "src/jittersim/api/dashboard.js": "016f29353b6b0772fa663225d2505c2a83275f55149a86ff8e49c70f81c87f53",
+    "src/jittersim/api/dashboard.html": "66930a93e6de9e2c308e7e4f03e65be5c60041de2d19114c8e8678161e0e8b80"
+  },
+  "audit_logging": "Removed from emergency patch because blocked storage could stall recovery",
+  "revised_focused_macos_python_3_12_passed": 283,
+  "previous_validation_scope": "Earlier counts and build hashes describe their recorded source before audit removal",
+  "historical_source_comparison": {
+    "unchanged_functions": 116,
+    "panic_and_normal_access_function_bodies_unchanged": true,
+    "changed_functions": [
+      "HelperService.__init__",
+      "HelperService.handle_payload",
+      "HelperService._handle_router_wifi",
+      "run_helper",
+      "_build_parser",
+      "main"
+    ],
+    "new_function": "HelperService._record_router",
+    "comparison": "AST comparison against installed revision, not independent source approval"
+  },
+  "revised_validation": {
+    "focused_macos_python_3_12_passed": 283,
+    "focused_linux_python_3_13_passed": 283,
+    "installer_and_recovery_macos_passed": 117,
+    "installer_and_recovery_linux_initial": {
+      "passed": 114,
+      "failed": 3,
+      "reason": "128 MiB temporary disk below installer recovery-space requirement"
+    },
+    "linux_source_gate_retry_passed": 12,
+    "linux_source_gate_retry_tmpfs": "2 GiB",
+    "independent_source_approval": true,
+    "exact_source_tuple_admitted": true,
+    "remaining_known_source_gate_failures": 0,
+    "clean_wheel_sha256": "edca2bc7f3046c0ded51c64e123701fb44ec91a1945293d788f93675a9dbb07d",
+    "clean_wheel_matches_source": true,
+    "removed_audit_module_absent": true,
+    "lint_and_javascript_syntax": "passed",
+    "complete_release_pipeline": "not repeated on revised source",
+    "live_pi_acceptance": "pending"
   }
 }
