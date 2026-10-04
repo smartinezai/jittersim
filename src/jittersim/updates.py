@@ -349,11 +349,11 @@ def _certificate_section(text, title):
     return match.group(0) if match else ""
 
 
-def _certificate_names(text):
+def _certificate_names(text, *, allow_legacy_repeated_names=False):
     section = _certificate_section(text, "Subject Alternative Name")
     names = tuple(re.findall(r"DNS:([^,\s]+)", section))
     label = r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
-    if (len(names) > 32 or len(set(names)) != len(names) or
+    if (len(names) > 32 or (not allow_legacy_repeated_names and len(set(names)) != len(names)) or
             any(len(name) > 253 or not re.fullmatch(label + r"(?:\." + label + r")*", name)
                 for name in names)):
         raise UpdateError("dashboard certificate names are invalid")
@@ -367,7 +367,7 @@ def _certificate_names(text):
         raise UpdateError("dashboard certificate addresses are invalid") from error
     if not names and not addresses:
         raise UpdateError("the dashboard certificate has no usable names or addresses")
-    return names
+    return tuple(dict.fromkeys(names))
 
 
 def _certificate_settings(content):
@@ -471,7 +471,7 @@ def verify_certificate_identity(files, *, authority_only=False, deadline=None, b
                 if name not in files:
                     continue
                 cert_text = text(name)
-                names = _certificate_names(cert_text)
+                names = _certificate_names(cert_text, allow_legacy_repeated_names=not ca_present)
                 if public(name, True) != key:
                     raise UpdateError("the dashboard certificate does not match the retained key")
                 _certificate_command(["verify", *anchor, "-purpose", "sslserver",
