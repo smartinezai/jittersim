@@ -199,5 +199,28 @@
     "incident_device_bypass_matches": "not independently verified",
     "interpretation": "post-reset isolation observations cannot rule out an incident address or DHCP conflict",
     "later_router_only_failure": "user reports router Wi-Fi association still failed with Pi unplugged until router restart"
+  },
+  "legacy_form_guard": {
+    "local_parent_commit": "0f7503b97caf9343d13d67b50bd3ecf78c37fbfa",
+    "frozen_candidate_router_and_test_sources_match_parent": true,
+    "risk": "older-firmware write fallback resubmitted all captured form controls",
+    "incident_use_of_legacy_path": "not established",
+    "fix": "refuse unknown legacy form controls before mutating the form or sending a write",
+    "compatibility": "unknown older forms require manual router settings, legacy reads remain supported",
+    "regression_before_fix": "legacy unknown-control test failed, modern exclusion test passed",
+    "validation": {
+      "router_and_router_operations": "62 passed",
+      "helper_deadlines_and_dashboard_copy": "131 passed",
+      "configured_lint": "passed",
+      "python_3_9_syntax": "passed, not full runtime coverage",
+      "whitespace_check": "passed"
+    },
+    "source_sha256": {
+      "src/jittersim/networking/router.py": "2fa9ea14fc49c861e40b64fc4df30c891dc392832a6f3d8a6ee4f9d9652aef5a",
+      "tests/unit/test_router.py": "206d000d0ee1d042d2d42025e11c8091302d6062386e05405f58c60423d1a638"
+    },
+    "live_router_contact": false,
+    "live_settings_changed": false,
+    "publication_and_installation": "follow-up requires release owner integration and exact-source checks"
   }
 }

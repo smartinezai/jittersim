@@ -698,6 +698,7 @@ class RouterProtocolTests(unittest.TestCase):
         self.firmware.legacy_html = (
             '<form><input name="wifi_ssid24" value="Legacy-Test">'
             '<input name="wifi_password24" value="legacy-test-password">'
+            '<input name="KickAssocDevices" value="true">'
             '<input name="wifi_on_state" value="0"></form>'
         )
         settings = self.router.read_wifi_settings()
@@ -750,6 +751,27 @@ class RouterProtocolTests(unittest.TestCase):
             for name in ("Passphrase", "Passphrase5G", "PassphraseGuest"):
                 self.assertEqual(self.firmware.settings[name], before[name])
         self.assertEqual(len(self.firmware.writes), 2)
+
+    def test_unrelated_router_actions_are_not_forwarded_in_encrypted_wifi_writes(self):
+        unrelated = {
+            "Device.WiFi.AccessPoint.2.X_CISCO_COM_KickAssocDevices": True,
+            "KickAssocDevices": True,
+            "FactoryReset": True,
+        }
+        self.router.login()
+        self.firmware.settings.update(unrelated)
+        before = dict(self.firmware.settings)
+
+        self.assertFalse(self.router.set_wifi_enabled(enabled=False).enabled)
+
+        self.assertEqual(len(self.firmware.writes), 1)
+        self.assertTrue(set(unrelated).isdisjoint(self.firmware.writes[0]))
+        self.assertEqual(
+            {name: value for name, value in self.firmware.settings.items()
+             if name != "EnableWiFiFunction"},
+            {name: value for name, value in before.items()
+             if name != "EnableWiFiFunction"},
+        )
 
     def test_split_ssid_preserves_an_intentionally_disabled_band_on_off_and_on(self):
         self.router.login()
@@ -899,6 +921,7 @@ class RouterFormTests(unittest.TestCase):
             controls={
                 "wifi_ssid24": "Vodafone-Test",
                 "wifi_password24": "secret",
+                "wifi_security24": "WPA2-Personal",
                 "wifi_on_state": "1",
                 "main_wifi24_state": "1",
                 "main_wifi5_state": "1",
@@ -930,6 +953,7 @@ class RouterFormTests(unittest.TestCase):
         self.assertFalse(settings.enabled)
         self.assertEqual(requests[0][0], "post")
         self.assertEqual(requests[0][1], "http://192.168.0.1/php/save_wifi.php")
+        self.assertEqual(requests[0][2]["data"]["wifi_security24"], "WPA2-Personal")
         self.assertEqual(
             {
                 name: requests[0][2]["data"][name]
@@ -941,6 +965,37 @@ class RouterFormTests(unittest.TestCase):
                 "main_wifi5_state": "0",
             },
         )
+
+
+    def test_unknown_legacy_controls_are_refused_before_any_write(self) -> None:
+        for name, value in (
+            ("Device.WiFi.AccessPoint.2.X_CISCO_COM_KickAssocDevices", "true"),
+            ("KickAssocDevices", "true"),
+            ("FactoryReset", "1"),
+            ("channel", "auto"),
+        ):
+            with self.subTest(control=name):
+                controls = {
+                    "wifi_ssid24": "Vodafone-Test",
+                    "wifi_password24": "test-password",
+                    "wifi_on_state": "1",
+                    name: value,
+                }
+                form = _Form(action="/php/save_wifi.php", method="post", controls=dict(controls))
+                router = object.__new__(TG3442DERouter)
+                router.base_url = "http://192.168.0.1"
+                router._wifi_form = lambda: (form, "")
+                router._read_wifi_data = lambda: (_ for _ in ()).throw(
+                    _EndpointUnavailable("older firmware")
+                )
+
+                with patch.object(router, "_request") as request:
+                    with self.assertRaises(RouterError) as caught:
+                        router.set_wifi_enabled(enabled=False)
+
+                self.assertEqual(caught.exception.reason, "unsupported")
+                request.assert_not_called()
+                self.assertEqual(form.controls, controls)
 
 
 class RouterPasswordCheckMessageTests(unittest.TestCase):

@@ -222,7 +222,7 @@ establish that the user entered an incorrect Wi-Fi password.
 
 The [RDK Wi-Fi component documentation](https://wiki.rdkcentral.com/spaces/RDK/pages/21365686/CcspWifiAgent)
 lists KickAssocDevices as a router Wi-Fi parameter. It does not identify what
-CLIENTTOOL represents in this specific firmware. The inspected JitterSim writer
+CLIENTTOOL represents in this specific firmware. The inspected encrypted JitterSim writer
 does not directly submit this parameter. Firmware could still trigger internal
 actions after another setting changes. Neither JitterSim involvement nor its
 absence can be established from this entry alone.
@@ -240,3 +240,30 @@ with 5,274 passed and 40 skipped in 486.19 seconds. Router copy passed at deskto
 fonts plus 1280px and 1920px desktop checks. Configured lint and whitespace
 checks passed. Exact source receipts are kept separately from the original
 repair's results. Live installation remains with the release owner.
+
+## Additional older-form safety check
+
+The owner's additional permission on 2026-10-04 prompted a focused check of
+the older-firmware fallback. It previously resubmitted every captured form
+field while changing radio controls. A form containing an unrelated hidden
+action could therefore forward it. This is a demonstrated code risk.
+It does not prove this router exposed such a form or used that path.
+
+The local guard now refuses a write if a legacy form contains any field outside
+the radio controls and Wi-Fi name, password and security fields understood by
+the client. The check happens before changing the form or submitting it.
+Unknown forms require the router's own settings page. Read-only legacy imports
+remain supported. The encrypted protocol already restricts posted fields.
+
+A new regression failed before the guard. With the guard, 193 router, operation,
+helper and dashboard-copy checks pass. The cases cover the exported disconnect
+parameter, another disconnect name, a reset field and an ordinary unknown field.
+They also verify that unrelated actions are omitted from encrypted writes and
+that read-only legacy imports still work. Configured lint, Python 3.9 syntax
+and whitespace checks pass. The Python 3.9 check is a syntax check rather than
+a full runtime test. Tests used local fixtures and never contacted Vodafone.
+
+This follow-up is local and separate from the frozen release candidate.
+Its accepted release still needs checks against the newly composed source.
+No live router or Pi settings were changed. It does not identify CLIENTTOOL.
+

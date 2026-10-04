@@ -243,6 +243,10 @@ class TG3442DERouter:
         "main_wifi5_state",
         "main_wifi6_state",
     )
+    _LEGACY_WIFI_FIELDS = frozenset(
+        _STATE_NAMES + _SSID_NAMES + _PASSWORD_NAMES
+        + ("wifi_security24", "wifi_security5", "wifi_security6")
+    )
 
     def __init__(
         self,
@@ -561,6 +565,8 @@ class TG3442DERouter:
 
     def _set_legacy_wifi_enabled(self, *, enabled: bool) -> RouterWifiSettings:
         form, _ = self._wifi_form()
+        if not form.controls.keys() <= self._LEGACY_WIFI_FIELDS:
+            raise RouterError("router Wi-Fi form has unverified controls", reason="unsupported")
         state = "1" if enabled else "0"
         present = [name for name in self._STATE_NAMES if name in form.controls]
         if not present or any(_radio_state(form.controls[name]) is None for name in present):
