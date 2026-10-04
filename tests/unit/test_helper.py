@@ -429,6 +429,7 @@ class HelperServiceTests(unittest.TestCase):
                 topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
             ),
             router_factory=router_factory,
+            allow_router_wifi_changes=True,
         )
 
         response = service.handle_payload(
@@ -461,6 +462,7 @@ class HelperServiceTests(unittest.TestCase):
                 topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
             ),
             router_factory=router_factory,
+            allow_router_wifi_changes=True,
         )
         with self.assertLogs("jittersim.networking.helper", level="WARNING") as logs:
             response = service.handle_payload(

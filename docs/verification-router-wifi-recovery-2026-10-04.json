@@ -1,0 +1,34 @@
+{
+  "base": "081b2ab042e3084e66e40104a9f92d65e60b5caf",
+  "focused_tests_passed": 204,
+  "focused_python": "3.12",
+  "ci_lint": "passed",
+  "javascript_syntax": "passed",
+  "isolated_wheel_build": "passed",
+  "wheel_changed_files_match": true,
+  "source_sha256": {
+    "src/jittersim/networking/helper.py": "a4007a5e80482a4ce3f33b658518f3ded7760269270355f5d90127ad0ac0912c",
+    "src/jittersim/router_audit.py": "deb99d7ac11baf62a59a53f26ec8019af914a3ab167e5b6b27979a0389b34e59",
+    "src/jittersim/api/dashboard.js": "016f29353b6b0772fa663225d2505c2a83275f55149a86ff8e49c70f81c87f53",
+    "src/jittersim/api/dashboard.html": "66930a93e6de9e2c308e7e4f03e65be5c60041de2d19114c8e8678161e0e8b80"
+  },
+  "guarded_update_tests_failed": 11,
+  "guarded_update_failure": "Exact helper source is not yet admitted by the Panic protection gate",
+  "linux_validation": {
+    "python": "3.13",
+    "focused_tests_passed": 204,
+    "network": "disabled",
+    "source_mount": "read-only"
+  },
+  "browser_validation": {
+    "desktop": true,
+    "phone_width": 375,
+    "readonly_switch": true,
+    "credential_import_preserved": true
+  },
+  "full_release_checks": "pending",
+  "deployed": false,
+  "pushed": false,
+  "original_outage_cause_confirmed": false,
+  "review_status": "Internal change review complete. Independent complete helper review and exact Panic-source admission pending."
+}

@@ -232,6 +232,9 @@ def run_width(browser, base, width, height):
 
     enter_router_password(page)
     expect(button).to_be_enabled()
+    expect(page.locator("#router-wifi-toggle")).to_be_disabled()
+    expect(page.locator("#router-wifi-label")).to_contain_text("read only")
+    assert api_calls(requests, "/api/router/wifi") == []
     expect(page.locator("#router-action-message")).to_have_text("")
     sidebar_control(page, "#sync-router-ap")
     control = page.locator(".router-wifi-control").bounding_box()

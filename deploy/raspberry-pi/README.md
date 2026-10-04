@@ -1272,3 +1272,26 @@ expiry remains the fallback if a process dies during an update.
 Before live deployment verify Ethernet or independent management Wi-Fi.
 Physical Wi-Fi isolation, device reconnection, Pi memory and throughput
 still require acceptance on the actual hardware.
+
+
+### Router Wi-Fi recovery safety
+
+The dashboard shows router Wi-Fi status but its switch is disabled. The helper
+refuses router Wi-Fi changes by default before contacting the router. Use the
+router's own controls. Read-only checks and copying its credentials to the Pi
+remain available. Copying credentials changes the Pi access point and must
+still be tested through management access before turning router Wi-Fi off.
+
+For a separately reviewed setup, the root-owned helper service command can
+explicitly include --allow-router-wifi-changes. This is never enabled by the
+installer or a dashboard request. The dashboard switch stays read only.
+
+The helper writes fixed router-operation records under
+/var/log/jittersim-router/operations.jsonl with one rotated backup. Each file
+is limited to 64 KiB. Files are private to root and remain after rollback.
+Records include action, requested on/off state where applicable, operation
+number, process and boot identity, time, duration and result category. They
+exclude passwords, tokens, request bodies and response text. Diagnostic
+storage failure does not prevent refusal, Reset or Panic. These records
+identify JitterSim requests, not changes made by other router users or the
+router itself. Do not claim previous outage causation from this repair.
