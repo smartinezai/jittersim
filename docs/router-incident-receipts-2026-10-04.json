@@ -122,5 +122,71 @@
     "settings_changed": false,
     "diagnostic_tests_run": false,
     "session_logged_out": true
+  },
+  "supplied_eventlog_export": {
+    "source": "user-supplied eventlogs.txt, original retained locally",
+    "sha256": "af1093b0bff6c2bf4e05d2082d37bca6a7a150794567387450647d1848ff0d8d",
+    "bytes": 20433,
+    "entries": 97,
+    "category": "WiFi only",
+    "level": "info only",
+    "date_counts": {
+      "2026-10-04": 88,
+      "2022-04-28": 9
+    },
+    "valid_date_time_range": [
+      "2026-10-04 01:14:24",
+      "2026-10-04 01:33:20"
+    ],
+    "file_order_is_chronological": false,
+    "reason_counts_match_displayed_table": true,
+    "shared_disconnect_sequence": {
+      "previous_auth_invalid": {
+        "time": "01:15:14",
+        "distinct_clients": 4,
+        "lines": [
+          27,
+          29,
+          30,
+          31
+        ],
+        "bands": "both"
+      },
+      "disconnections": {
+        "time": "01:15:18",
+        "distinct_clients": 4,
+        "lines": [
+          35,
+          36,
+          37,
+          38
+        ],
+        "bands": "both"
+      },
+      "successful_reconnections": {
+        "time_range": [
+          "01:15:18",
+          "01:16:19"
+        ],
+        "lines": [
+          44,
+          62
+        ]
+      }
+    },
+    "phone_or_wan_or_crash_events_present": false,
+    "causal_conclusion": "unproven, apparent post-recovery Wi-Fi disruption",
+    "raw_client_identifiers_committed": false,
+    "user_account_of_01_14_58": {
+      "vodafone_dashboard_used": false,
+      "confidence_about_vodafone_dashboard": "certain",
+      "possible_jittersim_actions": [
+        "apply profile",
+        "reset",
+        "reapply general profile"
+      ],
+      "jittersim_action_order": "uncertain",
+      "CLIENTTOOL_identity": "unknown"
+    }
   }
 }

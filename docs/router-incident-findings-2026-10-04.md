@@ -167,6 +167,51 @@ The uptime implies a recovery reboot around 01:12. The valid-date displayed
 events appear later. No pre-recovery failure log was available on this page.
 The router log therefore does not establish why its PHONE light became red.
 
+## Supplied event-log export
+
+The supplied eventlogs.txt contains 97 entries in 20,433 bytes. Its SHA-256 is
+af1093b0bff6c2bf4e05d2082d37bca6a7a150794567387450647d1848ff0d8d.
+All entries are marked information and Wi-Fi. There are 88 entries dated
+4 October 2026 and nine dated 28 April 2022. File order is not chronological.
+The 2026 entries cover 01:14:24 through 01:33:20. These counts and reason totals
+match the earlier displayed router table. The original export remains local.
+Device identifiers and the Wi-Fi name are omitted from committed evidence.
+
+The user is certain that they were not using the Vodafone dashboard around
+the recorded setting change. They may have been applying a profile, resetting
+JitterSim or reapplying the general profile. The exact JitterSim actions and
+their order are uncertain. This excludes a user change through the Vodafone
+dashboard at that time. It does not identify CLIENTTOOL or exclude an internal
+firmware action, another control path or an indirect effect of Pi traffic.
+
+The export makes the simultaneous disconnect sequence easier to verify:
+
+| Router time | Export lines | Recorded event |
+| --- | --- | --- |
+| 01:14:58 | 22 | CLIENTTOOL sets KickAssocDevices to true |
+| 01:15:14 | 27, 29, 30, 31 | Four distinct clients report previous authentication invalid across both Wi-Fi bands |
+| 01:15:18 | 35 through 38 | Those four clients are disconnected |
+| 01:15:18 through 01:16:19 | 44 through 62 | Clients successfully connect again |
+
+This supports a brief shared disruption of router Wi-Fi after recovery. It does
+not identify the requester of the setting change or prove that the earlier
+household outage had the same cause. The exported records contain no phone,
+cable registration, upstream internet failure, memory exhaustion or crash event.
+Their absence from this Wi-Fi export does not establish that such events did
+not occur elsewhere.
+
+The [wireless reason-code definitions](https://w1.fi/wpa_supplicant/devel/ieee802__11__defs_8h_source.html)
+identify code 2 as previous authentication no longer valid. It is distinct from
+the handshake-timeout and key-update-timeout codes. These entries alone cannot
+establish that the user entered an incorrect Wi-Fi password.
+
+The [RDK Wi-Fi component documentation](https://wiki.rdkcentral.com/spaces/RDK/pages/21365686/CcspWifiAgent)
+lists KickAssocDevices as a router Wi-Fi parameter. It does not identify what
+CLIENTTOOL represents in this specific firmware. The inspected JitterSim writer
+does not directly submit this parameter. Firmware could still trigger internal
+actions after another setting changes. Neither JitterSim involvement nor its
+absence can be established from this entry alone.
+
 ## Current release adaptation
 
 The containment change was adapted onto d43f2d1e3f5987dde78d83416c55d3607cc85716
