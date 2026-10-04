@@ -4,6 +4,112 @@
     let pendingFormSubmitButton = null;
     let messageSerial = 0;
 
+    function setupSidebarActionHelp() {
+      const tooltip = document.createElement("div");
+      tooltip.id = "sidebar-action-help";
+      tooltip.className = "sidebar-action-help";
+      tooltip.setAttribute("role", "tooltip");
+      tooltip.hidden = true;
+      document.body.appendChild(tooltip);
+      let active = null;
+      let hideTimer = null;
+
+      function cancelHide() {
+        clearTimeout(hideTimer);
+        hideTimer = null;
+      }
+
+      function hide() {
+        cancelHide();
+        if (active) active.removeAttribute("aria-describedby");
+        active = null;
+        tooltip.hidden = true;
+        window.removeEventListener("scroll", dismissOnScroll, true);
+        window.removeEventListener("resize", hide);
+        if (window.visualViewport) {
+          window.visualViewport.removeEventListener("resize", hide);
+          window.visualViewport.removeEventListener("scroll", dismissOnScroll);
+        }
+      }
+
+      function dismissOnScroll(event) {
+        if (event.target === tooltip) return;
+        if (active && active.matches(":hover, :focus")) position();
+        else hide();
+      }
+
+      function scheduleHide() {
+        cancelHide();
+        hideTimer = setTimeout(() => {
+          if (active && (active.matches(":hover, :focus") || tooltip.matches(":hover"))) return;
+          hide();
+        }, 150);
+      }
+
+      function position() {
+        const anchor = active.getBoundingClientRect();
+        const viewport = window.visualViewport;
+        const leftEdge = viewport ? viewport.offsetLeft : 0;
+        const topEdge = viewport ? viewport.offsetTop : 0;
+        const width = viewport ? viewport.width : window.innerWidth;
+        const height = viewport ? viewport.height : window.innerHeight;
+        const margin = Math.min(16, width / 4, height / 4);
+        const gap = 8;
+        if (anchor.bottom <= topEdge || anchor.top >= topEdge + height) {
+          hide();
+          return;
+        }
+        tooltip.style.width = Math.min(352, width - margin * 2) + "px";
+        tooltip.style.maxHeight = (height - margin * 2) + "px";
+        tooltip.hidden = false;
+        const box = tooltip.getBoundingClientRect();
+        const rightEdge = leftEdge + width - margin;
+        const bottomEdge = topEdge + height - margin;
+        let left = anchor.right + gap;
+        let top = anchor.top;
+        if (left + box.width > rightEdge) {
+          left = anchor.right - box.width;
+          top = anchor.bottom + gap;
+          if (top + box.height > bottomEdge) top = anchor.top - gap - box.height;
+        }
+        tooltip.style.left = Math.max(leftEdge + margin, Math.min(left, rightEdge - box.width)) + "px";
+        tooltip.style.top = Math.max(topEdge + margin, Math.min(top, bottomEdge - box.height)) + "px";
+      }
+
+      function show(trigger) {
+        hide();
+        active = trigger;
+        tooltip.textContent = trigger.dataset.help;
+        tooltip.hidden = false;
+        position();
+        if (!active) return;
+        trigger.setAttribute("aria-describedby", tooltip.id);
+        window.addEventListener("scroll", dismissOnScroll, true);
+        window.addEventListener("resize", hide);
+        if (window.visualViewport) {
+          window.visualViewport.addEventListener("resize", hide);
+          window.visualViewport.addEventListener("scroll", dismissOnScroll);
+        }
+      }
+
+      document.querySelectorAll(".sidebar-action-row .help-icon").forEach((trigger) => {
+        trigger.addEventListener("mouseenter", () => show(trigger));
+        trigger.addEventListener("mouseleave", scheduleHide);
+        trigger.addEventListener("focus", () => show(trigger));
+        trigger.addEventListener("blur", scheduleHide);
+      });
+      tooltip.addEventListener("mouseenter", cancelHide);
+      tooltip.addEventListener("mouseleave", scheduleHide);
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") hide();
+      });
+      document.addEventListener("pointerdown", (event) => {
+        if (active && !active.contains(event.target) && !tooltip.contains(event.target)) hide();
+      });
+    }
+
+    setupSidebarActionHelp();
+
     function optionalNumber(id) {
       const value = element(id).value.trim();
       return value === "" ? null : Number(value);

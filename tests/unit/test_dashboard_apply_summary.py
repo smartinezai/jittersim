@@ -765,16 +765,8 @@ def test_the_apply_and_reset_buttons_each_have_a_help_icon():
     assert re.search(r'id="reset-button"[^>]*>[^<]*</button>\s*<span class="help-icon"', dock)
 
 
-def test_the_sidebar_tips_stay_in_the_window_and_the_apply_button_keeps_its_height():
+def test_the_apply_button_keeps_its_height():
     css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
-    # The sidebar scrolls so a tip placed inside it is cut off on a short window. The tip
-    # is fixed to the window next to the sidebar instead.
-    tip = re.search(
-        r"\.sidebar \.sidebar-action-row \.help-icon::after \{([^{}]*)\}", css
-    ).group(1)
-    assert "position: fixed" in tip
-    assert "bottom: 1rem" in tip
-    assert "left: 16rem" in tip
     # One line and two lines of the label need the same room so the footer does not jump.
     assert re.search(r"#apply-button \{[^{}]*min-height: calc\(2lh \+ 1\.24rem \+ 2px\)", css)
 

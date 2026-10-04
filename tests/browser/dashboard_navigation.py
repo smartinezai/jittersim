@@ -10,6 +10,7 @@ from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.draft_navigation import check_draft_navigation
 from tests.browser.diagnostics_keyboard import check_diagnostics_keyboard
+from tests.browser.phone import close_controls, open_controls
 
 PAGES = ("devices", "profiles", "schedules", "router", "traffic", "access", "diagnostics")
 
@@ -127,6 +128,62 @@ def check_narrow(page):
         expect(page.locator("#page-devices")).to_be_in_viewport()
 
 
+def check_action_help(page):
+    open_controls(page)
+    tip = page.locator("#sidebar-action-help")
+    for name in ("Reset network help", "Start help"):
+        trigger = page.get_by_role("img", name=name, exact=True)
+        trigger.hover()
+        action = "reset" if name.startswith("Reset") else "start"
+        page.screenshot(path=f"test-results/action-help-{action}-{page.viewport_size['width']}.png")
+        expect(tip).to_be_visible()
+        expect(trigger).to_have_attribute("aria-describedby", "sidebar-action-help")
+        assert tip.inner_text() == trigger.get_attribute("data-help")
+        assert trigger.evaluate("node => getComputedStyle(node, '::after').display") == "none"
+        anchor = trigger.bounding_box()
+        box = tip.bounding_box()
+        width = page.viewport_size["width"]
+        height = page.viewport_size["height"]
+        assert 0 <= box["x"] and box["x"] + box["width"] <= width
+        assert 0 <= box["y"] and box["y"] + box["height"] <= height
+        if width > 768:
+            assert 0 <= box["x"] - anchor["x"] - anchor["width"] <= 16
+            assert abs(box["y"] - anchor["y"]) <= box["height"]
+        else:
+            gap = min(abs(box["y"] - anchor["y"] - anchor["height"]),
+                      abs(anchor["y"] - box["y"] - box["height"]))
+            assert gap <= 16
+        tip.hover()
+        expect(tip).to_be_visible()
+        page.mouse.move(0, 0)
+        expect(tip).to_be_hidden()
+        trigger.focus()
+        expect(tip).to_be_visible()
+        page.keyboard.press("Escape")
+        expect(tip).to_be_hidden()
+        # Escape also closes the phone Controls sheet. Reopen it for the next check.
+        open_controls(page)
+        page.locator("#reset-button").focus()
+        trigger.focus()
+        expect(tip).to_be_visible()
+        page.locator("#reset-button").focus()
+        expect(tip).to_be_hidden()
+        trigger.hover()
+        expect(tip).to_be_visible()
+        page.set_viewport_size(page.viewport_size)
+        page.evaluate("window.dispatchEvent(new Event('resize'))")
+        expect(tip).to_be_hidden()
+        page.mouse.move(0, 0)
+        trigger.hover()
+        expect(tip).to_be_visible()
+        page.evaluate("window.dispatchEvent(new Event('scroll'))")
+        expect(tip).to_be_visible()
+        page.mouse.move(0, 0)
+        expect(tip).to_be_hidden()
+    assert page.evaluate("document.documentElement.scrollWidth") <= page.viewport_size["width"]
+    close_controls(page)
+
+
 def run():
     process = subprocess.Popen(
         [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True,
@@ -152,6 +209,7 @@ def run():
                     page.goto(f"http://127.0.0.1:{port}")
                     expect(page.locator(".sidebar-nav")).to_be_hidden()
                     unlock(page)
+                    check_action_help(page)
                     check_sections(page)
                     check_nothing_floats(page)
                     check_collapsing(page)
@@ -163,7 +221,15 @@ def run():
                     page.screenshot(path=f"test-results/dashboard-devices-{width}.png")
                     if width == 1280:
                         check_narrow(page)
+                        check_action_help(page)
                         page.screenshot(path="test-results/dashboard-devices-390.png")
+                        page.set_viewport_size({"width": 900, "height": 360})
+                        check_action_help(page)
+                        reset_help = page.get_by_role("img", name="Reset network help", exact=True)
+                        reset_help.focus()
+                        expect(page.locator("#sidebar-action-help")).to_be_visible()
+                        page.locator(".sidebar").evaluate("node => { node.scrollTop = 0; }")
+                        expect(page.locator("#sidebar-action-help")).to_be_hidden()
                     assert not errors, errors
                     context.close()
                 print("Dashboard navigation browser acceptance passed.")

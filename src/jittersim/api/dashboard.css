@@ -634,10 +634,24 @@
     .analytics-table td { color: #d7e4f2; font-size: 0.84rem; }
     .analytics-table td:nth-child(n + 3) { text-align: right; font-variant-numeric: tabular-nums; }
     .analytics-domain { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
-    /* The sidebar scrolls so a tip placed inside it is cut off on a short window. Next to the
-       sidebar the tip is fixed to the window and always has room. */
-    @media (min-width: 701px) {
-      .sidebar .sidebar-action-row .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 16rem; right: auto; width: min(22rem, calc(100vw - 17rem)); }
+    .sidebar .sidebar-action-row .help-icon::after { display: none; }
+    .sidebar-action-help {
+      position: fixed;
+      z-index: 120;
+      width: min(22rem, calc(100vw - 2rem));
+      max-height: calc(100dvh - 2rem);
+      overflow-y: auto;
+      padding: 0.65rem 0.75rem;
+      border: 1px solid #547392;
+      border-radius: 0.45rem;
+      background: #08101c;
+      color: #dcecff;
+      font-size: 0.78rem;
+      font-weight: 400;
+      line-height: 1.4;
+      text-align: left;
+      overflow-wrap: anywhere;
+      box-shadow: 0 0.6rem 1.2rem rgba(0, 0, 0, 0.35);
     }
     /* A short window needs the room for the footer so that Panic and the router switch and the
        copy buttons stay in view. The sidebar lists nine pages and on a laptop or a full HD screen

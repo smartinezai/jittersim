@@ -39,3 +39,16 @@ No new data capture or external API is needed. Keep existing bounded requests,
 finite configuration and authentication. Do not alter unrelated containers,
 working trees or stored Pi settings. Each focused source commit is reversible.
 Physical phone, Safari and multiple-client acceptance need separate evidence.
+
+## Single final verification batch
+
+Maintenance d43 passed its full Python 3.13 suite but the independent local
+browser runner stopped sidebar_status at its 180-second limit. Its incomplete
+results remain evidence of a failed run. Earlier maintenance browser evidence
+is useful for diagnosis but does not complete this run.
+
+The coordinated candidate now contains the maintenance correction. Freeze it
+with the admitted features and urgent router containment then run every final
+configured check once at that exact source. Do not publish a separate maintenance
+candidate or repeat its full matrix before testing the same combined source.
+Investigate the timed-out module and preserve the original failed receipt.

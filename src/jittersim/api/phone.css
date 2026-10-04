@@ -171,10 +171,6 @@
   .toast button { pointer-events: auto; }
   /* Keep recovery messages available after using the controls they would cover. */
   .phone-controls-open .toast { visibility: hidden; }
-  .sidebar .sidebar-action-row .help-icon::after {
-    position: fixed; top: auto; right: auto; bottom: calc(var(--phone-bar-height) + 0.75rem); left: 1rem;
-    width: calc(100vw - 2rem);
-  }
 }
 
 @media (max-width: 700px) {

@@ -97,7 +97,7 @@ def test_floating_dock_and_sticky_bar_are_gone():
     # .field-tooltip is the help bubble that follows its button. On a phone the bar with Panic
     # and the router switch and the Controls sheet are pinned (see the next test).
     allowed = {".sidebar", ".toast", ".credentials-panel", ".help-icon::after",
-               ".sidebar .sidebar-action-row .help-icon::after", ".field-tooltip"} | PHONE_PINNED
+               ".sidebar-action-help", ".field-tooltip"} | PHONE_PINNED
     assert pinned <= allowed, pinned
 
 

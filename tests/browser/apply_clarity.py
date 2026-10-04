@@ -72,34 +72,23 @@ def assert_old_wording_is_gone(page):
 
 
 def tip_of(page, locator):
-    """Read the help text a help icon shows from its pseudo-element."""
+    """Read the shared explanation associated with this help icon."""
 
-    return locator.evaluate(
-        """(icon) => {
-            const style = getComputedStyle(icon, '::after');
-            return {
-                shown: style.display !== 'none' && style.visibility === 'visible'
-                    && Number(style.opacity) > 0,
-                text: style.content.replace(/^"|"$/g, ''),
-            };
-        }"""
-    )
+    tooltip = page.locator("#sidebar-action-help")
+    shown = locator.get_attribute("aria-describedby") == "sidebar-action-help"
+    return {"shown": shown and tooltip.is_visible(), "text": tooltip.text_content()}
 
 
 def tip_box(icon):
-    """Measure the help tip of an icon. The tip is a pseudo-element so its box comes from
-    the computed style that a fixed element resolves to pixels in the window."""
+    """Measure the rendered explanation rather than reconstructing a CSS box."""
 
     return icon.evaluate(
         """(icon) => {
-            const style = getComputedStyle(icon, '::after');
-            return {
-                shown: style.display !== 'none' && style.visibility === 'visible',
-                left: parseFloat(style.left),
-                top: parseFloat(style.top),
-                width: parseFloat(style.width),
-                height: parseFloat(style.height),
-            };
+            const tooltip = document.getElementById(icon.getAttribute('aria-describedby'));
+            if (!tooltip || tooltip.hidden) return {shown: false};
+            const box = tooltip.getBoundingClientRect();
+            return {shown: true, left: box.left, top: box.top,
+                    width: box.width, height: box.height};
         }"""
     )
 
@@ -111,10 +100,10 @@ def assert_tip_inside_window(page, icon, what):
     assert box["left"] >= 0 and box["top"] >= 0, (what, "starts outside the window", box, size)
     assert box["left"] + box["width"] <= size["width"] + 0.5, (what, "runs past the right", box)
     assert box["top"] + box["height"] <= size["height"] + 0.5, (what, "runs past the bottom", box)
-    sidebar = page.locator(".sidebar").bounding_box()
+    anchor = icon.bounding_box()
     if size["width"] > 768:
-        # next to the sidebar and not over its buttons
-        assert box["left"] >= sidebar["x"] + sidebar["width"], (what, box, sidebar)
+        # Stay beside the help icon without covering the action button.
+        assert box["left"] >= anchor["x"] + anchor["width"], (what, box, anchor)
     return box
 
 
@@ -551,6 +540,7 @@ def check_width(browser, width, height):
         page.wait_for_timeout(300)
         page.screenshot(path=f"test-results/apply-clarity-help-{width}.png")
         page.mouse.move(width // 2, 5)
+        expect(page.locator("#sidebar-action-help")).to_be_hidden()
         assert not tip_of(page, apply_icon)["shown"]
         page.locator("#reset-button").focus()
         page.keyboard.press("Tab")  # keyboard focus is what opens the tip
@@ -559,6 +549,7 @@ def check_width(browser, width, height):
         assert tip["shown"] and tip["text"].startswith(RESET_HELP), tip
         assert "Choose Start to run them again." in tip["text"], tip
         page.keyboard.press("Tab")
+        expect(page.locator("#sidebar-action-help")).to_be_hidden()
         assert not tip_of(page, reset_icon)["shown"]
 
         # Start
