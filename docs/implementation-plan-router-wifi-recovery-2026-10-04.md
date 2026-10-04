@@ -100,3 +100,16 @@ shutdown cause remains unconfirmed.
 
 The deferred learning concept is why privileged refusal must happen before
 router discovery or login. Revisit it after urgent recovery work.
+
+
+## Additional recovery verification
+
+105 existing recovery tests pass on Python 3.12, covering persistent Panic,
+helper intent, revision generation, worker saturation, scheduler races,
+restart latching, recovery ownership and request deadlines. A structural
+comparison against the installed revision confirms 116 helper functions
+are unchanged. The six changed functions are constructor, router dispatch,
+router-write handling, startup, parser and main. The only new helper method
+is the diagnostic record wrapper. Panic and normal-access bodies are
+unchanged. This is additional internal evidence, not independent approval
+of the complete source or completion of the release pipeline.

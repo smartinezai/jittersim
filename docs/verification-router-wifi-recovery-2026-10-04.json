@@ -30,5 +30,20 @@
   "deployed": false,
   "pushed": false,
   "original_outage_cause_confirmed": false,
-  "review_status": "Internal change review complete. Independent complete helper review and exact Panic-source admission pending."
+  "review_status": "Internal change review complete. Independent complete helper review and exact Panic-source admission pending.",
+  "additional_recovery_tests_passed": 105,
+  "source_comparison": {
+    "unchanged_functions": 116,
+    "panic_and_normal_access_function_bodies_unchanged": true,
+    "changed_functions": [
+      "HelperService.__init__",
+      "HelperService.handle_payload",
+      "HelperService._handle_router_wifi",
+      "run_helper",
+      "_build_parser",
+      "main"
+    ],
+    "new_function": "HelperService._record_router",
+    "comparison": "AST comparison against installed revision, not independent source approval"
+  }
 }
