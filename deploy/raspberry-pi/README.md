@@ -3,9 +3,11 @@
 This directory contains the versioned deployment pieces for the Pi appliance.
 
 Install the helper and dashboard from the same release. The sidebar's Router
-Wi-Fi switch needs the helper's read-only status action. It refreshes while
-the dashboard is visible and uses background operations for slow router
-changes. An older helper shows unavailable status. No router password is
+Wi-Fi switch needs the helper's read-only status action. Choose **Check router
+Wi-Fi** to request a fresh status. Opening the dashboard or remembering the
+password does not start automatic router checks. Slow router changes run in
+the background and the page reads their existing results. An older helper
+shows unavailable status. No router password is
 saved on the Pi by these checks.
 The installer keeps credentials out of the repository and generates them on
 the Pi the first time it runs.

@@ -1,0 +1,142 @@
+{
+  "source_commit": "6fb864f0874c7152048297d4ff87f7051001d21a",
+  "source_tree": "c4ade2abff9cd115cce47c9735bbd51b9dce4b83",
+  "application_tree": "ee20676f7e06e176a94abe6473153427cc40cb98",
+  "wheel_sha256": "41739cd18896f308b312675ae225a17fddafe5ebf525d009c6cbd8550ca78ecb",
+  "status": "All actual configured local Tests and Pi release checks completed. Hosted status and physical acceptance remain separate. Earlier failed runs remain failed.",
+  "complete_local_test_counterparts": true,
+  "hosted_ci_green": false,
+  "physical_acceptance": false,
+  "sequence_directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-frozen-release-sequence-74t681ap",
+  "records": {
+    "python313": {
+      "cases": 5501,
+      "passed": 5461,
+      "skipped": 40,
+      "xml_sha256": "4c44272cf954eb8dac4746567c62f99e031deabf2c55ea465ffd4086512185f6"
+    },
+    "configured_first_stage": {
+      "commands": 40,
+      "browser_modules": 31,
+      "node_scripts": 2,
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-remaining-ci313-final-z4triw37",
+      "returned_report_sha256": "81edc86abe7bc9542a2b8413fc13f98e09939710b137e7c0cbbf50cc17119023"
+    },
+    "gui_baseline": {
+      "states": 40,
+      "manifest_sha256": "445c5050f342cdba3668b89a59614fdafe81c146642244ca6242b5c19270db5c"
+    },
+    "a11y_axe": {
+      "states": 40,
+      "manifest_sha256": "a5fa5bb92821b4c2adbcb0ffb43666146f47e9a9abea1879e2bd81567c5943a3"
+    },
+    "accessibility_observations": {
+      "observation_only": true,
+      "states_with_violations": 18,
+      "violation_rule_instances": 22,
+      "severity": {
+        "moderate": 20,
+        "minor": 2
+      },
+      "rule_ids": {
+        "landmark-unique": 8,
+        "skip-link": 12,
+        "empty-table-header": 2
+      },
+      "states_with_incomplete_checks": 40,
+      "incomplete_rule_ids": {
+        "aria-allowed-role": 40,
+        "aria-prohibited-attr": 4,
+        "color-contrast": 20
+      }
+    },
+    "python39": {
+      "cases": 5501,
+      "passed": 5461,
+      "skipped": 40,
+      "xml_sha256": "ed43eed1c3361af3d4327ae68ba93476ad0d44459191dbd8527f8e1c103ede7e",
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-remaining-linux39-am1derc_"
+    },
+    "python311": {
+      "cases": 5501,
+      "passed": 5461,
+      "skipped": 40,
+      "xml_sha256": "fd47059829e7648dc9fab13afc89e0d3e25de9c1aff3e0f468b74bc616a19c51",
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-remaining-ci311-2xd62w2w"
+    },
+    "release_build": {
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-remaining-release-clean-build-6umdr7z_",
+      "report_sha256": "6499f2d83c417793a90fd31284b295e034c5af1e2d4fcd38df15d7bf4775872f",
+      "complete": true
+    },
+    "native_python": {
+      "cases": 5501,
+      "passed": 5391,
+      "skipped": 110,
+      "xml_sha256": "7645bd621a21684099946900112512e436225acce96e5c9c42938ba7bfc50d3f"
+    },
+    "native": {
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-remaining-release-commands-final-3y8wobpj",
+      "report_sha256": "f28fdca8320599e8ff74581aee2c4fc2cfa872008af9ec90ffc61fdbc84aa5af",
+      "complete": true
+    },
+    "kernel_build": {
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-remaining-kernel-clean-build-f15_qo_1",
+      "report_sha256": "226126829213c17a5fb2cdd3a5fdc2d1babdf649dae86cf7c2e42c7280372269",
+      "complete": true
+    },
+    "kernel": {
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-remaining-kernel-ao58resa",
+      "report_sha256": "04c3fdf3c6cd379067594c09c94c366154fa44921026b1b94c1aa518495ac1f6",
+      "complete": true
+    },
+    "ca": {
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-remaining-ca-permissions-2wdd73xj",
+      "report_sha256": "b1fa6bc620c500fcb6ae4d37b70e3133af05a7e5ca6b17ad097e4b7c32c3d688",
+      "complete": true
+    },
+    "locked3.9": {
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-composed-locked-3.9-x3r7h14o",
+      "report_sha256": "a1138210f2f837f2a57e5cb788c1c9be7643964f0d0dc94e9966210428ca85b9",
+      "prepared_wheels": {
+        "requests-2.32.5-py3-none-any.whl": "2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6",
+        "jittersim-0.2.0-py3-none-any.whl": "ed8a8d8dd44f672f2747fa4fd04556a4ce777285cbb7a5f6d266070d1ddd7e4c",
+        "pycryptodome-3.23.0-cp37-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl": "67bd81fcbe34f43ad9422ee8fd4843c8e7198dd88dd3d40e6de42ee65fbe1490",
+        "urllib3-2.6.3-py3-none-any.whl": "bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4",
+        "idna-3.20-py3-none-any.whl": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+        "charset_normalizer-3.5.1-cp39-cp39-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl": "3e5e1224c0a6a90e05843e07adfec669edebec17801c67072f51e59561d63c0b",
+        "certifi-2026.7.22-py3-none-any.whl": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+      },
+      "complete": true
+    },
+    "locked3.11": {
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-composed-locked-3.11-mypmaeme",
+      "report_sha256": "0322f139f1c480fd62a4d412cd3245f39cffa7e1ab3e610fd204318708338749",
+      "prepared_wheels": {
+        "jittersim-0.2.0-py3-none-any.whl": "5b308462f85db6c1673cf80780f48a18a624cc643b67859aa985fc4ec402d83e",
+        "charset_normalizer-3.5.1-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl": "aa2bb0b37202dca27175591f761108b5d34096ade1191ffe4808bdf6b1571488",
+        "pycryptodome-3.23.0-cp37-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl": "67bd81fcbe34f43ad9422ee8fd4843c8e7198dd88dd3d40e6de42ee65fbe1490",
+        "urllib3-2.8.0-py3-none-any.whl": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+        "idna-3.20-py3-none-any.whl": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+        "certifi-2026.7.22-py3-none-any.whl": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+        "requests-2.34.2-py3-none-any.whl": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"
+      },
+      "complete": true
+    },
+    "locked3.13": {
+      "directory": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-composed-locked-3.13-4mmndahj",
+      "report_sha256": "ff13e180ae5d0458b256367880e21e22343c02a96b6688f584ce52678ee87ee9",
+      "prepared_wheels": {
+        "jittersim-0.2.0-py3-none-any.whl": "a437fb9ed835214bfd5c8af8ecae7e804766a2d873ae12f51a76a603e1053c3f",
+        "pycryptodome-3.23.0-cp37-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl": "67bd81fcbe34f43ad9422ee8fd4843c8e7198dd88dd3d40e6de42ee65fbe1490",
+        "charset_normalizer-3.5.1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl": "94d78ecec2605a8d0398b0f365d5f12a63248438516f5dac536a5eff7337df4a",
+        "urllib3-2.8.0-py3-none-any.whl": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+        "idna-3.20-py3-none-any.whl": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+        "certifi-2026.7.22-py3-none-any.whl": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+        "requests-2.34.2-py3-none-any.whl": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"
+      },
+      "complete": true
+    }
+  },
+  "driver_manifest_sha256": "268dd239baeb15ad2fc7be24f36cda417f111f29f772194fafe61cf7fa79c5f5"
+}

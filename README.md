@@ -277,9 +277,10 @@ bytes.
 The left sidebar, visible on every page, includes one **Router Wi-Fi** switch.
 On a phone the switch sits in the bar at the bottom of the screen next to
 **Panic**. It shows the router's confirmed On or Off state and the last check time.
-Enter the router admin password to start automatic checks while the page is
-visible. A change shows **Changing** until the router confirms it. An
-unavailable status disables the switch instead of guessing. Keep the Pi
+Enter the router admin password then choose **Check router Wi-Fi** for a
+fresh status. Remembering the password or opening the page does not start
+automatic router checks. A change shows **Changing** until the router confirms
+it. An unavailable status disables the switch instead of guessing. Keep the Pi
 connected by Ethernet when changing router Wi-Fi.
 
 Under the switch **Copy router Wi-Fi to Pi** applies the router's Wi-Fi name,

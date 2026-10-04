@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Network Lab Redesign</title>
+<style>
+:root{
+  --bg:#0e141b; --panel:#161e28; --panel2:#1c2632; --line:#263341; --text:#e6edf3; --muted:#97a5b5;
+  --accent:#4aa3ff; --accent-ink:#04121f; --good:#3fb97a; --warn:#e3b341; --bad:#f0616d; --bad-bg:#2e171c;
+  --scrim:rgba(5,9,14,.62); --radius:12px; color-scheme:dark;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0e141b; --panel:#161e28; --panel2:#1c2632; --line:#263341; --text:#e6edf3; --muted:#97a5b5;
+    --accent:#4aa3ff; --accent-ink:#04121f; --good:#3fb97a; --warn:#e3b341; --bad:#f0616d; --bad-bg:#2e171c;
+    --scrim:rgba(5,9,14,.62);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0e141b; --panel:#161e28; --panel2:#1c2632; --line:#263341; --text:#e6edf3; --muted:#97a5b5;
+  --accent:#4aa3ff; --accent-ink:#04121f; --good:#3fb97a; --warn:#e3b341; --bad:#f0616d; --bad-bg:#2e171c;
+  --scrim:rgba(5,9,14,.62);
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;min-height:100vh;overflow-x:hidden}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+h1,h2,h3{margin:0;font-weight:650;line-height:1.2}
+h1{font-size:1.5rem} h2{font-size:1.1rem} h3{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+p{margin:0}
+.muted{color:var(--muted)} .small{font-size:.86rem}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+
+/* layout */
+.app{display:grid;grid-template-columns:188px minmax(0,1fr);grid-template-rows:56px minmax(0,1fr);min-height:100vh}
+.top{grid-column:1/-1;display:flex;align-items:center;gap:10px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:30;min-width:0}
+.logo{width:32px;height:32px;border-radius:9px;background:var(--accent);color:var(--accent-ink);display:grid;place-items:center;font-weight:800;flex:none}
+.brand{font-weight:650;flex:none}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:99px;background:var(--panel2);border:1px solid var(--line);min-width:0;max-width:100%}
+.pill span.t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
+.dot.on{background:var(--good);box-shadow:0 0 0 3px rgba(63,185,122,.2)}
+.dot.bad{background:var(--bad)}
+.grow{flex:1;min-width:0}
+.btn{min-height:40px;padding:0 16px;border-radius:10px;border:1px solid var(--line);background:var(--panel2);font-weight:600}
+.btn:hover{border-color:#3a4b5e}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.danger{background:var(--bad);border-color:var(--bad);color:#26070b}
+.btn.ghost{background:transparent}
+.btn.small{min-height:34px;padding:0 12px;font-size:.88rem}
+.btn:disabled{opacity:.5;cursor:default}
+.sw{display:inline-flex;align-items:center;gap:8px;cursor:pointer;min-height:40px}
+.sw input{position:absolute;opacity:0;width:1px;height:1px}
+.sw .track{width:42px;height:24px;border-radius:99px;background:#33414f;position:relative;flex:none;transition:background .15s}
+.sw .track::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform .15s}
+.sw input:checked+.track{background:var(--good)}
+.sw input:checked+.track::after{transform:translateX(18px)}
+.sw input:focus-visible+.track{outline:2px solid var(--accent);outline-offset:2px}
+.kbd{font-size:.74rem;border:1px solid var(--line);border-bottom-width:2px;border-radius:6px;padding:1px 6px;color:var(--muted);background:var(--panel2)}
+
+.rail{padding:14px 10px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:4px;position:sticky;top:56px;align-self:start;height:calc(100vh - 56px)}
+.rail a{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;color:var(--muted);text-decoration:none;font-weight:600;min-height:44px}
+.rail a:hover{background:var(--panel)}
+.rail a[aria-current="page"]{background:var(--panel2);color:var(--text)}
+.rail svg,.tabbar svg{width:20px;height:20px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.badge{margin-left:auto;width:8px;height:8px;border-radius:50%;background:var(--accent)}
+.tabbar{display:none}
+main{padding:24px;min-width:0;max-width:1100px;width:100%}
+.view{display:none} .view.on{display:block}
+.head{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+.head .grow{min-width:200px}
+.stack{display:grid;gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px;min-width:0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+.banner{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px 16px;border-radius:var(--radius);background:var(--bad-bg);border:1px solid #5a2a33;margin-bottom:16px}
+.banner .grow{min-width:180px}
+
+/* now */
+.hero{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center}
+.hero .big{min-width:150px;min-height:64px;font-size:1.15rem;border-radius:14px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.chip{min-height:38px;padding:0 14px;border-radius:99px;border:1px solid var(--line);background:var(--panel2)}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:650}
+.dcard{display:block;width:100%;text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
+.dcard:hover{border-color:#3a4b5e}
+.dcard .row{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.dcard b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+svg.spark{display:block;width:100%;height:44px;margin:8px 0 4px}
+svg.spark.sm{height:26px;margin:0;width:70px}
+svg.spark path{fill:none;stroke:var(--accent);stroke-width:1.6;vector-effect:non-scaling-stroke}
+svg.spark.lg{height:90px}
+.stats{display:flex;gap:14px;flex-wrap:wrap}
+.stat b{font-size:1.1rem;font-variant-numeric:tabular-nums}
+.tag{display:inline-block;padding:2px 9px;border-radius:99px;font-size:.78rem;border:1px solid var(--line);background:var(--panel2);color:var(--muted);white-space:nowrap}
+.tag.good{color:var(--good);border-color:#285a40}
+.tag.warn{color:var(--warn)}
+.check{display:grid;gap:8px;margin-top:10px}
+.check li{list-style:none;display:flex;gap:10px;align-items:center}
+.check ul{margin:0;padding:0}
+.tick{width:20px;height:20px;border-radius:50%;border:2px solid var(--line);display:grid;place-items:center;flex:none;font-size:.75rem}
+.tick.done{background:var(--good);border-color:var(--good);color:#04160d}
+.bar{height:6px;border-radius:9px;background:var(--panel2);overflow:hidden;margin-top:8px}
+.bar i{display:block;height:100%;background:var(--good)}
+
+/* devices */
+.tools{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.input{min-height:40px;padding:0 12px;border-radius:10px;border:1px solid var(--line);background:var(--panel);width:100%}
+select.input{appearance:auto}
+.tools .input{flex:1 1 200px;width:auto}
+.seg{display:flex;gap:6px;flex-wrap:wrap}
+.strip{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px 16px;margin-bottom:14px}
+.strip select{width:auto;flex:0 1 240px}
+.list{display:grid;gap:8px}
+.drow{display:grid;grid-template-columns:36px minmax(0,1fr) auto 70px 14px;gap:12px;align-items:center;width:100%;text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:10px 14px;min-height:60px}
+.drow:hover{border-color:#3a4b5e}
+.drow .ico{width:36px;height:36px;border-radius:10px;background:var(--panel2);display:grid;place-items:center;color:var(--muted);font-size:.75rem;font-weight:700}
+.drow .nm{min-width:0}
+.drow .nm b,.drow .nm span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chev{color:var(--muted)}
+.empty{padding:28px 16px;text-align:center;border:1px dashed var(--line);border-radius:var(--radius);color:var(--muted)}
+.empty b{display:block;color:var(--text);margin-bottom:4px}
+
+/* drawer */
+.scrim{position:fixed;inset:0;background:var(--scrim);z-index:40;display:none}
+.scrim.on{display:block}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(440px,100vw);background:var(--panel);border-left:1px solid var(--line);z-index:41;transform:translateX(105%);transition:transform .2s;display:flex;flex-direction:column}
+.drawer.on{transform:none}
+.drawer header{padding:16px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center}
+.drawer .body{padding:16px;overflow:auto;flex:1;display:grid;gap:16px;align-content:start}
+.handle{display:none}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);padding:0 12px;overflow-x:auto}
+.tabs button{background:none;border:0;border-bottom:2px solid transparent;padding:10px 12px;color:var(--muted);font-weight:600;min-height:44px;white-space:nowrap}
+.tabs button[aria-selected="true"]{color:var(--text);border-color:var(--accent)}
+.sect{display:grid;gap:8px}
+.kv{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);align-items:center}
+.kv:last-child{border:0}
+.kv .nm{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.result{padding:10px 12px;border-radius:10px;background:var(--panel2);border:1px solid var(--line)}
+
+/* profiles */
+.pc{display:flex;flex-direction:column;gap:8px;text-align:left;min-height:130px}
+.pc .acts{margin-top:auto;display:flex;gap:8px;flex-wrap:wrap}
+.field{display:grid;gap:6px;margin-bottom:14px}
+.field label{display:flex;justify-content:space-between;font-weight:600}
+.field output{color:var(--accent);font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--accent);min-height:28px}
+.cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+
+/* palette, toasts, modal */
+.pal{position:fixed;inset:0;z-index:60;background:var(--scrim);display:none;align-items:flex-start;justify-content:center;padding:12vh 16px 0}
+.pal.on{display:flex}
+.pal .box{width:min(560px,100%);background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.pal input{width:100%;border:0;border-bottom:1px solid var(--line);background:transparent;padding:14px 16px;font-size:1rem;outline:none}
+.pal ul{list-style:none;margin:0;padding:6px;max-height:50vh;overflow:auto}
+.pal li{display:flex;justify-content:space-between;gap:12px;padding:10px 12px;border-radius:8px;cursor:pointer;min-height:40px;align-items:center}
+.pal li[aria-selected="true"]{background:var(--panel2)}
+.pal li small{color:var(--muted)}
+.toasts{position:fixed;left:50%;transform:translateX(-50%);bottom:20px;z-index:80;display:grid;gap:8px;width:min(440px,calc(100vw - 32px))}
+.toast{display:flex;gap:12px;align-items:center;padding:10px 12px 10px 16px;background:#233142;border:1px solid #34475c;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.4)}
+.toast span{flex:1;min-width:0}
+.toast.err{border-color:#7a3340}
+.modal{position:fixed;inset:0;z-index:70;display:none;align-items:center;justify-content:center;background:var(--scrim);padding:16px}
+.modal.on{display:flex}
+.modal .box{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px;width:min(440px,100%);display:grid;gap:12px;max-height:90vh;overflow:auto}
+.skel{background:linear-gradient(90deg,var(--panel) 25%,var(--panel2) 50%,var(--panel) 75%);background-size:200% 100%;animation:sk 1.2s infinite;border-radius:var(--radius);height:96px}
+@keyframes sk{to{background-position:-200% 0}}
+@media (prefers-reduced-motion: reduce){.skel{animation:none}.drawer{transition:none}}
+details summary{cursor:pointer;color:var(--muted);min-height:36px;display:flex;align-items:center}
+
+@media (max-width:700px){
+  .app{grid-template-columns:minmax(0,1fr);grid-template-rows:56px minmax(0,1fr)}
+  .rail,.brand,#palBtn,.hide-m{display:none}
+  .top{padding:0 16px;gap:8px}
+  main{padding:16px 16px calc(84px + env(safe-area-inset-bottom,0px))}
+  .tabbar{display:grid;grid-template-columns:repeat(5,1fr);position:fixed;left:0;right:0;bottom:0;z-index:35;background:var(--panel);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom,0px)}
+  .tabbar a{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-height:60px;color:var(--muted);text-decoration:none;font-size:.72rem;font-weight:600;position:relative}
+  .tabbar a[aria-current="page"]{color:var(--accent)}
+  .tabbar .badge{position:absolute;top:10px;left:calc(50% + 8px);margin:0}
+  .toasts{bottom:calc(76px + env(safe-area-inset-bottom,0px))}
+  .hero{grid-template-columns:minmax(0,1fr)}
+  .hero .big{width:100%}
+  .cols{grid-template-columns:minmax(0,1fr)}
+  .drow{grid-template-columns:36px minmax(0,1fr) 14px;padding:10px 12px}
+  .drow .tag,.drow svg.spark.sm{display:none}
+  .drawer{top:auto;left:0;right:0;width:100%;max-height:88vh;height:88vh;border-left:0;border-top:1px solid var(--line);border-radius:18px 18px 0 0;transform:translateY(105%)}
+  .drawer.on{transform:none}
+  .handle{display:block;width:44px;height:5px;border-radius:9px;background:var(--line);margin:8px auto 0}
+  .btn,.chip,.sw{min-height:44px}
+  .btn.small{min-height:40px}
+  h1{font-size:1.3rem}
+}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <header class="top" role="banner">
+    <div class="logo" aria-hidden="true">N</div>
+    <div class="brand">Network Lab</div>
+    <div class="grow"><div class="pill" id="status" role="status" aria-live="polite"></div></div>
+    <label class="sw" title="Home router Wi-Fi"><input type="checkbox" id="routerSw" aria-label="Router Wi-Fi"><span class="track"></span><span class="hide-m small">Router Wi-Fi</span></label>
+    <button class="btn danger" id="panic" aria-label="Panic: stop everything">Panic</button>
+    <button class="btn ghost" id="palBtn" aria-label="Search and commands">Search <span class="kbd">Ctrl K</span></button>
+  </header>
+
+  <nav class="rail" aria-label="Main" id="rail"></nav>
+
+  <main id="main">
+    <section class="view" id="v-now" aria-label="Now"></section>
+    <section class="view" id="v-devices" aria-label="Devices"></section>
+    <section class="view" id="v-profiles" aria-label="Profiles"></section>
+    <section class="view" id="v-network" aria-label="Network"></section>
+    <section class="view" id="v-more" aria-label="More"></section>
+  </main>
+</div>
+<nav class="tabbar" aria-label="Main" id="tabbar"></nav>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-label="Device details" aria-hidden="true"></aside>
+<div class="pal" id="pal" role="dialog" aria-label="Command palette"><div class="box"><input id="palIn" placeholder="Type a command or a device name" aria-label="Command"><ul id="palList" role="listbox"></ul></div></div>
+<div class="modal" id="modal" role="dialog" aria-modal="true"><div class="box" id="modalBox"></div></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script>
+(function(){
+"use strict";
+const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const clone=o=>JSON.parse(JSON.stringify(o));
+
+/* ---------- fake state ---------- */
+const S={
+  running:true, panic:false, general:"cafe", router:true, routerPw:false, knownOnly:false, dns:0, updateReady:true,
+  presets:{
+    normal:{name:"Normal",delay:0,jitter:0,loss:0,rate:100,custom:false},
+    cafe:{name:"Busy café Wi-Fi",delay:120,jitter:40,loss:2,rate:5},
+    hotel:{name:"Hotel Wi-Fi",delay:80,jitter:60,loss:4,rate:3},
+    train:{name:"Train tunnel",delay:300,jitter:150,loss:12,rate:1},
+    g3:{name:"Slow 3G",delay:400,jitter:100,loss:1,rate:0.4}
+  },
+  services:{cafe:[],hotel:[],train:["Instagram"],g3:[],normal:[]},
+  devices:[
+    {id:"pixel",name:"Pixel 8",kind:"Phone",ip:"192.168.50.31",profile:"follow",prot:false,blocked:[]},
+    {id:"anna",name:"Anna’s iPhone",kind:"Phone",ip:"192.168.50.32",profile:"follow",prot:false,blocked:[]},
+    {id:"think",name:"ThinkPad X1",kind:"Laptop",ip:"192.168.50.40",profile:"train",prot:false,blocked:[]},
+    {id:"mac",name:"Owner’s MacBook",kind:"Laptop",ip:"192.168.50.20",profile:"follow",prot:true,blocked:[]},
+    {id:"tv",name:"Living-room TV",kind:"TV",ip:"192.168.50.55",profile:"follow",prot:false,blocked:[]},
+    {id:"unk",name:"Unnamed client",kind:"Unknown",ip:"192.168.50.61",profile:"follow",prot:false,blocked:[]}
+  ],
+  check:{pick:false,connect:true,start:true,impact:false,hide:false}
+};
+const NAMES=[["api.myapp.dev","420 kB/s"],["instagram.com","310 kB/s"],["youtube.com","1.2 MB/s"],["spotify.com","96 kB/s"],["apple.com","24 kB/s"],["graph.facebook.com","58 kB/s"]];
+const LOG=[]; const H={}; const CHK={}; const EDIT={};
+let view="now", openDev=null, devFilter="all", devQuery="", dtab="overview", editing=null, etab="settings", moreTab="updates", skeleton=true;
+
+function snap(){return JSON.stringify(S)}
+function restore(j){const o=JSON.parse(j);for(const k in S)delete S[k];Object.assign(S,o)}
+function log(t){LOG.unshift({t:new Date(),text:t});if(LOG.length>40)LOG.pop()}
+
+/* ---------- derived ---------- */
+function effKey(d){ if(S.panic||!S.running||d.prot)return "normal"; return d.profile==="follow"?S.general:d.profile }
+function eff(d){return S.presets[effKey(d)]||S.presets.normal}
+function affected(d){return effKey(d)!=="normal"}
+function profName(k){return (S.presets[k]||{name:"Normal"}).name}
+function devById(id){return S.devices.find(d=>d.id===id)}
+function sample(p){
+  const base=10+Math.random()*4;
+  if(!p.delay&&!p.loss)return base;
+  if(Math.random()*100<p.loss)return null;
+  return Math.max(base,base+p.delay+(Math.random()*2-1)*p.jitter);
+}
+function ensureH(id,p){ if(!H[id]){H[id]=[];for(let i=0;i<60;i++)H[id].push(sample(p))} return H[id] }
+function sparkD(a,w=120,h=32){
+  const CAP=700,n=a.length;let d="";
+  a.forEach((v,i)=>{const val=v==null?CAP:Math.min(v,CAP);const fr=Math.sqrt(val/CAP);const x=(i*(w/(n-1))).toFixed(1),y=(h-2-(h-4)*fr).toFixed(1);d+=(i?"L":"M")+x+" "+y});
+  return d;
+}
+function stat(a){
+  const ok=a.slice(-20).filter(v=>v!=null);const ms=ok.length?Math.round(ok.reduce((s,v)=>s+v,0)/ok.length):0;
+  const loss=Math.round(a.filter(v=>v==null).length/a.length*100);return{ms,loss};
+}
+function spark(id,cls=""){return `<svg class="spark ${cls}" viewBox="0 0 120 32" preserveAspectRatio="none" role="img" aria-label="Live delay"><path data-spark="${id}" d=""/></svg>`}
+
+/* ---------- icons ---------- */
+const IC={
+  now:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+  devices:'<svg viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 18h2"/></svg>',
+  profiles:'<svg viewBox="0 0 24 24"><path d="M4 8h10M18 8h2M4 16h2M10 16h10"/><circle cx="16" cy="8" r="2"/><circle cx="8" cy="16" r="2"/></svg>',
+  network:'<svg viewBox="0 0 24 24"><path d="M3 9a14 14 0 0 1 18 0M6 12.5a9.5 9.5 0 0 1 12 0M9 16a5 5 0 0 1 6 0"/><circle cx="12" cy="19" r="1"/></svg>',
+  more:'<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>'
+};
+const PLACES=[["now","Now"],["devices","Devices"],["profiles","Profiles"],["network","Network"],["more","More"]];
+function navHtml(){return PLACES.map(([k,l])=>`<a href="#${k}" data-nav="${k}" ${view===k?'aria-current="page"':''}>${IC[k]}<span>${l}</span>${k==="more"&&S.updateReady?'<i class="badge" title="Update ready"></i>':''}</a>`).join("")}
+
+/* ---------- actions with undo ---------- */
+function commit(label,fn){
+  const before=snap();fn();log(label);render();toast(label,()=>{restore(before);log("Undid: "+label);render();toast("Undone")});
+}
+function toast(msg,undo,err){
+  const t=document.createElement("div");t.className="toast"+(err?" err":"");
+  t.innerHTML=`<span>${esc(msg)}</span>`;
+  if(undo){const b=document.createElement("button");b.className="btn small ghost";b.textContent="Undo";b.onclick=()=>{undo();t.remove()};t.appendChild(b)}
+  const box=$("#toasts");box.innerHTML="";box.appendChild(t);
+  setTimeout(()=>{if(t.parentNode)t.remove()},6000);
+}
+const A={
+  toggleRun(){ if(S.panic){commit("Started again. Saved settings are on",()=>{S.panic=false;S.running=true;S.check.start=true})}
+    else if(S.running)commit("Stopped. All devices are back to normal",()=>{S.running=false});
+    else commit("Started with "+profName(S.general),()=>{S.running=true;S.check.start=true}) },
+  panic(){ if(S.panic)return; commit("Panic: everything is stopped",()=>{S.panic=true;S.running=false}) },
+  general(k){ commit(profName(k)+" for everyone",()=>{S.general=k;S.check.pick=true}) },
+  router(on){
+    if(!S.routerPw){ $("#routerSw").checked=S.router; askPassword(on); return }
+    commit("Router Wi-Fi "+(on?"on":"off"),()=>{S.router=on});
+  },
+  devProfile(id,k){ const d=devById(id); commit(d.name+" "+(k==="follow"?"follows everyone":"now on "+profName(k)),()=>{d.profile=k;S.check.pick=true}) },
+  protect(id,on){ const d=devById(id); commit(d.name+(on?" is protected":" is no longer protected"),()=>{d.prot=on}) },
+  block(id,name){ const d=devById(id); const has=d.blocked.includes(name);
+    commit((has?"Unblocked ":"Blocked ")+name+" on "+d.name,()=>{d.blocked=has?d.blocked.filter(x=>x!==name):[...d.blocked,name]}) },
+  checkNow(id){ const d=devById(id); CHK[id]={busy:true}; renderDrawer();
+    setTimeout(()=>{const s=stat(ensureH(id,eff(d)));CHK[id]={ms:s.ms,loss:s.loss,aff:affected(d)};S.check.impact=true;log("Checked impact on "+d.name);renderDrawer();if(view==="now")renderNow()},900) }
+};
+
+/* ---------- views ---------- */
+function renderStatus(){
+  const el=$("#status");
+  if(S.panic)el.innerHTML='<i class="dot bad"></i><span class="t">Stopped by Panic</span>';
+  else if(!S.running)el.innerHTML='<i class="dot"></i><span class="t">Stopped</span>';
+  else{const n=S.devices.filter(affected).length;el.innerHTML=`<i class="dot on"></i><span class="t">Running · ${esc(profName(S.general))}${n?` · ${n} affected`:""}</span>`}
+  $("#routerSw").checked=S.router;
+}
+function banner(){return S.panic?`<div class="banner" role="alert"><div class="grow"><b>Everything is stopped.</b><div class="small muted">Profiles, schedules and blocks are off. Start brings your saved settings back.</div></div><button class="btn primary" data-act="run">Start</button></div>`:""}
+
+function renderNow(){
+  const aff=S.devices.filter(affected);
+  const done=Object.entries(S.check).filter(([k,v])=>k!=="hide"&&v).length;
+  const items=[["connect","Connect a phone to the Pi’s Wi-Fi"],["pick","Pick a profile"],["start","Press Start"],["impact","Check the impact on a device"]];
+  const doneN=items.filter(([k])=>S.check[k]).length;
+  const list=skeleton?'<div class="grid"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>':
+    aff.length?`<div class="grid">${aff.map(d=>{const p=eff(d);return `<button class="dcard" data-open="${d.id}"><div class="row"><b>${esc(d.name)}</b><span class="tag">${esc(profName(effKey(d)))}</span></div>${spark(d.id)}<div class="stats small"><span class="stat"><b data-ms="${d.id}">–</b> ms</span><span class="stat"><b data-loss="${d.id}">–</b>% lost</span><span class="muted">${p.rate} Mbps cap</span></div></button>`}).join("")}</div>`:
+    `<div class="empty"><b>${S.running?"No device is affected":"Nothing is running"}</b>${S.running?"Everyone is on Normal, or all devices are protected. Pick a profile above.":"Press Start to put "+esc(profName(S.general))+" on your devices."}</div>`;
+  $("#v-now").innerHTML=`${banner()}
+  <div class="head"><div class="grow"><h1>Now</h1><p class="muted">${S.panic?"Everything is stopped.":S.running?esc(profName(S.general))+" is on "+aff.length+" of "+S.devices.length+" devices.":"Stopped. Devices have normal internet."}</p></div></div>
+  <div class="stack">
+  <div class="card"><div class="hero"><div><h3>Profile for everyone</h3>
+    <div class="chips" role="group" aria-label="Profile for everyone">${Object.entries(S.presets).map(([k,p])=>`<button class="chip" aria-pressed="${S.general===k}" data-gen="${k}">${esc(p.name)}</button>`).join("")}</div></div>
+    <button class="btn big ${S.running?"":"primary"}" data-act="run">${S.running?"Stop":"Start"}</button></div></div>
+  ${S.check.hide?"":`<div class="card"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><div><h2>Get started</h2><p class="muted small">${doneN} of 4 done</p></div><button class="btn small ghost" data-act="hideCheck">Dismiss</button></div><div class="bar" aria-hidden="true"><i style="width:${doneN*25}%"></i></div><ul class="check">${items.map(([k,t])=>`<li><span class="tick ${S.check[k]?"done":""}">${S.check[k]?"✓":""}</span><span>${t}</span></li>`).join("")}</ul></div>`}
+  <div><div class="head" style="margin-bottom:10px"><h2>Affected devices</h2></div>${list}</div></div>`;
+}
+
+function filteredDevices(){
+  return S.devices.filter(d=>(devFilter==="all"||(devFilter==="aff"&&affected(d))||(devFilter==="prot"&&d.prot))&&(!devQuery||(d.name+" "+d.ip).toLowerCase().includes(devQuery.toLowerCase())));
+}
+function renderDevices(keepFocus){
+  const rows=filteredDevices();
+  const html=rows.length?rows.map(d=>{const p=profName(effKey(d));return `<button class="drow" data-open="${d.id}"><span class="ico">${esc(d.kind.slice(0,2).toUpperCase())}</span><span class="nm"><b>${esc(d.name)}</b><span class="muted small">${esc(d.ip)} · ${d.prot?"Protected":d.profile==="follow"?"Same as everyone":"Own profile"}</span></span><span class="tag ${d.prot?"good":affected(d)?"warn":""}">${d.prot?"Protected":esc(p)}</span>${spark(d.id,"sm")}<span class="chev">›</span></button>`}).join(""):
+    `<div class="empty"><b>No device matches</b>Try another word or <button class="btn small ghost" data-act="clearFilter">clear the filter</button>.</div>`;
+  if(keepFocus){$("#devList").innerHTML=html;return}
+  $("#v-devices").innerHTML=`${banner()}<div class="head"><div class="grow"><h1>Devices</h1><p class="muted">${S.devices.length} connected to the Pi’s Wi-Fi.</p></div></div>
+  <div class="card strip"><b>Everyone</b><select class="input" id="genSel" aria-label="Profile for everyone">${Object.entries(S.presets).map(([k,p])=>`<option value="${k}" ${S.general===k?"selected":""}>${esc(p.name)}</option>`).join("")}</select><span class="muted small">Devices set to “Same as everyone” follow this.</span></div>
+  <div class="tools"><input class="input" id="devQ" type="search" placeholder="Search devices" aria-label="Search devices" value="${esc(devQuery)}">
+    <div class="seg" role="group" aria-label="Filter">${[["all","All"],["aff","Affected"],["prot","Protected"]].map(([k,l])=>`<button class="chip" data-filter="${k}" aria-pressed="${devFilter===k}">${l}</button>`).join("")}</div></div>
+  <div class="list" id="devList">${html}</div>`;
+}
+
+function renderDrawer(){
+  const dr=$("#drawer"),sc=$("#scrim");
+  if(!openDev){dr.classList.remove("on");sc.classList.remove("on");dr.setAttribute("aria-hidden","true");return}
+  const d=devById(openDev);dr.setAttribute("aria-hidden","false");
+  const c=CHK[d.id];
+  const ov=`<div class="sect"><h3>Profile</h3>${d.prot?`<p class="muted">Protected devices ignore every profile.</p>`:`<select class="input" id="devProf" aria-label="Profile for ${esc(d.name)}"><option value="follow" ${d.profile==="follow"?"selected":""}>Same as everyone (${esc(profName(S.general))})</option>${Object.entries(S.presets).map(([k,p])=>`<option value="${k}" ${d.profile===k?"selected":""}>${esc(p.name)}</option>`).join("")}</select>
+    <p class="muted small">${d.profile==="follow"?"This device follows the profile for everyone. Choose another to set it just for this device.":"This device keeps its own profile, whatever is set for everyone."}</p>`}</div>
+  <div class="sect"><h3>Live impact</h3><div class="card" style="padding:12px">${spark(d.id,"lg")}<div class="stats"><span class="stat"><b data-ms="${d.id}">–</b> ms delay</span><span class="stat"><b data-loss="${d.id}">–</b>% lost</span><span class="stat"><b>${eff(d).rate}</b> Mbps cap</span></div></div>
+    <div><button class="btn" data-check="${d.id}" ${c&&c.busy?"disabled":""}>${c&&c.busy?"Checking…":"Check now"}</button></div>
+    ${c&&!c.busy?`<div class="result" role="status">Normal: about 12 ms, 0% lost. Now: <b>${c.ms} ms</b>, <b>${c.loss}% lost</b>. ${c.aff?"The profile is working on this device.":"No profile is affecting this device."}</div>`:""}</div>
+  <div class="sect"><h3>Protect</h3><label class="sw"><input type="checkbox" id="devProt" ${d.prot?"checked":""}><span class="track"></span><span>Protected from all profiles</span></label></div>`;
+  const tr=`<div class="sect"><h3>Names this device is using</h3><div>${NAMES.map(([n,r])=>{const b=d.blocked.includes(n);return `<div class="kv"><span class="nm"><b>${esc(n)}</b><br><span class="muted small">${r}${b?" · blocked":""}</span></span><button class="btn small ${b?"primary":""}" data-block="${esc(n)}" aria-label="${b?"Unblock":"Block"} ${esc(n)}">${b?"Unblock":"Block"}</button></div>`}).join("")}</div></div>`;
+  const hs=LOG.filter(l=>l.text.includes(d.name)).slice(0,8);
+  const hi=`<div class="sect"><h3>History</h3>${hs.length?hs.map(l=>`<div class="kv"><span>${esc(l.text)}</span><span class="muted small">${l.t.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</span></div>`).join(""):`<div class="empty"><b>Nothing yet</b>Changes you make to this device show up here.</div>`}</div>`;
+  dr.innerHTML=`<div class="handle"></div><header><div class="grow"><h2>${esc(d.name)}</h2><span class="muted small">${esc(d.ip)} · ${esc(d.kind)}</span></div><button class="btn small ghost" data-act="closeDrawer" aria-label="Close">Close</button></header>
+  <div class="tabs" role="tablist">${[["overview","Overview"],["traffic","Traffic"],["history","History"]].map(([k,l])=>`<button role="tab" aria-selected="${dtab===k}" data-dtab="${k}">${l}</button>`).join("")}</div>
+  <div class="body">${dtab==="overview"?ov:dtab==="traffic"?tr:hi}</div>`;
+  dr.classList.add("on");sc.classList.add("on");
+}
+
+function renderProfiles(){
+  if(editing){renderEditor();return}
+  $("#v-profiles").innerHTML=`${banner()}<div class="head"><div class="grow"><h1>Profiles</h1><p class="muted">How the network should behave. Pick one to edit it.</p></div><button class="btn primary" data-act="newProfile">New profile</button></div>
+  <div class="grid">${Object.entries(S.presets).map(([k,p])=>{const users=S.devices.filter(d=>effKey(d)===k).length;return `<div class="card pc"><div style="display:flex;justify-content:space-between;gap:8px"><h2>${esc(p.name)}</h2>${S.general===k?'<span class="tag good">For everyone</span>':""}</div><p class="muted small">${p.delay} ms delay · ${p.loss}% loss · ${p.rate} Mbps</p><p class="muted small">${users} device${users===1?"":"s"} using it</p><div class="acts"><button class="btn small" data-edit="${k}">Edit</button><button class="btn small ghost" data-gen="${k}">Use for everyone</button></div></div>`}).join("")}</div>`;
+}
+function renderEditor(){
+  const k=editing,p=S.presets[k];EDIT.h=EDIT.h&&EDIT.k===k?EDIT.h:(EDIT.k=k,Array.from({length:60},()=>sample(p)));
+  const sl=(id,l,min,max,step,u)=>`<div class="field"><label for="${id}">${l}<output id="${id}O">${p[id]} ${u}</output></label><input type="range" id="${id}" min="${min}" max="${max}" step="${step}" value="${p[id]}"></div>`;
+  const sv=["Instagram","YouTube","TikTok","Spotify"];
+  const body=etab==="settings"?`<div class="field"><label for="pname">Name</label><input class="input" id="pname" value="${esc(p.name)}"></div>${sl("delay","Delay",0,1000,10,"ms")}${sl("jitter","Jitter",0,500,10,"ms")}${sl("loss","Packet loss",0,40,1,"%")}${sl("rate","Speed cap",0.1,100,0.1,"Mbps")}<details><summary>More options</summary><p class="muted small">Loss bursts, reordering, outages and limits go here. Help text sits under each field, not behind an icon.</p></details>`:
+    etab==="services"?`<p class="muted small" style="margin-bottom:8px">Devices on this profile cannot reach these apps.</p>${sv.map(n=>{const b=(S.services[k]||[]).includes(n);return `<div class="kv"><span>${n}</span><label class="sw"><input type="checkbox" data-svc="${n}" ${b?"checked":""} aria-label="Block ${n}"><span class="track"></span></label></div>`}).join("")}`:
+    `<div class="kv"><span>Weekdays 09:00–17:00</span><span class="tag">Off</span></div><div class="kv"><span>Evenings 20:00–23:00</span><span class="tag good">On</span></div><div style="margin-top:12px"><button class="btn small" data-act="fakeSched">Add schedule</button></div>`;
+  $("#v-profiles").innerHTML=`${banner()}<div class="head"><div class="grow"><button class="btn small ghost" data-act="backProfiles">‹ All profiles</button><h1 style="margin-top:8px">${esc(p.name)}</h1><p class="muted small">Changes save by themselves. Undo appears after each one.</p></div><button class="btn primary" data-gen="${k}">Use for everyone</button></div>
+  <div class="cols"><div class="card"><div class="tabs" role="tablist" style="margin:-8px -12px 14px">${[["settings","Settings"],["services","Services"],["schedule","Schedule"]].map(([t,l])=>`<button role="tab" aria-selected="${etab===t}" data-etab="${t}">${l}</button>`).join("")}</div>${body}</div>
+  <div class="card" style="align-self:start"><h3>Live preview</h3><svg class="spark lg" viewBox="0 0 120 32" preserveAspectRatio="none"><path id="prevPath" d=""/></svg><div class="stats"><span class="stat"><b id="prevMs">–</b> ms</span><span class="stat"><b id="prevLoss">–</b>% lost</span></div><p class="muted small" style="margin-top:8px">This is what a device on “${esc(p.name)}” would see.</p></div></div>`;
+}
+function renderNetwork(){
+  $("#v-network").innerHTML=`${banner()}<div class="head"><div class="grow"><h1>Network</h1><p class="muted">The Wi-Fi around your test.</p></div></div><div class="stack">
+  <div class="card"><div class="kv"><span><b>Home router Wi-Fi</b><br><span class="muted small">${S.router?"On. Phones can use the router.":"Off. Phones can only use this Pi."} The switch is also in the top bar.</span></span><span class="tag ${S.router?"good":"warn"}">${S.router?"On":"Off"}</span></div>
+    <div class="kv"><span>Pi is on Ethernet</span><span class="tag good">Yes</span></div>
+    <div class="kv"><span>Router password</span><span>${S.routerPw?'<span class="tag good">Saved</span>':'<button class="btn small" data-act="askPw">Enter password</button>'}</span></div></div>
+  <div class="card"><h3>Pi Wi-Fi</h3><div class="kv"><span>Name</span><b>Lab-Wi-Fi</b></div><div class="kv"><span>Connected devices</span><b>${S.devices.length}</b></div></div>
+  <div class="card"><h3>Access rules</h3><div class="kv"><span><b>Only known devices can join</b><br><span class="muted small">New devices wait until you allow them.</span></span><label class="sw"><input type="checkbox" id="knownOnly" ${S.knownOnly?"checked":""} aria-label="Only known devices can join"><span class="track"></span></label></div>
+    <div class="field" style="margin:12px 0 0"><label for="dns">DNS failures<output id="dnsO">${S.dns}%</output></label><input type="range" id="dns" min="0" max="50" step="1" value="${S.dns}"></div></div>
+  <details class="card"><summary>Recovery</summary><p class="muted small">If the Pi’s Wi-Fi name is lost, reset it here. Needs a cable.</p><div style="margin-top:8px"><button class="btn small" data-act="fakeReset">Reset Wi-Fi name</button></div></details></div>`;
+}
+function renderMore(){
+  const t=moreTab;
+  const body=t==="updates"?`<div class="kv"><span>This version</span><b>1.8.2</b></div><div class="kv"><span>${S.updateReady?"Version 1.9.0 is ready to install":"You are on the newest approved version"}</span>${S.updateReady?'<button class="btn primary small" data-act="install">Install</button>':'<button class="btn small" data-act="checkUpd">Check</button>'}</div><p class="muted small" style="margin-top:8px">An admin approves new versions. Only approved ones appear here.</p>`:
+    t==="diag"?`${["Pi network shaping","Wi-Fi access point","DNS","Disk space"].map(n=>`<div class="kv"><span>${n}</span><span class="tag good">OK</span></div>`).join("")}<details><summary>Details</summary><p class="muted small">Raw state and the plan the Pi is using. For support only.</p></details>`:
+    t==="activity"?(LOG.length?LOG.map(l=>`<div class="kv"><span>${esc(l.text)}</span><span class="muted small">${l.t.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"})}</span></div>`).join(""):`<div class="empty"><b>Nothing yet</b>Everything you do here is listed.</div>`):
+    `<div class="kv"><span>Dashboard access</span><button class="btn small" data-act="fakeAccess">Manage</button></div><div class="kv"><span>Look</span><span class="muted">Dark only</span></div><div class="kv"><span>This browser</span><button class="btn small" data-act="signout">Sign out</button></div>`;
+  $("#v-more").innerHTML=`${banner()}<div class="head"><div class="grow"><h1>More</h1></div></div><div class="card"><div class="tabs" role="tablist" style="margin:-8px -12px 8px">${[["updates","Updates"],["diag","Diagnostics"],["activity","Activity"],["settings","Settings"]].map(([k,l])=>`<button role="tab" aria-selected="${t===k}" data-mtab="${k}">${l}${k==="updates"&&S.updateReady?' •':""}</button>`).join("")}</div>${body}</div>`;
+}
+function render(){
+  renderStatus();
+  $("#rail").innerHTML=navHtml();$("#tabbar").innerHTML=navHtml();
+  $$(".view").forEach(v=>v.classList.toggle("on",v.id==="v-"+view));
+  ({now:renderNow,devices:()=>renderDevices(false),profiles:renderProfiles,network:renderNetwork,more:renderMore})[view]();
+  renderDrawer();
+  if(view==="devices"&&devQuery){}
+  tick(true);
+}
+
+/* ---------- live ticking: only touches SVG paths and numbers ---------- */
+function tick(noPush){
+  S.devices.forEach(d=>{const p=eff(d);const a=ensureH(d.id,p);if(!noPush){a.push(sample(p));a.shift()}
+    $$(`[data-spark="${d.id}"]`).forEach(el=>el.setAttribute("d",sparkD(a)));
+    const s=stat(a);$$(`[data-ms="${d.id}"]`).forEach(el=>el.textContent=s.ms);$$(`[data-loss="${d.id}"]`).forEach(el=>el.textContent=s.loss)});
+  const pp=$("#prevPath");if(pp&&editing){const p=S.presets[editing];if(!noPush){EDIT.h.push(sample(p));EDIT.h.shift()}
+    pp.setAttribute("d",sparkD(EDIT.h));const s=stat(EDIT.h);$("#prevMs").textContent=s.ms;$("#prevLoss").textContent=s.loss}
+}
+setInterval(()=>{if(!document.hidden)tick()},900);
+
+/* ---------- modal, password ---------- */
+function modal(html){$("#modalBox").innerHTML=html;$("#modal").classList.add("on");const f=$("#modalBox input,#modalBox button");f&&f.focus()}
+function closeModal(){$("#modal").classList.remove("on")}
+function askPassword(on){
+  modal(`<h2>Router password</h2><p class="muted small">Needed once to switch the router’s Wi-Fi ${on?"on":"off"}. It is stored on the Pi.</p><input class="input" id="pw" type="password" aria-label="Router password" autocomplete="off"><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn ghost" data-act="closeModal">Cancel</button><button class="btn primary" id="pwOk">Save and switch ${on?"on":"off"}</button></div>`);
+  $("#pwOk").onclick=()=>{ if(!$("#pw").value){toast("Enter the router password first",null,true);return} closeModal();S.routerPw=true;commit("Router Wi-Fi "+(on?"on":"off"),()=>{S.router=on}) };
+}
+function helpModal(){modal(`<h2>Shortcuts</h2>${[["Ctrl/Cmd K","Search and commands"],["g then n","Now"],["g then d","Devices"],["g then p","Profiles"],["g then w","Network"],["g then m","More"],["?","This help"],["Esc","Close"]].map(([k,t])=>`<div class="kv"><span>${t}</span><span class="kbd">${k}</span></div>`).join("")}<div style="text-align:right"><button class="btn" data-act="closeModal">Close</button></div>`)}
+
+/* ---------- palette ---------- */
+let palSel=0,palItems=[];
+function commands(){
+  const c=[];
+  PLACES.forEach(([k,l],i)=>c.push({t:"Go to "+l,k:"g "+"ndpwm"[i],run:()=>go(k)}));
+  c.push({t:S.running?"Stop":"Start",run:A.toggleRun});
+  c.push({t:"Panic: stop everything",run:A.panic});
+  c.push({t:"Router Wi-Fi "+(S.router?"off":"on"),run:()=>A.router(!S.router)});
+  Object.entries(S.presets).forEach(([k,p])=>c.push({t:"Use "+p.name+" for everyone",run:()=>A.general(k)}));
+  S.devices.forEach(d=>{c.push({t:"Open "+d.name,run:()=>{go("devices");open(d.id)}});c.push({t:(d.prot?"Unprotect ":"Protect ")+d.name,run:()=>A.protect(d.id,!d.prot)})});
+  c.push({t:"Check for updates",run:()=>{go("more");moreTab="updates";render()}});
+  c.push({t:"Show shortcuts",k:"?",run:helpModal});
+  return c;
+}
+function palRender(){
+  const q=$("#palIn").value.toLowerCase().trim();
+  palItems=commands().filter(c=>!q||q.split(/\s+/).every(w=>c.t.toLowerCase().includes(w))).slice(0,30);
+  palSel=Math.min(palSel,Math.max(0,palItems.length-1));
+  $("#palList").innerHTML=palItems.length?palItems.map((c,i)=>`<li role="option" data-i="${i}" aria-selected="${i===palSel}"><span>${esc(c.t)}</span>${c.k?`<small>${esc(c.k)}</small>`:""}</li>`).join(""):'<li class="muted">No command matches</li>';
+}
+function palOpen(){$("#pal").classList.add("on");$("#palIn").value="";palSel=0;palRender();$("#palIn").focus()}
+function palClose(){$("#pal").classList.remove("on")}
+function palRun(i){const c=palItems[i];if(!c)return;palClose();c.run()}
+
+/* ---------- navigation ---------- */
+function go(v){view=v;if(location.hash!=="#"+v)location.hash=v;editing=null;render();window.scrollTo(0,0)}
+function open(id){openDev=id;dtab="overview";renderDrawer();if(!CHK[id])CHK[id]=undefined;tick(true)}
+function closeDrawer(){openDev=null;renderDrawer()}
+window.addEventListener("hashchange",()=>{const v=location.hash.slice(1);if(PLACES.some(p=>p[0]===v)&&v!==view){view=v;editing=null;render()}});
+
+/* ---------- events ---------- */
+document.addEventListener("click",e=>{
+  const t=e.target;let el;
+  if((el=t.closest("[data-nav]"))){e.preventDefault();go(el.dataset.nav);return}
+  if((el=t.closest("[data-open]"))){open(el.dataset.open);return}
+  if((el=t.closest("[data-gen]"))){A.general(el.dataset.gen);return}
+  if((el=t.closest("[data-filter]"))){devFilter=el.dataset.filter;renderDevices(false);return}
+  if((el=t.closest("[data-dtab]"))){dtab=el.dataset.dtab;renderDrawer();tick(true);return}
+  if((el=t.closest("[data-etab]"))){etab=el.dataset.etab;renderEditor();tick(true);return}
+  if((el=t.closest("[data-mtab]"))){moreTab=el.dataset.mtab;renderMore();return}
+  if((el=t.closest("[data-edit]"))){editing=el.dataset.edit;etab="settings";EDIT.h=null;renderProfiles();tick(true);return}
+  if((el=t.closest("[data-check]"))){A.checkNow(el.dataset.check);return}
+  if((el=t.closest("[data-block]"))){A.block(openDev,el.dataset.block);renderDrawer();return}
+  if((el=t.closest("#palList li[data-i]"))){palRun(+el.dataset.i);return}
+  if(t.id==="scrim"){closeDrawer();return}
+  if(t.id==="pal"){palClose();return}
+  if(t.id==="panic"||t.closest("#panic")){A.panic();return}
+  if(t.closest("#palBtn")){palOpen();return}
+  if((el=t.closest("[data-act]"))){
+    const a=el.dataset.act;
+    ({run:A.toggleRun,closeDrawer,closeModal,hideCheck(){S.check.hide=true;renderNow()},clearFilter(){devFilter="all";devQuery="";renderDevices(false)},
+      backProfiles(){editing=null;renderProfiles()},
+      newProfile(){const k="p"+Date.now();commit("Created a new profile",()=>{S.presets[k]={name:"New profile",delay:100,jitter:20,loss:1,rate:10};S.services[k]=[]});editing=k;etab="settings";EDIT.h=null;renderProfiles();tick(true)},
+      fakeSched(){toast("Schedules are not part of this prototype")},fakeReset(){toast("Not part of this prototype")},fakeAccess(){toast("Not part of this prototype")},
+      askPw(){askPassword(!S.router)},install(){commit("Installed 1.9.0",()=>{S.updateReady=false})},checkUpd(){toast("You are on the newest approved version")},signout(){toast("Signed out (pretend)")}
+    })[a]?.();
+  }
+});
+document.addEventListener("change",e=>{
+  const t=e.target;
+  if(t.id==="routerSw"){A.router(t.checked);return}
+  if(t.id==="genSel"){A.general(t.value);return}
+  if(t.id==="devProf"){A.devProfile(openDev,t.value);return}
+  if(t.id==="devProt"){A.protect(openDev,t.checked);return}
+  if(t.id==="knownOnly"){commit("Only known devices can join: "+(t.checked?"on":"off"),()=>{S.knownOnly=t.checked});return}
+  if(t.id==="dns"){commit("DNS failures set to "+t.value+"%",()=>{S.dns=+t.value});return}
+  if(t.dataset&&t.dataset.svc){const k=editing,n=t.dataset.svc;commit((t.checked?"Blocked ":"Unblocked ")+n+" on "+S.presets[k].name,()=>{const a=S.services[k]||(S.services[k]=[]);S.services[k]=t.checked?[...new Set([...a,n])]:a.filter(x=>x!==n)});return}
+  if(editing&&["delay","jitter","loss","rate"].includes(t.id)){const before=snap(),k=editing;const old=S.presets[k][t.id];
+    S.presets[k][t.id]=+t.value;log(S.presets[k].name+": "+t.id+" "+t.value);toast(S.presets[k].name+": "+t.id+" is now "+t.value,()=>{restore(before);render()});renderStatus();return}
+  if(t.id==="pname"){const before=snap();S.presets[editing].name=t.value.trim()||"Untitled";toast("Renamed",()=>{restore(before);render()});return}
+});
+document.addEventListener("input",e=>{
+  const t=e.target;
+  if(t.id==="devQ"){devQuery=t.value;renderDevices(true);return}
+  if(t.id==="palIn"){palSel=0;palRender();return}
+  if(t.id==="dns"){$("#dnsO").textContent=t.value+"%";return}
+  if(editing&&["delay","jitter","loss","rate"].includes(t.id)){const u={delay:"ms",jitter:"ms",loss:"%",rate:"Mbps"}[t.id];$("#"+t.id+"O").textContent=t.value+" "+u;
+    S.presets[editing][t.id]=+t.value;H.__dirty=1;EDIT.h=Array.from({length:60},()=>sample(S.presets[editing]));tick(true)}
+});
+document.addEventListener("keydown",e=>{
+  const typing=/INPUT|SELECT|TEXTAREA/.test((e.target.tagName||""))&&e.target.id!=="palIn";
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();$("#pal").classList.contains("on")?palClose():palOpen();return}
+  if($("#pal").classList.contains("on")){
+    if(e.key==="Escape"){palClose();return}
+    if(e.key==="ArrowDown"){e.preventDefault();palSel=Math.min(palItems.length-1,palSel+1);palRender();return}
+    if(e.key==="ArrowUp"){e.preventDefault();palSel=Math.max(0,palSel-1);palRender();return}
+    if(e.key==="Enter"){e.preventDefault();palRun(palSel)}
+    return;
+  }
+  if(e.key==="Escape"){if($("#modal").classList.contains("on"))closeModal();else if(openDev)closeDrawer();return}
+  if(typing||e.metaKey||e.ctrlKey||e.altKey)return;
+  if(e.key==="/"){e.preventDefault();palOpen();return}
+  if(e.key==="?"){helpModal();return}
+  if(window.__g){const m={n:"now",d:"devices",p:"profiles",w:"network",m:"more"}[e.key];window.__g=0;if(m)go(m);return}
+  if(e.key==="g"){window.__g=1;setTimeout(()=>window.__g=0,900)}
+});
+$("#modal").addEventListener("click",e=>{if(e.target.id==="modal")closeModal()});
+
+/* ---------- start ---------- */
+(function init(){
+  const v=location.hash.slice(1);if(PLACES.some(p=>p[0]===v))view=v;
+  render();
+  setTimeout(()=>{skeleton=false;if(view==="now")renderNow();tick(true)},500);
+})();
+})();
+</script>
+</body>
+</html>

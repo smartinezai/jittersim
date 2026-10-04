@@ -97,13 +97,13 @@ Release tried: ________________  Date: ________________
   - **Warning:** a wrong password only once. The router locks its login after a few tries.
 - [ ] **Router password memory**
   - Do: tick **Remember for 24 hours** under the router password. Reload the page.
-  - Expect: the password comes back and the router status keeps updating without typing. Press **Clear** afterwards if the computer is shared.
+  - Expect: the password comes back. The router switch stays unavailable until you choose **Check router Wi-Fi**. That deliberate check shows the confirmed state and last check time. Press **Clear** afterwards if the computer is shared.
 - [ ] **Copy router Wi-Fi to Pi from the sidebar**
   - Do: from Ethernet with the router password accepted press **Copy router Wi-Fi to Pi** in the sidebar. Check the preview then cancel once. Repeat and confirm only when a test Wi-Fi restart is acceptable.
   - Expect: there is one combined button. Cancelling changes nothing. Confirming applies the router's Wi-Fi name and password together. The password is not displayed or copied to the clipboard. A rejected router password blocks another attempt until you edit it.
   - **Warning:** this changes the test Wi-Fi and disconnects its clients while it restarts. Keep Ethernet access throughout the check.
 - [ ] **Router Wi-Fi switch**
-  - Do: from a computer on Ethernet turn the sidebar **Router Wi-Fi** switch off then on again. A separate session also owns this check so tick it only if you did it yourself.
+  - Do: from a computer on Ethernet choose **Check router Wi-Fi** first then turn the sidebar **Router Wi-Fi** switch off then on again. Tick this only after performing the physical check.
   - Expect: the switch shows `Changing` then the confirmed state. Devices on the router Wi-Fi drop and come back.
   - **Warning:** turning it off cuts every device on the router Wi-Fi. Turn it back on with the same switch or from a computer on Ethernet. The test Wi-Fi cannot reach the router page.
 
