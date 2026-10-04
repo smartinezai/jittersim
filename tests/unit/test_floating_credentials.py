@@ -171,7 +171,8 @@ CASES = {
       assert.deepEqual(
         networkCalls.map(call => JSON.parse(call.options.body).refresh), [true, false]);
       assert.equal(timers.size, 0);
-      assert.equal(element("router-wifi-toggle").disabled, false);
+      assert.equal(element("router-wifi-toggle").disabled, true);
+      assert.match(element("router-wifi-toggle").title, /disabled for recovery safety/);
     """,
     "failed_explicit_check_does_not_schedule_another_check": r"""
       helperConfigured = true;
@@ -217,7 +218,8 @@ CASES = {
       network = async () => ({ok:true, json:async () => ({result: {
         enabled:true, checked_at:clock/1000, busy:false}})});
       await pollRouterWifi();
-      assert.equal(element("router-wifi-toggle").disabled, false);
+      assert.equal(element("router-wifi-toggle").disabled, true);
+      assert.match(element("router-wifi-toggle").title, /disabled for recovery safety/);
       clock += 46000;
       const before = networkCalls.length;
       element("router-wifi-toggle").listeners.get("click")({
@@ -289,7 +291,8 @@ CASES = {
       network = async () => ({ok:true, json:async () => ({result: {
         enabled:false, checked_at:clock/1000, busy:false, changing:false, retry_after:15}})});
       await pollRouterWifi();
-      assert.equal(element("router-wifi-toggle").disabled, false);
+      assert.equal(element("router-wifi-toggle").disabled, true);
+      assert.match(element("router-wifi-toggle").title, /disabled for recovery safety/);
       assert.equal(element("router-wifi-toggle").getAttribute("aria-checked"), "false");
       assert.match(element("router-wifi-status").textContent, /^Off/);
       clock += 46000;

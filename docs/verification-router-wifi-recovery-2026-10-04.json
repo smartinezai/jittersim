@@ -53,5 +53,25 @@
     "sync_and_background_router_write_refusal": true,
     "router_factory_never_called": true,
     "production_source_unchanged_since_f8a46e7": true
+  },
+  "broader_local_suite": {
+    "python": "3.12",
+    "passed": 5461,
+    "skipped": 41,
+    "failed": 14,
+    "duration_seconds": 533.32,
+    "failure_breakdown": {
+      "unadmitted_helper_source": 11,
+      "stale_readonly_switch_expectations": 3
+    },
+    "complete_ci_pipeline": false
+  },
+  "readonly_expectation_followup": {
+    "production_source_changed": false,
+    "stale_expectations_updated": 3,
+    "macos_python_3_12_passed": 62,
+    "linux_python_3_13_passed": 62,
+    "remaining_known_failures": "11 exact-source admission checks",
+    "full_suite_rerun_after_test_only_changes": false
   }
 }

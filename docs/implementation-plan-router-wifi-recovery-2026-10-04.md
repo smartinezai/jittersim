@@ -129,3 +129,19 @@ The repair remains local. Independent complete-source approval, exact source
 admission and full release validation still prevent deployment. Passing these
 HTTP checks does not identify the original outage cause or establish readiness
 for another copied-name cutover.
+
+
+## Broader suite and read-only expectation correction
+
+The broader Python 3.12 run finished with 5,461 passes, 41 skips and 14
+failures in 533 seconds. Eleven failures are the unadmitted helper-source
+gate. Three tests expected the router switch to become clickable after a
+successful status check. Those expectations now require it to stay disabled
+and display the recovery-safety explanation. Status and expiry assertions
+remain intact. No production code changed during this correction.
+
+The complete credential-state file and HTTP refusal cases then passed all
+62 checks on both macOS Python 3.12 and Linux Python 3.13. Error lint and
+whitespace checks passed. The broader suite was not repeated after these
+test-only changes. This is not a green release pipeline. The exact-source
+review and admission gate remains unresolved. No push or deployment occurred.
