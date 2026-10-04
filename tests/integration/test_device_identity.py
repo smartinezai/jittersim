@@ -73,7 +73,7 @@ class DeviceIdentityTests(unittest.TestCase):
         status, response = self.assign()
 
         self.assertEqual(status, 409)
-        self.assertIn("Several saved devices", response["error"])
+        self.assertIn("Multiple saved assignments use this MAC address", response["error"])
         self.assertEqual(self.repository.get_device("alice"), self.device)
 
     def test_manual_assignment_cannot_add_a_duplicate_mac(self):
@@ -86,14 +86,16 @@ class DeviceIdentityTests(unittest.TestCase):
         self.assertEqual(self.repository.list_devices(), (self.device,))
 
     def test_connected_assignment_keeps_the_original_edit_snapshot(self):
-        original_list = self.repository.list_devices
+        original_lookup = self.repository.get_device_by_mac_address
 
-        def changed_after_read():
-            snapshot = original_list()
+        def changed_after_read(mac_address):
+            snapshot = original_lookup(mac_address)
             self.repository.save_device(replace(self.device, name="Changed elsewhere"))
             return snapshot
 
-        with patch.object(self.repository, "list_devices", side_effect=changed_after_read):
+        with patch.object(
+            self.repository, "get_device_by_mac_address", side_effect=changed_after_read
+        ):
             status, response = self.assign()
 
         self.assertEqual(status, 409, response)
@@ -103,7 +105,8 @@ class DeviceIdentityTests(unittest.TestCase):
     def test_new_connected_assignment_cannot_replace_a_concurrently_claimed_id(self):
         self.repository.delete_device("alice")
         original_snapshot = self.server.helper_client.connected_device_snapshot
-        other = Device("client-192-168-50-178", "Other", "192.168.50.42", "normal", "aa:bb:cc:dd:ee:ff")
+        # The ID a new assignment would get, claimed by someone else meanwhile.
+        other = Device("client-dc1ed53e974c", "Other", "192.168.50.42", "normal", "aa:bb:cc:dd:ee:ff")
 
         def claimed_during_discovery():
             self.repository.save_device(other)

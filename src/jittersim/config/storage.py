@@ -1,21 +1,30 @@
 """SQLite persistence for validated jittersim configuration."""
 
+import functools
+import inspect
 import json
+import re
 import sqlite3
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import Dict, Iterable, Optional, Sequence, Tuple, Union
 
+from .adblocking import allowed_domains, blocking_macs
 from .device_labels import (
     MAX_SAVED_CONNECTED_DEVICE_LABELS,
     normalize_device_display_name,
     normalize_device_mac,
     normalize_device_type,
 )
+from .exemptions import (
+    MAX_ADDRESS_MOVES, MAX_UNAFFECTED_DEVICES, AddressMove, UnaffectedDevice, normalize_exempt_mac,
+)
+from .payloads import impairment_payload, profile_payload
 from .models import (
-    MAX_UNAFFECTED_DEVICES,
     AccessOptions,
     DataLimit,
     Device,
@@ -27,6 +36,7 @@ from .models import (
     Profile,
     Progression,
     Randomness,
+    RandomWebsiteOutcome,
     RuntimeState,
     SavedSettings,
     Scenario,
@@ -34,13 +44,14 @@ from .models import (
     ScenarioStep,
     Schedule,
     ServiceAssignment,
+    ServiceList,
     ServiceQuota,
     SiteBlock,
     TimeQuota,
     Timer,
-    UnaffectedDevice,
     ValidationError,
     WebsitePolicy,
+    time_quota_counter_id,
 )
 
 
@@ -60,6 +71,11 @@ DatabasePath = Union[str, Path]
 _DOMAIN_RETENTION_SECONDS = 30 * 24 * 60 * 60
 _MAX_DOMAIN_OBSERVATIONS = 20_000
 _MAX_OBSERVATIONS_PER_DEVICE = 50
+_SECONDS_PER_UTC_DAY = 24 * 60 * 60
+_RANDOM_WEBSITE_ANALYTICS_RETENTION_DAYS = 30
+_MAX_RANDOM_WEBSITE_ANALYTICS_ROWS = 50_000
+MAX_RANDOM_WEBSITE_ANALYTICS_BATCH = 50_000
+_MAX_RANDOM_WEBSITE_ANALYTICS_RESPONSE_ROWS = 5_000
 MIN_TRAFFIC_RATE_KBIT = 100
 MAX_TRAFFIC_RATE_KBIT = 1_000_000
 TRAFFIC_RATE_STEP_KBIT = 100
@@ -91,7 +107,7 @@ _SCHEDULES_TABLE_SQL = """
 
 
 def _serialize_impairment(impairment: Impairment) -> str:
-    return json.dumps(asdict(impairment), sort_keys=True)
+    return json.dumps(impairment_payload(impairment), sort_keys=True)
 
 
 def _deserialize_randomness(data: dict, field_name: str) -> None:
@@ -124,9 +140,13 @@ def _deserialize_impairment(value: str) -> Impairment:
 
 
 def _serialize_profile_settings(profile: Profile) -> str:
-    settings = asdict(profile)
+    settings = profile_payload(profile)
     for field_name in ("id", "name", "upload", "download", "random_seed"):
         settings.pop(field_name, None)
+    if profile.homepage_bounce_percent == 0:
+        settings.pop("homepage_bounce_percent", None)
+    if profile.random_mode == "repeatable":
+        settings.pop("random_mode", None)
     return json.dumps(settings, sort_keys=True)
 
 
@@ -145,11 +165,18 @@ def _deserialize_profile_settings(value: str) -> dict:
 
 
 class ConfigRepository:
-    """Store profiles and device assignments in a local SQLite database."""
+    """Store profiles and device assignments in a local SQLite database.
+
+    The dashboard serves requests on several threads that share one repository,
+    so the connection may be used from any thread and every method holds one
+    re-entrant lock. A call that needs several statements to stay together uses
+    `transaction()`, which keeps the lock for the whole block.
+    """
 
     def __init__(self, database_path: DatabasePath) -> None:
-        self._deferring_commits = False
-        self._connection = sqlite3.connect(str(database_path))
+        self._lock = threading.RLock()
+        self._transaction_depth = 0
+        self._connection = sqlite3.connect(str(database_path), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._initialize_schema()
@@ -165,7 +192,49 @@ class ConfigRepository:
 
         self._connection.close()
 
+    def _commit(self) -> None:
+        if not self._transaction_depth:
+            self._connection.commit()
+
+    def _rollback(self) -> None:
+        if not self._transaction_depth:
+            self._connection.rollback()
+
+    @contextmanager
+    def transaction(self):
+        """Commit related configuration writes together or restore all of them."""
+
+        with self._lock:
+            depth = self._transaction_depth
+            savepoint = f"configuration_{depth}"
+            self._connection.execute("BEGIN IMMEDIATE" if depth == 0 else f"SAVEPOINT {savepoint}")
+            self._transaction_depth += 1
+            try:
+                yield
+            except BaseException:
+                self._transaction_depth -= 1
+                if depth == 0:
+                    self._connection.rollback()
+                else:
+                    self._connection.execute(f"ROLLBACK TO {savepoint}")
+                    self._connection.execute(f"RELEASE {savepoint}")
+                raise
+            else:
+                self._transaction_depth -= 1
+                if depth == 0:
+                    try:
+                        self._connection.commit()
+                    except BaseException:
+                        self._connection.rollback()
+                        raise
+                else:
+                    self._connection.execute(f"RELEASE {savepoint}")
+
     def _initialize_schema(self) -> None:
+        # An existing settings table without access options comes from the Pi line.
+        pi_line_policies = self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'network_policies'"
+        ).fetchone() is not None
         self._connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS settings_history (
@@ -216,10 +285,38 @@ class ConfigRepository:
                 profile_id TEXT NOT NULL REFERENCES profiles(id),
                 mac_address TEXT
             );
+            CREATE TABLE IF NOT EXISTS general_profile_setting (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                profile_id TEXT REFERENCES profiles(id) ON DELETE RESTRICT
+            );
+            CREATE TABLE IF NOT EXISTS pattern_events (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                scope TEXT NOT NULL,
+                happened_at INTEGER NOT NULL,
+                event_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS pattern_events_session ON pattern_events(session_id, id);
+            CREATE INDEX IF NOT EXISTS pattern_events_time ON pattern_events(happened_at);
+            CREATE INDEX IF NOT EXISTS pattern_events_scope ON pattern_events(scope);
+            INSERT OR IGNORE INTO general_profile_setting (id, profile_id) VALUES (1, NULL);
+            CREATE TABLE IF NOT EXISTS unaffected_devices (
+                mac_address TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                created_at INTEGER NOT NULL CHECK (created_at >= 0)
+            );
             CREATE TABLE IF NOT EXISTS connected_device_labels (
                 mac_address TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
                 device_type TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ad_blocking_devices (
+                mac_address TEXT PRIMARY KEY REFERENCES unaffected_devices(mac_address)
+                    ON DELETE CASCADE ON UPDATE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS ad_blocking_allowances (
+                domain TEXT PRIMARY KEY
             );
             CREATE TABLE IF NOT EXISTS traffic_rate_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -336,6 +433,14 @@ class ConfigRepository:
                 profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
                 enabled INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS service_lists (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                services_json TEXT NOT NULL,
+                hostnames_json TEXT NOT NULL,
+                enabled INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS time_quotas (
                 id TEXT PRIMARY KEY,
                 device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -384,6 +489,14 @@ class ConfigRepository:
                 mac_address TEXT PRIMARY KEY,
                 name TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS address_moves (
+                old_mac TEXT PRIMARY KEY,
+                new_mac TEXT NOT NULL,
+                name TEXT NOT NULL,
+                moved_access INTEGER NOT NULL CHECK (moved_access IN (0, 1)),
+                moved_protection INTEGER NOT NULL CHECK (moved_protection IN (0, 1)),
+                moved_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS runtime_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 configuration_version INTEGER NOT NULL,
@@ -410,10 +523,29 @@ class ConfigRepository:
                 query_count INTEGER NOT NULL,
                 first_seen INTEGER NOT NULL,
                 last_seen INTEGER NOT NULL,
+                mac_address TEXT,
                 PRIMARY KEY (ipv4_address, domain)
             );
             CREATE INDEX IF NOT EXISTS domain_observations_last_seen_idx
                 ON domain_observations (last_seen);
+            CREATE TABLE IF NOT EXISTS domain_list_clearing (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                cleared_at INTEGER NOT NULL,
+                rows_cleared INTEGER NOT NULL CHECK (rows_cleared > 0)
+            );
+            CREATE TABLE IF NOT EXISTS random_website_analytics (
+                event_day_utc INTEGER NOT NULL,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                domain TEXT NOT NULL,
+                kept_count INTEGER NOT NULL CHECK (kept_count >= 0),
+                removed_count INTEGER NOT NULL CHECK (removed_count >= 0),
+                PRIMARY KEY (event_day_utc, device_id, domain),
+                CHECK (kept_count + removed_count > 0)
+            );
+            CREATE INDEX IF NOT EXISTS random_website_analytics_device_day_idx
+                ON random_website_analytics (device_id, event_day_utc);
+            CREATE INDEX IF NOT EXISTS random_website_analytics_event_day_idx
+                ON random_website_analytics (event_day_utc);
             -- Running query totals per client. Pruning old observations must
             -- not lower them, because DNS-driven progressions measure from them.
             CREATE TABLE IF NOT EXISTS domain_query_totals (
@@ -444,6 +576,15 @@ class ConfigRepository:
             INSERT OR IGNORE INTO everyone_else_settings (id, profile_id) VALUES (1, NULL);
             """
         )
+        self._migrate_unaffected_devices()
+        self._add_column_if_missing("unaffected_devices", "address_move_id", "TEXT NOT NULL DEFAULT ''")
+        for column, definition in (
+            ("move_id", "TEXT NOT NULL DEFAULT ''"),
+            ("phase", "TEXT NOT NULL DEFAULT 'saved'"),
+            ("previous_protection_owner", "TEXT NOT NULL DEFAULT ''"),
+            ("prepared_version", "INTEGER NOT NULL DEFAULT -1"),
+        ):
+            self._add_column_if_missing("address_moves", column, definition)
         self._connection.execute(_SCHEDULES_TABLE_SQL.format(name="schedules"))
         self._upgrade_schedules_table()
         self._connection.execute("""
@@ -457,22 +598,43 @@ class ConfigRepository:
                 CHECK (device_id IS NULL OR group_id IS NULL)
             )
         """)
-        self._add_column_if_missing("network_policies", "access_options_json", "TEXT NOT NULL DEFAULT '{}'")
+        if self._add_column_if_missing(
+            "network_policies", "access_options_json", "TEXT NOT NULL DEFAULT '{}'"
+        ) and pi_line_policies:
+            # The Pi line never filtered DNS. Household rules start off there so the
+            # first Start does not send all test-client DNS through Unbound, block
+            # subdomains or move the MAC lists into the table that survives Reset.
+            # Fresh installs and main's databases keep main's default (on).
+            self._connection.execute(
+                "UPDATE network_policies SET access_options_json = ? WHERE id = 1",
+                (json.dumps(asdict(AccessOptions(enabled=False))),),
+            )
         self._add_column_if_missing("test_sessions", "captures_json", "TEXT NOT NULL DEFAULT '[]'")
         self._add_column_if_missing("test_sessions", "captures_truncated", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("activity_log", "device_ids_json", "TEXT NOT NULL DEFAULT '[]'")
         self._add_column_if_missing("profiles", "settings_json", "TEXT NOT NULL DEFAULT '{}'")
         self._add_column_if_missing("devices", "mac_address", "TEXT")
-        self._add_column_if_missing("progressions", "traffic_target_bytes", "INTEGER NOT NULL DEFAULT 0")
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS devices_mac_idx ON devices(lower(mac_address))"
+        )
+        self._add_column_if_missing(
+            "progressions", "traffic_target_bytes", "INTEGER NOT NULL DEFAULT 0"
+        )
         self._add_column_if_missing("progressions", "traffic_baseline_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("service_quotas", "weight_percent", "INTEGER NOT NULL DEFAULT 100")
-        self._connection.execute("CREATE INDEX IF NOT EXISTS devices_mac_idx ON devices(mac_address)")
         for table in ("timers", "progressions", "scenario_runs"):
             self._connection.execute(
                 f"CREATE INDEX IF NOT EXISTS {table}_history_idx "
                 f"ON {table}(enabled, started_at DESC, id DESC)"
             )
         self._prune_run_history()
+        self._commit()
+        self._migrate_domain_observations()
+        self._commit()
+        self._prune_random_website_analytics(now=int(time.time()))
+        self._connection.execute(
+            "DELETE FROM pattern_events WHERE happened_at < ?", (int(time.time()) - 7 * 86400,)
+        )
         self._commit()
 
     def _upgrade_schedules_table(self) -> None:
@@ -513,15 +675,106 @@ class ConfigRepository:
             self._connection.rollback()
             raise StorageError("could not upgrade the saved schedules") from error
 
-    def _add_column_if_missing(self, table_name: str, column_name: str, column_definition: str) -> None:
+    def _migrate_domain_observations(self) -> None:
+        """Add the hardware address column and drop rows that can no longer be attributed.
+
+        Rows saved before the column existed have no hardware address. A device that is
+        protected already may have moved to another address since then so those rows could
+        show its lookups under an address that no longer points to it. They are a cache
+        that learns again so they are cleared once when any device is protected. The column
+        and the clearing happen in one step so a crash cannot leave the old rows behind.
+        """
+
+        with self.transaction():
+            added = self._add_column_if_missing("domain_observations", "mac_address", "TEXT")
+            protected = self._connection.execute(
+                "SELECT 1 FROM unaffected_devices LIMIT 1"
+            ).fetchone()
+            if added and protected is not None:
+                cleared = self._connection.execute(
+                    "DELETE FROM domain_observations WHERE mac_address IS NULL"
+                ).rowcount
+                if cleared > 0:
+                    self._record_domain_list_cleared(cleared)
+
+    def _record_domain_list_cleared(self, rows_cleared: int) -> None:
+        """Remember that an upgrade emptied the Traffic list so the dashboard can say so.
+
+        This runs in the transaction that clears the rows. A crash keeps both or neither and
+        the next start clears the rows again and records it once.
+        """
+
+        self._connection.execute(
+            "INSERT OR IGNORE INTO domain_list_clearing (id, cleared_at, rows_cleared) VALUES (1, ?, ?)",
+            (int(time.time()), rows_cleared),
+        )
+
+    def get_domain_list_clearing(self) -> Optional[Tuple[int, int]]:
+        """Return when an upgrade cleared the Traffic list and how many names it held.
+
+        The record goes with the first new observation, so a list that is empty with a record
+        has had no sighting since the upgrade. It returns None otherwise.
+        """
+
+        row = self._connection.execute(
+            "SELECT cleared_at, rows_cleared FROM domain_list_clearing WHERE id = 1"
+        ).fetchone()
+        return None if row is None else (row["cleared_at"], row["rows_cleared"])
+
+    def _migrate_unaffected_devices(self) -> None:
+        """Upgrade the original protection list without losing saved identities."""
+
+        with self.transaction():
+            columns = {
+                row["name"]
+                for row in self._connection.execute("PRAGMA table_info(unaffected_devices)")
+            }
+            if "display_name" in columns and "created_at" in columns:
+                return
+            if "display_name" not in columns:
+                if "name" not in columns:
+                    raise StorageError("The saved protection list has an unsupported layout")
+                self._connection.execute(
+                    "ALTER TABLE unaffected_devices RENAME COLUMN name TO display_name"
+                )
+            self._add_column_if_missing(
+                "unaffected_devices", "created_at",
+                "INTEGER NOT NULL DEFAULT 0 CHECK (created_at >= 0)",
+            )
+            rows = self._connection.execute(
+                "SELECT mac_address, display_name, created_at FROM unaffected_devices LIMIT ?",
+                (MAX_UNAFFECTED_DEVICES + 1,),
+            ).fetchall()
+            if len(rows) > MAX_UNAFFECTED_DEVICES:
+                raise StorageError("The unaffected-device list exceeds its limit")
+            try:
+                devices = [UnaffectedDevice(**dict(row)) for row in rows]
+            except ValueError as error:
+                raise StorageError("The saved protection list contains an invalid device") from error
+            if len({device.mac_address for device in devices}) != len(devices):
+                raise StorageError("The saved protection list repeats a device identity")
+            for row, device in zip(rows, devices):
+                if row["mac_address"] != device.mac_address:
+                    self._connection.execute(
+                        "UPDATE unaffected_devices SET mac_address = ? WHERE mac_address = ?",
+                        (device.mac_address, row["mac_address"]),
+                    )
+
+    def _add_column_if_missing(
+        self, table_name: str, column_name: str, column_definition: str
+    ) -> bool:
+        """Add a column an older database lacks and tell whether it was added."""
+
         columns = {
             row["name"]
             for row in self._connection.execute(f"PRAGMA table_info({table_name})").fetchall()
         }
-        if column_name not in columns:
-            self._connection.execute(
-                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
-            )
+        if column_name in columns:
+            return False
+        self._connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )
+        return True
 
     def save_profile(self, profile: Profile) -> None:
         """Insert or update one validated profile."""
@@ -551,8 +804,36 @@ class ConfigRepository:
             self._bump_configuration_version()
             self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save profile {profile.id}") from error
+
+    def get_general_profile(self) -> Optional[Profile]:
+        """Return the saved general profile without creating device assignments."""
+
+        row = self._connection.execute(
+            "SELECT profile_id FROM general_profile_setting WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            raise StorageError("the general profile setting is missing")
+        if row["profile_id"] is None:
+            return None
+        profile = self.get_profile(row["profile_id"])
+        if profile is None:
+            raise StorageError("the saved general profile is missing")
+        return profile
+
+    def save_general_profile(self, profile_id: Optional[str]) -> None:
+        """Save or clear one validated general profile reference."""
+
+        if profile_id is not None and (
+            not isinstance(profile_id, str) or self.get_profile(profile_id) is None
+        ):
+            raise StorageError("Choose an existing saved profile")
+        self._connection.execute(
+            "UPDATE general_profile_setting SET profile_id = ? WHERE id = 1", (profile_id,)
+        )
+        self._bump_configuration_version()
+        self._commit()
 
     def save_device(
         self, device: Device, *, expected: Optional[Device] = None, create_only: bool = False
@@ -604,10 +885,10 @@ class ConfigRepository:
             self._bump_configuration_version()
             self._commit()
         except DeviceConflictError:
-            self._connection.rollback()
+            self._rollback()
             raise
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise DeviceConflictError(
                 f"could not save device {device.id}: check its profile and address"
             ) from error
@@ -693,7 +974,7 @@ class ConfigRepository:
             )
             self._commit()
         except sqlite3.Error as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not record action history") from error
 
     def list_recent_actions(self, *, limit: int = 50) -> tuple:
@@ -763,7 +1044,7 @@ class ConfigRepository:
             )
             self._commit()
         except sqlite3.Error as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not record activity") from error
 
     def list_activity(self) -> tuple:
@@ -807,6 +1088,8 @@ class ConfigRepository:
                 temporary_path = Path(temporary.name)
             target = sqlite3.connect(str(temporary_path))
             self._connection.backup(target)
+            target.execute("DROP TABLE IF EXISTS random_website_analytics")
+            target.commit()
             target.close()
             target = None
             return temporary_path.read_bytes()
@@ -882,9 +1165,9 @@ class ConfigRepository:
             )
             if cursor.rowcount != 1:
                 raise StorageError("traffic rate settings are missing")
-            self._connection.commit()
+            self._commit()
         except sqlite3.Error as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not save traffic rate settings") from error
         return {
             "upload_kbit": upload_kbit,
@@ -942,12 +1225,14 @@ class ConfigRepository:
     def get_device_by_mac_address(self, mac_address: str) -> Optional[Device]:
         """Return the device assignment saved with one MAC address or `None`."""
 
-        row = self._connection.execute(
+        rows = self._connection.execute(
             "SELECT id, name, ipv4_address, profile_id, mac_address FROM devices "
-            "WHERE mac_address = ? ORDER BY id",
-            (mac_address,),
-        ).fetchone()
-        return None if row is None else self._device_from_row(row)
+            "WHERE lower(mac_address) = ? LIMIT 2",
+            (normalize_exempt_mac(mac_address),),
+        ).fetchall()
+        if len(rows) > 1:
+            raise StorageError("Multiple saved assignments use this MAC address")
+        return None if not rows else self._device_from_row(rows[0])
 
     def get_everyone_else_profile_id(self) -> Optional[str]:
         """Return the profile for test Wi-Fi clients that aren't saved or unaffected."""
@@ -967,43 +1252,222 @@ class ConfigRepository:
             self._bump_configuration_version()
             self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"profile {profile_id} does not exist") from error
 
     def list_unaffected_devices(self) -> tuple:
-        """Return the devices that keep a normal connection, in address order."""
-
         rows = self._connection.execute(
-            "SELECT mac_address, name FROM unaffected_devices ORDER BY mac_address"
+            "SELECT mac_address, display_name, created_at FROM unaffected_devices "
+            "ORDER BY mac_address LIMIT ?",
+            (MAX_UNAFFECTED_DEVICES + 1,),
         ).fetchall()
+        if len(rows) > MAX_UNAFFECTED_DEVICES:
+            raise StorageError("The unaffected-device list exceeds its limit")
         try:
-            return tuple(UnaffectedDevice(row["mac_address"], row["name"]) for row in rows)
-        except ValidationError as error:
-            raise StorageError("stored unaffected device is malformed") from error
+            return tuple(UnaffectedDevice(**dict(row)) for row in rows)
+        except (TypeError, ValueError) as error:
+            raise StorageError("stored unaffected device is invalid") from error
 
     def save_unaffected_device(self, device: UnaffectedDevice) -> None:
-        """Add or rename one unaffected device."""
-
-        exists = self._connection.execute(
-            "SELECT 1 FROM unaffected_devices WHERE mac_address = ?", (device.mac_address,)
-        ).fetchone()
-        count = self._connection.execute("SELECT COUNT(*) FROM unaffected_devices").fetchone()[0]
-        if exists is None and count >= MAX_UNAFFECTED_DEVICES:
-            raise StorageError(
-                f"the unaffected list holds at most {MAX_UNAFFECTED_DEVICES} devices"
+        with self.transaction():
+            count = self._connection.execute("SELECT count(*) FROM unaffected_devices").fetchone()[
+                0
+            ]
+            exists = self._connection.execute(
+                "SELECT 1 FROM unaffected_devices WHERE mac_address = ?",
+                (device.mac_address,),
+            ).fetchone()
+            if not exists and count >= MAX_UNAFFECTED_DEVICES:
+                raise StorageError("The unaffected-device list can contain at most 256 devices")
+            self._connection.execute(
+                "INSERT INTO unaffected_devices (mac_address, display_name, created_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(mac_address) DO UPDATE SET display_name = excluded.display_name, "
+                "address_move_id = ''",
+                (device.mac_address, device.display_name, device.created_at),
             )
-        self._connection.execute(
-            "INSERT INTO unaffected_devices (mac_address, name) VALUES (?, ?) "
-            "ON CONFLICT(mac_address) DO UPDATE SET name = excluded.name",
-            (device.mac_address, device.name),
-        )
-        self._bump_configuration_version()
-        self._commit()
+            device_ids = {row[0] for row in self._connection.execute(
+                "SELECT id FROM devices WHERE mac_address = ?", (device.mac_address,)
+            )}
+            scopes = set(device_ids)
+            scopes.update(f"assignment:{item.id}" for item in self.list_service_assignments() if item.device_id in device_ids)
+            scopes.update(f"quota:{item.id}" for item in self.list_service_quotas() if item.device_id in device_ids)
+            scopes.update(f"quota:{time_quota_counter_id(item.id)}" for item in self.list_time_quotas() if item.device_id in device_ids)
+            self._connection.executemany("DELETE FROM pattern_events WHERE scope = ?", ((scope,) for scope in scopes))
+            self._bump_configuration_version()
 
     def delete_unaffected_device(self, mac_address: str) -> bool:
-        """Remove one device from the unaffected list."""
+        with self.transaction():
+            cursor = self._connection.execute(
+                "DELETE FROM unaffected_devices WHERE mac_address = ?",
+                (normalize_exempt_mac(mac_address),),
+            )
+            if cursor.rowcount:
+                self._bump_configuration_version()
+            return bool(cursor.rowcount)
 
-        return self._delete_row("unaffected_devices", "mac_address", mac_address)
+    @contextmanager
+    def address_move_transaction(self):
+        """Keep a failed identity commit from leaving an open transaction."""
+        depth = self._transaction_depth
+        try:
+            with self.transaction():
+                yield
+        except sqlite3.Error as error:
+            if depth == 0:
+                self._connection.rollback()
+            raise StorageError("Device move could not be saved.") from error
+
+    def address_move_protection_owner(self, mac_address: str) -> Optional[str]:
+        row = self._connection.execute(
+            "SELECT address_move_id FROM unaffected_devices WHERE mac_address = ?",
+            (normalize_exempt_mac(mac_address),),
+        ).fetchone()
+        if row is None:
+            return None
+        owner = row[0]
+        if not isinstance(owner, str) or owner and not re.fullmatch(r"[0-9a-f]{32}", owner):
+            raise StorageError("Saved protection ownership is invalid.")
+        return owner
+
+    def claim_address_move_protection(self, mac_address: str, move_id: str) -> None:
+        if move_id and not re.fullmatch(r"[0-9a-f]{32}", move_id):
+            raise ValueError("move ownership identifier is invalid")
+        self._connection.execute(
+            "UPDATE unaffected_devices SET address_move_id = ? WHERE mac_address = ?",
+            (move_id, normalize_exempt_mac(mac_address)),
+        )
+        self._commit()
+
+    def list_address_moves(self) -> tuple:
+        rows = self._connection.execute(
+            "SELECT old_mac, new_mac, name, moved_access, moved_protection, moved_at, "
+            "move_id, phase, previous_protection_owner, prepared_version "
+            "FROM address_moves ORDER BY moved_at DESC, old_mac LIMIT ?",
+            (MAX_ADDRESS_MOVES + 1,),
+        ).fetchall()
+        if len(rows) > MAX_ADDRESS_MOVES:
+            raise StorageError("The device move history exceeds its limit.")
+        try:
+            return tuple(
+                AddressMove(
+                    row[0],
+                    row[1],
+                    row[2],
+                    bool(row[3]),
+                    bool(row[4]),
+                    row[5],
+                    row[6],
+                    row[7],
+                    row[8],
+                    row[9],
+                )
+                for row in rows
+            )
+        except (TypeError, ValueError) as error:
+            raise StorageError("stored address move is invalid") from error
+
+    def get_address_move(self, old_mac: str):
+        key = normalize_exempt_mac(old_mac)
+        return next((move for move in self.list_address_moves() if move.old_mac == key), None)
+
+    def save_address_move(self, move: AddressMove) -> None:
+        """Keep bounded ownership evidence without evicting unfinished recovery."""
+        with self.address_move_transaction():
+            moves = self.list_address_moves()
+            existing = next((item for item in moves if item.old_mac == move.old_mac), None)
+            if existing is not None and existing.move_id != move.move_id:
+                raise StorageError("Resolve the existing move before replacing it.")
+            if existing is not None and (
+                existing.new_mac != move.new_mac
+                or existing.phase == "undoing"
+                and move.phase != "undoing"
+                or existing.phase == "saved"
+                and move.phase == "pending"
+            ):
+                raise StorageError("Move recovery cannot be replaced by an earlier phase.")
+            if existing is None and len(moves) >= MAX_ADDRESS_MOVES:
+                raise StorageError("Device move history is full. Resolve earlier moves first.")
+            self._connection.execute(
+                "INSERT INTO address_moves "
+                "(old_mac, new_mac, name, moved_access, moved_protection, moved_at, "
+                "move_id, phase, previous_protection_owner, prepared_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(old_mac) DO UPDATE SET "
+                "new_mac = excluded.new_mac, name = excluded.name, "
+                "moved_access = excluded.moved_access, moved_protection = excluded.moved_protection, "
+                "moved_at = excluded.moved_at, phase = excluded.phase, "
+                "previous_protection_owner = excluded.previous_protection_owner, "
+                "prepared_version = excluded.prepared_version",
+                (
+                    move.old_mac,
+                    move.new_mac,
+                    move.name,
+                    int(move.moved_access),
+                    int(move.moved_protection),
+                    move.moved_at,
+                    move.move_id,
+                    move.phase,
+                    move.previous_protection_owner,
+                    move.prepared_version,
+                ),
+            )
+
+    def delete_address_move(self, old_mac: str) -> bool:
+        with self.transaction():
+            cursor = self._connection.execute(
+                "DELETE FROM address_moves WHERE old_mac = ?", (normalize_exempt_mac(old_mac),)
+            )
+            return bool(cursor.rowcount)
+
+    def list_ad_blocking_devices(self) -> tuple:
+        return blocking_macs(tuple(row['mac_address'] for row in self._connection.execute(
+            'SELECT mac_address FROM ad_blocking_devices ORDER BY mac_address LIMIT 257'
+        )))
+
+    def set_ad_blocking(self, mac_address: str, enabled: bool) -> None:
+        mac = normalize_exempt_mac(mac_address)
+        if type(enabled) is not bool:
+            raise ValueError('Choose whether ad blocking is on or off')
+        with self.transaction():
+            if self._connection.execute('SELECT 1 FROM unaffected_devices WHERE mac_address = ?',
+                                        (mac,)).fetchone() is None:
+                raise ValueError('Protect this device before enabling ad blocking')
+            if enabled:
+                self._connection.execute('INSERT OR IGNORE INTO ad_blocking_devices VALUES (?)', (mac,))
+            else:
+                self._connection.execute('DELETE FROM ad_blocking_devices WHERE mac_address = ?', (mac,))
+            self._bump_configuration_version()
+
+    def list_ad_blocking_allowances(self) -> tuple:
+        return allowed_domains(tuple(row['domain'] for row in self._connection.execute(
+            'SELECT domain FROM ad_blocking_allowances ORDER BY domain LIMIT 257'
+        )))
+
+    def set_ad_blocking_allowances(self, values) -> None:
+        domains = allowed_domains(values)
+        with self.transaction():
+            self._connection.execute('DELETE FROM ad_blocking_allowances')
+            self._connection.executemany('INSERT INTO ad_blocking_allowances VALUES (?)',
+                                         ((domain,) for domain in domains))
+            self._bump_configuration_version()
+
+    def rebase_time_quota_sample(self, quota_id: str, *, now: int) -> None:
+        self._connection.execute(
+            "UPDATE time_quotas SET last_sample_at = ? WHERE id = ?",
+            (now, quota_id),
+        )
+        self._commit()
+
+    def rebase_quota_counters(self, *, now: int) -> None:
+        """Preserve spent usage when applying a replacement counter table."""
+
+        for table in ("data_limits", "group_data_limits", "service_quotas"):
+            self._connection.execute(f"UPDATE {table} SET counter_bytes = 0")
+        self._connection.execute(
+            "UPDATE time_quotas SET counter_bytes = 0, last_sample_at = ?",
+            (now,),
+        )
+        self._commit()
 
     def list_connected_device_labels(self) -> Dict[str, Dict[str, str]]:
         """Read locally saved names and types for Wi-Fi client addresses."""
@@ -1054,9 +1518,9 @@ class ConfigRepository:
                 "device_type = excluded.device_type",
                 (mac, name, kind),
             )
-            self._connection.commit()
+            self._commit()
         except sqlite3.Error as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not save connected-device label") from error
 
     def delete_connected_device_label(self, *, mac_address: str) -> None:
@@ -1070,10 +1534,41 @@ class ConfigRepository:
             self._connection.execute(
                 "DELETE FROM connected_device_labels WHERE mac_address = ?", (mac,)
             )
-            self._connection.commit()
+            self._commit()
         except sqlite3.Error as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not remove connected-device label") from error
+
+    def save_pattern_events(self, events: Sequence[dict], *, now: int) -> None:
+        """Retain bounded configuration choices without recording traffic contents."""
+
+        if len(events) > 1000:
+            raise StorageError("Too many pattern events in one update")
+        try:
+            with self.transaction():
+                for event in events:
+                    self._connection.execute(
+                        "INSERT INTO pattern_events (session_id, profile_id, scope, happened_at, event_json) VALUES (?, ?, ?, ?, ?)",
+                        (event["session_id"], event["profile_id"], event["scope"], event["happened_at"], json.dumps(event)),
+                    )
+                self._connection.execute("DELETE FROM pattern_events WHERE happened_at < ?", (now - 7 * 86400,))
+                for session_id in {event["session_id"] for event in events}:
+                    self._connection.execute(
+                        "DELETE FROM pattern_events WHERE session_id = ? AND id NOT IN (SELECT id FROM pattern_events WHERE session_id = ? ORDER BY id DESC LIMIT 1000)",
+                        (session_id, session_id),
+                    )
+                self._connection.execute(
+                    "DELETE FROM pattern_events WHERE id NOT IN (SELECT id FROM pattern_events ORDER BY id DESC LIMIT 10000)"
+                )
+        except sqlite3.Error as error:
+            raise StorageError("Could not save pattern history") from error
+
+    def list_pattern_events(self, *, now: int) -> tuple:
+        rows = self._connection.execute(
+            "SELECT event_json FROM pattern_events WHERE happened_at >= ? ORDER BY id DESC LIMIT 100",
+            (now - 7 * 86400,),
+        ).fetchall()
+        return tuple(json.loads(row[0]) for row in rows)
 
     def list_profiles(self) -> tuple:
         """Return all stored profiles in stable identifier order."""
@@ -1162,7 +1657,7 @@ class ConfigRepository:
         try:
             return self._delete_row("profiles", "id", profile_id)
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"profile {profile_id} is still in use") from error
 
     def delete_device(self, device_id: str) -> bool:
@@ -1184,14 +1679,8 @@ class ConfigRepository:
             self._commit()
             return True
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("remove site rules for this device or its last group before deleting it") from error
-
-    def _commit(self) -> None:
-        # replace_settings defers the commits of the save methods it calls so
-        # the whole replacement is one transaction.
-        if not self._deferring_commits:
-            self._connection.commit()
 
     def access_settings(self) -> SavedSettings:
         """Read only the settings needed by persistent access controls."""
@@ -1224,7 +1713,17 @@ class ConfigRepository:
             persist_profiles_after_gateway_outage=(
                 self.get_persist_profiles_after_gateway_outage()
             ),
+            general_profile_id=self._general_profile_id(),
+            service_lists=self.list_service_lists(),
+            ad_blocking_devices=self.list_ad_blocking_devices(),
+            ad_blocking_allowances=self.list_ad_blocking_allowances(),
         )
+
+    def _general_profile_id(self) -> Optional[str]:
+        row = self._connection.execute(
+            "SELECT profile_id FROM general_profile_setting WHERE id = 1"
+        ).fetchone()
+        return None if row is None else row["profile_id"]
 
     def get_check_staged_updates_on_open(self) -> bool:
         """Return whether the dashboard checks for a staged release on open."""
@@ -1247,11 +1746,11 @@ class ConfigRepository:
                 (int(enabled),),
             )
             if cursor.rowcount != 1:
-                self._connection.rollback()
+                self._rollback()
                 raise StorageError("dashboard update preference is unavailable")
-            self._connection.commit()
+            self._commit()
         except sqlite3.Error as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not save dashboard update preference") from error
 
     def get_persist_profiles_after_gateway_outage(self) -> bool:
@@ -1272,126 +1771,154 @@ class ConfigRepository:
         if not isinstance(enabled, bool):
             raise StorageError("gateway-outage persistence must be true or false")
         try:
-            self._connection.execute("BEGIN IMMEDIATE")
-            if expected_version is not None and (
-                isinstance(expected_version, bool)
-                or not isinstance(expected_version, int)
-                or self.get_runtime_state().configuration_version != expected_version
-            ):
-                raise DeviceConflictError("settings changed since this form was loaded")
-            current = self.get_persist_profiles_after_gateway_outage()
-            if current != enabled:
-                self._connection.execute(
-                    "UPDATE experiment_settings SET persist_profiles_after_gateway_outage = ? WHERE id = 1",
-                    (int(enabled),),
-                )
-                self._bump_configuration_version()
-            self._connection.commit()
-        except DeviceConflictError:
-            self._connection.rollback()
-            raise
+            with self.transaction():
+                if expected_version is not None and (
+                    isinstance(expected_version, bool)
+                    or not isinstance(expected_version, int)
+                    or self.get_runtime_state().configuration_version != expected_version
+                ):
+                    raise DeviceConflictError("settings changed since this form was loaded")
+                current = self.get_persist_profiles_after_gateway_outage()
+                if current != enabled:
+                    self._connection.execute(
+                        "UPDATE experiment_settings "
+                        "SET persist_profiles_after_gateway_outage = ? WHERE id = 1",
+                        (int(enabled),),
+                    )
+                    self._bump_configuration_version()
         except sqlite3.Error as error:
-            self._connection.rollback()
             raise StorageError("could not save gateway-outage persistence") from error
         return self.get_runtime_state().configuration_version
 
-    def replace_settings(self, settings: SavedSettings, *, expected_version: Optional[int] = None, preserve_usage: bool = False) -> None:
+    def replace_settings(
+        self,
+        settings: SavedSettings,
+        *,
+        expected_version: Optional[int] = None,
+        preserve_usage: bool = False,
+        observation_addresses: Iterable[str] = (),
+    ) -> None:
         """Replace every saved setting at once. On failure nothing changes.
 
-        DNS observations, action history and the runtime state stay. Timers,
-        progressions and scenario runs are removed because they belong to the
-        replaced devices, groups and scenarios.
+        Action history and the runtime state stay. DNS observations stay except
+        those of devices the new settings protect: protected devices are never
+        monitored so their stored names go in the same transaction. Matching uses
+        the recorded hardware address, the addresses of saved devices with that
+        hardware address and `observation_addresses` (connected clients that the
+        caller found). Timers, progressions and scenario runs are removed because
+        they belong to the replaced devices, groups and scenarios.
         """
 
-        usage = {}
-        if expected_version is not None:
-            self._connection.execute("BEGIN IMMEDIATE")
-            if self.get_runtime_state().configuration_version != expected_version:
-                self._connection.rollback()
-                raise StorageError("settings changed since the preview")
-        if preserve_usage:
-            for table, key, columns in (
-                ("data_limits", ("device_id",), ("used_bytes", "counter_bytes", "last_reset_at")),
-                ("group_data_limits", ("group_id",), ("used_bytes", "counter_bytes", "last_reset_at")),
-                ("service_quotas", ("id", "device_id"), ("used_bytes", "counter_bytes", "last_reset_at")),
-                ("time_quotas", ("id", "device_id"), ("used_seconds", "counter_bytes", "last_reset_at", "last_sample_at", "started_at", "expires_at")),
-            ):
-                usage[table] = (key, columns, self._connection.execute(
-                    "SELECT " + ", ".join(key + columns) + " FROM " + table
-                ).fetchall())
-        self._deferring_commits = True
         try:
-            # The everyone-else profile refers to a profile that is replaced below.
-            self._connection.execute("UPDATE everyone_else_settings SET profile_id = NULL")
-            for table in (
-                "site_blocks",
-                "scenario_runs",
-                "scenarios",
-                "unaffected_devices",
-                "service_assignments",
-                "time_quotas",
-                "service_quotas",
-                "group_data_limits",
-                "data_limits",
-                "schedules",
-                "timers",
-                "progressions",
-                "device_groups",
-                "devices",
-                "profiles",
-            ):
-                self._connection.execute(f"DELETE FROM {table}")
-            for profile in settings.profiles:
-                self.save_profile(profile)
-            for device in settings.devices:
-                self.save_device(device)
-            for group in settings.groups:
-                self.save_device_group(group)
-            for schedule in settings.schedules:
-                self.save_schedule(schedule)
-            for scenario in settings.scenarios:
-                self.save_scenario(scenario)
-            self.save_mac_policy(settings.mac_policy)
-            self.save_website_policy(settings.website_policy)
-            self._write_site_blocks(settings.site_blocks)
-            self._connection.execute(
-                "UPDATE network_policies SET access_options_json = ? WHERE id = 1",
-                (json.dumps(asdict(settings.access_options)),),
-            )
-            self._connection.execute(
-                "UPDATE experiment_settings SET persist_profiles_after_gateway_outage = ? WHERE id = 1",
-                (int(settings.persist_profiles_after_gateway_outage),),
-            )
-            for data_limit in settings.data_limits:
-                self.save_data_limit(data_limit)
-            for group_data_limit in settings.group_data_limits:
-                self.save_group_data_limit(group_data_limit)
-            for service_quota in settings.service_quotas:
-                self.save_service_quota(service_quota)
-            for time_quota in settings.time_quotas:
-                self.save_time_quota(time_quota)
-            for assignment in settings.service_assignments:
-                self.save_service_assignment(assignment)
-            for unaffected in settings.unaffected_devices:
-                self.save_unaffected_device(unaffected)
-            self.save_everyone_else_profile_id(settings.everyone_else_profile_id)
-            for table, (key, columns, rows) in usage.items():
-                for row in rows:
-                    self._connection.execute(
-                        "UPDATE " + table + " SET " + ", ".join(column + " = ?" for column in columns)
-                        + " WHERE " + " AND ".join(column + " = ?" for column in key),
-                        tuple(row[column] for column in columns + key)
-                    )
-        except BaseException as error:
-            # Any error, not only a storage one, must not leave a half-replaced
-            # configuration for the next save to commit.
-            self._connection.rollback()
-            if isinstance(error, sqlite3.Error):
-                raise StorageError("could not replace the saved settings") from error
-            raise
-        finally:
-            self._deferring_commits = False
-        self._connection.commit()
+            with self.transaction():
+                if (
+                    expected_version is not None
+                    and self.get_runtime_state().configuration_version != expected_version
+                ):
+                    raise StorageError("settings changed since the preview")
+                ad_devices = blocking_macs(settings.ad_blocking_devices)
+                ad_allowances = allowed_domains(settings.ad_blocking_allowances)
+                if set(ad_devices) - {item.mac_address for item in settings.unaffected_devices}:
+                    raise ValueError("Ad blocking needs a protected device")
+                usage = {}
+                if preserve_usage:
+                    for table, key, columns in (
+                        ("data_limits", ("device_id",),
+                         ("used_bytes", "counter_bytes", "last_reset_at")),
+                        ("group_data_limits", ("group_id",),
+                         ("used_bytes", "counter_bytes", "last_reset_at")),
+                        ("service_quotas", ("id", "device_id"),
+                         ("used_bytes", "counter_bytes", "last_reset_at")),
+                        ("time_quotas", ("id", "device_id"),
+                         ("used_seconds", "counter_bytes", "last_reset_at", "last_sample_at",
+                          "started_at", "expires_at")),
+                    ):
+                        usage[table] = (key, columns, self._connection.execute(
+                            "SELECT " + ", ".join(key + columns) + " FROM " + table
+                        ).fetchall())
+                newly_protected = {
+                    item.mac_address for item in settings.unaffected_devices
+                } - {item.mac_address for item in self.list_unaffected_devices()}
+                protected_addresses = set(observation_addresses) | {
+                    str(device.ipv4_address)
+                    for device in self.list_devices() + tuple(settings.devices)
+                    if device.mac_address in newly_protected
+                }
+                # The everyone-else and general profiles refer to profiles replaced below.
+                self._connection.execute("UPDATE everyone_else_settings SET profile_id = NULL")
+                self._connection.execute("UPDATE general_profile_setting SET profile_id = NULL")
+                for table in (
+                    "site_blocks",
+                    "scenario_runs",
+                    "scenarios",
+                    "unaffected_devices",
+                    "service_lists",
+                    "service_assignments",
+                    "time_quotas",
+                    "service_quotas",
+                    "group_data_limits",
+                    "data_limits",
+                    "schedules",
+                    "timers",
+                    "progressions",
+                    "device_groups",
+                    "devices",
+                    "profiles",
+                ):
+                    self._connection.execute(f"DELETE FROM {table}")
+                for profile in settings.profiles:
+                    self.save_profile(profile)
+                for device in settings.devices:
+                    self.save_device(device)
+                for group in settings.groups:
+                    self.save_device_group(group)
+                for schedule in settings.schedules:
+                    self.save_schedule(schedule)
+                for scenario in settings.scenarios:
+                    self.save_scenario(scenario)
+                self.save_mac_policy(settings.mac_policy)
+                self.save_website_policy(settings.website_policy)
+                self._write_site_blocks(settings.site_blocks)
+                self._connection.execute(
+                    "UPDATE network_policies SET access_options_json = ? WHERE id = 1",
+                    (json.dumps(asdict(settings.access_options)),),
+                )
+                self._connection.execute(
+                    "UPDATE experiment_settings "
+                    "SET persist_profiles_after_gateway_outage = ? WHERE id = 1",
+                    (int(settings.persist_profiles_after_gateway_outage),),
+                )
+                for data_limit in settings.data_limits:
+                    self.save_data_limit(data_limit)
+                for group_data_limit in settings.group_data_limits:
+                    self.save_group_data_limit(group_data_limit)
+                for service_quota in settings.service_quotas:
+                    self.save_service_quota(service_quota)
+                for time_quota in settings.time_quotas:
+                    self.save_time_quota(time_quota)
+                for assignment in settings.service_assignments:
+                    self.save_service_assignment(assignment)
+                for service_list in settings.service_lists:
+                    self.save_service_list(service_list)
+                for unaffected in settings.unaffected_devices:
+                    self.save_unaffected_device(unaffected)
+                for mac in ad_devices:
+                    self.set_ad_blocking(mac, True)
+                self.set_ad_blocking_allowances(ad_allowances)
+                self.save_everyone_else_profile_id(settings.everyone_else_profile_id)
+                self.save_general_profile(settings.general_profile_id)
+                if newly_protected:
+                    self.delete_domain_observations(protected_addresses, newly_protected)
+                for table, (key, columns, rows) in usage.items():
+                    for row in rows:
+                        self._connection.execute(
+                            "UPDATE " + table + " SET "
+                            + ", ".join(column + " = ?" for column in columns)
+                            + " WHERE " + " AND ".join(column + " = ?" for column in key),
+                            tuple(row[column] for column in columns + key),
+                        )
+        except sqlite3.Error as error:
+            raise StorageError("could not replace the saved settings") from error
 
     def _delete_row(self, table: str, key_column: str, key: str) -> bool:
         cursor = self._connection.execute(f"DELETE FROM {table} WHERE {key_column} = ?", (key,))
@@ -1465,7 +1992,7 @@ class ConfigRepository:
             self._bump_configuration_version()
             self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save device group {group.id}") from error
 
     def delete_device_group(self, group_id: str) -> bool:
@@ -1474,7 +2001,7 @@ class ConfigRepository:
         try:
             return self._delete_row("device_groups", "id", group_id)
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("remove site rules for this group before deleting it") from error
 
     def save_schedule(self, schedule: Schedule) -> None:
@@ -1512,7 +2039,7 @@ class ConfigRepository:
             self._bump_configuration_version()
             self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save schedule {schedule.id}") from error
 
     def delete_schedule(self, schedule_id: str) -> bool:
@@ -1583,7 +2110,7 @@ class ConfigRepository:
             self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save timer {timer.id}") from error
 
     def save_scenario(self, scenario: Scenario, *, now: Optional[float] = None) -> None:
@@ -1621,7 +2148,7 @@ class ConfigRepository:
             self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save scenario {scenario.id}") from error
 
     def get_scenario(self, scenario_id: str) -> Optional[Scenario]:
@@ -1688,7 +2215,7 @@ class ConfigRepository:
             self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not start scenario run {run.id}") from error
 
     def stop_scenario_run(self, run_id: str) -> bool:
@@ -1830,7 +2357,7 @@ class ConfigRepository:
             self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save progression {progression.id}") from error
 
     def delete_progression(self, progression_id: str) -> bool:
@@ -1897,7 +2424,7 @@ class ConfigRepository:
                     (f"moving:{device_id}", device_id, old_address),
                 )
                 if cursor.rowcount != 1:
-                    self._connection.rollback()
+                    self._rollback()
                     return False
             for device_id, (old_address, new_address) in moves.items():
                 self._connection.execute(
@@ -1920,7 +2447,7 @@ class ConfigRepository:
             self._commit()
             return True
         except sqlite3.Error as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not move saved devices to their new addresses") from error
 
     def total_domain_queries(self, ipv4_address: str) -> int:
@@ -1997,7 +2524,7 @@ class ConfigRepository:
             self._bump_configuration_version()
             self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save data limit for {data_limit.device_id}") from error
 
     def restart_usage_counters(self) -> None:
@@ -2150,7 +2677,7 @@ class ConfigRepository:
             self._bump_configuration_version()
             self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(
                 f"could not save group data limit for {data_limit.group_id}"
             ) from error
@@ -2301,7 +2828,7 @@ class ConfigRepository:
             self._bump_configuration_version()
             self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save service quota {quota.id}") from error
 
     def list_service_assignments(self) -> tuple:
@@ -2343,7 +2870,7 @@ class ConfigRepository:
             self._bump_configuration_version()
             self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save service assignment {assignment.id}") from error
 
     def delete_service_assignment(self, assignment_id: str) -> bool:
@@ -2356,7 +2883,71 @@ class ConfigRepository:
             self._commit()
             return False
         self._bump_configuration_version()
-        self._connection.commit()
+        self._commit()
+        return True
+
+    def get_service_list(self, list_id: str) -> Optional[ServiceList]:
+        """Return one service list or `None` when it is not stored."""
+
+        row = self._connection.execute(
+            """
+            SELECT id, name, profile_id, services_json, hostnames_json, enabled
+            FROM service_lists WHERE id = ?
+            """,
+            (list_id,),
+        ).fetchone()
+        return None if row is None else self._service_list_from_row(row)
+
+    def list_service_lists(self) -> tuple:
+        """Return service lists in stable identifier order."""
+
+        rows = self._connection.execute(
+            """
+            SELECT id, name, profile_id, services_json, hostnames_json, enabled
+            FROM service_lists ORDER BY id
+            """
+        ).fetchall()
+        return tuple(self._service_list_from_row(row) for row in rows)
+
+    def save_service_list(self, service_list: ServiceList) -> None:
+        """Insert or update a service list that overrides device profiles."""
+
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO service_lists (
+                    id, name, profile_id, services_json, hostnames_json, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    profile_id = excluded.profile_id,
+                    services_json = excluded.services_json,
+                    hostnames_json = excluded.hostnames_json,
+                    enabled = excluded.enabled
+                """,
+                (
+                    service_list.id,
+                    service_list.name,
+                    service_list.profile_id,
+                    json.dumps(list(service_list.services)),
+                    json.dumps(list(service_list.hostnames)),
+                    int(service_list.enabled),
+                ),
+            )
+            self._bump_configuration_version()
+            self._commit()
+        except sqlite3.IntegrityError as error:
+            self._rollback()
+            raise StorageError(f"could not save service list {service_list.id}") from error
+
+    def delete_service_list(self, list_id: str) -> bool:
+        """Remove one service list and its matching rules on the next apply."""
+
+        cursor = self._connection.execute("DELETE FROM service_lists WHERE id = ?", (list_id,))
+        if not cursor.rowcount:
+            return False
+        self._bump_configuration_version()
+        self._commit()
         return True
 
     def reset_service_quota_usage(
@@ -2508,7 +3099,7 @@ class ConfigRepository:
             self._bump_configuration_version()
             self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save time quota {quota.id}") from error
 
     def reset_time_quota_usage(
@@ -2682,19 +3273,25 @@ class ConfigRepository:
              for r in blocks),
         )
 
-    def save_access_policies(self, mac: MacPolicy, websites: WebsitePolicy, *,
+    def save_access_policies(self, mac: Optional[MacPolicy], websites: Optional[WebsitePolicy], *,
                              blocks=None, options=None, expected_version=None) -> None:
-        """Replace all access rules together and reject an obsolete browser edit."""
-        self._connection.execute("BEGIN IMMEDIATE")
-        self._deferring_commits = True
-        try:
+        """Save the given access rules together and reject an obsolete browser edit.
+
+        A section passed as None keeps its stored value, so a request that only
+        carries website rules cannot clear the device rules (and the other way
+        round). Every section that is given is written in one transaction, so a
+        failed write restores the whole request.
+        """
+        with self.transaction():
             if expected_version is not None and (
                 isinstance(expected_version, bool) or not isinstance(expected_version, int)
                 or self.get_runtime_state().configuration_version != expected_version
             ):
                 raise DeviceConflictError("settings changed since this form was loaded")
-            self.save_mac_policy(mac)
-            self.save_website_policy(websites)
+            if mac is not None:
+                self.save_mac_policy(mac)
+            if websites is not None:
+                self.save_website_policy(websites)
             if blocks is not None:
                 self._write_site_blocks(blocks)
             if options is not None:
@@ -2702,12 +3299,11 @@ class ConfigRepository:
                     "UPDATE network_policies SET access_options_json = ? WHERE id = 1",
                     (json.dumps(asdict(options)),),
                 )
-            self._connection.commit()
-        except Exception:
-            self._connection.rollback()
-            raise
-        finally:
-            self._deferring_commits = False
+            if mac is None and websites is None and (blocks is not None or options is not None):
+                # The policy saves above bump the version themselves. When only
+                # site rules or options changed, bump here so other browsers are
+                # refused, the change is re-applied and the checkpoint is taken.
+                self._bump_configuration_version()
 
     def get_mac_policy(self) -> MacPolicy:
         """Return the saved MAC filtering policy."""
@@ -2795,9 +3391,12 @@ class ConfigRepository:
                 self._connection.execute(
                     """
                     INSERT INTO domain_observations (
-                        ipv4_address, domain, query_count, first_seen, last_seen
-                    ) VALUES (?, ?, ?, ?, ?)
+                        ipv4_address, domain, query_count, first_seen, last_seen, mac_address
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(ipv4_address, domain) DO UPDATE SET
+                        mac_address = COALESCE(
+                            excluded.mac_address, domain_observations.mac_address
+                        ),
                         query_count = MIN(
                             domain_observations.query_count + excluded.query_count,
                             ?
@@ -2815,6 +3414,7 @@ class ConfigRepository:
                         observation.query_count,
                         observation.first_seen,
                         observation.last_seen,
+                        observation.mac_address,
                         1_000_000_000,
                     ),
                 )
@@ -2830,18 +3430,56 @@ class ConfigRepository:
                     """,
                     (str(observation.ipv4_address), observation.query_count, 2**62),
                 )
+            if observations:
+                # The list fills again so the note about the cleared list is no longer true.
+                self._connection.execute("DELETE FROM domain_list_clearing")
             self._prune_domain_observations(now=current_time)
             self._commit()
         except (sqlite3.IntegrityError, sqlite3.OperationalError) as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not save domain observations") from error
+
+    def delete_domain_observations(
+        self, ipv4_addresses: Iterable[str], mac_addresses: Iterable[str] = ()
+    ) -> int:
+        """Remove every stored DNS aggregate for the given client addresses or devices.
+
+        A row goes when its address is listed or when its recorded hardware address is
+        listed. Rows saved before hardware addresses were recorded match by address only.
+        """
+
+        addresses = sorted({str(address) for address in ipv4_addresses})
+        macs = sorted({normalize_exempt_mac(mac) for mac in mac_addresses})
+        if not addresses and not macs:
+            return 0
+        try:
+            cursor = self._connection.execute(
+                "DELETE FROM domain_observations WHERE ipv4_address IN ("
+                + ",".join("?" for _ in addresses)
+                + ") OR mac_address IN ("
+                + ",".join("?" for _ in macs)
+                + ")",
+                addresses + macs,
+            )
+            if addresses:
+                self._connection.execute(
+                    "DELETE FROM domain_query_totals WHERE ipv4_address IN ("
+                    + ",".join("?" for _ in addresses)
+                    + ")",
+                    addresses,
+                )
+            self._commit()
+        except (sqlite3.IntegrityError, sqlite3.OperationalError) as error:
+            self._rollback()
+            raise StorageError("could not delete domain observations") from error
+        return cursor.rowcount
 
     def list_domain_observations(self) -> tuple:
         """Return recent domain aggregates ordered by device and query count."""
 
         rows = self._connection.execute(
             """
-            SELECT ipv4_address, domain, query_count, first_seen, last_seen
+            SELECT ipv4_address, domain, query_count, first_seen, last_seen, mac_address
             FROM domain_observations
             ORDER BY ipv4_address, query_count DESC, domain
             """
@@ -2853,17 +3491,180 @@ class ConfigRepository:
             count = counts_by_device.get(ipv4_address, 0)
             if count >= _MAX_OBSERVATIONS_PER_DEVICE:
                 continue
-            observations.append(
-                DomainObservation(
-                    ipv4_address=ipv4_address,
-                    domain=row["domain"],
-                    query_count=row["query_count"],
-                    first_seen=row["first_seen"],
-                    last_seen=row["last_seen"],
+            try:
+                observations.append(
+                    DomainObservation(
+                        ipv4_address=ipv4_address,
+                        domain=row["domain"],
+                        query_count=row["query_count"],
+                        first_seen=row["first_seen"],
+                        last_seen=row["last_seen"],
+                        mac_address=row["mac_address"],
+                    )
                 )
-            )
+            except (KeyError, TypeError, ValueError) as error:
+                raise StorageError("stored domain observation is malformed") from error
             counts_by_device[ipv4_address] = count + 1
         return tuple(observations)
+
+    def save_random_website_outcomes(
+        self,
+        outcomes: Sequence[RandomWebsiteOutcome],
+        *,
+        now: Optional[int] = None,
+    ) -> None:
+        """Add one bounded scheduler batch to the daily random-choice totals."""
+
+        if not isinstance(outcomes, (list, tuple)):
+            raise StorageError("random website outcomes must be a list")
+        if len(outcomes) > MAX_RANDOM_WEBSITE_ANALYTICS_BATCH:
+            raise StorageError("random website outcome batch is too large")
+        if not outcomes:
+            return
+        counts = {}
+        for outcome in outcomes:
+            if not isinstance(outcome, RandomWebsiteOutcome):
+                raise StorageError("random website outcome is malformed")
+            event_day = (
+                outcome.happened_at // _SECONDS_PER_UTC_DAY
+            ) * _SECONDS_PER_UTC_DAY
+            key = (event_day, outcome.device_id, outcome.domain)
+            pair = counts.setdefault(key, [0, 0])
+            pair[0 if outcome.kept else 1] += 1
+        try:
+            self._connection.executemany(
+                """
+                INSERT INTO random_website_analytics (
+                    event_day_utc, device_id, domain, kept_count, removed_count
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(event_day_utc, device_id, domain) DO UPDATE SET
+                    kept_count = kept_count + excluded.kept_count,
+                    removed_count = removed_count + excluded.removed_count
+                """,
+                [
+                    (event_day, device_id, domain, pair[0], pair[1])
+                    for (event_day, device_id, domain), pair in sorted(counts.items())
+                ],
+            )
+            self._prune_random_website_analytics(
+                now=int(time.time()) if now is None else now
+            )
+            self._commit()
+        except sqlite3.Error as error:
+            self._rollback()
+            raise StorageError("could not save randomized website history") from error
+
+    def prune_random_website_analytics(self, *, now: Optional[int] = None) -> None:
+        """Remove expired and over-limit daily website-choice totals."""
+
+        current_time = int(time.time()) if now is None else now
+        if isinstance(current_time, bool) or not isinstance(current_time, int) or current_time < 0:
+            raise StorageError("random website cleanup time is invalid")
+        try:
+            self._prune_random_website_analytics(now=current_time)
+            self._commit()
+        except sqlite3.Error as error:
+            self._rollback()
+            raise StorageError("could not prune randomized website history") from error
+
+    def list_random_website_analytics(
+        self,
+        *,
+        days: int = _RANDOM_WEBSITE_ANALYTICS_RETENTION_DAYS,
+        device_id: Optional[str] = None,
+        now: Optional[int] = None,
+    ) -> dict:
+        """Return bounded per-device and per-domain totals for a UTC date range."""
+
+        if (
+            isinstance(days, bool)
+            or not isinstance(days, int)
+            or not 1 <= days <= _RANDOM_WEBSITE_ANALYTICS_RETENTION_DAYS
+        ):
+            raise StorageError("random website history range must be between 1 and 30 days")
+        if device_id is not None and (
+            not isinstance(device_id, str) or not device_id or len(device_id) > 64
+        ):
+            raise StorageError("random website history device id is invalid")
+        current_time = int(time.time()) if now is None else now
+        if isinstance(current_time, bool) or not isinstance(current_time, int) or current_time < 0:
+            raise StorageError("random website history time is invalid")
+        current_day = (current_time // _SECONDS_PER_UTC_DAY) * _SECONDS_PER_UTC_DAY
+        first_day = max(
+            0,
+            current_day - (days - 1) * _SECONDS_PER_UTC_DAY,
+        )
+        oldest_query = (
+            "SELECT MIN(event_day_utc) AS oldest_day "
+            "FROM random_website_analytics WHERE event_day_utc <= ?"
+        )
+        oldest_parameters = [current_day]
+        if device_id is not None:
+            oldest_query += " AND device_id = ?"
+            oldest_parameters.append(device_id)
+        query = """
+            SELECT analytics.device_id, devices.name AS device_name, analytics.domain,
+                SUM(analytics.kept_count) AS kept_count,
+                SUM(analytics.removed_count) AS removed_count,
+                COUNT(*) AS days_with_events
+            FROM random_website_analytics AS analytics
+            JOIN devices ON devices.id = analytics.device_id
+            WHERE analytics.event_day_utc BETWEEN ? AND ?
+        """
+        parameters = [first_day, current_day]
+        if device_id is not None:
+            query += " AND analytics.device_id = ?"
+            parameters.append(device_id)
+        query += " GROUP BY analytics.device_id, devices.name, analytics.domain"
+        query += " ORDER BY (SUM(analytics.kept_count) + SUM(analytics.removed_count)) DESC, "
+        query += "devices.name, analytics.domain LIMIT ?"
+        parameters.append(_MAX_RANDOM_WEBSITE_ANALYTICS_RESPONSE_ROWS + 1)
+        try:
+            oldest_row = self._connection.execute(
+                oldest_query,
+                oldest_parameters,
+            ).fetchone()
+            rows = self._connection.execute(query, parameters).fetchall()
+        except sqlite3.Error as error:
+            raise StorageError("could not read randomized website history") from error
+        truncated = len(rows) > _MAX_RANDOM_WEBSITE_ANALYTICS_RESPONSE_ROWS
+        return {
+            "days": days,
+            "from_day_utc": first_day,
+            "to_day_utc": current_day,
+            "oldest_available_day_utc": (
+                oldest_row["oldest_day"] if oldest_row is not None else None
+            ),
+            "truncated": truncated,
+            "rows": [
+                dict(row)
+                for row in rows[:_MAX_RANDOM_WEBSITE_ANALYTICS_RESPONSE_ROWS]
+            ],
+        }
+
+    def _prune_random_website_analytics(self, *, now: int) -> None:
+        current_day = (max(0, now) // _SECONDS_PER_UTC_DAY) * _SECONDS_PER_UTC_DAY
+        first_retained_day = max(
+            0,
+            current_day
+            - (_RANDOM_WEBSITE_ANALYTICS_RETENTION_DAYS - 1) * _SECONDS_PER_UTC_DAY,
+        )
+        self._connection.execute(
+            "DELETE FROM random_website_analytics WHERE event_day_utc < ?",
+            (first_retained_day,),
+        )
+        self._connection.execute(
+            """
+            DELETE FROM random_website_analytics
+            WHERE rowid IN (
+                SELECT rowid
+                FROM random_website_analytics
+                ORDER BY event_day_utc DESC, device_id DESC, domain DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (_MAX_RANDOM_WEBSITE_ANALYTICS_ROWS,),
+        )
 
     def _prune_domain_observations(self, *, now: int) -> None:
         cutoff = max(0, now - _DOMAIN_RETENTION_SECONDS)
@@ -3050,6 +3851,20 @@ class ConfigRepository:
             raise StorageError("stored service assignment is malformed") from error
 
     @staticmethod
+    def _service_list_from_row(row: sqlite3.Row) -> ServiceList:
+        try:
+            return ServiceList(
+                id=row["id"],
+                name=row["name"],
+                profile_id=row["profile_id"],
+                services=tuple(json.loads(row["services_json"])),
+                hostnames=tuple(json.loads(row["hostnames_json"])),
+                enabled=bool(row["enabled"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored service list is malformed") from error
+
+    @staticmethod
     def _service_quota_from_row(row: sqlite3.Row) -> ServiceQuota:
         try:
             return ServiceQuota(
@@ -3095,3 +3910,18 @@ class ConfigRepository:
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
             raise StorageError("stored time quota is malformed") from error
+
+
+def _serialized(method):
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
+# Every plain method runs under the repository lock. `transaction` holds the lock itself.
+for _name, _member in tuple(vars(ConfigRepository).items()):
+    if inspect.isfunction(_member) and _name not in ("__init__", "transaction"):
+        setattr(ConfigRepository, _name, _serialized(_member))

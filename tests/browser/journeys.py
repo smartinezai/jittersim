@@ -10,12 +10,40 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.phone import close_controls, sidebar_control
+from tests.browser.service_list_focus import check_service_list_contexts
+
+ROUTER_LINK = re.compile("^Router and Wi-Fi")
+UPDATES_LINK = re.compile("^Updates")
+DEVICES_LINK = re.compile("^Devices")
+
 
 def dismiss_toasts(page):
     page.locator("#toast").evaluate("toast => { toast.hidden = true; }")
 
+
+def unlock(page):
+    """Enter the admin token the way the sidebar asks for it and keep it for reloads."""
+
+    page.locator("#open-admin-credentials").click()
+    page.locator("#admin-token").fill("browser-test")
+    page.locator("#check-admin-token").click()
+    expect(page.locator("#private-dashboard")).to_be_visible()
+    expect(page.locator("#token-check-status")).to_contain_text("Token accepted")
+    page.locator("#remember-admin-token").check()
+    page.locator("#close-credentials").click()
+
+
+def profile_row(page, name):
+    return page.locator(".saved-profile-row", has_text=name)
+
+
 def check_wifi_recovery(page):
-    page.get_by_role("link", name=re.compile("^Setup")).click()
+    page.get_by_role("link", name=ROUTER_LINK).click()
+    # The Pi line keeps the fallback card closed until it is opened.
+    fallback = page.get_by_role("button", name="Manual Pi access-point fallback")
+    if fallback.get_attribute("aria-expanded") == "false":
+        fallback.click()
     button = page.locator("#reset-wifi-name")
     expect(button).to_be_enabled()
     field = page.locator("#access-point-ssid")
@@ -41,10 +69,15 @@ def check_wifi_recovery(page):
     page.route("**/api/access-point/reset-name", lambda route: held.append(route))
     page.once("dialog", lambda dialog: dialog.accept())
     button.click()
+    # The control becomes busy before the asynchronous request reaches the route.
+    for _ in range(500):
+        if held:
+            break
+        page.wait_for_timeout(10)
     expect(button).to_be_disabled()
-    assert len(held) == 1
+    assert len(held) == 1, held
     held[0].continue_()
-    expect(field).to_have_value("JitterSim")
+    expect(field).to_have_value("TestNet")
     expect(button).to_be_enabled()
     assert len(requests) == 2
     page.unroute("**/api/access-point/reset-name")
@@ -63,7 +96,7 @@ def check_access_and_help(page):
         page.get_by_role("button", name="Discard unfinished edits", exact=True).click()
         page.get_by_role("dialog").get_by_role("button", name="Continue", exact=True).click()
         expect(page.locator("#draft-notice")).to_be_hidden()
-    page.get_by_role("link", name="Devices", exact=True).click()
+    page.get_by_role("link", name=DEVICES_LINK).click()
     page.get_by_role("button", name="Manage device and site access", exact=True).click()
     expect(page.locator("#site-rule-form")).to_be_visible()
     page.get_by_label("Rule name", exact=True).fill("Video for the test phone")
@@ -89,7 +122,7 @@ def check_access_and_help(page):
     page.get_by_role("button", name="Reset network", exact=True).click()
     expect(page.locator("#message")).to_contain_text("reset")
     expect(page.locator("#access-summary")).to_contain_text("Saved access rules are active")
-    page.get_by_role("link", name="Devices", exact=True).click()
+    page.get_by_role("link", name=DEVICES_LINK).click()
     expect(page.locator(".device-access-status").first).to_contain_text("Video for the test phone")
     page.get_by_role("button", name="Manage device and site access", exact=True).click()
     page.get_by_role("button", name="Block Test phone", exact=True).click()
@@ -101,15 +134,15 @@ def check_access_and_help(page):
     page.get_by_role("button", name="Edit Video for the test phone", exact=True).click()
     page.get_by_label("Domains to block", exact=True).fill("unfinished.example.com")
     # Polling status must not overwrite an unfinished domain list.
-    page.get_by_role("button", name="Apply current configuration", exact=True).click()
-    expect(page.locator("#message")).to_contain_text("Configuration applied")
+    page.locator("#apply-button").click()
+    expect(page.locator("#message")).to_contain_text(re.compile(r"^(Started|Started)"))
     expect(page.get_by_label("Domains to block", exact=True)).to_have_value("unfinished.example.com")
     page.set_viewport_size({"width": 320, "height": 740})
     page.get_by_role("link", name="Profiles", exact=True).click()
     page.get_by_text("Randomness, outages and website access", exact=True).click()
     page.emulate_media(color_scheme="light", reduced_motion="reduce")
     assert page.evaluate("getComputedStyle(document.documentElement).colorScheme") == "dark"
-    for direction in ("upload", "download"):
+    for direction in ("Upload", "Download"):
         for field in ("delay", "jitter", "loss", "bandwidth", "reorder", "duplicate", "corrupt"):
             button = page.get_by_role("button", name=f"{direction} {field} help", exact=True)
             button.click()
@@ -119,7 +152,7 @@ def check_access_and_help(page):
             assert box['x'] >= 0 and box['x'] + box['width'] <= 320, field
             page.keyboard.press("Escape")
             expect(tooltip).to_be_hidden()
-    button = page.get_by_role("button", name="upload delay help", exact=True)
+    button = page.get_by_role("button", name="Upload delay help", exact=True)
     button.focus()
     expect(page.locator("#" + button.get_attribute("aria-controls"))).to_be_visible()
     page.keyboard.press("Tab")
@@ -157,7 +190,7 @@ def check_access_and_help(page):
     page.screenshot(path="test-results/access-profiles-phone.png", full_page=True)
     page.set_viewport_size({"width": 1440, "height": 1000})
     page.screenshot(path="test-results/access-profiles-desktop.png", full_page=True)
-    page.get_by_role("link", name="Rules & limits", exact=True).click()
+    page.get_by_role("link", name="Access and rules", exact=True).click()
     page.screenshot(path="test-results/access-rules-desktop.png", full_page=True)
     # Panic works without discarding an unfinished form or another confirmation.
     page.get_by_role("button", name="Normal access", exact=True).click()
@@ -168,7 +201,7 @@ def check_access_and_help(page):
     expect(page.locator("#normal-access-notice")).to_be_visible()
     expect(page.locator("#site-rule-list")).to_contain_text("Video for the test phone")
     page.set_viewport_size({"width": 390, "height": 844})
-    page.get_by_role("link", name="Overview", exact=True).click()
+    page.get_by_role("link", name=DEVICES_LINK).click()
     page.evaluate("window.scrollTo(0, 0)")
     page.screenshot(path="test-results/access-normal-phone.png")
     page.set_viewport_size({"width": 1440, "height": 1000})
@@ -177,7 +210,11 @@ def check_access_and_help(page):
 
 def run():
     process = subprocess.Popen(
-        [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True
+        [sys.executable, "-m", "tests.browser.fixture"],
+        stdout=subprocess.PIPE,
+        text=True,
+        # Main's fixture always ran a scheduler; the Pi line's fixture makes it opt-in.
+        env={**os.environ, "JITTERSIM_BROWSER_TEST_SEED": "1", "JITTERSIM_BROWSER_TEST_SCHEDULER": "1"},
     )
     try:
         with selectors.DefaultSelector() as selector:
@@ -195,6 +232,8 @@ def run():
             errors = []
             release_checks = []
             release_installs = []
+            online_checks = []
+            preference_requests = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.on(
                 "request",
@@ -208,44 +247,73 @@ def run():
                 if request.method == "POST" and request.url.endswith("/api/updates/install")
                 else None,
             )
+            page.on(
+                "request",
+                lambda request: online_checks.append(request.url)
+                if request.method == "POST" and request.url.endswith("/api/updates/check-online")
+                else None,
+            )
+            page.on(
+                "request",
+                lambda request: preference_requests.append(request.method)
+                if request.url.endswith("/api/update-preferences")
+                else None,
+            )
+            page.clock.install()
             Path("test-results").mkdir(exist_ok=True)
             try:
                 page.goto(f"http://127.0.0.1:{port}")
-                page.get_by_label("Token", exact=True).fill("browser-test")
-                page.get_by_role("button", name="Sign in", exact=True).click()
-                expect(page.get_by_text("Signed in.", exact=True)).to_be_visible()
+                # The public health check has no system details. Signed in the
+                # health card reads them from the private route.
+                public_health = page.request.get(f"http://127.0.0.1:{port}/api/health").json()
+                assert "system" not in public_health, public_health
+                # Keep periodic status reads from racing the exact request counts.
+                page.clock.pause_at(page.evaluate("Date.now() / 1000") + 1)
+                unlock(page)
+                expect(page.locator("#health-details")).to_contain_text("Version: ")
+                expect(page.locator("#health-details")).not_to_contain_text("Version: Unknown")
                 expect(page.locator("#update-preference-status")).to_contain_text(
                     "Automatic checking is on."
                 )
                 expect(page.locator("#release-status")).to_contain_text("candidate-release")
                 expect(
-                    page.get_by_role("link", name="Setup, release staged", exact=True)
+                    page.get_by_role("link", name="Updates, update available", exact=True)
                 ).to_be_visible()
                 assert len(release_checks) == 1, release_checks
                 assert not release_installs, release_installs
-                page.get_by_role("link", name="Setup, release staged", exact=True).click()
+                page.get_by_role("link", name="Updates, update available", exact=True).click()
                 automatic_check = page.locator("#check-staged-updates-on-open")
                 expect(automatic_check).to_be_checked()
                 automatic_check.uncheck()
                 expect(page.locator("#update-preference-status")).to_contain_text(
                     "Automatic checking is off."
                 )
+                # On-open checks are optional. Visible Updates always reads local status.
+                page.get_by_role("link", name=DEVICES_LINK).click()
                 page.reload()
                 expect(page.locator("#update-preference-status")).to_contain_text(
                     "Automatic checking is off."
                 )
                 assert len(release_checks) == 1, release_checks
-                page.get_by_role("link", name="Setup", exact=True).click()
-                page.get_by_role("button", name="Check for updates", exact=True).click()
+                assert not online_checks, online_checks
+                assert not release_installs, release_installs
+                page.get_by_role("link", name=UPDATES_LINK).click()
                 expect(page.locator("#release-status")).to_contain_text("candidate-release")
                 assert len(release_checks) == 2, release_checks
+                page.get_by_role("button", name="Check for updates", exact=True).click()
+                expect(page.get_by_role("button", name="Check for updates", exact=True)).to_be_enabled()
+                expect(page.locator("#release-status")).to_contain_text("candidate-release")
+                assert len(release_checks) == 3, release_checks
                 automatic_check = page.locator("#check-staged-updates-on-open")
                 automatic_check.check()
+                expect(automatic_check).to_be_enabled()
                 expect(page.locator("#update-preference-status")).to_contain_text(
                     "Automatic checking is on."
                 )
-                expect(page.locator("#staged-release-badge")).to_be_visible()
-                assert len(release_checks) == 3, release_checks
+                expect(page.locator("#update-available-badge")).to_be_visible()
+                assert len(release_checks) == 4, release_checks
+                preference_writes = preference_requests.count("POST")
+                preference_reads = preference_requests.count("GET")
                 page.route(
                     "**/api/update-preferences",
                     lambda route: route.fulfill(
@@ -258,10 +326,14 @@ def run():
                 )
                 automatic_check.uncheck()
                 expect(automatic_check).to_be_checked()
+                expect(automatic_check).to_be_enabled()
                 expect(page.locator("#update-preference-status")).to_contain_text(
-                    "The preference was not saved."
+                    "Automatic checking is on."
                 )
+                assert preference_requests.count("POST") == preference_writes + 1, preference_requests
+                assert preference_requests.count("GET") == preference_reads + 1, preference_requests
                 page.unroute("**/api/update-preferences")
+                page.get_by_role("link", name=DEVICES_LINK).click()
                 preference_read_count = len(release_checks)
                 page.route(
                     "**/api/update-preferences",
@@ -274,28 +346,42 @@ def run():
                 page.reload()
                 expect(page.locator("#check-staged-updates-on-open")).to_be_disabled()
                 expect(page.locator("#update-preference-status")).to_contain_text(
-                    "The saved preference could not be read."
+                    "The saved preference is unknown."
                 )
                 assert len(release_checks) == preference_read_count, release_checks
-                page.get_by_role("button", name="Check for updates", exact=True).click()
+                assert not online_checks, online_checks
+                assert not release_installs, release_installs
+                page.get_by_role("link", name=UPDATES_LINK).click()
                 expect(page.locator("#release-status")).to_contain_text("candidate-release")
                 assert len(release_checks) == preference_read_count + 1, release_checks
+                page.get_by_role("button", name="Check for updates", exact=True).click()
+                expect(page.get_by_role("button", name="Check for updates", exact=True)).to_be_enabled()
+                expect(page.locator("#release-status")).to_contain_text("candidate-release")
+                expect(page.locator("#check-staged-updates-on-open")).to_be_disabled()
+                expect(page.locator("#update-preference-status")).to_contain_text(
+                    "The saved preference is unknown."
+                )
+                assert len(release_checks) == preference_read_count + 2, release_checks
                 page.unroute("**/api/update-preferences")
+                page.get_by_role("link", name=DEVICES_LINK).click()
                 page.reload()
                 expect(page.locator("#update-preference-status")).to_contain_text(
                     "Automatic checking is on."
                 )
                 expect(page.locator("#check-staged-updates-on-open")).to_be_checked()
                 expect(page.locator("#release-status")).to_contain_text("candidate-release")
-                assert len(release_checks) == preference_read_count + 2, release_checks
-                page.get_by_role("link", name="Rules & limits", exact=True).click()
-                page.get_by_role("button", name="Access rules", exact=True).click()
+                assert len(release_checks) == preference_read_count + 3, release_checks
+                # The remaining journey exercises ordinary status polling and timers.
+                page.clock.resume()
+                page.get_by_role("link", name="Access and rules", exact=True).click()
                 draft = page.get_by_label("Global blocked domains (comma separated)", exact=True)
                 draft.fill("unsaved.example")
-                page.get_by_role("button", name="Apply current configuration", exact=True).click()
-                expect(page.locator("#message")).to_have_text("Configuration applied successfully.")
+                # On a phone Start is in the Controls sheet of the bar at the bottom.
+                sidebar_control(page, "#apply-button").click()
+                expect(page.locator("#message")).to_contain_text(re.compile(r"^(Started|Started)"))
                 expect(draft).to_have_value("unsaved.example")
-                page.get_by_role("link", name="Devices", exact=True).click()
+                close_controls(page)
+                page.get_by_role("link", name=DEVICES_LINK).click()
                 page.get_by_role("button", name="Open Test phone", exact=True).click()
                 page.get_by_role("combobox", name="Temporary profile", exact=True).select_option(
                     "slow"
@@ -303,31 +389,30 @@ def run():
                 page.get_by_role("button", name="Start device timer", exact=True).click()
                 expect(page.locator("#workspace-state")).to_contain_text("Slow connection")
                 expect(page.locator("#workspace-state")).to_contain_text("Timer")
-                page.get_by_role("link", name="Overview", exact=True).click()
                 expect(page.get_by_text(re.compile(r"^Active: Slow connection"))).to_be_visible()
-                page.get_by_role("link", name="Rules & limits", exact=True).click()
+                page.get_by_role("link", name="Access and rules", exact=True).click()
                 expect(draft).to_have_value("unsaved.example")
-                page.get_by_role("link", name="Devices", exact=True).click()
+                page.get_by_role("link", name=DEVICES_LINK).click()
                 page.get_by_role("button", name="Stop timer", exact=True).click()
                 expect(page.locator("#workspace-state")).to_contain_text("Normal connection")
                 page.get_by_role("link", name="Profiles", exact=True).click()
-                page.get_by_role("row").filter(has_text="Slow connection").get_by_role(
-                    "button", name="Duplicate", exact=True
+                # The Pi line's rows name their buttons after the profile.
+                profile_row(page, "Slow connection").get_by_role(
+                    "button", name="Duplicate Slow connection", exact=True
                 ).click()
                 expect(page.locator("#download-delay")).to_have_value("300")
                 expect(page.locator("#profile-id")).to_have_value("slow-copy")
-                page.get_by_role("row").filter(has_text="Slow connection").get_by_role(
-                    "button", name="Edit", exact=True
+                profile_row(page, "Slow connection").get_by_role(
+                    "button", name="Edit Slow connection", exact=True
                 ).click()
                 page.get_by_role("dialog").get_by_role("button", name="Cancel", exact=True).click()
                 expect(page.locator("#profile-id")).to_have_value("slow-copy")
-                page.get_by_role("button", name="Save profile", exact=True).click()
-                expect(
-                    page.get_by_role("row").filter(has_text="Slow connection copy")
-                ).to_contain_text("300 ms")
-                page.get_by_role("link", name="Rules & limits", exact=True).click()
+                # The form's heading is a card toggle with the same name.
+                page.locator("#profile-form button[type='submit']").click()
+                expect(profile_row(page, "Slow connection copy")).to_contain_text("300 ms")
+                page.get_by_role("link", name="Access and rules", exact=True).click()
                 expect(draft).to_have_value("unsaved.example")
-                page.get_by_role("link", name="Devices", exact=True).click()
+                page.get_by_role("link", name=DEVICES_LINK).click()
                 # A failed read retains the confirmed device state and labels it stale.
                 page.route(
                     "**/api/conditions",
@@ -384,12 +469,10 @@ def run():
                 page.get_by_role("button", name="Continue", exact=True).click()
                 expect(page.locator("#message")).to_contain_text("Settings restored.")
                 page.get_by_role("link", name="Profiles", exact=True).click()
-                expect(
-                    page.get_by_role("row").filter(has_text="Slow connection copy")
-                ).to_have_count(0)
+                expect(profile_row(page, "Slow connection copy")).to_have_count(0)
                 check_access_and_help(page)
                 page.set_viewport_size({"width": 1440, "height": 1000})
-                page.get_by_role("link", name=re.compile("^Setup")).click()
+                page.get_by_role("link", name=ROUTER_LINK).click()
                 expect(page.locator("#gateway-persistence-state")).to_contain_text(
                     "Router reachable."
                 )
@@ -399,9 +482,10 @@ def run():
                     "Saved and applied to the networking helper."
                 )
                 dismiss_toasts(page)
-                page.locator(".tab-panel#tab-setup > section").nth(0).screenshot(
-                    path="test-results/router-outage-persistence-desktop.png"
-                )
+                page.locator(
+                    "#page-router section", has=page.locator("#gateway-persistence-save")
+                ).first.screenshot(path="test-results/router-outage-persistence-desktop.png")
+                page.get_by_role("link", name=UPDATES_LINK).click()
                 page.get_by_role("button", name="Check for updates", exact=True).click()
                 expect(page.locator("#release-status")).to_contain_text("test-release")
                 expect(page.locator("#release-status")).to_contain_text(
@@ -428,7 +512,7 @@ def run():
                     ),
                 )
                 page.get_by_role("button", name="Check for updates", exact=True).click()
-                expect(page.locator("#staged-release-badge")).to_be_hidden()
+                expect(page.locator("#update-available-badge")).to_be_hidden()
                 expect(page.locator("#release-install")).to_be_disabled()
                 page.unroute("**/api/updates")
                 page.route(
@@ -441,7 +525,7 @@ def run():
                 )
                 page.get_by_role("button", name="Check for updates", exact=True).click()
                 expect(page.locator("#release-status")).to_contain_text(
-                    "Could not check for a staged release."
+                    "Staged release status is unknown."
                 )
                 expect(page.get_by_role("button", name="Check for updates")).to_be_enabled()
                 page.unroute("**/api/updates")
@@ -463,22 +547,24 @@ def run():
                 )
                 page.get_by_role("button", name="Check for updates", exact=True).click()
                 expect(page.locator("#release-status")).to_contain_text(
-                    "Installed: Unknown · Available: None staged"
+                    "Installed: test-release · Available: None staged"
                 )
-                expect(page.locator("#staged-release-badge")).to_be_hidden()
+                expect(page.locator("#update-available-badge")).to_be_hidden()
                 expect(page.locator("#release-install")).to_be_disabled()
                 page.unroute("**/api/updates")
-                release_phases = ["installing", "done"]
+                release_operation = {"phase": "installing"}
 
                 def release_progress(route):
-                    phase = release_phases.pop(0) if len(release_phases) > 1 else release_phases[0]
+                    phase = release_operation["phase"]
                     route.fulfill(
                         status=200,
                         content_type="application/json",
                         body=json.dumps(
                             {
                                 "phase": phase,
-                                "installed": "test-release",
+                                "request_id": "a" * 32,
+                                "request_kind": "install",
+                                "installed": "candidate-release" if phase == "complete" else "test-release",
                                 "available": "candidate-release",
                                 "rollback_available": True,
                                 "message": "Update " + phase + ".",
@@ -490,48 +576,52 @@ def run():
                 page.get_by_role("button", name="Check for updates", exact=True).click()
                 expect(page.locator("#release-status")).to_contain_text("Update installing.")
                 expect(page.locator("#release-install")).to_be_disabled()
-                # The Setup poll follows the install without another click.
+                # Updates follows the same operation until the installed version confirms it.
+                release_operation["phase"] = "complete"
                 expect(page.locator("#release-status")).to_contain_text(
-                    "Update done.", timeout=15000
+                    "Update complete.", timeout=15000
                 )
+                expect(page.locator("#update-progress")).to_have_text("Updated to candidate-release.")
+                expect(page.locator("#update-installed")).to_have_text("candidate-release")
                 expect(page.locator("#release-rollback")).to_be_enabled()
+                assert not release_installs, release_installs
                 page.unroute("**/api/updates")
                 page.set_viewport_size({"width": 320, "height": 740})
                 for tab in (
-                    "Overview",
-                    "Devices",
+                    DEVICES_LINK,
                     "Profiles",
-                    "Rules & limits",
+                    "Schedules and limits",
+                    ROUTER_LINK,
+                    "Traffic",
                     "Measurements",
-                    "Setup",
+                    "Activity",
+                    "Access and rules",
                     "Diagnostics",
                 ):
-                    tab_name = re.compile("^Setup") if tab == "Setup" else tab
-                    page.get_by_role("link", name=tab_name, exact=tab != "Setup").click()
+                    page.get_by_role("link", name=tab, exact=isinstance(tab, str)).click()
                     assert page.evaluate(
                         "document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1"
                     ), tab
                 page.set_viewport_size({"width": 1440, "height": 1000})
-                page.get_by_role("link", name="Overview", exact=True).click()
+                page.get_by_role("link", name=DEVICES_LINK).click()
                 discard = page.get_by_role("button", name="Discard unfinished edits", exact=True)
                 if discard.is_visible():
                     discard.click()
                     page.get_by_role("dialog").get_by_role(
                         "button", name="Continue", exact=True
                     ).click()
-                page.get_by_role("button", name="Apply current configuration", exact=True).click()
+                page.locator("#apply-button").click()
                 expect(page.locator("#message")).to_contain_text(
-                    "Configuration applied successfully."
+                    re.compile(r"^(Started|Started)")
                 )
                 page.set_viewport_size({"width": 390, "height": 844})
-                page.get_by_role("link", name="Devices", exact=True).click()
+                page.get_by_role("link", name=DEVICES_LINK).click()
                 page.get_by_role("button", name="Open Test phone", exact=True).click()
                 page.get_by_role("combobox", name="Temporary profile", exact=True).select_option(
                     "slow"
                 )
                 page.get_by_role("button", name="Start device timer", exact=True).click()
                 expect(page.locator("#workspace-state")).to_contain_text("Slow connection")
-                page.get_by_role("link", name="Overview", exact=True).click()
                 expect(page.get_by_text(re.compile(r"^Active: Slow connection"))).to_be_visible()
                 dismiss_toasts(page)
                 page.set_viewport_size({"width": 1440, "height": 1000})
@@ -544,6 +634,7 @@ def run():
                 page.screenshot(
                     path="test-results/experience-overview-phone.png", full_page=False
                 )
+                check_service_list_contexts(browser, f"http://127.0.0.1:{port}/")
                 check_wifi_recovery(page)
                 page.set_viewport_size({"width": 1440, "height": 1000})
                 page.screenshot(path="test-results/wifi-recovery-desktop.png", full_page=True)

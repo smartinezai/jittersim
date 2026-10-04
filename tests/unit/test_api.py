@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import http.client
 import json
+import logging
 import os
 import re
 import shutil
@@ -13,14 +14,15 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from datetime import datetime
 from email.message import Message
 from html.parser import HTMLParser
 from io import BytesIO
+from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Optional
 from unittest.mock import patch
-from urllib.parse import urlencode
 
 from jittersim.api.server import (
     DASHBOARD_HTML,
@@ -29,7 +31,7 @@ from jittersim.api.server import (
     ControlServer,
     _build_parser,
 )
-from jittersim.api.session import issue_session
+from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import (
     DataLimit,
     Device,
@@ -37,14 +39,38 @@ from jittersim.config.models import (
     DomainObservation,
     Impairment,
     Profile,
+    RandomWebsiteOutcome,
     Schedule,
-    UnaffectedDevice,
+    ServiceList,
 )
 from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.runtime import PreparedRuntimePlan, RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
 from jittersim.measure import comparison_table
 from jittersim.networking.helper import HelperClientError
+from tests.helper_support import OlderHelperService, OldHelperService, captures, serving
+
+
+@contextmanager
+def captured_logs():
+    """Collect every log message from every logger while the block runs."""
+
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Capture(level=logging.DEBUG)
+    root = logging.getLogger()
+    old_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        yield records
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(old_level)
 
 
 class FakeHelper:
@@ -136,7 +162,7 @@ class FakeHelper:
     def configure_access_point(self, *, ssid, password):
         return {"ok": True, "action": "configure-ap", "commands_run": 3}
 
-    def sync_access_point_from_router(self, *, admin_password):
+    def sync_access_point_from_router(self, *, admin_password, expected_fingerprint, confirm_legacy=False):
         return {
             "ok": True,
             "action": "router-sync-ap",
@@ -147,6 +173,18 @@ class FakeHelper:
 
     def set_router_wifi(self, *, admin_password, enabled):
         return {"ok": True, "action": "router-wifi", "enabled": enabled}
+
+    def check_router_password(self, *, admin_password):
+        return {"ok": True, "action": "router-check"}
+
+    def read_router_wifi_status(self, *, admin_password):
+        return {"ok": True, "enabled": False}
+
+    def read_router_wifi_credentials(self, *, admin_password, include_password):
+        result = {"ssid": "Browser home"}
+        if include_password:
+            result["password"] = "browser-wifi-password"
+        return result
 
     def connected_devices(self):
         return [
@@ -175,7 +213,7 @@ class FakeHelper:
             "gateway": "192.168.0.1",
         }
 
-    def observe_dns_queries(self):
+    def observe_dns_queries(self, excluded_macs=()):
         return [
             {
                 "ipv4_address": "192.168.50.178",
@@ -204,6 +242,35 @@ class FakeHelper:
         }
 
 
+class PlanRecordingHelper(FakeHelper):
+    """Keep every plan that was applied rather than only the last one."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.plans = []
+
+    def apply(self, *, plan, explicit_apply=False):
+        self.plans.append(plan)
+        return super().apply(plan=plan, explicit_apply=explicit_apply)
+
+
+class MovingClientHelper(FakeHelper):
+    """One client that keeps its hardware address while its address changes or it leaves."""
+
+    def __init__(self, mac, address) -> None:
+        super().__init__()
+        self.mac = mac
+        self.address = address
+        self.online = True
+
+    def connected_devices(self):
+        if not self.online:
+            return []
+        return [{**super().connected_devices()[0], "mac_address": self.mac,
+                 "ipv4_address": self.address}]
+
+    def observe_dns_queries(self, excluded_macs=()):
+        return [{"ipv4_address": self.address, "domain": "amazon.com", "query_count": 2}]
 VIDEO_ASSIGNMENT = {
     "id": "video",
     "device_id": "alice",
@@ -283,8 +350,37 @@ def local_time_zone(name: str):
         time.tzset()
 
 
+# The cards every page holds, in order. A card outside the pages is the
+# dashboard-access card that the token flow shows first.
+EXPECTED_PAGE_HEADINGS = {
+    None: ["Credentials", "Dashboard access"],
+    "page-devices": [
+        "Getting started", "Everyone", "Connected clients", "Saved devices",
+        "Everyone else", "Protected devices",
+    ],
+    "page-profiles": ["Saved profiles", "Save profile", "Assign a device", "Group devices"],
+    "page-schedules": [
+        "Schedule a profile", "Run a profile timer", "Scenarios", "Progression mode",
+        "Device data limit", "Shared group data limit", "Service lists",
+        "Browser service profile", "Service data limit", "Service time limit",
+    ],
+    "page-router": [
+        "Wi-Fi name", "Upstream router connection", "Manual Pi access-point fallback",
+        "Router outage behavior", "Updates",
+    ],
+    "page-traffic": ["Live traffic", "Traffic discovery", "Random website choices"],
+    "page-measurements": ["Measurements"],
+    "page-activity": ["Activity log"],
+    "page-access": ["Network access rules"],
+    "page-diagnostics": [
+        "Impact", "Profiles", "Devices", "Compiled plan", "Runtime state", "Access rules", "Diagnostics",
+        "Backup and action history",
+    ],
+}
+
+
 class DashboardStructure(HTMLParser):
-    """Record which tab panel holds each card and heading, checking every tag closes."""
+    """Record which page holds each card and heading, checking every tag closes."""
 
     VOID_TAGS = {"br", "hr", "img", "input", "link", "meta", "source", "wbr"}
 
@@ -302,7 +398,7 @@ class DashboardStructure(HTMLParser):
         attributes = dict(attrs)
         classes = (attributes.get("class") or "").split()
         panel = self.open_tags[-1][1] if self.open_tags else None
-        if "tab-panel" in classes:
+        if "page" in classes:
             if panel is not None:
                 self.errors.append(f"{attributes.get('id')} is inside {panel}")
             self.panel_parents.add(tuple(open_tag for open_tag, _ in self.open_tags))
@@ -332,6 +428,97 @@ class DashboardStructure(HTMLParser):
 
 
 class ControlServerTests(unittest.TestCase):
+    def test_router_status_and_results_require_admin_and_own_site(self):
+        self.server.admin_token = "fixture-admin"
+        for path in ("/api/router/status", "/api/router/operation", "/api/router/wifi", "/api/router/check",
+                     "/api/router/wifi-credentials"):
+            for authorized, cross_site, expected in ((False, False, 401), (True, True, 403)):
+                handler = object.__new__(ControlRequestHandler)
+                handler.server = self.server
+                handler.path = path
+                handler.client_address = ("127.0.0.1", 12345)
+                handler.headers = Message()
+                handler.headers["Host"] = "127.0.0.1:8080"
+                if authorized:
+                    handler.headers["Authorization"] = "Bearer fixture-admin"
+                if cross_site:
+                    handler.headers["Origin"] = "https://different.example"
+                captured = []
+                handler._send_response = lambda **values: captured.append(values)
+                handler._handle_write()
+                self.assertEqual(captured[0]["status"], expected)
+
+    def test_router_status_contacts_the_router_only_for_an_explicit_refresh(self):
+        calls = []
+
+        class CountingHelper(FakeHelper):
+            def read_router_wifi_status(self, *, admin_password):
+                calls.append(admin_password)
+                return {"enabled": False}
+
+        self.server.helper_client = CountingHelper()
+        for _ in range(50):
+            status, _, body = self.server.write_response_for("/api/router/status", {
+                "admin_password": "private-password"})
+            self.assertEqual(status, 200)
+            self.assertIsNone(json.loads(body)["result"]["enabled"])
+        for refresh in ("true", 1, None, {}):
+            status, _, _ = self.server.write_response_for("/api/router/status", {
+                "admin_password": "private-password", "refresh": refresh})
+            self.assertEqual(status, 400)
+        self.assertEqual(calls, [])
+        self.server.write_response_for("/api/router/status", {
+            "admin_password": "private-password", "refresh": True})
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            _, _, body = self.server.write_response_for("/api/router/status", {
+                "admin_password": "private-password"})
+            state = json.loads(body)["result"]
+            if not state["busy"]:
+                break
+            time.sleep(0.005)
+        self.assertIs(state["enabled"], False)
+        self.assertEqual(calls, ["private-password"])
+
+    def test_background_router_change_keeps_dashboard_responsive_and_records_once(self):
+        release = threading.Event()
+
+        class SlowHelper(FakeHelper):
+            def set_router_wifi(self, *, admin_password, enabled):
+                assert release.wait(2)
+                return {"enabled": enabled}
+
+        self.server.helper_client = SlowHelper()
+        try:
+            status, _, body = self.server.write_response_for("/api/router/wifi", {
+                "admin_password": "private-password", "enabled": False,
+                "confirm_disable": True, "background": True})
+            self.assertEqual(status, 202)
+            operation = json.loads(body)["operation_id"]
+            self.assertEqual(self.server.response_for("/api/health")[0], 200)
+            state = json.loads(self.server.write_response_for("/api/router/status", {
+                "admin_password": "another-password"})[2])["result"]
+            self.assertTrue(state["changing"])
+            self.assertIsNone(state["enabled"])
+            release.set()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                status, _, body = self.server.write_response_for("/api/router/operation", {
+                    "admin_password": "private-password", "operation_id": operation})
+                if status != 202:
+                    break
+                time.sleep(0.005)
+            self.assertEqual(status, 200)
+            self.assertFalse(json.loads(body)["result"]["enabled"])
+            self.server.write_response_for("/api/router/operation", {
+                "admin_password": "private-password", "operation_id": operation})
+            history = self.repository.list_recent_actions()
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["action"], "/api/router/wifi")
+            self.assertNotIn("private-password", str(history) + body.decode())
+        finally:
+            release.set()
+
     def setUp(self) -> None:
         self.repository = ConfigRepository(":memory:")
         self.repository.save_profile(
@@ -559,8 +746,9 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
+        # Only what the Pi base exposed: the page needs the mode before the token.
         self.assertEqual(
-            {key: value for key, value in json.loads(body).items() if key != "system"},
+            json.loads(body),
             {
                 "helper_configured": False,
                 "helper_reachable": False,
@@ -695,6 +883,44 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(content_type, "application/vnd.sqlite3")
         self.assertTrue(backup.startswith(b"SQLite format 3\x00"))
 
+    def test_reset_diagnostics_keeps_client_scan_without_reading_removed_counters(self) -> None:
+        class ResetHelper(FakeHelper):
+            def traffic_counters(self):
+                raise AssertionError("Reset traffic tables must not be inspected")
+
+        self.server.helper_client = ResetHelper()
+        self.repository.update_runtime_state(
+            observed_state="reset", last_action="reset", last_result="success", last_error=None,
+        )
+
+        status, _, body = self.server.response_for("/api/diagnostics")
+        diagnostics = json.loads(body)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(diagnostics["runtime"]["observed_state"], "reset")
+        self.assertEqual(diagnostics["connected_clients"], 1)
+        self.assertIsNone(diagnostics["traffic_counters"])
+        self.assertTrue(diagnostics["traffic_counters_message"])
+        self.assertEqual(diagnostics["warnings"], [])
+
+    def test_active_diagnostics_still_reports_failed_counters(self) -> None:
+        class FailedCountersHelper(FakeHelper):
+            def traffic_counters(self):
+                raise HelperClientError("simulated counter failure")
+
+        self.server.helper_client = FailedCountersHelper()
+        self.repository.update_runtime_state(
+            observed_state="applied", last_action="apply", last_result="success", last_error=None,
+        )
+
+        status, _, body = self.server.response_for("/api/diagnostics")
+        diagnostics = json.loads(body)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(diagnostics["connected_clients"], 1)
+        self.assertIsNone(diagnostics["traffic_counters_message"])
+        self.assertIsNone(diagnostics["traffic_counters"])
+        self.assertEqual(diagnostics["warnings"], ["traffic counters are unavailable"])
     def test_admin_reads_require_admin_token(self) -> None:
         self.server.admin_token = "admin-token"
         self.server.helper_client = FakeHelper()
@@ -703,6 +929,7 @@ class ControlServerTests(unittest.TestCase):
             handler = object.__new__(ControlRequestHandler)
             handler.server = self.server
             handler.path = path
+            handler.client_address = ("127.0.0.1", 45000)
             handler.headers = Message()
             if authorization:
                 handler.headers["Authorization"] = authorization
@@ -719,14 +946,16 @@ class ControlServerTests(unittest.TestCase):
             "/api/export",
             "/api/gateway-persistence",
             "/api/update-preferences",
+            "/api/system-health",
         ):
             with self.subTest(path=path):
                 self.assertEqual(get(path)["status"], 401)
                 self.assertEqual(get(path, "Bearer wrong-token")["status"], 401)
                 self.assertEqual(get(path, "Bearer admin-token")["status"], 200)
-        # Only the sign-in page is public.
+        # The mode check is the only public read, so the page can show its mode
+        # before the token is entered.
         self.assertEqual(get("/api/profiles")["status"], 401)
-        self.assertEqual(get("/api/health")["status"], 401)
+        self.assertEqual(get("/api/health")["status"], 200)
         self.assertEqual(get("/api/health", "Bearer admin-token")["status"], 200)
 
     def test_live_traffic_requires_admin_token_and_returns_directional_counters(self) -> None:
@@ -736,6 +965,7 @@ class ControlServerTests(unittest.TestCase):
         def get_traffic(authorization):
             handler = object.__new__(ControlRequestHandler)
             handler.server = self.server
+            handler.client_address = ("127.0.0.1", 45000)
             handler.path = "/api/traffic"
             handler.headers = Message()
             if authorization:
@@ -778,6 +1008,7 @@ class ControlServerTests(unittest.TestCase):
         def save_rates(*, authorization, body):
             handler = object.__new__(ControlRequestHandler)
             handler.server = self.server
+            handler.client_address = ("127.0.0.1", 45000)
             handler.path = "/api/traffic-settings"
             handler.headers = Message()
             if authorization:
@@ -816,6 +1047,9 @@ class ControlServerTests(unittest.TestCase):
 
     def test_traffic_endpoint_includes_applied_default_queue_limits(self) -> None:
         class SnapshotScheduler:
+            def begin_shutdown(self):
+                pass
+
             def applied_queue_bandwidth_limits(self):
                 return {
                     "alice": {
@@ -848,10 +1082,12 @@ class ControlServerTests(unittest.TestCase):
             "/api/connected-devices",
             "/api/connected-device-labels",
             "/api/traffic-settings",
+            "/api/random-website-analytics",
         ):
             with self.subTest(path=path):
                 handler = object.__new__(ControlRequestHandler)
                 handler.server = self.server
+                handler.client_address = ("127.0.0.1", 45000)
                 handler.path = path
                 handler.headers = Message()
                 response = {}
@@ -861,6 +1097,43 @@ class ControlServerTests(unittest.TestCase):
                 handler.headers["Authorization"] = "Bearer admin-token"
                 handler.do_GET()
                 self.assertEqual(response["status"], 200)
+
+    def test_random_website_analytics_route_filters_and_validates_queries(self) -> None:
+        now = int(time.time())
+        self.repository.save_random_website_outcomes(
+            [
+                RandomWebsiteOutcome("alice", "kept.example", True, now),
+                RandomWebsiteOutcome("alice", "removed.example", False, now),
+            ],
+            now=now,
+        )
+
+        status, content_type, body = self.server.response_for(
+            "/api/random-website-analytics",
+            query="days=1&device_id=alice",
+        )
+        report = json.loads(body)
+        invalid_range = self.server.response_for(
+            "/api/random-website-analytics",
+            query="days=31",
+        )[0]
+        repeated_filter = self.server.response_for(
+            "/api/random-website-analytics",
+            query="days=1&days=2",
+        )[0]
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(report["days"], 1)
+        self.assertEqual(
+            {
+                row["domain"]: (row["kept_count"], row["removed_count"])
+                for row in report["rows"]
+            },
+            {"kept.example": (1, 0), "removed.example": (0, 1)},
+        )
+        self.assertEqual(invalid_range, 400)
+        self.assertEqual(repeated_filter, 400)
 
     def test_health_reports_an_unreachable_helper(self) -> None:
         self.server.helper_client = FakeHelper(fail_action="ping")
@@ -989,8 +1262,13 @@ class ControlServerTests(unittest.TestCase):
 
     def test_the_traffic_menu_offers_everyone_else_while_it_has_a_profile(self) -> None:
         result = self._run_dashboard_functions(
-            ["updateTrafficDeviceOptions", "everyoneElseAssigned", "everyoneElseInLiveTraffic"],
+            ["updateTrafficDeviceOptions", "everyoneElseAssigned", "everyoneElseInLiveTraffic",
+             "resetTrafficView"],
             "const EVERYONE_ELSE_TRAFFIC = '__everyone_else__';\n"
+            "let generalProfileState = null;\n"
+            "let latestTrafficReferences = {profile_upload:10,profile_download:5};\n"
+            "let trafficProfileScope = 'everyone';\n"
+            "function devicePickerLabel(device) { return device.name; }\n"
             "let everyoneElse = {profile_id: 'slow'};\n"
             "let savedSchedules = [];\n"
             "let runningScenarios = [];\n"
@@ -1013,13 +1291,16 @@ class ControlServerTests(unittest.TestCase):
             "savedSchedules = [{everyone_else: true, enabled: true}];\n"
             "updateTrafficDeviceOptions(devices);\n"
             "console.log(JSON.stringify({offered: offered, kept: kept, after: after,\n"
-            "  scheduled: select.options.map((option) => option.value)}));\n",
+            "  scheduled: select.options.map((option) => option.value),\n"
+            "  limits: latestTrafficReferences, scope: trafficProfileScope}));\n",
         )
 
         self.assertEqual(result["offered"], ["@all", "alice", "__everyone_else__"])
         self.assertEqual(result["kept"], ["__everyone_else__", 0])
         # Without a profile the choice goes, and the graph starts again for "all".
         self.assertEqual(result["after"], [["@all", "alice"], "@all", 1])
+        self.assertEqual(result["limits"], {"profile_upload": None, "profile_download": None})
+        self.assertIsNone(result["scope"])
         # An everyone-else schedule brings the choice back.
         self.assertEqual(result["scheduled"], ["@all", "alice", "__everyone_else__"])
 
@@ -1065,6 +1346,7 @@ class ControlServerTests(unittest.TestCase):
         def handle_write(*, authorization, body, path="/api/apply"):
             handler = object.__new__(ControlRequestHandler)
             handler.server = self.server
+            handler.client_address = ("127.0.0.1", 45000)
             handler.path = path
             handler.headers = Message()
             handler.headers["Authorization"] = authorization
@@ -1098,6 +1380,7 @@ class ControlServerTests(unittest.TestCase):
         handler = object.__new__(ControlRequestHandler)
         handler.server = self.server
         handler.path = path
+        handler.client_address = ("127.0.0.1", 45000)
         handler.headers = Message()
         handler.headers["Authorization"] = authorization
         if body is not None:
@@ -1562,6 +1845,7 @@ class ControlServerTests(unittest.TestCase):
         self.server.admin_token = "admin-token"
         handler = object.__new__(ControlRequestHandler)
         handler.server = self.server
+        handler.client_address = ("127.0.0.1", 45000)
         handler.path = "/api/connected-device-labels"
         handler.headers = Message()
         body = json.dumps(
@@ -1614,7 +1898,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body), {"deleted": True})
         self.assertEqual(self.repository.list_connected_device_labels(), {})
 
-    def test_tls_requires_both_files_and_wraps_the_dashboard_socket(self) -> None:
+    def test_tls_requires_both_files_and_encrypts_accepted_connections(self) -> None:
         with self.assertRaisesRegex(ValueError, "TLS is required"):
             ControlServer(("0.0.0.0", 0), self.repository)
         with self.assertRaisesRegex(ValueError, "provided together"):
@@ -1636,6 +1920,17 @@ class ControlServerTests(unittest.TestCase):
                 tls_keyfile=key,
             )
             response: list[bytes] = []
+            accepted_encryption: list[bool] = []
+            accept_connection = secure_server.get_request
+
+            def accept_encrypted_connection():
+                connection, address = accept_connection()
+                accepted_encryption.append(
+                    isinstance(connection, ssl.SSLSocket) and connection.cipher() is not None
+                )
+                return connection, address
+
+            secure_server.get_request = accept_encrypted_connection
 
             def send_health_request() -> None:
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -1658,6 +1953,7 @@ class ControlServerTests(unittest.TestCase):
                 secure_server.server_close()
 
         self.assertTrue(secure_server.secure_transport)
+        self.assertEqual(accepted_encryption, [True])
         self.assertEqual(len(response), 1)
         self.assertTrue(response[0].startswith(b"HTTP/1.0 200 OK"))
 
@@ -1690,20 +1986,23 @@ class ControlServerTests(unittest.TestCase):
             thread.join(timeout=5)
 
     @staticmethod
-    def _inline_hash(tag: str) -> str:
-        content = re.search(f"<{tag}>(.*?)</{tag}>", DASHBOARD_HTML, re.S).group(1)
-        digest = hashlib.sha256(content.encode("utf-8")).digest()
-        return "'sha256-" + base64.b64encode(digest).decode("ascii") + "'"
+    def _inline_hashes(tag: str) -> str:
+        hashes = []
+        for content in re.findall(f"<{tag}>(.*?)</{tag}>", DASHBOARD_HTML, re.S):
+            digest = hashlib.sha256(content.encode("utf-8")).digest()
+            hashes.append("'sha256-" + base64.b64encode(digest).decode("ascii") + "'")
+        return " ".join(hashes)
 
     def test_dashboard_only_runs_its_own_inline_script_and_style(self) -> None:
         self.server.admin_token = "admin-token"
-        session = issue_session("admin-token", now=int(time.time()))
-        response = self._get_over_http("/", headers={"Cookie": f"session={session}"})
+        response = self._get_over_http("/")
 
         policy = response.getheader("Content-Security-Policy")
         self.assertIn("default-src 'none'", policy)
-        self.assertIn("script-src " + self._inline_hash("script"), policy)
-        self.assertIn("style-src " + self._inline_hash("style"), policy)
+        # Every inline block is allowed, including the sidebar script.
+        self.assertEqual(DASHBOARD_HTML.count("<script>"), 2)
+        self.assertIn("script-src " + self._inline_hashes("script"), policy)
+        self.assertIn("style-src " + self._inline_hashes("style"), policy)
         self.assertIn("connect-src 'self'", policy)
         self.assertIn("frame-ancestors 'none'", policy)
 
@@ -1961,13 +2260,28 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
         self.assertEqual(
-            {key: value for key, value in json.loads(body).items() if key != "system"},
+            json.loads(body),
             {
                 "helper_configured": True,
                 "helper_reachable": True,
                 "mode": "hardware",
                 "status": "ok",
             },
+        )
+
+    def test_system_details_need_the_token_and_stay_out_of_the_public_health(self) -> None:
+        # Version and free disk and temperature and uptime help an attacker on the
+        # test Wi-Fi so they sit behind the admin token.
+        _, _, public = self.server.response_for("/api/health")
+        for detail in ("system", "version", "disk_free_bytes", "temperature_celsius", "uptime"):
+            self.assertNotIn(detail, public.decode())
+        status, content_type, body = self.server.response_for("/api/system-health")
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        system = json.loads(body)["system"]
+        self.assertEqual(
+            set(system),
+            {"version", "checked_at", "disk_free_bytes", "temperature_celsius", "uptime_seconds"},
         )
 
     def test_configuration_endpoints_serialize_validated_values(self) -> None:
@@ -2033,12 +2347,401 @@ class ControlServerTests(unittest.TestCase):
 
         status, content_type, body = self.server.write_response_for(
             "/api/router/sync-ap",
-            {"admin_password": "router-secret"},
+            {"admin_password": "router-secret", "expected_fingerprint": "a" * 64},
         )
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
         self.assertEqual(json.loads(body)["result"]["ssid"], "Vodafone-Test")
+
+    def test_router_preview_does_not_expose_helper_secrets(self) -> None:
+        class PreviewHelper(FakeHelper):
+            def preview_router_wifi(self, *, admin_password):
+                return {"ssid": "Home", "security": "WPA2", "band": "2.4 GHz",
+                        "fingerprint": "a" * 64, "legacy": False, "password": "private"}
+
+        self.server.helper_client = PreviewHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/router/preview-ap", {"admin_password": "router-secret"})
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"private", body)
+        self.assertNotIn(b"router-secret", body)
+
+    def test_router_preview_rejects_a_helper_without_detection(self) -> None:
+        self.server.helper_client = FakeHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/router/preview-ap", {"admin_password": "router-secret"})
+        self.assertEqual(status, 502)
+        self.assertIn("out of date", json.loads(body)["error"])
+
+    def test_router_import_error_guidance_is_safe_in_response_and_logs(self) -> None:
+        from jittersim.networking.router import ROUTER_IMPORT_MESSAGES
+
+        for message, expected in (
+            (ROUTER_IMPORT_MESSAGES["unsupported"], ROUTER_IMPORT_MESSAGES["unsupported"]),
+            ("router-secret was present in a response", "router Wi-Fi import failed"),
+        ):
+            with self.subTest(message=message):
+                class FailedHelper(FakeHelper):
+                    def sync_access_point_from_router(self, *, admin_password, expected_fingerprint, confirm_legacy=False):
+                        raise HelperClientError(message)
+
+                self.server.helper_client = FailedHelper()
+                with self.assertLogs("jittersim.api.server", level="WARNING") as logs:
+                    status, _, body = self.server.write_response_for(
+                        "/api/router/sync-ap", {"admin_password": "router-secret", "expected_fingerprint": "a" * 64},
+                    )
+                self.assertEqual(status, 502)
+                self.assertEqual(json.loads(body)["error"], expected)
+                self.assertNotIn("router-secret", body.decode() + "\n".join(logs.output))
+
+    def test_router_check_endpoint_signs_in_through_the_helper(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, content_type, body = self.server.write_response_for(
+            "/api/router/check", {"admin_password": "router-secret"}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(json.loads(body), {"result": {"ok": True, "action": "router-check"}})
+        self.assertNotIn("router-secret", body.decode())
+
+    def test_router_check_endpoint_needs_a_helper_and_a_password(self) -> None:
+        self.server.helper_client = None
+        status, _, body = self.server.write_response_for(
+            "/api/router/check", {"admin_password": "router-secret"}
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body)["error"], "network helper is not configured")
+
+        class UnexpectedHelper(FakeHelper):
+            def check_router_password(self, *, admin_password):
+                raise AssertionError("no router contact without a password")
+
+        self.server.helper_client = UnexpectedHelper()
+        for payload in ({}, {"admin_password": ""}, {"admin_password": 5}):
+            with self.subTest(payload=payload):
+                status, _, body = self.server.write_response_for("/api/router/check", payload)
+                self.assertEqual(status, 400)
+                self.assertEqual(json.loads(body)["error"], "router admin password is required")
+
+    def test_router_check_error_guidance_is_safe_in_response_and_logs(self) -> None:
+        from jittersim.networking.router import ROUTER_CHECK_MESSAGES
+
+        for message, expected in (
+            (ROUTER_CHECK_MESSAGES["login"], ROUTER_CHECK_MESSAGES["login"]),
+            (ROUTER_CHECK_MESSAGES["unreachable"], ROUTER_CHECK_MESSAGES["unreachable"]),
+            ("router-secret was present in a response", ROUTER_CHECK_MESSAGES["failed"]),
+            ("some other helper text", ROUTER_CHECK_MESSAGES["failed"]),
+            ("unknown action", ROUTER_CHECK_MESSAGES["outdated"]),
+        ):
+            with self.subTest(message=message):
+
+                class FailedHelper(FakeHelper):
+                    def check_router_password(self, *, admin_password):
+                        raise HelperClientError(message)
+
+                self.server.helper_client = FailedHelper()
+                with self.assertLogs("jittersim.api.server", level="WARNING") as logs:
+                    status, _, body = self.server.write_response_for(
+                        "/api/router/check", {"admin_password": "router-secret"}
+                    )
+                self.assertEqual(status, 502)
+                self.assertEqual(json.loads(body)["error"], expected)
+                self.assertNotIn("router-secret", body.decode() + "\n".join(logs.output))
+
+    def test_router_check_route_requires_the_admin_token_and_records_no_password(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+        handler = object.__new__(ControlRequestHandler)
+        handler.server = self.server
+        handler.client_address = ("127.0.0.1", 45000)
+        handler.path = "/api/router/check"
+        handler.headers = Message()
+        body = json.dumps({"admin_password": "router-secret"}).encode()
+        handler.headers["Content-Length"] = str(len(body))
+        response = {}
+        handler._send_response = lambda **values: response.update(values)
+
+        handler.rfile = BytesIO(body)
+        handler.do_POST()
+        self.assertEqual(response["status"], 401)
+
+        handler.headers["Authorization"] = "Bearer admin-token"
+        handler.rfile = BytesIO(body)
+        handler.do_POST()
+        self.assertEqual(response["status"], 200)
+        history = self.repository.list_recent_actions()
+        self.assertEqual(
+            (history[0]["action"], history[0]["status_code"]), ("/api/router/check", 200)
+        )
+        self.assertNotIn("router-secret", str(history))
+
+    def test_wifi_credentials_return_the_name_without_the_password(self) -> None:
+        self.server.helper_client = FakeHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi-credentials",
+            {"admin_password": "router-secret", "include_password": False},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"result": {"ssid": "Browser home"}})
+        self.assertNotIn("router-secret", body.decode())
+        self.assertNotIn("browser-wifi-password", body.decode())
+
+    def test_wifi_credentials_default_to_the_name_only(self) -> None:
+        self.server.helper_client = FakeHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi-credentials", {"admin_password": "router-secret"})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"result": {"ssid": "Browser home"}})
+
+    def test_wifi_credentials_return_the_password_only_when_asked(self) -> None:
+        self.server.helper_client = FakeHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi-credentials",
+            {"admin_password": "router-secret", "include_password": True},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body)["result"], {"ssid": "Browser home", "password": "browser-wifi-password"}
+        )
+
+    def test_wifi_credentials_never_ask_the_helper_for_more_than_was_requested(self) -> None:
+        asked = []
+
+        class Recording(FakeHelper):
+            def read_router_wifi_credentials(self, *, admin_password, include_password):
+                asked.append((admin_password, include_password))
+                # A misbehaving helper that always sends the password must not leak it.
+                return {"ssid": "Browser home", "password": "browser-wifi-password"}
+
+        self.server.helper_client = Recording()
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi-credentials",
+            {"admin_password": "router-secret", "include_password": False},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(asked, [("router-secret", False)])
+        self.assertEqual(json.loads(body), {"result": {"ssid": "Browser home"}})
+        self.assertNotIn("browser-wifi-password", body.decode())
+
+    def test_wifi_credentials_reject_bad_requests(self) -> None:
+        self.server.helper_client = FakeHelper()
+        for payload in (
+            {},
+            {"admin_password": ""},
+            {"admin_password": 7},
+            {"admin_password": "x" * 1025},
+            {"admin_password": "x", "include_password": "yes"},
+            {"admin_password": "x", "include_password": "true"},
+            {"admin_password": "x", "include_password": "false"},
+            {"admin_password": "x", "include_password": 1},
+            {"admin_password": "x", "include_password": None},
+        ):
+            status, _, body = self.server.write_response_for(
+                "/api/router/wifi-credentials", payload)
+            self.assertEqual(status, 400, payload)
+            self.assertNotIn("browser-wifi-password", body.decode())
+
+    def test_wifi_credentials_need_a_helper_and_the_admin_token(self) -> None:
+        from jittersim.api.server import WRITE_PATHS
+
+        self.server.helper_client = None
+        status, _, _ = self.server.write_response_for(
+            "/api/router/wifi-credentials", {"admin_password": "x"})
+        self.assertEqual(status, 503)
+        self.assertIn("/api/router/wifi-credentials", WRITE_PATHS)
+
+    def _assert_no_secret_logged(self, records) -> None:
+        for message in records:
+            for secret in ("hunter2hunter2", "router-secret", "browser-wifi-password"):
+                self.assertNotIn(secret, message)
+
+    def test_wifi_credentials_never_echo_a_wrong_password(self) -> None:
+        class Rejecting(FakeHelper):
+            def read_router_wifi_credentials(self, *, admin_password, include_password):
+                raise HelperClientError(
+                    "The router rejected the password " + admin_password + " browser-wifi-password")
+
+        self.server.helper_client = Rejecting()
+        with captured_logs() as records:
+            status, _, body = self.server.write_response_for(
+                "/api/router/wifi-credentials",
+                {"admin_password": "hunter2hunter2", "include_password": True})
+        self.assertEqual(status, 502)
+        self.assertNotIn("hunter2hunter2", body.decode())
+        self.assertNotIn("browser-wifi-password", body.decode())
+        # The failure is logged once so the capture is not vacuous.
+        self.assertTrue(any("router Wi-Fi copy failed" in message for message in records))
+        self._assert_no_secret_logged(records)
+
+    def test_wifi_credentials_pass_on_only_the_fixed_router_messages(self) -> None:
+        from jittersim.networking.helper import WIFI_DETAILS_MISSING_MESSAGE
+        from jittersim.networking.router import ROUTER_CHECK_MESSAGES
+
+        busy = "The router is busy right now. Try again in a moment."
+        for error, expected in (
+            (HelperClientError(ROUTER_CHECK_MESSAGES["login"]), ROUTER_CHECK_MESSAGES["login"]),
+            (HelperClientError(ROUTER_CHECK_MESSAGES["unreachable"]),
+             ROUTER_CHECK_MESSAGES["unreachable"]),
+            (HelperClientError("unknown action"), ROUTER_CHECK_MESSAGES["outdated"]),
+            (HelperClientError("browser-wifi-password leaked here"), ROUTER_CHECK_MESSAGES["failed"]),
+            (HelperClientError("Another router operation is running. Try again shortly.",
+                               reason="helper-busy"), busy),
+            (HelperClientError("router-secret browser-wifi-password", reason="helper-busy"), busy),
+            (HelperClientError(WIFI_DETAILS_MISSING_MESSAGE), WIFI_DETAILS_MISSING_MESSAGE),
+        ):
+            class Failing(FakeHelper):
+                def read_router_wifi_credentials(self, *, admin_password, include_password):
+                    raise error
+
+            self.server.helper_client = Failing()
+            with captured_logs() as records:
+                status, _, body = self.server.write_response_for(
+                    "/api/router/wifi-credentials",
+                    {"admin_password": "router-secret", "include_password": True})
+            self.assertEqual(status, 502, str(error))
+            self.assertEqual(json.loads(body), {"error": expected}, str(error))
+            self._assert_no_secret_logged(records)
+
+    def test_wifi_credentials_wording_is_for_this_route_only(self) -> None:
+        from jittersim.networking.helper import WIFI_DETAILS_MISSING_MESSAGE
+        from jittersim.networking.router import ROUTER_CHECK_MESSAGES
+
+        for error in (
+            HelperClientError("Another router operation is running. Try again shortly.",
+                              reason="helper-busy"),
+            HelperClientError(WIFI_DETAILS_MISSING_MESSAGE),
+        ):
+            class Failing(FakeHelper):
+                def check_router_password(self, *, admin_password):
+                    raise error
+
+            self.server.helper_client = Failing()
+            status, _, body = self.server.write_response_for(
+                "/api/router/check", {"admin_password": "router-secret"})
+            self.assertEqual(status, 502)
+            self.assertEqual(json.loads(body), {"error": ROUTER_CHECK_MESSAGES["failed"]})
+
+    def test_an_old_helper_gets_the_out_of_date_message(self) -> None:
+        class Old(FakeHelper):
+            read_router_wifi_credentials = None
+
+        self.server.helper_client = Old()
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi-credentials", {"admin_password": "router-secret"})
+        self.assertEqual(status, 502)
+        self.assertIn("out of date", json.loads(body)["error"])
+
+    def test_wifi_credentials_are_not_logged_or_recorded(self) -> None:
+        self.server.helper_client = FakeHelper()
+        before = list(self.repository.list_recent_actions())
+        with captured_logs() as records:
+            status, _, body = self.server.write_response_for(
+                "/api/router/wifi-credentials",
+                {"admin_password": "router-secret", "include_password": True})
+        self.assertEqual(status, 200)
+        self.assertIn("browser-wifi-password", body.decode())
+        self.assertEqual(list(self.repository.list_recent_actions()), before)
+        self._assert_no_secret_logged(records)
+
+    def test_wifi_credentials_never_run_as_a_background_operation(self) -> None:
+        self.server.helper_client = FakeHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi-credentials",
+            {"admin_password": "router-secret", "include_password": True, "background": True})
+        # The password would be kept for minutes in the retained operation result.
+        self.assertEqual(status, 200)
+        self.assertNotIn("operation_id", json.loads(body))
+        self.assertIsNone(self.server.router_operations.completed_action())
+        self.assertIsNone(self.server.router_operations._active)
+        self.assertIsNone(self.server.router_operations._completed)
+
+    def _post_over_http(self, path, payload, headers=None):
+        """Send one POST over a real socket while the repository's own thread serves it."""
+
+        import http.client
+
+        outcome = []
+
+        def send() -> None:
+            connection = http.client.HTTPConnection(*self.server.server_address[:2], timeout=5)
+            try:
+                request_headers = {"Content-Type": "application/json"}
+                request_headers.update(headers or {})
+                connection.request("POST", path, body=json.dumps(payload).encode(),
+                                   headers=request_headers)
+                response = connection.getresponse()
+                outcome.append((response.status,
+                                {k.lower(): v for k, v in response.getheaders()},
+                                response.read()))
+            finally:
+                connection.close()
+
+        client = threading.Thread(target=send)
+        client.start()
+        try:
+            self.server.timeout = 5
+            self.server.handle_request()
+        finally:
+            client.join(timeout=5)
+        self.assertEqual(len(outcome), 1)
+        return outcome[0]
+
+    def test_wifi_credentials_over_http_need_the_token_and_are_never_cached(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+        payload = {"admin_password": "router-secret", "include_password": True}
+
+        status, headers, body = self._post_over_http("/api/router/wifi-credentials", payload)
+        self.assertEqual(status, 401)
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertNotIn("browser-wifi-password", body.decode())
+
+        status, headers, body = self._post_over_http(
+            "/api/router/wifi-credentials", payload,
+            {"Authorization": "Bearer wrong-token"})
+        self.assertEqual(status, 401)
+        self.assertNotIn("browser-wifi-password", body.decode())
+
+        status, headers, body = self._post_over_http(
+            "/api/router/wifi-credentials", payload,
+            {"Authorization": "Bearer admin-token"})
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertEqual(headers["x-content-type-options"], "nosniff")
+        self.assertEqual(json.loads(body)["result"]["password"], "browser-wifi-password")
+
+    def test_wifi_credentials_over_http_refuse_other_sites(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+        payload = {"admin_password": "router-secret", "include_password": True}
+        host = "%s:%s" % self.server.server_address[:2]
+
+        for extra in ({"Origin": "https://different.example"}, {"Sec-Fetch-Site": "cross-site"}):
+            status, headers, body = self._post_over_http(
+                "/api/router/wifi-credentials", payload,
+                {"Authorization": "Bearer admin-token", "Host": host, **extra})
+            self.assertEqual(status, 403, extra)
+            self.assertEqual(headers["cache-control"], "no-store")
+            self.assertNotIn("browser-wifi-password", body.decode())
+
+    def test_wifi_credentials_history_keeps_no_password(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+        status, _, _ = self._post_over_http(
+            "/api/router/wifi-credentials",
+            {"admin_password": "router-secret", "include_password": True},
+            {"Authorization": "Bearer admin-token"})
+        self.assertEqual(status, 200)
+        history = self.repository.list_recent_actions()
+        self.assertEqual(
+            (history[0]["action"], history[0]["status_code"]),
+            ("/api/router/wifi-credentials", 200),
+        )
+        for secret in ("router-secret", "browser-wifi-password"):
+            self.assertNotIn(secret, str(history))
 
     def test_router_wifi_endpoint_requires_confirmation_to_disable(self) -> None:
         self.server.helper_client = FakeHelper()
@@ -2067,6 +2770,36 @@ class ControlServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertTrue(json.loads(body)["result"]["enabled"])
+
+    def test_router_toggle_propagates_only_safe_errors(self):
+        from jittersim.networking.router import ROUTER_WIFI_MESSAGES
+
+        for reported in (*ROUTER_WIFI_MESSAGES.values(), "router-secret response contents"):
+            with self.subTest(reported=reported):
+
+                class RejectedHelper(FakeHelper):
+                    def set_router_wifi(self, *, admin_password, enabled):
+                        raise HelperClientError(reported)
+
+                self.server.helper_client = RejectedHelper()
+                with self.assertLogs("jittersim.api.server", level="WARNING") as logs:
+                    status, _, body = self.server.write_response_for(
+                        "/api/router/wifi",
+                        {
+                            "admin_password": "router-secret",
+                            "enabled": False,
+                            "confirm_disable": True,
+                        },
+                    )
+                self.assertEqual(status, 502)
+                expected = (
+                    reported
+                    if reported in ROUTER_WIFI_MESSAGES.values()
+                    else ROUTER_WIFI_MESSAGES["uncertain"]
+                )
+                self.assertEqual(json.loads(body)["error"], expected)
+                self.assertNotIn("router-secret", body.decode() + "\n".join(logs.output))
+                self.assertNotIn("response contents", body.decode() + "\n".join(logs.output))
 
     def test_connected_devices_endpoint_reports_unavailable_without_helper(self) -> None:
         status, content_type, body = self.server.response_for("/api/connected-devices")
@@ -2114,6 +2847,10 @@ class ControlServerTests(unittest.TestCase):
                         "assigned_device_name": None,
                         "assigned_profile_id": None,
                         "unaffected": False,
+                        "assigned_effective_state": None,
+                        "group_id": None,
+                        "group_name": None,
+                        "group_profile_id": None,
                     }
                 ],
                 "everyone_else_profile_id": None,
@@ -2135,7 +2872,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
         response = json.loads(body)
-        self.assertEqual(response["device"]["id"], "client-192-168-50-178")
+        self.assertEqual(response["device"]["id"], "client-dc1ed53e974c")
         self.assertEqual(response["device"]["profile_id"], "slow")
         self.assertEqual(response["device"]["mac_address"], "dc:1e:d5:3e:97:4c")
         self.assertEqual(
@@ -2166,9 +2903,11 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(
             self.repository.get_device_by_ipv4_address("192.168.50.178").profile_id, "slow"
         )
-        # Only an explicit Apply may undo a Reset, so the dashboard says so.
+        # Only an explicit Apply may undo a Reset. The dashboard relays the server's
+        # message, which says so.
         assign = DASHBOARD_HTML.split("async function applyProfileToDevice(", 1)[1]
-        self.assertIn("result.live_applied === false", assign.split("\n    }\n", 1)[0])
+        self.assertIn("result.message", assign.split("\n    }\n", 1)[0])
+        self.assertIn("Start", json.loads(body)["message"])
 
     def test_profile_assignment_rejects_a_neighbor_without_verified_association(self) -> None:
         class UnverifiedHelper(FakeHelper):
@@ -2260,12 +2999,17 @@ class ControlServerTests(unittest.TestCase):
         harness = (
             "const TRAFFIC_WINDOW_MS = 60000;\n"
             "const trafficSamples = [];\n"
+            + re.search(r"const TRAFFIC_SERIES = \[.*?\n    \];", script, re.S).group(0)
+            + "\nconst trafficProfileScope = 'device';\n"
+            "const trafficInspection = {pointer:null,legend:null,pinned:null};\n"
+            "const TRAFFIC_INSPECTION_HELP = 'Inspect a line';\n"
+            "const document = {querySelectorAll: () => []};\n"
             # An ISP plan of 100 Mbit/s sets the scale to 100 Mbit/s.
             "const latestTrafficReferences = {isp_download: 100};\n"
             "const drawn = [];\n"
             "const context = {\n"
             "  setTransform() {}, clearRect() {}, beginPath() {}, moveTo() {},\n"
-            "  lineTo() {}, stroke() {}, setLineDash() {},\n"
+            "  lineTo() {}, stroke() {}, setLineDash() {}, arc() {}, fill() {},\n"
             "  measureText(text) { return {width: 7 * text.length}; },\n"
             "  fillText(text, x) { drawn.push({text, x, align: this.textAlign}); },\n"
             "};\n"
@@ -2273,12 +3017,15 @@ class ControlServerTests(unittest.TestCase):
             "  'traffic-chart': {getBoundingClientRect: () => ({width: 600, height: 320}),\n"
             "                    getContext: () => context},\n"
             "  'traffic-device': {value: 'all'},\n"
-            "  'traffic-profile-upload-legend': {},\n"
-            "  'traffic-profile-download-legend': {},\n"
+            "  'traffic-chart-detail': {},\n"
             "};\n"
             "const element = (id) => elements[id];\n"
             "const window = {devicePixelRatio: 1};\n"
             + function("formatTrafficRate")
+            + function("trafficSeriesName")
+            + function("trafficSeriesGeometry")
+            + function("trafficSegmentDistance")
+            + function("trafficLineHits")
             + function("drawTrafficChart")
             + "drawTrafficChart();\n"
             "const clipped = drawn.filter(({text, x, align}) => {\n"
@@ -2456,10 +3203,10 @@ class ControlServerTests(unittest.TestCase):
 
     def test_dashboard_can_edit_and_delete_saved_items(self) -> None:
         for fragment in (
-            'id="profile-table"',
+            'id="saved-profiles"',
             'id="device-table"',
-            '<select id="device-profile" required></select>',
-            'id="profile-cancel-edit"',
+            '<select id="device-profile" required disabled',
+            'id="new-profile"',
             'id="device-cancel-edit"',
             "function fillProfileForm(profile)",
             "function fillDeviceForm(device)",
@@ -2475,8 +3222,6 @@ class ControlServerTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, DASHBOARD_HTML)
-        self.assertNotIn('<pre id="profiles">', DASHBOARD_HTML)
-        self.assertNotIn('<pre id="devices">', DASHBOARD_HTML)
 
     def test_dashboard_keeps_the_id_when_renaming_a_saved_item(self) -> None:
         for function, prefix in (
@@ -2492,16 +3237,19 @@ class ControlServerTests(unittest.TestCase):
     def test_dashboard_keeps_profile_settings_the_form_does_not_show(self) -> None:
         submit = DASHBOARD_HTML.split('element("profile-form").addEventListener("submit"', 1)[1]
         submit = submit.split("\n    });\n", 1)[0]
+        self.assertIn("profileFormPayload(editingProfile)", submit)
+        payload = DASHBOARD_HTML.split("function profileFormPayload(base) {", 1)[1]
+        payload = payload.split("\n    }\n", 1)[0]
 
+        # The profile being edited keeps the randomness the form does not show.
         for fragment in (
-            "const kept = savedProfileRandomness;",
-            "enabled_probability: kept.reroll_interval_randomness.enabled_probability",
-            "outage_duration_randomness: kept.outage_duration_randomness",
-            "outage_interval_randomness: kept.outage_interval_randomness",
-            "variation_percent: kept.website_randomness.variation_percent",
+            "enabled_probability: base ? base.reroll_interval_randomness.enabled_probability : 100",
+            'outage_duration_randomness: keep("outage_duration_randomness")',
+            'outage_interval_randomness: keep("outage_interval_randomness")',
+            "variation_percent: base ? base.website_randomness.variation_percent : 0",
         ):
             with self.subTest(fragment=fragment):
-                self.assertIn(fragment, submit)
+                self.assertIn(fragment, payload)
         self.assertIn('element("profile-form").addEventListener("reset"', DASHBOARD_HTML)
 
     def test_dashboard_shows_each_device_condition(self) -> None:
@@ -2509,11 +3257,12 @@ class ControlServerTests(unittest.TestCase):
         table = table.split("\n    }\n", 1)[0]
 
         self.assertIn('["Device", "Address", "Profile", "Condition"]', table)
-        self.assertIn("deviceConditionCell(device.id)", table)
+        self.assertIn("deviceStateCell(device)", table)
+        self.assertIn("return deviceConditionCell(device.id);", DASHBOARD_HTML)
         self.assertIn('request("/api/conditions", "GET")', DASHBOARD_HTML)
         self.assertIn('id="device-conditions-note"', DASHBOARD_HTML)
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
-        self.assertIn("loadConditions()", refresh)
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadConditions", refresh)
 
     def test_dashboard_condition_lookup_ignores_built_in_names(self) -> None:
         node = shutil.which("node")
@@ -2545,14 +3294,14 @@ class ControlServerTests(unittest.TestCase):
             'id="everyone-else-form"',
             'id="everyone-else-profile"',
             'id="unaffected-form"',
-            'id="unaffected-table"',
+            'id="unaffected-devices"',
             'request("/api/everyone-else", "GET")',
             '"/api/unaffected-devices/delete"',
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, DASHBOARD_HTML)
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
-        self.assertIn("loadEveryoneElse()", refresh)
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadEveryoneElse", refresh)
 
     def _run_dashboard_functions(self, names, setup, calls):
         node = shutil.which("node")
@@ -2568,7 +3317,7 @@ class ControlServerTests(unittest.TestCase):
                     return f"{kind} {name}({body}\n}}\n"
             raise AssertionError(f"{name} is not in the dashboard script")
 
-        harness = "const restoreDrafts = () => {}; const loadHealth = async () => {}; const loadWorkspace = async () => {};\n" + setup + "".join(function(name) for name in names) + calls
+        harness = "const invalidateAdminTools = () => {}; const restoreDrafts = () => {}; const loadHealth = async () => {}; const loadWorkspace = async () => {};\n" + setup + "".join(function(name) for name in names) + calls
         result = subprocess.run([node, "-e", harness], capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
@@ -2596,10 +3345,10 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(
             labels,
             [
-                "Unaffected",
+                "Protected",
                 "Saved device: Slow",
                 "Normal connection",
-                "Saved device: Slow (also on the unaffected list)",
+                "Saved device: Slow (also on the protected list)",
                 "Everyone else: 3G",
                 "Everyone else: Slow",
             ],
@@ -2614,9 +3363,10 @@ class ControlServerTests(unittest.TestCase):
         )
         result = self._run_dashboard_functions(
             [
-                "deviceName", "scheduleTargetFields", "scheduleTargetValue",
-                "scheduleTargetName", "scheduleTargetOptions",
+                "deviceDisplayName", "deviceTitle", "deviceName", "scheduleTargetFields",
+                "scheduleTargetValue", "scheduleTargetName", "scheduleTargetOptions",
             ],
+            "function devicePickerLabel(device) { return device.name + ' (' + device.ipv4_address + ')'; }\n"
             "const devices = [{id: 'alice', name: 'Alice', ipv4_address: '192.168.50.10'}];\n"
             "let groups = [{id: 'family', name: 'Family', device_ids: ['alice']}];\n",
             f"const targets = {targets};\n"
@@ -2659,7 +3409,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(result["withoutGroups"], ["device:alice", "everyone-else"])
 
     def test_the_scenarios_card_sits_with_the_timers(self) -> None:
-        rules = self._panel("rules")
+        rules = self._panel("schedules")
         for fragment in (
             'id="scenario-run-list"', 'id="scenario-start-form"', 'id="scenario-start-scenario"',
             'id="scenario-start-target"', 'id="scenario-list"', 'id="scenario-form"',
@@ -2668,9 +3418,9 @@ class ControlServerTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, rules)
         self.assertLess(rules.index("Run a profile timer"), rules.index("<h2>Scenarios</h2>"))
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
-        self.assertIn("loadScenarios()", refresh)
-        self.assertIn("window.setInterval(pollDashboard, 5000);", DASHBOARD_HTML)
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadScenarios", refresh)
+        self.assertIn("makePoller(pollDashboard, 5000);", DASHBOARD_HTML)
 
     def test_scenario_steps_durations_and_running_text(self) -> None:
         result = self._run_dashboard_functions(
@@ -2821,7 +3571,7 @@ class ControlServerTests(unittest.TestCase):
 
     def test_the_step_editor_keeps_one_step_and_numbers_them(self) -> None:
         result = self._run_dashboard_functions(
-            ["scenarioStepRow", "renumberScenarioSteps"],
+            ["profileOptionLabels", "scenarioStepRow", "renumberScenarioSteps"],
             "function updateScenarioDuration() {}\n"
             "const profiles = [{id: 'slow', name: 'Slow'}];\n"
             "const node = (tag) => ({tag: tag, children: [], className: '', value: '',\n"
@@ -2865,10 +3615,16 @@ class ControlServerTests(unittest.TestCase):
 
     def test_rebuilt_profile_menus_keep_the_steps_being_edited(self) -> None:
         result = self._run_dashboard_functions(
-            ["loadProfiles"],
+            ["profileOptionLabels", "setDeviceProfileAvailability", "loadProfiles", "followProfileMenus"],
+            "let profilesRequestRevision = 0;\n"
             "let profiles = [];\n"
+            "let profilesLoaded = false;\n"
+            "function renderSidebarStatus() {}\n"
+            "function updateGeneralProfileControls() {}\n"
+            "function updateGroupFormControls() {}\n"
+            "const profilesLoadedHooks = [followProfileMenus];\n"
             "const everyoneElse = {profile_id: null};\n"
-            "const element = () => ({value: '', options: [], replaceChildren() {this.options=[];}, appendChild(option) {this.options.push(option);}});\n"
+            "const element = () => ({value: '', options: [], getAttribute() {return null;}, replaceChildren() {this.options=[];}, appendChild(option) {this.options.push(option);}});\n"
             "const document = {createElement: () => ({})};\n"
             "async function request() { return {profiles: [{id: 'slow', name: 'Slow'}]}; }\n"
             "function renderProfileTable() {}\n"
@@ -2910,17 +3666,17 @@ class ControlServerTests(unittest.TestCase):
             ],
         )
 
-    def test_the_activity_log_sits_on_the_overview_and_polls(self) -> None:
-        overview = self._panel("overview")
+    def test_the_activity_log_has_its_own_page_and_polls(self) -> None:
+        overview = self._panel("activity")
         for fragment in (
             'id="activity-list"', 'id="activity-copy"', 'id="activity-clear"',
             'id="activity-markdown"',
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, overview)
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
-        self.assertIn("loadActivity()", refresh)
-        self.assertIn("window.setInterval(pollDashboard, 5000);", DASHBOARD_HTML)
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadActivity", refresh)
+        self.assertIn("makePoller(pollDashboard, 5000);", DASHBOARD_HTML)
 
     def test_the_activity_log_copies_as_markdown(self) -> None:
         result = self._run_dashboard_functions(
@@ -3054,7 +3810,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(result, {"posted": ["/api/activity/clear"], "reloads": 1})
 
     def test_the_activity_list_can_be_scrolled_by_keyboard(self) -> None:
-        overview = self._panel("overview")
+        overview = self._panel("activity")
         list_tag = overview.split('id="activity-list"', 1)[0].rsplit("<ol", 1)[1]
         list_tag += overview.split('id="activity-list"', 1)[1].split(">", 1)[0]
 
@@ -3098,20 +3854,27 @@ class ControlServerTests(unittest.TestCase):
             messages,
             [
                 "Saved.",
-                "Saved. The network is reset, so apply the configuration to use it.",
+                "Saved. The network is reset, so choose Start to use it.",
                 "Saved. It takes effect when the dashboard runs in hardware mode.",
             ],
         )
 
     def test_dashboard_profile_menus_keep_the_everyone_else_choice(self) -> None:
         values = self._run_dashboard_functions(
-            ["loadProfiles"],
+            ["profileOptionLabels", "setDeviceProfileAvailability", "loadProfiles", "followProfileMenus"],
+            "let profilesRequestRevision = 0;\n"
             "let profiles = [];\n"
+            "let profilesLoaded = false;\n"
+            "function renderSidebarStatus() {}\n"
+            "function updateGeneralProfileControls() {}\n"
+            "const profilesLoadedHooks = [followProfileMenus];\n"
             "const everyoneElse = {profile_id: '3g', unaffected_devices: []};\n"
+            "function updateGroupFormControls() {}\n"
             "const elements = {};\n"
             "function element(id) {\n"
             "  elements[id] = elements[id] || {\n"
             "    options: [], value: '',\n"
+            "    getAttribute() { return null; },\n"
             "    replaceChildren() { this.options = []; this.value = ''; },\n"
             "    appendChild(option) {\n"
             "      this.options.push(option);\n"
@@ -3162,8 +3925,8 @@ class ControlServerTests(unittest.TestCase):
             [
                 None,
                 [
-                    ["Everyone else", "Test Wi-Fi clients that aren't saved or unaffected"],
-                    ["Any address", "1 unaffected"],
+                    ["Everyone else", "Test Wi-Fi clients that aren't saved or protected"],
+                    ["Any address", "1 protected"],
                     ["3G", "Saved profile"],
                     ["Degraded", "upload: delay 100 ms"],
                 ],
@@ -3222,13 +3985,6 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn(".content-grid, .data-grid { grid-template-columns: minmax(0, 1fr); }", small)
         self.assertNotIn("grid-template-columns: 1fr;", small)
 
-    def test_connected_client_buttons_wrap_on_a_phone(self) -> None:
-        small = self._small_screen_css()
-
-        # "Keep unaffected" used to push the Overview to 522 pixels on a 375-pixel phone.
-        self.assertIn(".connected-controls { grid-column: 1 / -1; flex-wrap: wrap; }", small)
-        self.assertIn(".connected-controls select { flex: 1 1 100%; min-width: 0; }", small)
-
     def test_help_text_takes_no_room_until_shown(self) -> None:
         tooltip = DASHBOARD_HTML.split(".help-icon::after {", 1)[1].split("}", 1)[0]
 
@@ -3239,156 +3995,131 @@ class ControlServerTests(unittest.TestCase):
             ".help-icon:hover::after, .help-icon:focus-visible::after { display: block; }",
             DASHBOARD_HTML,
         )
-        # On a phone the help spans its field instead of starting at the icon.
+        # On a phone the help bubble sits at the bottom of the screen instead.
         small = self._small_screen_css()
-        self.assertIn("label, .randomness-title { position: relative; }", small)
-        self.assertIn(".help-icon { position: static; }", small)
-        self.assertIn(".help-icon::after { right: 0; width: auto; }", small)
+        self.assertIn(
+            ".help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 1rem; "
+            "width: calc(100vw - 2rem); }",
+            small,
+        )
 
     def test_hidden_fields_stay_hidden(self) -> None:
         # label { display: grid } used to override the hidden attribute.
         self.assertIn("[hidden] { display: none !important; }", DASHBOARD_HTML)
         script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
-        startup = script.split(
-            '["data-limit", "group-data-limit", "service-quota", "time-quota"].forEach(', 1
-        )[1].split("});", 1)[0]
-        self.assertIn('addEventListener("change", () => syncQuotaReset(prefix));', startup)
-        self.assertIn("syncQuotaReset(prefix);", startup.split("addEventListener", 1)[1])
+        for prefix in ("data-limit", "group-data-limit", "service-quota", "time-quota"):
+            with self.subTest(prefix=prefix):
+                listener = (
+                    f'element("{prefix}-reset-mode").addEventListener("change", '
+                    f'() => syncQuotaReset("{prefix}"));'
+                )
+                self.assertIn(listener, script)
+                self.assertIn(f'syncQuotaReset("{prefix}");', script.split(listener, 1)[1])
 
-    def test_devices_tab_cards_keep_their_gap(self) -> None:
-        self.assertIn(".data-grid + .content-grid { margin-top: 1rem; }", DASHBOARD_HTML)
-
-    def test_the_controls_bar_stays_slim_on_a_phone(self) -> None:
-        small = self._small_screen_css()
-
-        self.assertIn('<p class="action-description">', DASHBOARD_HTML)
-        self.assertIn(".action-description { display: none; }", small)
-        self.assertIn(".action-buttons button {", small)
-        self.assertIn("flex: 1; min-width: 0;", small)
-
-    TABS = ("overview", "devices", "profiles", "rules", "measurements", "setup", "diagnostics")
+    PAGES = (
+        "devices", "profiles", "schedules", "router", "traffic", "measurements", "activity",
+        "access", "diagnostics", "updates",
+    )
 
     def _panel(self, name: str) -> str:
-        start = DASHBOARD_HTML.index(f'<div class="tab-panel" id="tab-{name}"')
-        following = DASHBOARD_HTML.find('<div class="tab-panel" id="tab-', start + 1)
-        end = DASHBOARD_HTML.index("<script>") if following == -1 else following
+        start = DASHBOARD_HTML.index(f'<section class="page" id="page-{name}"')
+        end = DASHBOARD_HTML.index(f"<!-- /page:{name} -->", start)
         return DASHBOARD_HTML[start:end]
 
-    def test_dashboard_sections_live_in_tabs(self) -> None:
-        nav = DASHBOARD_HTML.split('<nav class="tabs"', 1)[1].split("</nav>", 1)[0]
-        for name in self.TABS:
-            with self.subTest(tab=name):
+    def test_dashboard_sections_live_on_pages(self) -> None:
+        nav = DASHBOARD_HTML.split('<nav class="sidebar-nav"', 1)[1].split("</nav>", 1)[0]
+        for name in self.PAGES:
+            with self.subTest(page=name):
                 self.assertIn(f'href="#{name}"', nav)
-                self.assertIn(f'id="tab-{name}"', DASHBOARD_HTML)
+                self.assertIn(f'id="page-{name}"', DASHBOARD_HTML)
         expected = {
-            "overview": ['action="/sign-out"', 'id="connected-devices"', 'id="traffic-chart"'],
             "devices": [
-                'id="device-table"', "<h2>Assign a device</h2>", "<h2>Group devices</h2>",
+                'id="getting-started"', 'id="connected-devices"', 'id="device-table"',
                 "<h2>Everyone else</h2>",
             ],
-            "profiles": ['id="profile-table"', "<h2>Save profile</h2>"],
-            "rules": [
-                "<h2>Network access rules</h2>", "<h2>Schedule a profile</h2>",
-                "Run a profile timer", "Device data limit", "Service time limit",
-                "Traffic discovery",
+            "profiles": [
+                'id="saved-profiles"', "Save profile", "<h2>Assign a device</h2>",
+                "<h2>Group devices</h2>",
             ],
+            "schedules": [
+                "<h2>Schedule a profile</h2>", "Run a profile timer", "<h2>Scenarios</h2>",
+                "Device data limit", "Service time limit",
+            ],
+            "router": [
+                "Upstream router connection", "Manual Pi access-point fallback",
+                "Router outage behavior",
+            ],
+            "traffic": ['id="traffic-chart"', "Traffic discovery"],
             "measurements": ['id="measurement-files"'],
-            "setup": ["Upstream router connection", "Manual Pi access-point fallback"],
+            "activity": ['id="activity-list"'],
+            "access": ["<h2>Network access rules</h2>"],
             "diagnostics": [
-                'id="plan"', 'id="state"', 'id="diagnostics-output"', 'id="action-history"',
+                'id="plan"', 'id="state"', 'id="diagnostics-json"', 'id="action-history"',
+                'id="export-settings"',
             ],
         }
         for name, fragments in expected.items():
             panel = self._panel(name)
             positions = []
             for fragment in fragments:
-                with self.subTest(tab=name, fragment=fragment):
+                with self.subTest(page=name, fragment=fragment):
                     self.assertIn(fragment, panel)
                     positions.append(panel.index(fragment))
             # Lists come before the forms that edit them.
             self.assertEqual(positions, sorted(positions), name)
 
-    def test_every_card_sits_in_one_tab(self) -> None:
+    def test_every_card_sits_on_one_page(self) -> None:
         structure = DashboardStructure()
         structure.feed(DASHBOARD_HTML)
         structure.close()
 
         self.assertEqual(structure.errors, [])
         self.assertEqual(structure.open_tags, [])
-        # Sibling panels: hiding one tab never hides another.
-        self.assertEqual(structure.panels, [f"tab-{name}" for name in self.TABS])
-        self.assertEqual(structure.panel_parents, {("html", "body")})
-        # Only the controls bar stays outside the tabs.
+        # Sibling pages: hiding one never hides another.
+        self.assertEqual(structure.panels, [f"page-{name}" for name in self.PAGES])
+        self.assertEqual(structure.panel_parents, {("html", "body", "div", "main", "div")})
+        # Only the dashboard-access card stays outside the pages.
         self.assertEqual(
             [classes for classes, panel in structure.cards if panel is None],
-            [["card", "action-bar"]],
+            [["card"]],
         )
-        self.assertEqual(
-            structure.headings,
-            {
-                None: ["Network controls"],
-                "tab-overview": [
-                    "Getting started", "Connected clients", "Live traffic",
-                    "Activity log",
-                ],
-                "tab-devices": ["Devices", "Assign a device", "Group devices", "Everyone else"],
-                "tab-profiles": ["Profiles", "Save profile"],
-                "tab-rules": [
-                    "Network access rules", "Schedule a profile", "Run a profile timer",
-                    "Scenarios", "Progression mode", "Device data limit", "Shared group data limit",
-                    "Browser service profile", "Service data limit", "Service time limit",
-                    "Traffic discovery",
-                ],
-                "tab-measurements": ["Measurements"],
-                "tab-setup": [
-                    "Router outage behavior",
-                    "Upstream router connection",
-                    "Manual Pi access-point fallback",
-                ],
-                "tab-diagnostics": [
-                    "Compiled plan", "Runtime state", "Access rules", "Diagnostics",
-                    "Backup and action history",
-                ],
-            },
-        )
-
-    def test_no_tab_shares_its_name_with_an_element(self) -> None:
-        # The address #<tab> would scroll the page to an element with that ID.
-        ids = set(re.findall(r'\bid="([^"]+)"', DASHBOARD_HTML))
-        self.assertEqual(ids & set(self.TABS), set())
+        self.assertEqual(structure.headings, EXPECTED_PAGE_HEADINGS)
 
     def test_background_polling_pauses_and_never_overlaps_refresh(self) -> None:
         result = self._run_dashboard_functions(
-            ["pollDashboard", "refresh"],
+            ["pollDashboard", "pagePollJobs", "refresh"],
             "const document = {hidden: true}; const dashboardLoaded = true;\n"
-            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false;\n"
-            "let currentDashboardTab = 'overview', currentRuleSection = 'runs';\n"
+            "let adminTokenVerified = true;\n"
+            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false, refreshWanted;\n"
+            "const unansweredPaths = new Set();\n"
+            "let page = 'activity'; function currentPage() { return page; }\n"
             "const seen = []; let release; let hold = new Promise(resolve => {release = resolve;});\n"
-            "const loadState = async () => {seen.push('state'); await hold;};\n"
-            "const loadConnectedDevices = async () => {seen.push('clients');};\n"
-            "const loadActivity = async () => {seen.push('activity');};\n"
+            "const loadActivity = async () => {seen.push('activity'); await hold;};\n"
             "const loadQuotas = async () => {seen.push('limits');};\n"
             "const loadTimers = loadQuotas, loadScenarios = loadQuotas, loadProgressions = loadQuotas;\n"
-            "const loadSchedules = loadQuotas, loadDevicesForSchedule = loadQuotas, loadConditions = loadQuotas;\n"
-            "const loadObservations = loadQuotas; const element = () => ({});\n"
+            "const loadSchedules = loadQuotas; const element = () => ({});\n"
+            "const loadServiceLists = async () => {seen.push('service lists');};\n"
             "const refreshDashboard = async () => {seen.push('refresh');};\n",
             "(async () => {\n"
             " await pollDashboard(); const hidden = seen.length; document.hidden = false;\n"
             " const first = pollDashboard(); await pollDashboard();\n"
             " const updating = refresh(); await pollDashboard(); const before = seen.slice();\n"
             " release(); await first; await updating;\n"
-            " currentDashboardTab = 'rules'; currentRuleSection = 'limits'; await pollDashboard();\n"
+            " page = 'schedules'; await pollDashboard();\n"
             " console.log(JSON.stringify({hidden, before, seen}));\n"
             "})();\n",
         )
         self.assertEqual(result["hidden"], 0)
-        self.assertEqual(result["before"], ["state", "clients", "activity", "limits"])
-        self.assertEqual(result["seen"], ["state", "clients", "activity", "limits", "refresh", "state", "limits"])
-
+        # A second poll while one runs does nothing, and a refresh waits for the poll.
+        self.assertEqual(result["before"], ["activity"])
+        # Only the visible page's readers run.
+        self.assertEqual(
+            result["seen"], ["activity", "refresh"] + ["limits"] * 5 + ["service lists"]
+        )
     def test_refresh_requested_during_a_refresh_reloads_after_it(self) -> None:
         result = self._run_dashboard_functions(
             ["refresh"],
-            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false;\n"
+            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false, refreshWanted;\n"
             "let release; const hold = new Promise(resolve => {release = resolve;});\n"
             "let active = 0, peak = 0, calls = 0;\n"
             "async function refreshDashboard() { calls++; active++; peak = Math.max(peak, active);\n"
@@ -3412,65 +4143,13 @@ class ControlServerTests(unittest.TestCase):
         self.assertNotIn("Phone timer", result)
         self.assertNotIn("Tablet", result)
 
-    def test_dashboard_tabs_follow_the_address(self) -> None:
-        result = self._run_dashboard_functions(
-            ["tabFromHash", "showTab"],
-            "const DASHBOARD_TABS = " + json.dumps(list(self.TABS)) + ";\n"
-            "const dashboardLoaded = false;\n"
-            "let currentDashboardTab = 'overview';\n"
-            "const panels = {};\n"
-            "const element = (id) => (panels[id] = panels[id] || {hidden: false});\n"
-            "const links = DASHBOARD_TABS.map((tab) => ({\n"
-            "  href: '#' + tab, current: null,\n"
-            "  getAttribute(name) { return this.href; },\n"
-            "  setAttribute(name, value) { this.current = value; },\n"
-            "  removeAttribute() { this.current = null; },\n"
-            "}));\n"
-            "const document = {querySelectorAll: () => links};\n"
-            "const drawn = [];\n"
-            "const revealed = [];\n"
-            "function drawTrafficChart() { drawn.push('traffic'); }\n"
-            "function drawMeasurementChart() { drawn.push('measurements'); }\n"
-            "function revealTab(link) { revealed.push(link.href); }\n",
-            "showTab('devices');\n"
-            "console.log(JSON.stringify({\n"
-            "  hidden: DASHBOARD_TABS.filter((tab) => panels['tab-' + tab].hidden),\n"
-            "  current: links.filter((link) => link.current).map((link) => link.href),\n"
-            "  revealed: revealed,\n"
-            "  fallback: [tabFromHash('#nope'), tabFromHash(''), tabFromHash('#rules')],\n"
-            "}));\n",
-        )
-
-        self.assertEqual(result["hidden"], [tab for tab in self.TABS if tab != "devices"])
-        self.assertEqual(result["current"], ["#devices"])
-        self.assertEqual(result["revealed"], ["#devices"])
-        self.assertEqual(result["fallback"], ["overview", "overview", "rules"])
-
-    def test_the_chosen_tab_scrolls_into_the_tab_bar(self) -> None:
-        result = self._run_dashboard_functions(
-            ["revealTab"],
-            "const bar = {scrollLeft: 100,\n"
-            "  getBoundingClientRect: () => ({left: 16, right: 357})};\n"
-            "const tab = (left, right) => ({parentElement: bar,\n"
-            "  getBoundingClientRect: () => ({left: left, right: right})});\n",
-            "const scrolls = [[400, 480], [-40, 30], [100, 180]].map(([left, right]) => {\n"
-            "  bar.scrollLeft = 100;\n"
-            "  revealTab(tab(left, right));\n"
-            "  return bar.scrollLeft;\n"
-            "});\n"
-            "console.log(JSON.stringify(scrolls));\n",
-        )
-
-        # Past the right edge, past the left edge, already in view. The tab keeps
-        # about the bar's padding clear of the edge.
-        self.assertEqual(result, [231, 36, 100])
-
     def test_tab_links_leave_modified_clicks_to_the_browser(self) -> None:
         result = self._run_dashboard_functions(
             ["followTabLink"],
             "const shown = [];\n"
             "const pushed = [];\n"
-            "function showTab(name) { shown.push(name); }\n"
+            "const TAB_PAGES = {devices: 'devices'};\n"
+            "function showPage(name) { shown.push(name); }\n"
             "const window = {location: {hash: '#overview'},\n"
             "  history: {pushState(state, title, url) { pushed.push(url); }}};\n"
             "const click = (extra) => Object.assign({button: 0, metaKey: false, ctrlKey: false,\n"
@@ -3494,9 +4173,11 @@ class ControlServerTests(unittest.TestCase):
         # The compiled plan alone used to be about 9,000 pixels tall.
         for element_id in ("plan", "state", "policies"):
             with self.subTest(element_id=element_id):
+                # The card starts closed, so the JSON takes no room until opened.
                 self.assertRegex(
                     DASHBOARD_HTML,
-                    r'<details class="raw-details">\s*<summary>Show details</summary>\s*'
+                    r'<section class="card" data-collapse="closed">\s*'
+                    r'<div class="section-heading"><h2>[^<]+</h2><p>[^<]+</p></div>\s*'
                     f'<pre id="{element_id}">',
                 )
 
@@ -3554,6 +4235,7 @@ class ControlServerTests(unittest.TestCase):
             "const elements = {'getting-started': fake({hidden: true}),\n"
             "  'getting-started-steps': list, 'tab-profiles': fake({id: 'tab-profiles'})};\n"
             "const element = (id) => elements[id];\n"
+            "function tabPanel(name) { return elements['tab-' + name]; }\n"
             "const document = {activeElement: null, createElement: () => fake({}),\n"
             "  createTextNode: (text) => ({text: text})};\n"
             "const followed = [];\n"
@@ -3605,13 +4287,13 @@ class ControlServerTests(unittest.TestCase):
         # The list is out of sight after its link switches tabs, so focus moves on.
         self.assertEqual(result["focused"], ["tab-profiles"])
 
-    def test_dashboard_getting_started_card_sits_on_the_overview(self) -> None:
-        overview = self._panel("overview")
+    def test_dashboard_getting_started_card_sits_on_the_devices_page(self) -> None:
+        overview = self._panel("devices")
         self.assertIn('id="getting-started"', overview)
         self.assertLess(
             overview.index('id="getting-started"'), overview.index('id="connected-devices"')
         )
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn("renderGettingStarted()", refresh)
 
     def test_forms_offer_the_connected_devices(self) -> None:
@@ -3687,7 +4369,7 @@ class ControlServerTests(unittest.TestCase):
             "let lastConnectedDevices = {available: true,\n"
             "  devices: [{mac_address: 'aa:aa:aa:aa:aa:01'}]};\n"
             "const elements = {'mac-picker': {value: ''},\n"
-            "  'mac-allowlist': {value: 'bb:bb:bb:bb:bb:bb'}};\n"
+            "  'mac-allowlist': {value: 'ba:bb:bb:bb:bb:bb'}};\n"
             "const element = (id) => elements[id];\n"
             "const messages = [];\n"
             "function showMessage(text, kind) { messages.push([text, kind]); }\n",
@@ -3701,7 +4383,7 @@ class ControlServerTests(unittest.TestCase):
             "  messages: messages}));\n",
         )
 
-        self.assertEqual(result["list"], "bb:bb:bb:bb:bb:bb, aa:aa:aa:aa:aa:01")
+        self.assertEqual(result["list"], "ba:bb:bb:bb:bb:bb, aa:aa:aa:aa:aa:01")
         self.assertEqual(
             result["messages"],
             [
@@ -3727,8 +4409,8 @@ class ControlServerTests(unittest.TestCase):
             "  unnamed: pickedDeviceFields(devices[1]),\n"
             "  lists: [\n"
             "    addMacToList('', 'aa:aa:aa:aa:aa:01'),\n"
-            "    addMacToList('bb:bb:bb:bb:bb:bb', 'aa:aa:aa:aa:aa:01'),\n"
-            "    addMacToList('AA:AA:AA:AA:AA:01, bb:bb:bb:bb:bb:bb', 'aa:aa:aa:aa:aa:01'),\n"
+            "    addMacToList('ba:bb:bb:bb:bb:bb', 'aa:aa:aa:aa:aa:01'),\n"
+            "    addMacToList('AA:AA:AA:AA:AA:01, ba:bb:bb:bb:bb:bb', 'aa:aa:aa:aa:aa:01'),\n"
             "  ],\n"
             "}));\n",
         )
@@ -3759,61 +4441,22 @@ class ControlServerTests(unittest.TestCase):
             result["lists"],
             [
                 "aa:aa:aa:aa:aa:01",
-                "bb:bb:bb:bb:bb:bb, aa:aa:aa:aa:aa:01",
+                "ba:bb:bb:bb:bb:bb, aa:aa:aa:aa:aa:01",
                 # Already listed, whatever its case.
-                "AA:AA:AA:AA:AA:01, bb:bb:bb:bb:bb:bb",
+                "AA:AA:AA:AA:AA:01, ba:bb:bb:bb:bb:bb",
             ],
         )
-
-    def test_dashboard_offers_sign_out_near_the_top(self) -> None:
-        self.assertLess(
-            DASHBOARD_HTML.index('action="/sign-out"'),
-            DASHBOARD_HTML.index('id="connected-devices"'),
-        )
-
-    def test_dashboard_leaves_the_token_to_the_sign_in_page(self) -> None:
-        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
-
-        for gone in (
-            'id="admin-token"',
-            "hasAdminToken",
-            "adminTokenVerified",
-            "checkAdminToken",
-            "Enter the admin token",
-            "Check the admin token",
-        ):
-            with self.subTest(gone=gone):
-                self.assertNotIn(gone, DASHBOARD_HTML)
-        # The browser's cookie authorizes requests, so the script sends no token.
-        self.assertNotIn("Authorization", script)
-        # Only signed-in browsers get this page, so it loads at once.
-        self.assertTrue(script.rstrip().endswith("startDashboard();"))
-
-    def test_dashboard_returns_to_sign_in_when_signed_out(self) -> None:
-        result = self._run_dashboard_functions(
-            ["request"],
-            "let pendingFormSubmitButton = null;\n"
-            "const assigned = [];\n"
-            "const window = {location: {assign: (url) => assigned.push(url)}};\n"
-            "function setButtonBusy() {}\n"
-            "async function fetch() {\n"
-            "  return {ok: false, status: 401, statusText: 'Unauthorized',\n"
-            "          json: async () => ({error: 'sign in required'})};\n"
-            "}\n",
-            "request('/api/profiles', 'GET').then(\n"
-            "  () => console.log(JSON.stringify({assigned, failed: false})),\n"
-            "  () => console.log(JSON.stringify({assigned, failed: true}))\n"
-            ");\n",
-        )
-
-        self.assertEqual(result, {"assigned": ["/"], "failed": True})
 
     def test_dashboard_contains_configuration_and_network_controls(self) -> None:
         status, content_type, body = self.server.response_for("/")
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "text/html; charset=utf-8")
-        self.assertEqual(body.decode("utf-8"), DASHBOARD_HTML)
+        # Only the neutral easy address is filled in. Scripts and styles stay as they are.
+        self.assertEqual(
+            body.decode("utf-8"),
+            DASHBOARD_HTML.replace("@@EASY_ADDRESS@@", "https://netlab.local:%d" % self.server.server_port),
+        )
         self.assertIn("Checking control mode", DASHBOARD_HTML)
         self.assertIn("Save profile", DASHBOARD_HTML)
         self.assertIn("Save device", DASHBOARD_HTML)
@@ -3822,13 +4465,18 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("Shared group data limit", DASHBOARD_HTML)
         self.assertIn("/api/groups", DASHBOARD_HTML)
         self.assertIn("/api/group-data-limits", DASHBOARD_HTML)
-        self.assertIn("Apply current configuration", DASHBOARD_HTML)
+        self.assertIn("Start", DASHBOARD_HTML)
+        self.assertNotIn("Apply current configuration", DASHBOARD_HTML)
         self.assertIn("Reset network", DASHBOARD_HTML)
         self.assertIn("setButtonBusy(event.submitter, true)", DASHBOARD_HTML)
-        self.assertIn("if (submitButton) setButtonBusy(submitButton, false);", DASHBOARD_HTML)
         self.assertIn("Dashboard refresh failed:", DASHBOARD_HTML)
-        self.assertIn("Settings changed since the last network action", DASHBOARD_HTML)
-        self.assertIn('id="toast" class="toast" role="status"', DASHBOARD_HTML)
+        self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
+        self.assertIn(
+            'element("check-admin-token").addEventListener("click", async () => {\n'
+            "      await checkAdminToken();\n",
+            DASHBOARD_HTML,
+        )
+        self.assertIn('id="action-announcer" class="action-announcer" role="status"', DASHBOARD_HTML)
         self.assertIn(
             'element("toast-dismiss").addEventListener("click", dismissToast)',
             DASHBOARD_HTML,
@@ -3840,7 +4488,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn('id="traffic-isp-download"', DASHBOARD_HTML)
         self.assertIn('id="traffic-isp-upload"', DASHBOARD_HTML)
         self.assertIn('request("/api/traffic-settings", "POST"', DASHBOARD_HTML)
-        self.assertIn("Default queue download limit", DASHBOARD_HTML)
+        self.assertIn("Device download limit", DASHBOARD_HTML)
         self.assertIn("Edit name and type", DASHBOARD_HTML)
         self.assertIn("/api/connected-device-labels", DASHBOARD_HTML)
         self.assertIn("Saved labels for devices not listed above", DASHBOARD_HTML)
@@ -3905,8 +4553,207 @@ class ControlServerTests(unittest.TestCase):
                 "last_error": None,
                 "last_result": None,
                 "observed_state": "unknown",
+                "running": False,
             },
         )
+
+    def _runtime_with_scheduler(self):
+        from jittersim.engine.runtime import RuntimeScheduler
+
+        helper = FakeHelper()
+        self.server.helper_client = helper
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        self.server.scheduler = scheduler
+        self.addCleanup(scheduler.stop)
+        return scheduler
+
+    def test_state_reports_running_only_while_the_scheduler_is_active(self) -> None:
+        def running():
+            _, _, body = self.server.response_for("/api/state")
+            return json.loads(body)["state"]["running"]
+
+        self.assertFalse(running())
+
+        scheduler = self._runtime_with_scheduler()
+        self.assertFalse(running())
+
+        status, _, _ = self.server.write_response_for("/api/apply", {})
+        self.assertEqual(status, 200)
+        self.assertTrue(running())
+
+        scheduler.pause()
+        self.assertFalse(running())
+
+    def test_reset_stops_the_running_flag(self) -> None:
+        self._runtime_with_scheduler()
+        self.server.write_response_for("/api/apply", {})
+        _, _, body = self.server.response_for("/api/state")
+        self.assertTrue(json.loads(body)["state"]["running"])
+
+        status, _, body = self.server.write_response_for("/api/reset", {})
+
+        self.assertEqual(status, 200)
+        _, _, state_body = self.server.response_for("/api/state")
+        self.assertFalse(json.loads(state_body)["state"]["running"])
+
+    def test_apply_and_reset_responses_carry_the_running_flag(self) -> None:
+        self._runtime_with_scheduler()
+
+        _, _, apply_body = self.server.write_response_for("/api/apply", {})
+        _, _, reset_body = self.server.write_response_for("/api/reset", {})
+
+        self.assertIs(json.loads(apply_body)["state"]["running"], True)
+        self.assertIs(json.loads(reset_body)["state"]["running"], False)
+
+    def test_apply_reports_what_it_sent(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body)["applied"],
+            {
+                "devices": 1,
+                "groups": 0,
+                "service_lists": 0,
+                "protected": 0,
+                "general_profile": None,
+                "access_rules": False,
+            },
+        )
+
+    def test_apply_counts_groups_protected_devices_and_service_lists(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_device(
+            Device(
+                id="laptop",
+                name="Laptop",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address="dc:1e:d5:3e:97:4c",
+            )
+        )
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("laptop",), "slow"))
+        self.repository.save_device_group(DeviceGroup("others", "Others", ("alice",), "slow"))
+        self.repository.save_service_list(
+            ServiceList("video", "Video", "slow", hostnames=("video.example.com",))
+        )
+        self.repository.save_service_list(
+            ServiceList("paused", "Paused", "slow", hostnames=("paused.example.com",), enabled=False)
+        )
+        self.protect("02:00:00:00:00:01")
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 200, body)
+        # The unverified device alice is left out of the plan so her group is not counted.
+        self.assertEqual(
+            json.loads(body)["applied"],
+            {
+                "devices": 1,
+                "groups": 1,
+                "service_lists": 1,
+                "protected": 1,
+                "general_profile": None,
+                "access_rules": False,
+            },
+        )
+
+    def test_apply_names_the_general_profile_instead_of_counting_devices(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice",), "slow"))
+        self.repository.save_general_profile("slow")
+        self.protect()
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            json.loads(body)["applied"],
+            {
+                "devices": 0,
+                "groups": 0,
+                "service_lists": 0,
+                "protected": 1,
+                "general_profile": "Slow",
+                "access_rules": False,
+            },
+        )
+
+    def test_apply_says_whether_access_rules_were_started(self) -> None:
+        # Block rules and an allow list and a MAC list are all enforced by Start. The words
+        # after a start with nothing else saved must not say that nothing is running.
+        from jittersim.config.models import MacPolicy, WebsitePolicy
+
+        self.server.helper_client = FakeHelper()
+
+        def started():
+            status, _, body = self.server.write_response_for("/api/apply", {})
+            self.assertEqual(status, 200, body)
+            return json.loads(body)["applied"]["access_rules"]
+
+        self.assertFalse(started())
+        # An allow list that is not switched on does nothing.
+        self.repository.save_website_policy(
+            WebsitePolicy(mode="unrestricted", allowed_domains=("example.com",))
+        )
+        self.assertFalse(started())
+        self.repository.save_website_policy(
+            WebsitePolicy(mode="unrestricted", blocked_domains=("ads.example.com",))
+        )
+        self.assertTrue(started())
+        self.repository.save_website_policy(
+            WebsitePolicy(mode="allow_only", allowed_domains=("example.com",))
+        )
+        self.assertTrue(started())
+        self.repository.save_website_policy(WebsitePolicy())
+        self.assertFalse(started())
+        self.repository.save_mac_policy(
+            MacPolicy(mode="denylist", denylist=("aa:bb:cc:dd:ee:ff",))
+        )
+        self.assertTrue(started())
+
+    def test_a_failed_apply_has_the_same_body_as_before_the_summary_existed(self) -> None:
+        # The dashboard shows the error and the hint. A summary of what was sent would say
+        # that something was started when nothing was.
+        self.server.helper_client = FakeHelper(fail_action="apply")
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 502)
+        failure = json.loads(body)
+        self.assertEqual(set(failure), {"error", "hint", "state"})
+        self.assertEqual(failure["error"], "network helper apply failed")
+        self.assertEqual(failure["state"]["observed_state"], "error")
+
+    def test_a_plan_that_cannot_be_built_has_the_same_body_as_before(self) -> None:
+        from jittersim.engine.compiler import PlanError
+
+        self.server.helper_client = FakeHelper()
+        with patch("jittersim.api.server.compile_stored_plan", side_effect=PlanError("broken")):
+            status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 409)
+        self.assertEqual(
+            json.loads(body), {"error": "stored configuration cannot be applied"}
+        )
+
+    def test_apply_without_a_helper_has_the_same_body_as_before(self) -> None:
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body), {"error": "network helper is not configured"})
+
+    def test_diagnostics_runtime_carries_the_running_flag(self) -> None:
+        self.server.helper_client = FakeHelper()
+        _, _, body = self.server.response_for("/api/diagnostics")
+        self.assertFalse(json.loads(body)["runtime"]["running"])
+
+        self._runtime_with_scheduler()
+        self.server.write_response_for("/api/apply", {})
+        _, _, body = self.server.response_for("/api/diagnostics")
+        self.assertTrue(json.loads(body)["runtime"]["running"])
 
     def test_unknown_paths_return_json_not_found(self) -> None:
         status, content_type, body = self.server.response_for("/missing")
@@ -4207,7 +5054,7 @@ class ControlServerTests(unittest.TestCase):
             "editSchedule({id: 'family-day', device_id: null, group_id: 'family',\n"
             "  everyone_else: false, profile_id: 'slow', days_of_week: [0],\n"
             "  start_minute: 540, end_minute: 1020});\n"
-            "console.log(JSON.stringify(fields['schedule-target'].value));\n",
+            "console.log(JSON.stringify(fields['schedule-device'].value));\n",
         )
 
         self.assertEqual(result, "group:family")
@@ -4234,6 +5081,7 @@ class ControlServerTests(unittest.TestCase):
     def test_the_target_menus_keep_their_choice_when_rebuilt(self) -> None:
         result = self._run_dashboard_functions(
             ["deviceName", "scheduleTargetOptions", "renderTargetMenus"],
+            "function devicePickerLabel(device) { return device.name + ' (' + device.ipv4_address + ')'; }\n"
             "let devices = [{id: 'alice', name: 'Alice', ipv4_address: '192.168.50.10'}];\n"
             "let groups = [{id: 'family', name: 'Family'}];\n"
             "const node = (tag) => ({tag: tag, children: [], value: '', label: '',\n"
@@ -4247,18 +5095,18 @@ class ControlServerTests(unittest.TestCase):
             "  get value() { const values = this.options.map((option) => option.value);\n"
             "    return values.includes(this.chosen) ? this.chosen : values[0] || ''; },\n"
             "  set value(value) { this.chosen = value; }});\n"
-            "const menus = {'schedule-target': menu(), 'scenario-start-target': menu()};\n"
+            "const menus = {'schedule-device': menu(), 'scenario-start-target': menu()};\n"
             "const element = (id) => menus[id];\n"
             "const document = {createElement: node};\n",
             "renderTargetMenus();\n"
-            "menus['schedule-target'].value = 'group:family';\n"
+            "menus['schedule-device'].value = 'group:family';\n"
             "menus['scenario-start-target'].value = 'everyone-else';\n"
             "devices = devices.concat([{id: 'bob', name: 'Bob', ipv4_address: '192.168.50.11'}]);\n"
             "renderTargetMenus();\n"
-            "const kept = [menus['schedule-target'].value, menus['scenario-start-target'].value];\n"
+            "const kept = [menus['schedule-device'].value, menus['scenario-start-target'].value];\n"
             "groups = [];\n"
             "renderTargetMenus();\n"
-            "const schedule = menus['schedule-target'];\n"
+            "const schedule = menus['schedule-device'];\n"
             "console.log(JSON.stringify({kept: kept,\n"
             "  labels: schedule.children.map((child) => child.label || child.value),\n"
             "  gone: schedule.value}));\n",
@@ -4552,19 +5400,25 @@ class ControlServerTests(unittest.TestCase):
         events = []
 
         class RecordingScheduler:
+            is_active = False
+
+            def begin_shutdown(self):
+                pass
+
             @contextlib.contextmanager
             def exclusive(self):
                 events.append("hold")
                 yield
                 events.append("release")
 
-            def prepare_plan(self, *, repository):
+            def prepare_plan(self, *, repository, connected_snapshot=None):
                 return PreparedRuntimePlan(plan=compile_stored_plan(repository=repository), states={})
 
             def sample_usage(self, *, repository):
                 events.append("sample")
 
-            def activate_plan(self, *, repository, prepared):
+            def activate_plan(self, *, repository, prepared, counters_preserved=False):
+                assert not counters_preserved
                 events.append("activate")
 
         class RecordingHelper(FakeHelper):
@@ -4845,15 +5699,15 @@ class ControlServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 404)
 
-    def test_a_saved_device_address_and_the_list_exclude_each_other(self) -> None:
-        self.repository.save_device(
-            Device("bob", "Bob", "192.168.50.11", "slow", "bb:bb:bb:bb:bb:bb")
-        )
+    def test_a_saved_device_can_be_protected_and_a_protected_one_can_be_saved(self) -> None:
+        bob = Device("bob", "Bob", "192.168.50.11", "slow", "ba:bb:bb:bb:bb:bb")
+        self.repository.save_device(bob)
         status, _, body = self.server.write_response_for(
-            "/api/unaffected-devices", {"mac_address": "bb:bb:bb:bb:bb:bb"}
+            "/api/unaffected-devices", {"mac_address": "ba:bb:bb:bb:bb:bb"}
         )
-        self.assertEqual(status, 409)
-        self.assertIn("Bob", json.loads(body)["error"])
+        # The saved assignment stays and pauses while the device is protected.
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.repository.get_device("bob"), bob)
 
         self.repository.save_unaffected_device(UnaffectedDevice("cc:cc:cc:cc:cc:cc"))
         status, _, body = self.server.write_response_for(
@@ -4866,8 +5720,17 @@ class ControlServerTests(unittest.TestCase):
                 "mac_address": "cc:cc:cc:cc:cc:cc",
             },
         )
-        self.assertEqual(status, 409)
-        self.assertIn("unaffected list", json.loads(body)["error"])
+        # Saving or editing it is allowed. The assignment stays dormant while protected.
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.repository.get_device("carol").mac_address, "cc:cc:cc:cc:cc:cc")
+        # A device without a MAC address cannot be told from a protected one so it
+        # needs a MAC to keep its profile next to protected clients.
+        self.repository.save_device(
+            Device("alice", "Alice's laptop", "192.168.50.10", "slow", "ba:aa:aa:aa:aa:aa")
+        )
+        plan = compile_stored_plan(repository=self.repository)
+        self.assertEqual([rule.device_id for rule in plan.mark_rules], ["alice"])
+        self.assertIn("cc:cc:cc:cc:cc:cc", plan.protected_mac_addresses)
 
     def test_a_listed_connected_client_cannot_get_a_profile(self) -> None:
         self.server.helper_client = FakeHelper()
@@ -5058,20 +5921,30 @@ class ControlServerTests(unittest.TestCase):
 
     def test_updates_the_local_test_access_point_without_returning_password(self) -> None:
         self.server.helper_client = FakeHelper()
+        self.server.wifi_operations.delay = 0
 
         status, _, body = self.server.write_response_for(
             "/api/access-point",
-            {"ssid": "JitterSim-Test", "password": "test-password-123"},
+            {"ssid": "JitterSim-Test", "password": "test-password-123",
+             "request_id": json.loads(self.server.response_for("/api/wifi-operation/request-id")[2])["request_id"]},
         )
 
-        self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["result"]["action"], "configure-ap")
+        # The Wi-Fi restarts after this answer, so the answer only accepts the change.
+        self.assertEqual(status, 202)
         self.assertNotIn("test-password-123", body.decode("utf-8"))
+        deadline = time.monotonic() + 5
+        while self.server.wifi_operations.busy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        _, _, stored = self.server.response_for(
+            "/api/wifi-operation", query="id=" + json.loads(body)["operation_id"])
+        operation = json.loads(stored)["operation"]
+        self.assertEqual((operation["state"], operation["ssid"]), ("succeeded", "JitterSim-Test"))
+        self.assertNotIn("test-password-123", stored.decode("utf-8"))
 
     def test_can_promote_an_observed_domain_to_a_profile_or_global_block(self) -> None:
         status, _, body = self.server.write_response_for(
             "/api/observations/add-to-profile",
-            {"profile_id": "slow", "domain": "Chat.OpenAI.com."},
+            {"profile_id": "slow", "domain": "Chat.OpenAI.com.", "confirm_allow_only": True},
         )
         self.assertEqual(status, 200)
         self.assertEqual(
@@ -5088,6 +5961,440 @@ class ControlServerTests(unittest.TestCase):
             self.repository.get_website_policy().blocked_domains,
             ("ads.example.com",),
         )
+
+    def test_remove_global_block_removes_one_exact_name(self) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(
+            replace(policy, blocked_domains=("facebook.com", "example.org"))
+        )
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "Facebook.com."}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ("example.org",))
+        self.assertEqual(
+            json.loads(body)["policies"]["websites"]["blocked_domains"], ["example.org"]
+        )
+
+    def test_remove_global_block_keeps_the_mode_and_the_allowed_list(self) -> None:
+        from jittersim.config.models import WebsitePolicy
+
+        self.repository.save_website_policy(
+            WebsitePolicy(
+                mode="allow_only",
+                allowed_domains=("ok.example",),
+                blocked_domains=("x.example", "y.example"),
+            )
+        )
+
+        self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "x.example"}
+        )
+
+        policy = self.repository.get_website_policy()
+        self.assertEqual(policy.mode, "allow_only")
+        self.assertEqual(policy.allowed_domains, ("ok.example",))
+        self.assertEqual(policy.blocked_domains, ("y.example",))
+
+    def test_remove_global_block_leaves_a_subdomain_entry_alone(self) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(
+            replace(policy, blocked_domains=("facebook.com", "www.facebook.com"))
+        )
+
+        self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "facebook.com"}
+        )
+
+        self.assertEqual(
+            self.repository.get_website_policy().blocked_domains, ("www.facebook.com",)
+        )
+
+    def test_remove_global_block_for_an_unlisted_name_changes_nothing(self) -> None:
+        version = self.repository.get_runtime_state().configuration_version
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "never-listed.example"}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ())
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, version)
+
+    def test_remove_global_block_rejects_a_bad_domain(self) -> None:
+        for payload in ({}, {"domain": 5}, {"domain": "not a domain"}):
+            status, _, body = self.server.write_response_for(
+                "/api/observations/remove-global-block", payload
+            )
+            self.assertEqual(status, 400)
+            self.assertEqual(
+                json.loads(body)["error"], "could not remove domain from global block list"
+            )
+
+    def test_remove_global_block_needs_the_admin_token(self) -> None:
+        from jittersim.api.server import WRITE_PATHS
+
+        self.assertIn("/api/observations/remove-global-block", WRITE_PATHS)
+
+    def test_block_many_names_in_one_call(self) -> None:
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-global-block",
+            {
+                "domains": [
+                    "sso.immobilienscout24.de",
+                    "Tracking.immobilienscout24.de",
+                    "sso.immobilienscout24.de",
+                ]
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.repository.get_website_policy().blocked_domains,
+            ("sso.immobilienscout24.de", "tracking.immobilienscout24.de"),
+        )
+
+    def test_block_many_names_keeps_the_existing_list_and_saves_once(self) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(replace(policy, blocked_domains=("old.example.com",)))
+        saves = []
+        original = self.repository.save_website_policy
+        self.repository.save_website_policy = lambda value: (saves.append(value), original(value))
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-global-block",
+            {"domains": ["a.example.com", "old.example.com", "b.example.com"]},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(saves), 1)
+        self.assertEqual(
+            self.repository.get_website_policy().blocked_domains,
+            ("old.example.com", "a.example.com", "b.example.com"),
+        )
+        self.assertEqual(
+            json.loads(body)["policies"]["websites"]["blocked_domains"],
+            ["old.example.com", "a.example.com", "b.example.com"],
+        )
+
+    def test_one_bad_name_rejects_the_whole_batch(self) -> None:
+        for path, text in (
+            ("/api/observations/add-global-block", "could not add domain to global block list"),
+            (
+                "/api/observations/remove-global-block",
+                "could not remove domain from global block list",
+            ),
+        ):
+            status, _, body = self.server.write_response_for(
+                path, {"domains": ["fine.example.com", "bad name"]}
+            )
+            self.assertEqual(status, 400, path)
+            # The reason follows the summary.
+            self.assertTrue(json.loads(body)["error"].startswith(text), body)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ())
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "slow", "domains": ["fine.example.com", 5]},
+        )
+        self.assertEqual(status, 400)
+        self.assertTrue(json.loads(body)["error"].startswith("could not add domain to profile"))
+        self.assertEqual(self.repository.get_profile("slow").website_domains, ())
+
+    def test_one_bad_name_leaves_the_block_list_as_it_was(self) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(replace(policy, blocked_domains=("a.example.com",)))
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domains": ["a.example.com", "bad name"]}
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ("a.example.com",))
+
+    def test_batch_bounds_and_exclusivity(self) -> None:
+        many = ["h%d.example.com" % i for i in range(65)]
+        payloads = (
+            {"domains": many},
+            {"domains": []},
+            {"domains": "x.example.com"},
+            {"domains": None},
+            {"domain": "a.example.com", "domains": ["b.example.com"]},
+            {},
+        )
+        for payload in payloads:
+            status, _, _ = self.server.write_response_for(
+                "/api/observations/add-global-block", payload
+            )
+            self.assertEqual(status, 400, payload)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ())
+        sixty_four = ["h%d.example.com" % i for i in range(64)]
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-global-block", {"domains": sixty_four}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), 64)
+
+    def test_the_bound_counts_names_before_duplicates_collapse(self) -> None:
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-global-block", {"domains": ["same.example.com"] * 65}
+        )
+        self.assertEqual(status, 400)
+
+    def test_unblock_many_and_add_many_to_a_profile(self) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(
+            replace(policy, blocked_domains=("a.example.com", "b.example.com", "c.example.com"))
+        )
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/remove-global-block",
+            {"domains": ["a.example.com", "c.example.com"]},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ("b.example.com",))
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "slow", "domains": ["x.example.com", "y.example.com"], "confirm_allow_only": True},
+        )
+        self.assertEqual(status, 200)
+        profile = self.repository.get_profile("slow")
+        self.assertEqual(profile.website_mode, "allow_only")
+        self.assertEqual(profile.website_domains[-2:], ("x.example.com", "y.example.com"))
+
+    def test_adding_many_names_to_a_profile_keeps_what_it_has_and_skips_duplicates(self) -> None:
+        self.server.write_response_for(
+            "/api/observations/add-to-profile", {"profile_id": "slow", "domain": "one.example.com", "confirm_allow_only": True}
+        )
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "slow", "domains": ["Two.example.com", "one.example.com"]},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.repository.get_profile("slow").website_domains,
+            ("one.example.com", "two.example.com"),
+        )
+
+    def test_adding_many_names_to_a_missing_profile_is_rejected(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "nope", "domains": ["x.example.com"]},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertTrue(json.loads(body)["error"].startswith("could not add domain to profile"))
+
+    def test_unblocking_names_that_are_not_listed_changes_nothing(self) -> None:
+        version = self.repository.get_runtime_state().configuration_version
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/remove-global-block",
+            {"domains": ["never.example.com", "listed.example.com"]},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, version)
+
+    def _fill_block_list(self, count: int) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        names = tuple("listed%d.example.com" % i for i in range(count))
+        self.repository.save_website_policy(replace(policy, blocked_domains=names))
+
+    def test_a_full_block_list_says_so_and_stays_as_it_was(self) -> None:
+        self._fill_block_list(98)
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-global-block",
+            {"domains": ["new1.example.com", "new2.example.com", "new3.example.com"]},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            json.loads(body)["error"], "The global block list can hold 100 names. Remove some first."
+        )
+        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), 98)
+
+    def test_the_block_list_can_be_filled_to_exactly_the_cap(self) -> None:
+        self._fill_block_list(98)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-global-block",
+            {"domains": ["new1.example.com", "new2.example.com"]},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), 100)
+
+    def test_names_already_on_a_full_block_list_do_not_count_again(self) -> None:
+        self._fill_block_list(100)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-global-block",
+            {"domains": ["listed0.example.com", "listed99.example.com"]},
+        )
+
+        self.assertEqual(status, 200)
+
+    def test_one_more_name_on_a_full_block_list_gets_the_same_message(self) -> None:
+        self._fill_block_list(100)
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-global-block", {"domain": "one-too-many.example.com"}
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            json.loads(body)["error"], "The global block list can hold 100 names. Remove some first."
+        )
+
+    def test_a_full_block_list_can_still_be_shortened(self) -> None:
+        self._fill_block_list(100)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domains": ["listed0.example.com"]}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), 99)
+
+    def _fill_profile(self, count: int) -> None:
+        from dataclasses import replace
+
+        profile = self.repository.get_profile("slow")
+        names = tuple("allowed%d.example.com" % i for i in range(count))
+        self.repository.save_profile(replace(profile, website_mode="allow_only", website_domains=names))
+
+    def test_a_full_profile_list_says_so_and_stays_as_it_was(self) -> None:
+        self._fill_profile(99)
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "slow", "domains": ["new1.example.com", "new2.example.com"]},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            json.loads(body)["error"], "A profile can list 100 websites. Remove some first."
+        )
+        self.assertEqual(len(self.repository.get_profile("slow").website_domains), 99)
+
+    def test_a_profile_list_can_be_filled_to_exactly_the_cap(self) -> None:
+        self._fill_profile(99)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "slow", "domains": ["new1.example.com", "allowed0.example.com"]},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.repository.get_profile("slow").website_domains), 100)
+
+    def test_one_more_name_for_a_full_profile_gets_the_same_message(self) -> None:
+        self._fill_profile(100)
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "slow", "domain": "one-too-many.example.com"},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            json.loads(body)["error"], "A profile can list 100 websites. Remove some first."
+        )
+
+    def _scheduled_server(self):
+        helper = PlanRecordingHelper()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        self.server.helper_client = helper
+        self.server.scheduler = scheduler
+        return helper, scheduler
+
+    def test_a_block_list_change_before_the_first_apply_is_not_applied_by_the_scheduler(
+        self,
+    ) -> None:
+        # The success message tells the user to start again after Reset or Panic. The scheduler
+        # is paused then and a saved change waits for the Start button.
+        helper, scheduler = self._scheduled_server()
+
+        self.server.write_response_for(
+            "/api/observations/add-global-block", {"domain": "ads.example.com"}
+        )
+
+        self.assertFalse(scheduler.tick(repository=self.repository))
+        self.assertEqual(helper.plans, [])
+
+    def test_a_block_list_change_after_a_reset_is_not_applied_by_the_scheduler(self) -> None:
+        helper, scheduler = self._scheduled_server()
+        self.server.write_response_for("/api/apply", {})
+        self.server.write_response_for("/api/reset", {})
+        applied = len(helper.plans)
+
+        self.server.write_response_for(
+            "/api/observations/add-global-block", {"domain": "ads.example.com"}
+        )
+
+        self.assertFalse(scheduler.tick(repository=self.repository))
+        self.assertEqual(len(helper.plans), applied)
+
+    def test_an_active_scheduler_applies_a_removed_block_on_its_next_tick(self) -> None:
+        # The success message says a change applies on its own while profiles are running.
+        helper, scheduler = self._scheduled_server()
+        blocked = IPv4Address("203.0.113.9")
+        kept = IPv4Address("203.0.113.10")
+        lookups = {"ads.example.com": (blocked,), "other.example.com": (kept,)}
+        for domain in lookups:
+            self.server.write_response_for(
+                "/api/observations/add-global-block", {"domain": domain}
+            )
+
+        with patch(
+            "jittersim.engine.website._cached_addresses",
+            side_effect=lambda *, domain: lookups.get(domain, ()),
+        ):
+            status, _, _ = self.server.write_response_for("/api/apply", {})
+            self.assertEqual(status, 200)
+            applied = len(helper.plans)
+            self.assertCountEqual(helper.plans[-1].global_blocked_addresses, (blocked, kept))
+
+            self.server.write_response_for(
+                "/api/observations/remove-global-block", {"domain": "ads.example.com"}
+            )
+            # The endpoint only saves. It never calls the helper itself.
+            self.assertEqual(len(helper.plans), applied)
+
+            self.assertTrue(scheduler.tick(repository=self.repository))
+
+        self.assertEqual(len(helper.plans), applied + 1)
+        self.assertEqual(helper.plans[-1].global_blocked_addresses, (kept,))
+
+    def test_the_global_block_endpoints_never_call_the_helper(self) -> None:
+        helper = PlanRecordingHelper()
+        self.server.helper_client = helper
+
+        self.server.write_response_for(
+            "/api/observations/add-global-block", {"domain": "ads.example.com"}
+        )
+        self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "ads.example.com"}
+        )
+
+        self.assertEqual(helper.plans, [])
 
     def test_rejects_invalid_profile_writes_before_persistence(self) -> None:
         status, content_type, body = self.server.write_response_for(
@@ -5157,246 +6464,1343 @@ class ControlServerTests(unittest.TestCase):
         finally:
             token_server.server_close()
 
-
-class SignInTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.repository = ConfigRepository(":memory:")
-        self.repository.save_profile(
-            Profile(id="slow", name="Slow", upload=Impairment(delay_ms=3_000))
-        )
-        self.server = ControlServer(("127.0.0.1", 0), self.repository, admin_token="admin-token")
-        thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05})
-        thread.start()
-
-        def stop() -> None:
-            self.server.shutdown()
-            thread.join(timeout=5)
-            self.server.server_close()
-            self.repository.close()
-
-        self.addCleanup(stop)
-
-    def request(self, method, path, *, body=None, headers=None):
-        connection = http.client.HTTPConnection(*self.server.server_address, timeout=5)
-        try:
-            connection.request(method, path, body=body, headers=headers or {})
-            response = connection.getresponse()
-            return response.status, dict(response.getheaders()), response.read()
-        finally:
-            connection.close()
-
-    def sign_in(self, token="admin-token"):
-        return self.request(
-            "POST",
-            "/sign-in",
-            body=urlencode({"token": token}),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-
-    def session(self) -> str:
-        status, headers, _ = self.sign_in()
-        self.assertEqual(status, 303)
-        return headers["Set-Cookie"].split(";", 1)[0]
-
-    def assert_neutral(self, headers, body) -> None:
-        text = body.decode("utf-8", "replace") + " ".join(f"{k}: {v}" for k, v in headers.items())
-        self.assertNotIn("jittersim", text.lower())
-        # Whole words: the standard "device-width" viewport setting names nothing.
-        self.assertIsNone(
-            re.search(r"\b(profiles?|devices?(?!-width)|networks?)\b", text, re.I)
-        )
-
-    def test_strangers_see_only_a_neutral_sign_in_page(self) -> None:
-        status, headers, body = self.request("GET", "/")
-
-        self.assertEqual(status, 200)
-        self.assertIn(b"<title>Sign in</title>", body)
-        self.assertIn(b'name="token"', body)
-        self.assertNotIn(b"<script", body)
-        self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
-        self.assertNotIn("script-src", headers["Content-Security-Policy"])
-        self.assert_neutral(headers, body)
-
-    def test_other_addresses_stay_generic_without_a_sign_in(self) -> None:
-        for path in ("/api/health", "/api/profiles", "/api/export", "/favicon.ico", "/other"):
-            with self.subTest(path=path):
-                status, headers, body = self.request("GET", path)
-                self.assertIn(status, (401, 404))
-                self.assert_neutral(headers, body)
-        status, headers, body = self.request(
-            "POST", "/api/apply", body="{}", headers={"Content-Type": "application/json"}
-        )
-        self.assertEqual(status, 401)
-        self.assert_neutral(headers, body)
-        # A made-up cookie is no sign-in.
-        status, _, body = self.request("GET", "/", headers={"Cookie": "session=1.2.3"})
-        self.assertIn(b"<title>Sign in</title>", body)
-
-    def test_signing_in_opens_the_dashboard_and_the_api(self) -> None:
-        status, headers, _ = self.sign_in()
-
-        self.assertEqual(status, 303)
-        self.assertEqual(headers["Location"], "/")
-        cookie = headers["Set-Cookie"]
-        for attribute in ("session=", "Path=/", "Max-Age=604800", "HttpOnly", "SameSite=Strict"):
-            self.assertIn(attribute, cookie)
-        # This test server speaks plain HTTP; the Pi's HTTPS adds Secure.
-        self.assertNotIn("Secure", cookie)
-        session = cookie.split(";", 1)[0]
-        status, headers, body = self.request("GET", "/", headers={"Cookie": session})
-        self.assertEqual(status, 200)
-        self.assertEqual(body.decode("utf-8"), DASHBOARD_HTML)
-        self.assertIn("script-src 'sha256-", headers["Content-Security-Policy"])
-        self.assertEqual(self.request("GET", "/api/health", headers={"Cookie": session})[0], 200)
-        # Visiting the sign-in address while signed in goes to the dashboard.
-        status, headers, _ = self.request("GET", "/sign-in", headers={"Cookie": session})
-        self.assertEqual((status, headers["Location"]), (303, "/"))
-
-    def test_dashboard_update_preference_requires_an_admin_session(self) -> None:
-        body = json.dumps({"check_staged_updates_on_open": False}).encode("utf-8")
-
-        def direct_request(method: str, cookie: Optional[str] = None):
-            # Run this database-backed route in the test thread because SQLite
-            # connections in this fixture are thread-bound.
-            handler = object.__new__(ControlRequestHandler)
-            handler.server = self.server
-            handler.path = "/api/update-preferences"
-            handler.client_address = ("127.0.0.1", 50000)
-            handler.headers = Message()
-            if cookie:
-                handler.headers["Cookie"] = cookie
-            if method == "POST":
-                handler.headers["Content-Type"] = "application/json"
-                handler.headers["Content-Length"] = str(len(body))
-                handler.rfile = BytesIO(body)
-            response = {}
-            handler._send_response = lambda **values: response.update(values)
-            getattr(handler, f"do_{method}")()
-            return response
-
-        self.assertEqual(direct_request("POST")["status"], 401)
-        session = self.session()
-        saved = direct_request("POST", session)
-        read = direct_request("GET", session)
-
-        self.assertEqual(saved["status"], 200)
-        self.assertTrue(json.loads(saved["body"])["saved"])
-        self.assertEqual(read["status"], 200)
-        self.assertFalse(json.loads(read["body"])["check_staged_updates_on_open"])
-
-    def test_a_wrong_token_shows_the_page_again(self) -> None:
-        status, headers, body = self.sign_in("wrong")
-
-        self.assertEqual(status, 401)
-        self.assertIn(b"That token didn", body)
-        self.assertNotIn("Set-Cookie", headers)
-        self.assert_neutral(headers, body)
-
-    def test_repeated_failures_lock_sign_in_for_a_while(self) -> None:
-        for _ in range(5):
-            self.assertEqual(self.sign_in("wrong")[0], 401)
-
-        status, headers, body = self.sign_in()
-
-        self.assertEqual(status, 429)
-        self.assertIn(b"Try again later", body)
-        self.assertNotIn("Set-Cookie", headers)
-
-    def test_sign_in_says_when_it_is_not_set_up(self) -> None:
-        self.server.admin_token = None
-
-        status, _, body = self.request("GET", "/")
-        self.assertEqual(status, 200)
-        self.assertIn(b"Sign-in isn", body)
-        self.assertEqual(self.sign_in()[0], 503)
-
-    def test_unsigned_writes_do_not_reveal_which_routes_exist(self) -> None:
-        for token in ("admin-token", None):
-            with self.subTest(token=token):
-                self.server.admin_token = token
-                answers = {
-                    self.request(
-                        method, path, body="{}", headers={"Content-Type": "application/json"}
-                    )[::2]
-                    for method in ("POST", "PUT")
-                    for path in (
-                        "/api/apply",
-                        "/api/everyone-else",
-                        "/api/update-preferences",
-                        "/api/not-a-route",
-                        "/other",
-                    )
-                }
-                self.assertEqual(len(answers), 1, answers)
-
-    def test_other_sites_cannot_sign_in_or_out(self) -> None:
-        session = self.session()
-        cross_site = {"Sec-Fetch-Site": "cross-site"}
-
-        status, headers, _ = self.request(
-            "POST", "/sign-out", headers={"Cookie": session, **cross_site}
-        )
-        self.assertEqual(status, 403)
-        self.assertNotIn("Set-Cookie", headers)
-        for _ in range(6):
-            status, headers, body = self.request(
-                "POST",
-                "/sign-in",
-                body=urlencode({"token": "wrong"}),
-                headers={"Content-Type": "application/x-www-form-urlencoded", **cross_site},
+    def test_devices_endpoint_adds_a_display_name(self) -> None:
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client 192.168.50.178",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address="dc:1e:d5:3e:97:4c",
             )
-            self.assertEqual(status, 403)
-            self.assert_neutral(headers, body)
-        # None of those counted as guesses.
-        self.assertEqual(self.sign_in()[0], 303)
-
-    def test_signing_out_clears_the_cookie(self) -> None:
-        status, headers, _ = self.request("POST", "/sign-out", headers={"Cookie": self.session()})
-
-        self.assertEqual((status, headers["Location"]), (303, "/"))
-        self.assertIn("Max-Age=0", headers["Set-Cookie"])
-
-    def test_cookie_writes_must_be_json_from_this_page(self) -> None:
-        session = self.session()
-        host = "127.0.0.1:8080"
-        body = json.dumps({"profile_id": None}).encode("utf-8")
-
-        def write(headers):
-            # Run the handler in this thread: the database belongs to it.
-            handler = object.__new__(ControlRequestHandler)
-            handler.server = self.server
-            handler.path = "/api/everyone-else"
-            handler.client_address = ("127.0.0.1", 50000)
-            handler.headers = Message()
-            handler.headers["Host"] = host
-            handler.headers["Content-Length"] = str(len(body))
-            for name, value in headers.items():
-                handler.headers[name] = value
-            handler.rfile = BytesIO(body)
-            response = {}
-            handler._send_response = lambda **values: response.update(values)
-            handler.do_POST()
-            return response["status"]
-
-        json_type = {"Content-Type": "application/json"}
-        self.assertEqual(write({"Cookie": session, **json_type, "Origin": f"http://{host}"}), 200)
-        self.assertEqual(write({"Cookie": session, **json_type}), 200)
-        self.assertEqual(write({"Cookie": session, "Content-Type": "text/plain"}), 403)
-        self.assertEqual(
-            write({"Cookie": session, **json_type, "Origin": "https://elsewhere.example"}), 403
         )
-        self.assertEqual(write(json_type), 401)
-        # With the no-referrer policy some browsers send Origin: null for this page.
-        null_origin = {"Origin": "null", "Sec-Fetch-Site": "same-origin"}
-        self.assertEqual(write({"Cookie": session, **json_type, **null_origin}), 200)
-        for site in ("same-site", "cross-site"):
-            with self.subTest(site=site):
-                headers = {"Cookie": session, **json_type, "Sec-Fetch-Site": site}
-                self.assertEqual(write(headers), 403)
-        # Scripts sending the token header aren't browsers, so none of this applies.
-        self.assertEqual(
-            write({"Authorization": "Bearer admin-token", "Content-Type": "text/plain"}), 200
+        self.repository.save_device(
+            Device(
+                id="kitchen",
+                name="Kitchen tablet",
+                ipv4_address="192.168.50.179",
+                profile_id="slow",
+            )
         )
 
-if __name__ == "__main__":
-    unittest.main()
+        _, _, body = self.server.response_for("/api/devices")
+        by_id = {item["id"]: item for item in json.loads(body)["devices"]}
+
+        self.assertEqual(by_id["client-dc1ed53e974c"]["display_name"], "Unknown device")
+        self.assertEqual(by_id["client-dc1ed53e974c"]["name"], "Client 192.168.50.178")
+        self.assertEqual(by_id["kitchen"]["display_name"], "Kitchen tablet")
+
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c", display_name="Sam MacBook", device_type="laptop"
+        )
+        _, _, body = self.server.response_for("/api/devices")
+        by_id = {item["id"]: item for item in json.loads(body)["devices"]}
+        self.assertEqual(by_id["client-dc1ed53e974c"]["display_name"], "Sam MacBook")
+
+    def test_device_display_name_helper(self) -> None:
+        from jittersim.api.server import _device_display_name
+
+        device = Device(
+            id="client-dc1ed53e974c",
+            name="Client 192.168.50.178",
+            ipv4_address="192.168.50.178",
+            profile_id="slow",
+            mac_address="dc:1e:d5:3e:97:4c",
+        )
+        labels = {"dc:1e:d5:3e:97:4c": {"display_name": "Sam MacBook", "device_type": "laptop"}}
+
+        self.assertEqual(_device_display_name(device, labels), "Sam MacBook")
+        self.assertEqual(_device_display_name(device, {}), "Unknown device")
+        self.assertEqual(_device_display_name(None, labels), "Unknown device")
+
+    def test_payloads_use_the_resolved_device_name(self) -> None:
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client 192.168.50.178",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address="dc:1e:d5:3e:97:4c",
+            )
+        )
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c", display_name="Sam MacBook", device_type="laptop"
+        )
+        self.server.write_response_for(
+            "/api/data-limits",
+            {
+                "device_id": "client-dc1ed53e974c",
+                "profile_id": "slow",
+                "limit_bytes": 1_000,
+                "reset_mode": "manual",
+                "reset_interval_seconds": 0,
+                "reset_times": [],
+                "enabled": True,
+            },
+        )
+        self.server.write_response_for(
+            "/api/timers",
+            {
+                "id": "ten-minutes",
+                "device_id": "client-dc1ed53e974c",
+                "profile_id": "slow",
+                "duration_minutes": 10,
+            },
+        )
+
+        _, _, body = self.server.response_for("/api/data-limits")
+        self.assertEqual(json.loads(body)["data_limits"][0]["device_name"], "Sam MacBook")
+        _, _, body = self.server.response_for("/api/timers")
+        self.assertEqual(json.loads(body)["timers"][0]["device_name"], "Sam MacBook")
+
+        self.repository.delete_connected_device_label(mac_address="dc:1e:d5:3e:97:4c")
+        _, _, body = self.server.response_for("/api/data-limits")
+        self.assertEqual(
+            json.loads(body)["data_limits"][0]["device_name"], "Unknown device (192.168.50.178)"
+        )
+
+    def test_observations_name_a_client_by_its_hostname(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+
+        _, _, body = self.server.response_for("/api/observations")
+        group = json.loads(body)["devices"][0]
+
+        self.assertEqual(group["ipv4_address"], "192.168.50.178")
+        self.assertEqual(group["display_name"], "MacBook-Pro")
+        self.assertEqual(group["hostname"], "MacBook-Pro")
+
+    def test_observations_prefer_a_saved_label(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c", display_name="Sam MacBook", device_type="laptop"
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+
+        self.assertEqual(json.loads(body)["devices"][0]["display_name"], "Sam MacBook")
+
+    def test_observations_carry_a_label_and_a_seen_with_hint(self) -> None:
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.124", "mmx-ds.cdn.whatsapp.net", 5, 100, 100),
+                DomainObservation("192.168.50.124", "a1051.dscg4.akamai.net", 1, 100, 100),
+                DomainObservation("192.168.50.124", "cdn.somesmallsite.io", 1, 5000, 5000),
+            ],
+            now=100,
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+        domains = {item["domain"]: item for item in json.loads(body)["devices"][0]["domains"]}
+
+        self.assertEqual(domains["mmx-ds.cdn.whatsapp.net"]["label"]["name"], "WhatsApp")
+        self.assertEqual(domains["mmx-ds.cdn.whatsapp.net"]["seen_with"], [])
+        self.assertEqual(domains["a1051.dscg4.akamai.net"]["label"]["kind"], "cdn")
+        self.assertEqual(domains["a1051.dscg4.akamai.net"]["seen_with"], ["WhatsApp"])
+        self.assertEqual(domains["cdn.somesmallsite.io"]["label"]["known"], False)
+        self.assertEqual(domains["cdn.somesmallsite.io"]["seen_with"], [])
+
+    def test_observations_carry_a_group(self) -> None:
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.124", "sso.immobilienscout24.de", 2, 100, 100),
+                DomainObservation("192.168.50.124", "tracking.immobilienscout24.de", 2, 100, 100),
+                DomainObservation("192.168.50.124", "tags-eu.tiqcdn.com", 2, 100, 100),
+            ],
+            now=100,
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+        domains = {item["domain"]: item for item in json.loads(body)["devices"][0]["domains"]}
+
+        self.assertEqual(
+            domains["sso.immobilienscout24.de"]["group"],
+            {"key": "label:immoscout24", "name": "ImmoScout24", "kind": "app"},
+        )
+        self.assertEqual(
+            domains["tracking.immobilienscout24.de"]["group"]["key"], "label:immoscout24"
+        )
+        self.assertEqual(domains["tags-eu.tiqcdn.com"]["group"]["key"], "domain:tiqcdn.com")
+
+    def test_the_group_kind_comes_with_the_observations(self) -> None:
+        names = {
+            "www.google.com": "system",
+            "connectivitycheck.gstatic.com": "system",
+            "a1051.dscg4.akamai.net": "cdn",
+            "tags-eu.tiqcdn.com": "tracker",
+            "10000.mt.eu.iot.dreame.tech": "iot",
+            "cdn.somesmallsite.io": "unknown",
+            "sso.immobilienscout24.de": "app",
+        }
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.124", name, 1, 100, 100) for name in names], now=100
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+        domains = {item["domain"]: item for item in json.loads(body)["devices"][0]["domains"]}
+
+        self.assertEqual({name: domains[name]["group"]["kind"] for name in names}, names)
+
+    def test_seen_with_hints_never_cross_devices(self) -> None:
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.124", "mmx-ds.cdn.whatsapp.net", 5, 100, 100),
+                DomainObservation("192.168.50.125", "a1051.dscg4.akamai.net", 1, 100, 100),
+            ],
+            now=100,
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+        devices = {item["ipv4_address"]: item for item in json.loads(body)["devices"]}
+
+        self.assertEqual(devices["192.168.50.125"]["domains"][0]["seen_with"], [])
+
+    def test_observations_flag_globally_blocked_names(self) -> None:
+        from dataclasses import replace
+
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.124", "facebook.com", 2, 100, 100),
+                DomainObservation("192.168.50.124", "www.facebook.com", 1, 100, 100),
+            ],
+            now=100,
+        )
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(replace(policy, blocked_domains=("facebook.com",)))
+
+        _, _, body = self.server.response_for("/api/observations")
+        domains = {item["domain"]: item for item in json.loads(body)["devices"][0]["domains"]}
+
+        self.assertTrue(domains["facebook.com"]["globally_blocked"])
+        self.assertFalse(domains["www.facebook.com"]["globally_blocked"])
+
+    def test_globally_blocked_matches_after_normalization(self) -> None:
+        from dataclasses import replace
+
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.124", "Ads.Example.COM.", 1, 100, 100)], now=100
+        )
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(replace(policy, blocked_domains=("ADS.example.com",)))
+
+        _, _, body = self.server.response_for("/api/observations")
+        domain = json.loads(body)["devices"][0]["domains"][0]
+
+        self.assertEqual(domain["domain"], "ads.example.com")
+        self.assertTrue(domain["globally_blocked"])
+
+    def test_nothing_is_globally_blocked_without_a_block_list(self) -> None:
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.124", "facebook.com", 1, 100, 100)], now=100
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+
+        self.assertFalse(json.loads(body)["devices"][0]["domains"][0]["globally_blocked"])
+
+    def test_observations_name_the_profile_assigned_to_each_device(self) -> None:
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.10", "facebook.com", 1, 100, 100),
+                DomainObservation("192.168.50.124", "facebook.com", 1, 100, 100),
+            ],
+            now=100,
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+        devices = {item["ipv4_address"]: item for item in json.loads(body)["devices"]}
+
+        self.assertEqual(devices["192.168.50.10"]["assigned_device_id"], "alice")
+        self.assertEqual(devices["192.168.50.10"]["assigned_profile_id"], "slow")
+        self.assertIsNone(devices["192.168.50.124"]["assigned_device_id"])
+        self.assertIsNone(devices["192.168.50.124"]["assigned_profile_id"])
+
+    def test_the_scan_response_keeps_its_original_fields(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        _, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        observation = json.loads(body)["observations"][0]
+        self.assertNotIn("label", observation)
+        self.assertNotIn("seen_with", observation)
+        self.assertNotIn("globally_blocked", observation)
+        self.assertNotIn("group", observation)
+
+    def test_observations_work_without_the_helper(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.server.helper_client = None
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client 192.168.50.178",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address="dc:1e:d5:3e:97:4c",
+            )
+        )
+
+        status, _, body = self.server.response_for("/api/observations")
+
+        self.assertEqual(status, 200)
+        group = json.loads(body)["devices"][0]
+        self.assertEqual(group["display_name"], "Unknown device")
+        self.assertEqual(group["assigned_device_name"], "Client 192.168.50.178")
+
+    def test_observations_survive_a_failing_station_scan(self) -> None:
+        class BrokenSnapshot(FakeHelper):
+            def connected_device_snapshot(self):
+                raise HelperClientError("simulated failure")
+
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.server.helper_client = BrokenSnapshot()
+
+        status, _, body = self.server.response_for("/api/observations")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["devices"][0]["display_name"], "Unknown device")
+
+    PROTECTED_MAC = "dc:1e:d5:3e:97:4c"
+    OLD_HELPER_MESSAGE = (
+        "The networking helper is out of date and cannot skip protected devices. "
+        "Restart the JitterSim services or reinstall the release."
+    )
+
+    def protect(self, mac=PROTECTED_MAC) -> None:
+        self.repository.save_unaffected_device(UnaffectedDevice(mac, "Protected", 1))
+
+    def test_scan_passes_the_protected_macs_to_the_helper(self) -> None:
+        seen = []
+
+        class Recording(FakeHelper):
+            def observe_dns_queries(self, excluded_macs=()):
+                seen.append(list(excluded_macs))
+                return super().observe_dns_queries(excluded_macs)
+
+        self.server.helper_client = Recording()
+        self.protect()
+        self.protect("02:00:00:00:00:01")
+
+        self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(seen, [["02:00:00:00:00:01", self.PROTECTED_MAC]])
+
+    def test_scan_drops_observations_of_a_protected_station(self) -> None:
+        self.server.helper_client = FakeHelper()  # its fake ignores the exclusion
+        self.protect()
+
+        status, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["captured_observations"], 0)
+        self.assertEqual(json.loads(body)["observations"], [])
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_scan_drops_observations_of_a_protected_saved_device_without_a_station(self) -> None:
+        class NoStations(FakeHelper):
+            def connected_device_snapshot(self):
+                raise HelperClientError("simulated failure")
+
+        self.server.helper_client = NoStations()
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address=self.PROTECTED_MAC,
+            )
+        )
+        self.protect()
+
+        status, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["captured_observations"], 0)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_scan_keeps_observations_of_ordinary_clients(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.protect("02:00:00:00:00:01")
+
+        status, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["captured_observations"], 1)
+        self.assertEqual(len(self.repository.list_domain_observations()), 1)
+
+    def test_scan_fails_closed_with_an_old_helper(self) -> None:
+        message = self.OLD_HELPER_MESSAGE
+
+        class OldHelper(FakeHelper):
+            def observe_dns_queries(self, excluded_macs=()):
+                raise HelperClientError(message)
+
+        self.server.helper_client = OldHelper()
+        self.protect()
+
+        status, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(body)["error"], message)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_scan_never_captures_through_a_helper_that_cannot_skip_protected_devices(self) -> None:
+        for service_class in (OldHelperService, OlderHelperService):
+            with self.subTest(service=service_class.__name__):
+                with serving(service_class) as (client, executor):
+                    self.server.helper_client = client
+                    self.protect()
+
+                    status, _, body = self.server.write_response_for(
+                        "/api/observations/scan", {}
+                    )
+
+                    self.assertEqual(status, 502)
+                    self.assertEqual(json.loads(body)["error"], self.OLD_HELPER_MESSAGE)
+                    self.assertEqual(captures(executor), [])
+                    self.assertEqual(self.repository.list_domain_observations(), ())
+
+    PHONE = "02:00:00:00:00:77"
+
+    def scan_with(self, helper) -> None:
+        self.server.helper_client = helper
+        status, _, _ = self.server.write_response_for("/api/observations/scan", {})
+        self.assertEqual(status, 200)
+
+    def stored_macs(self):
+        return {
+            (str(item.ipv4_address), item.mac_address)
+            for item in self.repository.list_domain_observations()
+        }
+
+    def shown_addresses(self):
+        _, _, body = self.server.response_for("/api/observations")
+        return [item["ipv4_address"] for item in json.loads(body)["devices"]]
+
+    def test_a_scan_records_the_hardware_address_of_each_client(self) -> None:
+        self.scan_with(MovingClientHelper(self.PHONE, "192.168.50.99"))
+
+        self.assertEqual(self.stored_macs(), {("192.168.50.99", self.PHONE)})
+
+    def test_a_scan_records_no_hardware_address_for_an_unknown_or_shared_address(self) -> None:
+        class Shared(MovingClientHelper):
+            def connected_devices(self):
+                client = super().connected_devices()[0]
+                return [client, {**client, "mac_address": "02:00:00:00:00:78"}]
+
+        class Broken(MovingClientHelper):
+            def connected_device_snapshot(self):
+                raise HelperClientError("simulated failure")
+
+        for helper in (Shared(self.PHONE, "192.168.50.99"), Broken(self.PHONE, "192.168.50.99")):
+            with self.subTest(helper=type(helper).__name__):
+                self.repository.delete_domain_observations(["192.168.50.99"])
+                self.scan_with(helper)
+
+                self.assertEqual(self.stored_macs(), {("192.168.50.99", None)})
+
+    def test_the_browser_never_receives_hardware_addresses_of_observations(self) -> None:
+        self.server.helper_client = MovingClientHelper(self.PHONE, "192.168.50.99")
+        _, _, scan = self.server.write_response_for("/api/observations/scan", {})
+        _, _, listing = self.server.response_for("/api/observations")
+
+        for body in (scan, listing):
+            self.assertNotIn(self.PHONE, body.decode())
+        group = json.loads(listing)["devices"][0]
+        self.assertNotIn("mac_address", group)
+        self.assertNotIn("mac_address", group["domains"][0])
+        self.assertNotIn("mac_address", json.loads(scan)["observations"][0])
+
+    def test_protecting_a_client_that_moved_purges_the_rows_under_its_old_address(self) -> None:
+        helper = MovingClientHelper(self.PHONE, "192.168.50.99")
+        self.scan_with(helper)
+        helper.address = "192.168.50.178"  # It now has another address and is not saved.
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.PHONE}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_the_rows_of_a_protected_client_that_moved_are_hidden(self) -> None:
+        helper = MovingClientHelper(self.PHONE, "192.168.50.99")
+        self.scan_with(helper)
+        helper.address = "192.168.50.178"
+        self.assertEqual(self.shown_addresses(), ["192.168.50.99"])
+        self.protect(self.PHONE)  # Saved elsewhere so nothing purged the rows.
+
+        self.assertEqual(self.shown_addresses(), [])
+
+    def test_protecting_an_offline_unsaved_client_purges_and_hides_its_rows(self) -> None:
+        helper = MovingClientHelper(self.PHONE, "192.168.50.99")
+        self.scan_with(helper)
+        helper.online = False
+        self.assertEqual(self.shown_addresses(), ["192.168.50.99"])
+        self.protect(self.PHONE)
+        self.assertEqual(self.shown_addresses(), [])
+        self.assertNotEqual(self.repository.list_domain_observations(), ())
+
+        self.repository.delete_unaffected_device(self.PHONE)
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.PHONE}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_rows_without_a_recorded_hardware_address_still_match_by_address(self) -> None:
+        self.server.helper_client = MovingClientHelper(self.PHONE, "192.168.50.178")
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.178", "amazon.com", 2, 10, 10)], now=10
+        )
+        self.assertEqual(self.stored_macs(), {("192.168.50.178", None)})
+        self.assertEqual(self.shown_addresses(), ["192.168.50.178"])
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.PHONE}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_rows_without_a_hardware_address_are_hidden_by_address_too(self) -> None:
+        self.server.helper_client = MovingClientHelper(self.PHONE, "192.168.50.178")
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.178", "amazon.com", 2, 10, 10)], now=10
+        )
+        self.protect(self.PHONE)
+
+        self.assertEqual(self.shown_addresses(), [])
+
+    UPPERCASE_PHONE = "DC:1E:D5:3E:97:4C"
+
+    def test_a_scan_drops_a_protected_client_that_the_snapshot_names_in_capitals(self) -> None:
+        # The saved protection is lower case and the snapshot is not. The row is under an
+        # address that is not the one the saved device was assigned.
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client",
+                ipv4_address="192.168.50.50",
+                profile_id="slow",
+                mac_address=self.UPPERCASE_PHONE,
+            )
+        )
+        self.protect(self.UPPERCASE_PHONE)
+        helper = MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.178")
+
+        self.scan_with(helper)
+
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_protecting_a_client_that_the_snapshot_names_in_capitals_purges_its_old_rows(
+        self,
+    ) -> None:
+        self.server.helper_client = MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.178")
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.178", "amazon.com", 2, 10, 10)], now=10
+        )
+        self.assertEqual(self.stored_macs(), {("192.168.50.178", None)})
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.UPPERCASE_PHONE}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_a_corrupt_stored_observation_gets_the_normal_storage_error_response(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "amazon.com", 2, 10, 10)], now=10
+        )
+        self.repository._connection.execute(
+            "UPDATE domain_observations SET mac_address = 'garbage'"
+        )
+        handler = object.__new__(ControlRequestHandler)
+        handler.server = self.server
+        handler.client_address = ("127.0.0.1", 45000)
+        handler.path = "/api/observations"
+        handler.headers = Message()
+        handler.headers["Authorization"] = "Bearer admin-token"
+        response = {}
+        handler._send_response = lambda **values: response.update(values)
+
+        handler.do_GET()
+
+        self.assertEqual(response["status"], 500)
+        self.assertEqual(
+            json.loads(response["body"]), {"error": "stored configuration could not be read"}
+        )
+
+    def test_a_scan_records_a_capital_snapshot_address_in_its_normal_form(self) -> None:
+        self.scan_with(MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.99"))
+
+        self.assertEqual(self.stored_macs(), {("192.168.50.99", self.UPPERCASE_PHONE.lower())})
+
+    def test_rows_recorded_from_a_capital_snapshot_are_hidden_by_the_normal_form(self) -> None:
+        helper = MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.99")
+        self.scan_with(helper)
+        helper.address = "192.168.50.178"  # The rows are now under an address it left.
+        self.assertEqual(self.shown_addresses(), ["192.168.50.99"])
+        self.protect(self.UPPERCASE_PHONE.lower())
+
+        self.assertEqual(self.shown_addresses(), [])
+
+    def test_scan_keeps_the_generic_error_for_other_helper_failures(self) -> None:
+        class Failing(FakeHelper):
+            def observe_dns_queries(self, excluded_macs=()):
+                raise HelperClientError("socket path /run/secret is gone")
+
+        self.server.helper_client = Failing()
+
+        status, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(body)["error"], "could not scan traffic observations")
+
+    def test_scan_refuses_when_more_devices_are_protected_than_the_helper_can_skip(self) -> None:
+        calls = []
+
+        class Counting(FakeHelper):
+            def observe_dns_queries(self, excluded_macs=()):
+                calls.append(list(excluded_macs))
+                return super().observe_dns_queries(excluded_macs)
+
+        self.server.helper_client = Counting()
+        too_many = tuple(
+            "02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(257)
+        )
+
+        with patch("jittersim.api.server.protected_macs", return_value=too_many):
+            status, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 409)
+        self.assertIn("at most 256", json.loads(body)["error"])
+        self.assertEqual(calls, [])
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_scan_still_works_with_the_largest_protected_list(self) -> None:
+        seen = []
+
+        class Recording(FakeHelper):
+            def observe_dns_queries(self, excluded_macs=()):
+                seen.append(list(excluded_macs))
+                return super().observe_dns_queries(excluded_macs)
+
+        self.server.helper_client = Recording()
+        for index in range(256):
+            self.protect("02:00:00:00:%02x:%02x" % (index // 256, index % 256))
+
+        status, _, _ = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(len(seen[0]), 256)
+        self.assertEqual(seen[0], sorted(seen[0]))
+
+    def test_old_rows_of_a_protected_station_are_hidden(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        _, _, before = self.server.response_for("/api/observations")
+        self.assertEqual(len(json.loads(before)["devices"]), 1)
+        self.protect()
+
+        _, _, body = self.server.response_for("/api/observations")
+
+        self.assertEqual(json.loads(body)["devices"], [])
+        self.assertEqual(json.loads(body)["total_domains"], 0)
+
+    def test_old_rows_of_a_protected_saved_device_are_hidden_without_the_helper(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.server.helper_client = None
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address=self.PROTECTED_MAC,
+            )
+        )
+        self.protect()
+
+        _, _, body = self.server.response_for("/api/observations")
+
+        self.assertEqual(json.loads(body)["devices"], [])
+
+    def test_protecting_a_station_deletes_its_stored_rows(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.assertNotEqual(self.repository.list_domain_observations(), ())
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices",
+            {"mac_address": self.PROTECTED_MAC, "display_name": "Mine"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.178"), 0)
+
+    def test_protecting_a_saved_device_deletes_its_rows_even_when_it_is_offline(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address=self.PROTECTED_MAC,
+            )
+        )
+        self.server.helper_client = None
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.PROTECTED_MAC}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_protecting_one_device_keeps_the_rows_of_the_others(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.10", "example.com", 1, 10, 10)], now=10
+        )
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.PROTECTED_MAC}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [str(item.ipv4_address) for item in self.repository.list_domain_observations()],
+            ["192.168.50.10"],
+        )
+
+    def test_a_failed_purge_rolls_the_protection_back(self) -> None:
+        # The purge and the protection are one change. If the rows cannot be deleted the
+        # device must not look protected while its old rows are still stored.
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+
+        def refuse(addresses, macs=()):
+            raise StorageError("could not delete domain observations")
+
+        self.repository.delete_domain_observations = refuse
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.PROTECTED_MAC}
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(self.repository.list_unaffected_devices(), ())
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.178"), 2)
+
+    def test_a_failed_protection_change_keeps_the_rows_and_the_list(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+
+        def refuse():
+            raise ValueError("simulated plan failure")
+
+        self.server._validate_saved_plan = refuse
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.PROTECTED_MAC}
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(self.repository.list_unaffected_devices(), ())
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.178"), 2)
+
+    def test_a_new_assignment_is_named_after_the_station_hostname(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, _, body = self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "MacBook-Pro")
+
+    def test_a_new_assignment_prefers_the_saved_label(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c", display_name="Sam MacBook", device_type="laptop"
+        )
+
+        self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "Sam MacBook")
+
+    def test_without_a_hostname_the_old_placeholder_remains(self) -> None:
+        class Anonymous(FakeHelper):
+            def connected_devices(self):
+                device = super().connected_devices()[0]
+                device["hostname"] = None
+                return [device]
+
+        self.server.helper_client = Anonymous()
+
+        self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "Client 192.168.50.178")
+
+    def test_an_existing_device_keeps_its_name(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Alice phone",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address="dc:1e:d5:3e:97:4c",
+            )
+        )
+
+        self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "Alice phone")
+
+    def test_a_hostname_that_is_not_a_usable_name_falls_back_to_the_placeholder(self) -> None:
+        class OddHostname(FakeHelper):
+            def connected_devices(self):
+                device = super().connected_devices()[0]
+                device["hostname"] = "x" * 101
+                return [device]
+
+        self.server.helper_client = OddHostname()
+
+        status, _, body = self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "Client 192.168.50.178")
+
+    def test_a_client_added_to_a_group_is_named_after_the_station_hostname(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice",), "slow"))
+
+        status, _, body = self.server.write_response_for(
+            "/api/connected-devices/group",
+            {
+                "group_id": "family",
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "MacBook-Pro")
+        self.assertIn(saved.id, self.repository.get_device_group("family").device_ids)
+
+    def test_clients_picked_for_a_new_group_are_named_after_the_station_hostname(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, _, body = self.server.write_response_for(
+            "/api/groups",
+            {
+                "id": "family",
+                "name": "Family",
+                "profile_id": "slow",
+                "device_ids": [],
+                "connected_clients": [
+                    {"ipv4_address": "192.168.50.178", "mac_address": "dc:1e:d5:3e:97:4c"}
+                ],
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "MacBook-Pro")
+
+    PROTECTED_MAC_FORMS = (
+        "dc:1e:d5:3e:97:4c",
+        "DC:1E:D5:3E:97:4C",
+        "DC-1E-D5-3E-97-4C",
+        "  dc:1e:d5:3e:97:4c  ",
+    )
+
+    def _protect_the_fake_client(self) -> None:
+        from jittersim.config.exemptions import UnaffectedDevice
+
+        self.repository.save_unaffected_device(UnaffectedDevice("dc:1e:d5:3e:97:4c", "Mine", 1))
+
+    def test_a_protected_client_cannot_join_a_new_group(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self._protect_the_fake_client()
+
+        for mac_address in self.PROTECTED_MAC_FORMS:
+            with self.subTest(mac_address=mac_address):
+                status, _, body = self.server.write_response_for(
+                    "/api/groups",
+                    {
+                        "id": "lab",
+                        "name": "Lab",
+                        "profile_id": "slow",
+                        "connected_clients": [
+                            {"ipv4_address": "192.168.50.178", "mac_address": mac_address}
+                        ],
+                    },
+                )
+
+                self.assertEqual(status, 409, body)
+                self.assertIn("protected from profiles", json.loads(body)["error"])
+                self.assertIsNone(self.repository.get_device_by_mac_address("dc:1e:d5:3e:97:4c"))
+                self.assertIsNone(self.repository.get_device_group("lab"))
+
+    def test_a_protected_client_cannot_be_added_to_an_existing_group(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice",), "slow"))
+        self._protect_the_fake_client()
+
+        for mac_address in self.PROTECTED_MAC_FORMS:
+            with self.subTest(mac_address=mac_address):
+                status, _, body = self.server.write_response_for(
+                    "/api/connected-devices/group",
+                    {
+                        "group_id": "family",
+                        "ipv4_address": "192.168.50.178",
+                        "mac_address": mac_address,
+                    },
+                )
+
+                self.assertEqual(status, 409, body)
+                self.assertIn("protected from profiles", json.loads(body)["error"])
+                self.assertIsNone(self.repository.get_device_by_mac_address("dc:1e:d5:3e:97:4c"))
+                self.assertEqual(
+                    self.repository.get_device_group("family").device_ids, ("alice",)
+                )
+
+    def test_a_protected_client_in_a_new_group_saves_nothing_for_the_others(self) -> None:
+        class TwoClients(FakeHelper):
+            def connected_devices(self):
+                ordinary = dict(super().connected_devices()[0])
+                ordinary.update(
+                    ipv4_address="192.168.50.179", mac_address="aa:bb:cc:dd:ee:02", hostname="Tab"
+                )
+                return super().connected_devices() + [ordinary]
+
+        self.server.helper_client = TwoClients()
+        self._protect_the_fake_client()
+        ordinary = {"ipv4_address": "192.168.50.179", "mac_address": "aa:bb:cc:dd:ee:02"}
+        protected = {"ipv4_address": "192.168.50.178", "mac_address": "dc:1e:d5:3e:97:4c"}
+
+        for clients in ([ordinary, protected], [protected, ordinary]):
+            with self.subTest(first=clients[0]["mac_address"]):
+                status, _, body = self.server.write_response_for(
+                    "/api/groups",
+                    {
+                        "id": "lab",
+                        "name": "Lab",
+                        "profile_id": "slow",
+                        "connected_clients": clients,
+                    },
+                )
+
+                self.assertEqual(status, 409, body)
+                self.assertIn("protected from profiles", json.loads(body)["error"])
+                self.assertIsNone(self.repository.get_device_by_mac_address("aa:bb:cc:dd:ee:02"))
+                self.assertIsNone(self.repository.get_device_by_mac_address("dc:1e:d5:3e:97:4c"))
+                self.assertIsNone(self.repository.get_device_group("lab"))
+
+        # the ordinary client alone is fine so the refusals above came from the protected one
+        status, _, body = self.server.write_response_for(
+            "/api/groups",
+            {"id": "lab", "name": "Lab", "profile_id": "slow", "connected_clients": [ordinary]},
+        )
+        self.assertEqual(status, 200, body)
+        self.assertIsNotNone(self.repository.get_device_by_mac_address("aa:bb:cc:dd:ee:02"))
+
+    def _save_unlabelled_client(self, name: str = "Client 192.168.50.178") -> None:
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name=name,
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address="dc:1e:d5:3e:97:4c",
+            )
+        )
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c", display_name="Sam MacBook", device_type="laptop"
+        )
+
+    def test_group_members_carry_the_saved_label_as_display_name(self) -> None:
+        self._save_unlabelled_client()
+        self.repository.save_device_group(
+            DeviceGroup("family", "Family", ("alice", "client-dc1ed53e974c"), "slow")
+        )
+
+        _, _, body = self.server.response_for("/api/groups")
+        members = {item["id"]: item for item in json.loads(body)["groups"][0]["devices"]}
+
+        self.assertEqual(members["client-dc1ed53e974c"]["display_name"], "Sam MacBook")
+        self.assertEqual(members["alice"]["display_name"], "Alice's laptop")
+
+    def test_the_group_save_response_carries_the_saved_label(self) -> None:
+        self._save_unlabelled_client()
+
+        status, _, body = self.server.write_response_for(
+            "/api/groups",
+            {
+                "id": "family",
+                "name": "Family",
+                "device_ids": ["client-dc1ed53e974c"],
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        member = json.loads(body)["group"]["devices"][0]
+        self.assertEqual(member["display_name"], "Sam MacBook")
+
+    def test_the_device_save_response_carries_the_saved_label(self) -> None:
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c", display_name="Sam MacBook", device_type="laptop"
+        )
+
+        status, _, body = self.server.write_response_for(
+            "/api/devices",
+            {
+                "id": "client-dc1ed53e974c",
+                "name": "Client 192.168.50.178",
+                "ipv4_address": "192.168.50.178",
+                "profile_id": "slow",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["device"]["display_name"], "Sam MacBook")
+
+    def test_the_apply_profile_response_carries_the_saved_label(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self._save_unlabelled_client(name="Alice phone")
+
+        status, _, body = self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        device = json.loads(body)["device"]
+        self.assertEqual(device["name"], "Alice phone")
+        self.assertEqual(device["display_name"], "Sam MacBook")
+
+    def test_random_website_analytics_rows_carry_a_display_name(self) -> None:
+        self._save_unlabelled_client()
+        self.repository.save_device(
+            Device(
+                id="client-aabbccddeeff",
+                name="Client 192.168.50.180",
+                ipv4_address="192.168.50.180",
+                profile_id="slow",
+                mac_address="aa:bb:cc:dd:ee:00",
+            )
+        )
+        now = int(time.time())
+        self.repository.save_random_website_outcomes(
+            [
+                RandomWebsiteOutcome("client-dc1ed53e974c", "labelled.example", True, now),
+                RandomWebsiteOutcome("client-aabbccddeeff", "plain.example", True, now),
+                RandomWebsiteOutcome("alice", "named.example", True, now),
+            ],
+            now=now,
+        )
+
+        status, _, body = self.server.response_for(
+            "/api/random-website-analytics", query="days=1"
+        )
+
+        self.assertEqual(status, 200)
+        rows = {row["domain"]: row for row in json.loads(body)["rows"]}
+        self.assertEqual(rows["labelled.example"]["display_name"], "Sam MacBook")
+        self.assertEqual(rows["labelled.example"]["device_name"], "Client 192.168.50.178")
+        self.assertEqual(rows["plain.example"]["display_name"], "Unknown device")
+        self.assertEqual(rows["named.example"]["display_name"], "Alice's laptop")
+
+    def test_device_title_helper(self) -> None:
+        from jittersim.api.server import _device_title
+
+        placeholder = Device(
+            id="client-dc1ed53e974c",
+            name="Client 192.168.50.178",
+            ipv4_address="192.168.50.178",
+            profile_id="slow",
+            mac_address="dc:1e:d5:3e:97:4c",
+        )
+        named = Device(
+            id="kitchen", name="Kitchen tablet", ipv4_address="192.168.50.179", profile_id="slow"
+        )
+        labels = {"dc:1e:d5:3e:97:4c": {"display_name": "Sam MacBook", "device_type": "laptop"}}
+
+        self.assertEqual(_device_title(placeholder, labels, "gone"), "Sam MacBook")
+        self.assertEqual(
+            _device_title(placeholder, {}, "gone"), "Unknown device (192.168.50.178)"
+        )
+        self.assertEqual(_device_title(named, {}, "gone"), "Kitchen tablet")
+        self.assertEqual(_device_title(None, labels, "gone"), "gone")
+
+    def test_unlabelled_placeholder_devices_keep_distinct_titles(self) -> None:
+        for suffix in ("178", "179"):
+            self.repository.save_device(
+                Device(
+                    id="client-" + suffix,
+                    name="Client 192.168.50." + suffix,
+                    ipv4_address="192.168.50." + suffix,
+                    profile_id="slow",
+                    mac_address="dc:1e:d5:3e:97:" + ("4c" if suffix == "178" else "4d"),
+                )
+            )
+            self.server.write_response_for(
+                "/api/data-limits",
+                {
+                    "device_id": "client-" + suffix,
+                    "profile_id": "slow",
+                    "limit_bytes": 1_000,
+                    "reset_mode": "manual",
+                    "reset_interval_seconds": 0,
+                    "reset_times": [],
+                    "enabled": True,
+                },
+            )
+
+        _, _, body = self.server.response_for("/api/data-limits")
+        titles = {
+            item["device_id"]: item["device_name"] for item in json.loads(body)["data_limits"]
+        }
+
+        self.assertEqual(titles["client-178"], "Unknown device (192.168.50.178)")
+        self.assertEqual(titles["client-179"], "Unknown device (192.168.50.179)")
+
+    def _observe_domains(self, *domains: str) -> None:
+        self.repository.save_domain_observations(
+            tuple(
+                DomainObservation(
+                    ipv4_address="192.168.50.178",
+                    domain=domain,
+                    query_count=1,
+                    first_seen=10,
+                    last_seen=10,
+                )
+                for domain in domains
+            ),
+            now=10,
+        )
+
+    def test_service_quota_payload_uses_the_resolved_device_name(self) -> None:
+        self._save_unlabelled_client()
+        self._observe_domains("netflix.com")
+        status, _, body = self.server.write_response_for(
+            "/api/service-quotas",
+            {
+                "id": "sam-video",
+                "device_id": "client-dc1ed53e974c",
+                "name": "Video service",
+                "domains": ["netflix.com"],
+                "profile_id": "slow",
+                "limit_bytes": 2_000,
+            },
+        )
+        self.assertEqual(status, 200, body)
+
+        _, _, body = self.server.response_for("/api/service-quotas")
+
+        self.assertEqual(json.loads(body)["service_quotas"][0]["device_name"], "Sam MacBook")
+
+    def test_time_quota_payload_uses_the_resolved_device_name(self) -> None:
+        self._save_unlabelled_client()
+        self._observe_domains("netflix.com")
+        status, _, body = self.server.write_response_for(
+            "/api/time-quotas",
+            {
+                "id": "sam-netflix-time",
+                "device_id": "client-dc1ed53e974c",
+                "name": "Netflix time",
+                "domains": ["netflix.com"],
+                "profile_id": "slow",
+                "limit_seconds": 3_600,
+                "window_duration_seconds": 7_200,
+            },
+        )
+        self.assertEqual(status, 200, body)
+
+        _, _, body = self.server.response_for("/api/time-quotas")
+
+        self.assertEqual(json.loads(body)["time_quotas"][0]["device_name"], "Sam MacBook")
+
+    def test_service_assignment_payload_uses_the_resolved_device_name(self) -> None:
+        self._save_unlabelled_client()
+        status, _, body = self.server.write_response_for(
+            "/api/service-assignments",
+            {
+                "id": "sam-video",
+                "device_id": "client-dc1ed53e974c",
+                "name": "Video",
+                "domains": ["youtube.com"],
+                "profile_id": "slow",
+                "enabled": True,
+            },
+        )
+        self.assertEqual(status, 200, body)
+
+        _, _, body = self.server.response_for("/api/service-assignments")
+
+        self.assertEqual(json.loads(body)["service_assignments"][0]["device_name"], "Sam MacBook")
+
+    def test_progression_payload_uses_the_resolved_device_name(self) -> None:
+        self._save_unlabelled_client()
+        status, _, body = self.server.write_response_for(
+            "/api/progressions",
+            {
+                "id": "five-hours",
+                "device_id": "client-dc1ed53e974c",
+                "start_profile_id": "slow",
+                "end_profile_id": "slow",
+                "mode": "time",
+                "duration_minutes": 300,
+            },
+        )
+        self.assertEqual(status, 200, body)
+
+        _, _, body = self.server.response_for("/api/progressions")
+
+        self.assertEqual(json.loads(body)["progressions"][0]["device_name"], "Sam MacBook")
+
+    def test_observations_find_the_label_through_the_saved_assignment_without_a_helper(
+        self,
+    ) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.server.helper_client = None
+        self._save_unlabelled_client()
+
+        _, _, body = self.server.response_for("/api/observations")
+
+        self.assertEqual(json.loads(body)["devices"][0]["display_name"], "Sam MacBook")
+
+    def test_new_client_name_uses_a_64_character_hostname_but_not_a_longer_one(self) -> None:
+        from jittersim.api.server import _new_client_name
+
+        self.assertEqual(_new_client_name(None, "h" * 64, "192.168.50.7"), "h" * 64)
+        self.assertEqual(
+            _new_client_name(None, "h" * 65, "192.168.50.7"), "Client 192.168.50.7"
+        )
+        self.assertEqual(_new_client_name("l" * 64, "host", "192.168.50.7"), "l" * 64)
+        self.assertEqual(_new_client_name("l" * 65, "host", "192.168.50.7"), "host")
+
+    def test_new_client_name_skips_a_name_with_control_characters(self) -> None:
+        from jittersim.api.server import _new_client_name
+
+        self.assertEqual(
+            _new_client_name(None, "bad\x07name", "192.168.50.7"), "Client 192.168.50.7"
+        )
+        self.assertEqual(_new_client_name("bad\nlabel", "host", "192.168.50.7"), "host")
+        self.assertEqual(_new_client_name("  Sam MacBook ", None, "192.168.50.7"), "Sam MacBook")
+
+    def test_observations_survive_any_kind_of_broken_station_snapshot(self) -> None:
+        def broken_with(snapshot=None, error=None):
+            class Broken(FakeHelper):
+                def connected_device_snapshot(self):
+                    if error is not None:
+                        raise error
+                    return snapshot
+
+            return Broken()
+
+        cases = {
+            "value error": broken_with(error=ValueError("bad reply")),
+            "os error": broken_with(error=OSError("socket closed")),
+            "helper error": broken_with(error=HelperClientError("simulated failure")),
+            "no snapshot": broken_with(snapshot=None),
+            "devices is a number": broken_with(snapshot={"devices": 5}),
+            "devices is missing": broken_with(snapshot={}),
+            "station is not a dict": broken_with(snapshot={"devices": [None, 5, "text"]}),
+            "address is not text": broken_with(
+                snapshot={"devices": [{"ipv4_address": ["192.168.50.178"], "hostname": "x"}]}
+            ),
+        }
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        for name, helper in cases.items():
+            with self.subTest(name):
+                self.server.helper_client = helper
+
+                status, _, body = self.server.response_for("/api/observations")
+
+                self.assertEqual(status, 200)
+                group = json.loads(body)["devices"][0]
+                self.assertEqual(group["display_name"], "Unknown device")
+                self.assertIsNone(group["hostname"])
+
+    def test_new_client_name_skips_hidden_control_characters(self) -> None:
+        from jittersim.api.server import _new_client_name
+
+        for character in ("\x7f", "‎", "‏", "‪", "‮", "⁦", "⁩"):
+            with self.subTest(character=repr(character)):
+                self.assertEqual(
+                    _new_client_name(None, "host" + character + "name", "192.168.50.7"),
+                    "Client 192.168.50.7",
+                )
+                self.assertEqual(
+                    _new_client_name("Sam" + character + "iPhone", "host", "192.168.50.7"), "host"
+                )
+
+    def test_new_client_name_keeps_emoji_and_accents(self) -> None:
+        from jittersim.api.server import _new_client_name
+
+        self.assertEqual(_new_client_name("Sam's 📱 phone", "host", "192.168.50.7"), "Sam's 📱 phone")
+        self.assertEqual(_new_client_name(None, "Café-tablet", "192.168.50.7"), "Café-tablet")
+

@@ -1,0 +1,97 @@
+name: Pi release checks
+
+on:
+  pull_request:
+  push:
+    branches: [main, feat/service-profiles-and-pi-hardening]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Python ${{ matrix.python-version }}
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        python-version: ['3.9', '3.11', '3.13']
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build and verify the locked release packages
+        run: python deploy/raspberry-pi/prepare-locked-wheels.py --source . --output "$RUNNER_TEMP/locked-wheels"
+      - run: pip install '.[dev]'
+      - run: python -m pytest -q
+      - run: ruff check --select E9,F63,F7,F82,F811 src tests
+
+  linux:
+    name: Pi Linux release checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: docker build -f tests/wifi/Dockerfile -t jittersim-wifi-release .
+      - run: docker run --rm jittersim-wifi-release python tests/integration/linux_installer_permissions.py
+      - run: docker run --rm --cap-add NET_ADMIN jittersim-wifi-release python tests/integration/linux_dashboard_peer_identity.py
+      - run: docker run --rm --init --privileged jittersim-wifi-release
+      - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_network_smoke.py
+      - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_exemption_packets.py
+      - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_many_queues.py
+      - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_protected_not_monitored.py
+      - run: docker run --rm --privileged --network none jittersim-wifi-release python tests/integration/linux_adblocking.py
+      - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_service_list_packets.py
+      - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_service_list_variation.py
+      - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_queue_stats.py
+      - run: docker run --rm --privileged jittersim-wifi-release python -m tests.integration.linux_dns_watch
+      - run: docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW jittersim-wifi-release python tests/integration/linux_dashboard_access_packets.py
+
+  browser:
+    name: Pi browser journeys
+    runs-on: ubuntu-latest
+    # The phone layout journey checks three phone sizes twice (normal and wide fonts).
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - run: pip install . 'playwright==1.63.0'
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m tests.browser.wifi_recovery
+      - run: python -m tests.browser.wifi_restart_reconnect
+      - run: python -m tests.browser.dashboard_access
+      - run: python -m tests.browser.trust_access
+      - run: python -m tests.browser.address_move
+      - run: python -m tests.browser.address_move_privacy
+      - run: python -m tests.browser.general_profile
+      - run: python -m tests.browser.saved_profiles
+      - run: python -m tests.browser.patterns
+      - run: python -m tests.browser.random_value_ranges
+      - run: python -m tests.browser.dashboard_navigation
+      - run: python -m tests.browser.protected_clients
+      - run: python -m tests.browser.ad_blocking
+      - run: python -m tests.browser.group_devices
+      - run: python -m tests.browser.impact_check
+      - run: python -m tests.browser.sidebar_status
+      - run: python -m tests.browser.apply_clarity
+      - run: python -m tests.browser.router_copy
+      - run: python -m tests.browser.observation_confirmation
+      - run: python -m tests.browser.traffic_chart
+      - run: python -m tests.browser.device_names
+      - run: python -m tests.browser.phone_layout
+      - run: python -m tests.browser.help_icons
+      - run: python -m tests.browser.token_remember
+      - run: python -m tests.browser.dns_failure
+      - run: python -m tests.browser.page_polling
+      - run: python -m tests.browser.update_status_recovery
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: always()
+        with:
+          name: wifi-browser-results
+          path: test-results/
+          retention-days: 7

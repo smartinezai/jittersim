@@ -15,6 +15,7 @@ from jittersim.config.models import (
     Profile,
     Progression,
     Randomness,
+    RandomWebsiteOutcome,
     SavedSettings,
     Scenario,
     ScenarioRun,
@@ -937,6 +938,121 @@ class ConfigRepositoryTests(unittest.TestCase):
             [("amazon.com", 5), ("chat.openai.com", 1)],
         )
 
+    def test_deletes_domain_observations_for_the_given_addresses_only(self) -> None:
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.20", "amazon.com", 2, 10, 10),
+                DomainObservation("192.168.50.20", "chat.openai.com", 1, 11, 11),
+                DomainObservation("192.168.50.21", "amazon.com", 4, 12, 12),
+            ],
+            now=12,
+        )
+
+        removed = self.repository.delete_domain_observations(["192.168.50.20"])
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(
+            {
+                str(observation.ipv4_address)
+                for observation in self.repository.list_domain_observations()
+            },
+            {"192.168.50.21"},
+        )
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.20"), 0)
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.21"), 4)
+
+    def test_deleting_no_domain_observation_addresses_removes_nothing(self) -> None:
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "amazon.com", 2, 10, 10)],
+            now=10,
+        )
+
+        self.assertEqual(self.repository.delete_domain_observations([]), 0)
+        self.assertEqual(self.repository.delete_domain_observations(["192.168.50.99"]), 0)
+        self.assertEqual(len(self.repository.list_domain_observations()), 1)
+
+    def test_observations_keep_the_client_hardware_address(self) -> None:
+        mac = "02:00:00:00:00:01"
+        other = "02:00:00:00:00:02"
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "amazon.com", 1, 10, 10)], now=10
+        )
+        self.assertIsNone(self.repository.list_domain_observations()[0].mac_address)
+
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "amazon.com", 1, 11, 11, mac_address=mac)], now=11
+        )
+        self.assertEqual(self.repository.list_domain_observations()[0].mac_address, mac)
+
+        # A later sample that could not name the client keeps what is known.
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "amazon.com", 1, 12, 12)], now=12
+        )
+        self.assertEqual(self.repository.list_domain_observations()[0].mac_address, mac)
+
+        # The address went to another client so the newest owner is recorded.
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "amazon.com", 1, 13, 13, mac_address=other)],
+            now=13,
+        )
+        self.assertEqual(self.repository.list_domain_observations()[0].mac_address, other)
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.20"), 4)
+
+    def test_deletes_domain_observations_by_hardware_address_or_by_address(self) -> None:
+        mac = "02:00:00:00:00:01"
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.99", "a.example.com", 1, 10, 10, mac_address=mac),
+                DomainObservation("192.168.50.99", "b.example.com", 1, 10, 10, mac_address=mac),
+                DomainObservation("192.168.50.20", "c.example.com", 1, 10, 10),
+                DomainObservation(
+                    "192.168.50.21", "d.example.com", 1, 10, 10, mac_address="02:00:00:00:00:02"
+                ),
+                DomainObservation("192.168.50.22", "e.example.com", 1, 10, 10),
+            ],
+            now=10,
+        )
+
+        removed = self.repository.delete_domain_observations(["192.168.50.20"], [mac.upper()])
+
+        self.assertEqual(removed, 3)
+        self.assertEqual(
+            sorted(str(item.ipv4_address) for item in self.repository.list_domain_observations()),
+            ["192.168.50.21", "192.168.50.22"],
+        )
+
+    def test_deleting_by_hardware_address_alone_leaves_unnamed_rows(self) -> None:
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "c.example.com", 1, 10, 10)], now=10
+        )
+
+        self.assertEqual(
+            self.repository.delete_domain_observations([], ["02:00:00:00:00:01"]), 0
+        )
+        self.assertEqual(self.repository.delete_domain_observations([], []), 0)
+        self.assertEqual(len(self.repository.list_domain_observations()), 1)
+
+    def test_a_corrupt_stored_observation_raises_a_storage_error(self) -> None:
+        for column, value in (
+            ("mac_address", "garbage"),
+            ("mac_address", "01:00:5e:00:00:01"),
+            ("domain", "-not a domain-"),
+            ("ipv4_address", "not-an-address"),
+            ("ipv4_address", "8.8.8.8"),
+            ("query_count", 0),
+        ):
+            with self.subTest(column=column, value=value):
+                self.repository._connection.execute("DELETE FROM domain_observations")
+                self.repository.save_domain_observations(
+                    [DomainObservation("192.168.50.20", "amazon.com", 2, 10, 10)], now=10
+                )
+                self.repository._connection.execute(
+                    "UPDATE domain_observations SET %s = ?" % column, (value,)
+                )
+
+                with self.assertRaisesRegex(StorageError, "stored domain observation"):
+                    self.repository.list_domain_observations()
+
     def test_action_history_is_newest_first_and_keeps_only_500_entries(self) -> None:
         for index in range(501):
             action = "/api/apply" if index < 500 else "/api/reset"
@@ -950,6 +1066,61 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(stored_count, 500)
         self.assertEqual(history[0]["action"], "/api/reset")
         self.assertEqual(set(history[0]), {"happened_at", "action", "status_code"})
+
+    def test_random_website_analytics_keeps_only_the_last_30_utc_days(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_device(
+            Device("alice", "Alice", "192.168.50.10", "normal")
+        )
+        day = 24 * 60 * 60
+        for domain, event_time in (
+            ("expired.example", 30 * day + 100),
+            ("oldest-kept.example", 31 * day + 100),
+            ("newest.example", 60 * day + 100),
+        ):
+            self.repository.save_random_website_outcomes(
+                [RandomWebsiteOutcome("alice", domain, True, event_time)],
+                now=event_time,
+            )
+
+        report = self.repository.list_random_website_analytics(
+            now=60 * day + 200,
+            days=30,
+        )
+
+        self.assertEqual(
+            {row["domain"] for row in report["rows"]},
+            {"oldest-kept.example", "newest.example"},
+        )
+        self.assertEqual(report["oldest_available_day_utc"], 31 * day)
+
+    def test_backup_excludes_random_website_analytics_and_keeps_live_data(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_device(
+            Device("alice", "Alice", "192.168.50.10", "normal")
+        )
+        self.repository.save_random_website_outcomes(
+            [RandomWebsiteOutcome("alice", "example.com", True, 100)],
+            now=100,
+        )
+
+        backup = self.repository.backup_bytes()
+        with tempfile.NamedTemporaryFile(suffix=".db") as temporary:
+            temporary.write(backup)
+            temporary.flush()
+            with sqlite3.connect(temporary.name) as snapshot:
+                analytics_table = snapshot.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'random_website_analytics'"
+                ).fetchone()
+
+        self.assertIsNone(analytics_table)
+        live_report = self.repository.list_random_website_analytics(
+            now=100,
+            days=1,
+        )
+        self.assertEqual(len(live_report["rows"]), 1)
+        self.assertEqual(live_report["rows"][0]["kept_count"], 1)
 
     def test_backup_is_a_readable_snapshot_of_saved_configuration(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))
@@ -1011,7 +1182,8 @@ class EveryoneElseStorageTests(unittest.TestCase):
 
     def test_a_malformed_unaffected_device_is_a_storage_error(self) -> None:
         self.repository._connection.execute(
-            "INSERT INTO unaffected_devices (mac_address, name) VALUES ('not-a-mac', 'Bad')"
+            "INSERT INTO unaffected_devices (mac_address, display_name, created_at) "
+            "VALUES ('not-a-mac', 'Bad', 0)"
         )
 
         with self.assertRaises(StorageError):
@@ -1024,15 +1196,15 @@ class EveryoneElseStorageTests(unittest.TestCase):
         self.assertIsNone(self.repository.get_everyone_else_profile_id())
 
     def test_unaffected_devices_round_trip_in_address_order(self) -> None:
-        self.repository.save_unaffected_device(UnaffectedDevice("bb:bb:bb:bb:bb:bb", "Phone"))
+        self.repository.save_unaffected_device(UnaffectedDevice("ba:bb:bb:bb:bb:bb", "Phone"))
         self.repository.save_unaffected_device(UnaffectedDevice("aa:aa:aa:aa:aa:aa"))
-        self.repository.save_unaffected_device(UnaffectedDevice("bb:bb:bb:bb:bb:bb", "My phone"))
+        self.repository.save_unaffected_device(UnaffectedDevice("ba:bb:bb:bb:bb:bb", "My phone"))
 
         self.assertEqual(
             self.repository.list_unaffected_devices(),
             (
                 UnaffectedDevice("aa:aa:aa:aa:aa:aa"),
-                UnaffectedDevice("bb:bb:bb:bb:bb:bb", "My phone"),
+                UnaffectedDevice("ba:bb:bb:bb:bb:bb", "My phone"),
             ),
         )
         self.assertTrue(self.repository.delete_unaffected_device("aa:aa:aa:aa:aa:aa"))
@@ -1084,7 +1256,7 @@ class EveryoneElseStorageTests(unittest.TestCase):
         self.assertEqual(
             self.repository.get_device_by_mac_address("aa:aa:aa:aa:aa:aa").id, "alice"
         )
-        self.assertIsNone(self.repository.get_device_by_mac_address("bb:bb:bb:bb:bb:bb"))
+        self.assertIsNone(self.repository.get_device_by_mac_address("ba:bb:bb:bb:bb:bb"))
 
 
 class TargetScheduleStorageTests(unittest.TestCase):

@@ -1,0 +1,92 @@
+{
+  "reviewed_at": "2026-10-02T22:38:09.669076+00:00",
+  "pull_request": "https://github.com/smartinezai/jittersim/pull/51",
+  "reviewed_head": "8bc2ca7c52a80ec2d49e6de381fa74f0673b2421",
+  "integration_head": "cf2a6fe44ec245061839a44b09a57e0b28782a6a",
+  "combined_tree": "7deb9d7910bdc6076625b3cb0ed75db19bd3b788",
+  "website_source_blob_in_both_trees": "ed0d09b78af30c5146c4dd98d3114a674f281d56",
+  "production_source_changed": false,
+  "findings": [
+    {
+      "id": "R01",
+      "priority": "P1",
+      "file": "src/jittersim/engine/website.py",
+      "function": "resolve_domains",
+      "problem": "Each call creates its own executor. Timed-out running lookups remain active while another call creates more workers.",
+      "evidence": {
+        "successive_calls": 5,
+        "names_per_call": 8,
+        "observed_active_lookups": 40,
+        "intended_limit": 8,
+        "concurrent_callers_observed_active_lookups": 40
+      },
+      "regressions": [
+        "WebsiteLookupDeadlineTests.test_successive_timeouts_share_one_worker_limit",
+        "WebsiteLookupDeadlineTests.test_concurrent_calls_share_one_worker_limit"
+      ],
+      "consequence": "Slow DNS can accumulate lookup threads across calls and exhaust resources on the Pi."
+    },
+    {
+      "id": "R02",
+      "priority": "P2",
+      "file": "src/jittersim/engine/website.py",
+      "function": "_cached_addresses",
+      "problem": "The cache expiry uses the time before the DNS lookup starts.",
+      "evidence": {
+        "simulated_lookup_seconds": 120,
+        "cache_lifetime_seconds": 60,
+        "fresh_answer_immediately_after_completion": null
+      },
+      "regression": "WebsiteLookupDeadlineTests.test_late_answer_remains_fresh_from_its_completion",
+      "consequence": "A late successful answer can expire before it is available. Later plans may repeat the lookup instead of using that answer."
+    }
+  ],
+  "verification": {
+    "new_regressions": {
+      "expected_failures": 3,
+      "observed_failures": 3,
+      "production_code_unchanged": true,
+      "blocked_work_released_during_cleanup": true
+    },
+    "existing_head_suite": {
+      "passed": 2878,
+      "excluded_new_regressions": 3,
+      "exit_code": 0,
+      "log": "/private/tmp/jittersim-resolver-baseline-2026-10-03.log"
+    },
+    "combined_suite": {
+      "passed": 3002,
+      "linux_only_skipped": 37,
+      "exit_code": 0,
+      "seconds": 116.2,
+      "log": "/private/tmp/jittersim-hardening-combined-tests-2026-10-03.log"
+    },
+    "combined_browser": {
+      "module": "tests.browser.journeys",
+      "exit_code": 0,
+      "fixture_only": true,
+      "log": "/private/tmp/jittersim-hardening-combined-browser-2026-10-03.log"
+    },
+    "lint": {
+      "selection": "E9,F63,F7,F82,F811",
+      "exit_code": 0
+    },
+    "syntax_and_whitespace": "passed",
+    "merge_preview": "conflict-free tree created without editing either PR branch"
+  },
+  "blocking_conditions": {
+    "production_repair": "Human feedback on docs/implementation-plan-resolver-limit-2026-10-03.md is pending under the working agreement.",
+    "published_checks": "GitHub refused recent jobs before any steps ran because of failed account payments or the spending limit.",
+    "ci_annotation": "https://github.com/smartinezai/jittersim/actions/runs/37071560448/job/111051950554"
+  },
+  "remote_changes": null,
+  "live_pi_changes": null,
+  "next_steps": [
+    "Receive the required plan feedback",
+    "Implement the shared eight-worker pool with bounded admission and completion-based cache expiry",
+    "Verify the repaired combined source",
+    "Publish the ready correction once",
+    "Wait for actual green checks on the exact head before merge",
+    "Coordinate installation and physical acceptance with the update owner"
+  ]
+}

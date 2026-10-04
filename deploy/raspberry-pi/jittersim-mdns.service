@@ -1,0 +1,30 @@
+[Unit]
+Description=Announce the dashboard name on Ethernet and the test Wi-Fi
+Wants=avahi-daemon.service network-online.target
+After=NetworkManager.service network-online.target avahi-daemon.service jittersim-control-firewall.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# The system Python provides the dbus module. The publisher itself ships with
+# the release and uses only the standard library.
+Environment=PYTHONPATH=/opt/jittersim/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m jittersim.mdnsname publish
+Restart=on-failure
+RestartSec=5
+# The status report that the dashboard and `jittersim diagnostics` read.
+RuntimeDirectory=jittersim-mdns
+RuntimeDirectoryMode=0755
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

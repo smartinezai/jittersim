@@ -136,7 +136,7 @@ class EveryoneElseCompileTests(unittest.TestCase):
             profiles={"slow": self.slow},
             everyone_else=self.rule(
                 upload_impairment=Impairment(delay_ms=100),
-                unaffected_macs=("BB:BB:BB:BB:BB:BB", "aa:aa:aa:aa:aa:aa", "bb:bb:bb:bb:bb:bb"),
+                unaffected_macs=("BA:BB:BB:BB:BB:BB", "aa:aa:aa:aa:aa:aa", "ba:bb:bb:bb:bb:bb"),
             ),
         )
 
@@ -145,7 +145,7 @@ class EveryoneElseCompileTests(unittest.TestCase):
             self.rule(
                 mark=2,
                 upload_impairment=Impairment(delay_ms=100),
-                unaffected_macs=("aa:aa:aa:aa:aa:aa", "bb:bb:bb:bb:bb:bb"),
+                unaffected_macs=("aa:aa:aa:aa:aa:aa", "ba:bb:bb:bb:bb:bb"),
             ),
         )
         self.assertEqual(

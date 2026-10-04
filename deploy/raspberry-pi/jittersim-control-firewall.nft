@@ -2,10 +2,10 @@ table inet jittersim_control {
     chain input {
         type filter hook input priority filter; policy accept;
 
-        # Test-network clients may use the Pi as a gateway, but never as an
-        # administration endpoint.
+        # HTTPS sign-in is reachable. The application checks the token and
+        # saved device permission before allowing dashboard controls.
         iifname "@TEST_INTERFACE@" tcp dport 22 counter drop comment "deny SSH from test Wi-Fi"
-        iifname "@TEST_INTERFACE@" tcp dport 8080 counter drop comment "deny dashboard from test Wi-Fi"
+        iifname "@TEST_INTERFACE@" tcp dport 8080 counter accept comment "allow dashboard sign-in from test Wi-Fi"
         iifname "lo" tcp dport 8080 accept
         iifname "@UPLINK_INTERFACE@" ip saddr {
             10.0.0.0/8,
@@ -13,8 +13,22 @@ table inet jittersim_control {
             192.168.0.0/16
         } tcp dport 8080 accept
         tcp dport 8080 counter drop comment "keep dashboard on private management paths"
+        iifname "@TEST_INTERFACE@" ip daddr 192.168.50.1 tcp dport 8443 accept
+        tcp dport 8443 drop comment "keep homepage policy on test Wi-Fi"
+        # Port 5353 is mDNS only. The Pi announces its one neutral dashboard name
+        # on the test Wi-Fi and answers name questions there. Avahi publishes
+        # nothing else (see jittersim.mdnsname). The filtered resolver listens on
+        # 5335 and test clients reach it through the access table's redirect from
+        # port 53.
+        iifname "@TEST_INTERFACE@" udp dport 5353 counter accept comment "allow mDNS name queries from test Wi-Fi"
         iifname "@TEST_INTERFACE@" ip saddr 192.168.50.0/24 tcp dport 3128 accept
         tcp dport 3128 counter drop comment "keep browser proxy on test Wi-Fi"
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+
+        oifname "@TEST_INTERFACE@" udp sport 5353 counter accept comment "allow mDNS answers on test Wi-Fi"
     }
 
     chain forward {

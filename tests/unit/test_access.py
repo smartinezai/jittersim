@@ -37,14 +37,14 @@ class AccessPolicyTests(unittest.TestCase):
         plan = AccessPlan(options=AccessOptions(dns_failure_percent=35))
         rules = render_access_firewall(plan, Topology("eth0", "wlan0"))
 
-        self.assertEqual(rules.count("numgen random mod 100 < 35"), 2)
+        self.assertEqual(rules.count("numgen random mod 100 < 35"), 4)
         self.assertIn(
-            'iifname "wlan0" ip saddr 192.168.50.0/24 udp dport 5353 '
+            'iifname "wlan0" ip saddr 192.168.50.0/24 udp dport 5335 '
             "numgen random mod 100 < 35 counter reject with icmpx type port-unreachable",
             rules,
         )
         self.assertIn(
-            'iifname "wlan0" ip saddr 192.168.50.0/24 tcp dport 5353 ct state new '
+            'iifname "wlan0" ip saddr 192.168.50.0/24 tcp dport 5335 ct state new '
             "numgen random mod 100 < 35 counter reject with tcp reset",
             rules,
         )
@@ -54,15 +54,51 @@ class AccessPolicyTests(unittest.TestCase):
             Topology("eth0", "wlan0"),
         )
         self.assertNotIn("numgen random", every_request)
-        self.assertEqual(every_request.count("ip saddr 192.168.50.0/24"), 2)
-        self.assertIn("udp dport 5353 counter reject", every_request)
-        self.assertIn("tcp dport 5353 ct state new counter reject", every_request)
+        self.assertEqual(every_request.count("ip saddr 192.168.50.0/24"), 4)
+        self.assertIn("udp dport 5354 counter reject", every_request)
+        self.assertIn("tcp dport 5354 tcp flags & (syn | ack) == syn counter reject", every_request)
+        self.assertIn("udp dport 5335 counter reject", every_request)
+        self.assertIn("tcp dport 5335 ct state new counter reject", every_request)
 
         disabled = render_access_firewall(
             AccessPlan(options=AccessOptions(enabled=False, dns_failure_percent=35)),
             Topology("eth0", "wlan0"),
         )
         self.assertNotIn("numgen random", disabled)
+
+    def test_dashboard_sign_in_exception_comes_before_every_drop_that_could_hit_it(self):
+        blocked = "02:00:00:00:00:01"
+        plan = AccessPlan(
+            mac=MacPolicy("denylist", (), (blocked,)),
+            blocks=(SiteBlock("video", "Video", ("video.example.com",), device_id="child"),),
+            clients=(AccessClient("child", "192.168.50.10", blocked, ("video",)),),
+        )
+        lines = render_access_firewall(plan, Topology("eth0", "wlan0")).splitlines()
+
+        def first(text, *, after=0):
+            return next(i for i, line in enumerate(lines) if i >= after and text in line)
+
+        accept = first("input iifname \"wlan0\" tcp dport 8080 accept")
+        for drop in (
+            f"input iifname \"wlan0\" ether saddr {{ {blocked} }} counter drop",
+            f"input iifname \"wlan0\" ip saddr 192.168.50.10 ether saddr != {blocked} counter drop",
+        ):
+            self.assertLess(accept, first(drop), drop)
+        # Replies go out through the egress chain that drops traffic to the blocked
+        # device. Only the Pi's own port 8080 replies carry the mark that passes it.
+        self.assertIn("priority -1;", lines[first("add chain netdev jittersim_access outgoing")])
+        mark = first("add rule inet jittersim_access output oifname \"wlan0\" tcp sport 8080 meta mark set")
+        self.assertIn("meta mark set 2147483648", lines[mark])
+        passing = first("add rule netdev jittersim_access outgoing meta mark 2147483648 accept")
+        dropping = first("add rule netdev jittersim_access outgoing ether daddr")
+        arp = first("add rule netdev jittersim_access outgoing ether type arp accept")
+        self.assertLess(passing, dropping)
+        self.assertLess(arp, dropping)
+
+        disabled = render_access_firewall(
+            replace(plan, options=AccessOptions(enabled=False)), Topology("eth0", "wlan0")
+        )
+        self.assertNotIn("8080", disabled)
 
     def test_deleting_a_missing_target_does_not_leave_access_edits_locked(self):
         with ConfigRepository(':memory:') as repository:
@@ -203,20 +239,88 @@ class AccessRecoveryTests(unittest.TestCase):
         self.plan = AccessPlan(blocks=(SiteBlock("global", "Global", ("example.com",)),))
 
     def test_failure_preserves_previous_rules_and_double_failure_keeps_guard(self):
+        other = AccessPlan(blocks=(SiteBlock("other", "Other", ("example.org",)),))
         self.manager.apply(self.plan)
         self.executor.fail_restarts = 1
         with self.assertRaises(CommandExecutionError):
-            self.manager.apply(AccessPlan())
+            self.manager.apply(other)
         self.assertEqual(read_access(self.directory / "policy.json"), self.plan)
         self.assertIn("restored", self.manager.status()["error"])
         self.executor.fail_restarts = 2
         with self.assertLogs(level="ERROR"), self.assertRaises(CommandExecutionError):
-            self.manager.apply(AccessPlan())
+            self.manager.apply(other)
         nft = [c for c in self.executor.commands if c.executable == "nft"]
         self.assertIn('iifname "wlan0" drop', nft[-1].stdin)
         self.assertIn("closed", self.manager.status()["error"])
         self.manager.restore()
         self.assertEqual(self.manager.applied, self.plan)
+
+    def commands_named(self, executable, first_argument=None):
+        return [
+            c for c in self.executor.commands
+            if c.executable == executable
+            and (first_argument is None or c.arguments[0] == first_argument)
+        ]
+
+    def test_a_plan_without_dns_rules_never_needs_the_resolver(self):
+        # MAC lists and an enabled policy with no site rules use no DNS at all. A
+        # broken or missing Unbound must not refuse them.
+        self.executor.fail_restarts = 100
+        for plan in (
+            AccessPlan(),
+            AccessPlan(mac=MacPolicy("denylist", (), ("02:00:00:00:00:01",))),
+        ):
+            self.manager.apply(plan)
+            self.assertEqual(self.manager.applied, plan)
+            self.assertIsNone(self.manager.error)
+        self.assertEqual(self.commands_named("systemctl", "restart"), [])
+        self.assertEqual(self.commands_named("dig"), [])
+        self.assertEqual(self.commands_named("unbound-checkconf"), [])
+        self.assertTrue(self.commands_named("systemctl", "stop"))
+        self.assertTrue(all(c.ignore_failure for c in self.commands_named("systemctl", "stop")))
+
+    def test_the_resolver_restarts_only_when_dns_rules_exist(self):
+        self.manager.apply(self.plan)
+        self.assertEqual(len(self.commands_named("systemctl", "restart")), 1)
+        self.assertEqual(len(self.commands_named("unbound-checkconf")), 1)
+        self.manager.apply(AccessPlan())
+        self.assertEqual(len(self.commands_named("systemctl", "restart")), 1)
+        # No resolver runs while nothing is redirected to it.
+        self.assertEqual(len(self.commands_named("systemctl", "stop")), 1)
+        before = len(self.commands_named("dig"))
+        self.manager.check_health()
+        self.assertEqual(len(self.commands_named("dig")), before)
+        self.assertIsNone(self.manager.status()["error"])
+
+    def test_a_failing_resolver_refuses_dns_rules_but_never_blocks_the_release(self):
+        self.executor.fail_restarts = 100
+        with self.assertRaises(CommandExecutionError):
+            self.manager.apply(self.plan)
+        self.assertTrue(self.manager.dns_failed)
+        self.assertIsNotNone(self.manager.status()["error"])
+        # Panic and Normal access need no resolver.
+        self.manager.disable()
+        self.assertFalse(self.manager.dns_failed)
+        self.assertFalse(self.manager.applied.options.enabled)
+        self.assertIsNone(self.manager.error)
+        guard = [c for c in self.commands_named("nft") if "access_transition" in c.stdin]
+        self.assertIn("delete table inet jittersim_access_transition", guard[-1].stdin)
+
+    def test_a_failed_stop_of_the_unused_resolver_is_ignored(self):
+        self.manager.apply(self.plan)
+        stops = []
+        original = self.executor.run
+
+        def run(command):
+            if command.executable == "systemctl" and command.arguments[0] == "stop":
+                stops.append(command)
+                raise CommandExecutionError("simulated stop failure")
+            return original(command)
+
+        with patch.object(self.executor, "run", run):
+            self.manager.apply(AccessPlan())
+        self.assertTrue(stops)
+        self.assertEqual(self.manager.applied, AccessPlan())
 
     def test_corrupt_saved_policy_closes_test_network_before_reading(self):
         (self.directory / "policy.json").write_text("{")

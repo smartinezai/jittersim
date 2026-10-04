@@ -1,5 +1,36 @@
 # Wi-Fi security and name recovery validation
 
+## Pi release integration
+
+The main change was merged through [PR 21](https://github.com/smartinezai/jittersim/pull/21)
+at `239c787b0ee44c0e0598008e702ebc97e70075f8`. All six CI checks passed and
+there were no unresolved review threads at merge.
+
+This port uses `codex/wifi-pi-integration` based on the current Pi release at
+`610d63e51f9f8edf3c867097c24c50685fa6d972`. It preserves router controls,
+credentials, unaffected devices, management name repair and bounded dashboard
+connections. The primary checkout and its unrelated edits remain intact.
+
+All 403 tests passed on Mac with Python 3.12 and from a fresh Linux package
+installation on Python 3.11. Actual Linux network smoke, routed packet
+protection and management name isolation passed in separate containers.
+Recovery browser checks passed against the release API and helper socket.
+Cancellation, pending state, failure, success and configuration mode were
+checked. Desktop and phone views were inspected with no horizontal overflow.
+Required lint, focused code checks, shell and JavaScript syntax, Python 3.9
+syntax and diff checks passed. Existing router timeouts and safe errors remain.
+
+The owner authorized push, merge and Pi deployment on 30 September 2026.
+Publish the port against `feat/service-profiles-and-pi-hardening`. Require
+all CI checks on its current head before merge. Deploy the exact merged source
+with private code, settings and NetworkManager backups. Exclude random website
+analytics from the settings backup. Verify installed hashes, services,
+authenticated dashboard endpoints, both recovery controls and the unchanged
+password. Run Pi packet and name-isolation checks in separate empty namespaces.
+Restore previous code and network settings if installation or acceptance fails.
+
+The remaining sections record the original main implementation checks.
+
 ## Review summary
 
 The change requires WPA2 with AES for installation and later Wi-Fi changes.
@@ -71,7 +102,5 @@ continued management access. WPA3 is unverified. Keep the router Wi-Fi
 available during that test. The dashboard button cannot be reached from the
 test network because administration access is intentionally blocked there.
 
-The owner authorized push, merge and Pi deployment after these checks on
-30 September 2026. Publish the main change first. Port it separately to
-`feat/service-profiles-and-pi-hardening`, verify that combined release and
-deploy it with private backups and authenticated acceptance checks.
+Main was pushed and merged through PR 21 after every CI check passed. The
+separately tested Pi port is approved for publication and deployment.

@@ -4,11 +4,9 @@ import http.client
 import json
 import sqlite3
 import threading
-import time
 import unittest
 from unittest.mock import patch
 
-from jittersim.api.session import issue_session
 from jittersim.config.models import Impairment, MacPolicy, Profile, WebsitePolicy
 from jittersim.engine.runtime import RuntimeScheduler
 from tests.integration import test_api_helper
@@ -54,13 +52,77 @@ class AccessApiTests(unittest.TestCase):
         # An old tab cannot restore restrictions after another tab changes them.
         self.assertEqual(self.write("/api/access/apply", {"version": 0})[0], 409)
 
+    def test_panic_is_normal_access_and_reports_the_runtime_state(self):
+        rule = {"id": "video", "name": "Video", "domains": ["example.com"], "device_id": "alice"}
+        self.write("/api/site-blocks", {"rule": rule})
+        self.assertEqual(self.write("/api/access/apply")[0], 200)
+        status, _, body = self.api_server.write_response_for("/api/normal-access", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["state"]["observed_state"], "reset")
+        self.assertFalse(self.access_manager.applied.options.enabled)
+        self.assertFalse(self.repository.access_settings().access_options.enabled)
+        self.assertTrue(
+            self.access_manager.applied.permits_host("192.168.50.10", "sub.example.com")
+        )
+
+    def test_panic_then_start_keeps_saved_mac_blocks_disabled(self):
+        blocked = "02:00:00:00:00:01"
+        policy = MacPolicy("denylist", (), (blocked,))
+        self.repository.save_access_policies(policy, WebsitePolicy())
+        self.assertEqual(self.write("/api/apply")[0], 200)
+        self.assertTrue(self.access_manager.applied.options.enabled)
+
+        self.assertEqual(self.write("/api/normal-access")[0], 200)
+        self.assertFalse(self.repository.get_access_options().enabled)
+        self.assertEqual(self.repository.get_mac_policy(), policy)
+        self.assertEqual(self.write("/api/apply")[0], 200)
+
+        self.assertFalse(self.access_manager.applied.options.enabled)
+        self.assertEqual(self.access_manager.applied.mac, policy)
+        published = json.loads(self.active_plan_path.read_text())
+        self.assertFalse(published["access"]["options"]["enabled"])
+        self.assertEqual(published["mac_policy"]["denylist"], [blocked])
+        rules = next(
+            command.stdin
+            for command in reversed(self.helper_executor.commands)
+            if command.executable == "nft" and command.stdin
+        )
+        self.assertNotIn("deny listed test client", rules)
+
+    def test_household_disable_leaves_running_profile_and_queues_unchanged(self):
+        blocked = "02:00:00:00:00:01"
+        policy = MacPolicy("denylist", (), (blocked,))
+        self.repository.save_access_policies(policy, WebsitePolicy())
+        self.assertEqual(self.write("/api/apply")[0], 200)
+        published = self.active_plan_path.read_bytes()
+        commands_before = len(self.helper_executor.commands)
+
+        self.assertEqual(self.write("/api/access/disable", {"confirmed": True})[0], 200)
+
+        self.assertEqual(self.active_plan_path.read_bytes(), published)
+        self.assertEqual(len(self.helper_executor.commands), commands_before)
+        self.assertFalse(self.access_manager.applied.options.enabled)
+        self.assertEqual(self.access_manager.applied.mac, policy)
+        self.assertEqual(self.repository.get_mac_policy(), policy)
+        self.assertEqual(self.repository.get_runtime_state().last_action, "apply")
+        rules = next(
+            command.stdin
+            for command in reversed(self.helper_executor.commands)
+            if command.executable == "nft" and command.stdin
+        )
+        self.assertNotIn("deny listed test client", rules)
+
     def test_failed_rule_change_reports_pending_without_replacing_working_policy(self):
         self.write(
             "/api/site-blocks",
             {"rule": {"id": "video", "name": "Video", "domains": ["example.com"]}},
         )
         self.assertEqual(self.write("/api/access/apply")[0], 200)
-        self.write("/api/site-blocks/delete", {"id": "video"})
+        # A changed rule still needs the DNS service. Removing every rule would not.
+        self.write(
+            "/api/site-blocks",
+            {"rule": {"id": "video", "name": "Video", "domains": ["example.org"]}},
+        )
         self.access_manager.executor.fail_restarts = 1
         with self.assertLogs(level="ERROR"):
             self.assertEqual(self.write("/api/access/apply")[0], 503)
@@ -149,7 +211,7 @@ class AccessApiTests(unittest.TestCase):
         self.assertFalse(self.access_manager.applied.options.enabled)
         self.assertFalse(self.active_plan_path.exists())
 
-    def test_private_reads_and_writes_require_sign_in_and_same_origin(self):
+    def test_private_reads_and_writes_require_the_admin_token(self):
         worker = threading.Thread(target=self.api_server.serve_forever, daemon=True)
         worker.start()
         try:
@@ -168,22 +230,6 @@ class AccessApiTests(unittest.TestCase):
                     headers={"Content-Type": "application/json"},
                 )
                 self.assertEqual(connection.getresponse().status, 401)
-                connection.close()
-            for path in ("/api/site-blocks", "/api/normal-access"):
-                connection = http.client.HTTPConnection(host, timeout=3)
-                connection.request(
-                    "POST",
-                    path,
-                    body="{}",
-                    headers={
-                        "Cookie": "session=" + issue_session(
-                            "test-token-123456", now=int(time.time())
-                        ),
-                        "Origin": "https://elsewhere.example",
-                        "Content-Type": "application/json",
-                    },
-                )
-                self.assertEqual(connection.getresponse().status, 403)
                 connection.close()
         finally:
             self.api_server.shutdown()

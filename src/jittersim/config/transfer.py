@@ -1,10 +1,12 @@
 """Export saved settings as JSON and check imported settings before saving."""
 
 from collections import Counter
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any, Dict, Iterable
 
+from .payloads import profile_payload
 from .models import MAX_UNAFFECTED_DEVICES, SavedSettings
+from .adblocking import allowed_domains, blocking_macs
 
 SETTINGS_FORMAT = "jittersim-settings"
 SETTINGS_VERSION = 3
@@ -38,7 +40,8 @@ def settings_to_payload(settings: SavedSettings, *, exported_at: int) -> Dict[st
         "persist_profiles_after_gateway_outage": (
             settings.persist_profiles_after_gateway_outage
         ),
-        "profiles": [_json_values(asdict(profile)) for profile in settings.profiles],
+        "profiles": [_json_values({key: value for key, value in profile_payload(profile).items()
+            if key != "homepage_bounce_percent" or value != 0}) for profile in settings.profiles],
         "devices": [
             {
                 "id": device.id,
@@ -131,7 +134,43 @@ def settings_to_payload(settings: SavedSettings, *, exported_at: int) -> Dict[st
                 for device in settings.unaffected_devices
             ],
         },
+        "general_profile_id": settings.general_profile_id,
+        "ad_blocking_devices": list(settings.ad_blocking_devices),
+        "ad_blocking_allowances": list(settings.ad_blocking_allowances),
+        "service_lists": [
+            {
+                "id": service_list.id,
+                "name": service_list.name,
+                "profile_id": service_list.profile_id,
+                "services": list(service_list.services),
+                "hostnames": list(service_list.hostnames),
+                "enabled": service_list.enabled,
+            }
+            for service_list in settings.service_lists
+        ],
     }
+
+
+# Files from main and from older Pi builds do not carry these sections.
+KEPT_WHEN_MISSING = ("general_profile_id", "service_lists", "ad_blocking_allowances")
+
+
+def keep_sections_missing_from(
+    payload: Dict[str, Any], settings: SavedSettings, current: SavedSettings
+) -> SavedSettings:
+    """Keep the saved sections that a settings file does not carry.
+
+    A file with the key replaces the section (an empty list clears it). A file
+    without it leaves the saved section as it is.
+    """
+
+    retained = {key: getattr(current, key) for key in KEPT_WHEN_MISSING if key not in payload}
+    if "ad_blocking_devices" not in payload:
+        protected = {item.mac_address for item in settings.unaffected_devices}
+        retained["ad_blocking_devices"] = tuple(
+            mac for mac in current.ad_blocking_devices if mac in protected
+        )
+    return replace(settings, **retained)
 
 
 def _require_unique(kind: str, identifiers: Iterable[str]) -> None:
@@ -166,6 +205,10 @@ def check_settings(
     )
     if len(settings.unaffected_devices) > MAX_UNAFFECTED_DEVICES:
         raise ValueError(f"the unaffected list holds at most {MAX_UNAFFECTED_DEVICES} devices")
+    selected = blocking_macs(settings.ad_blocking_devices)
+    allowed_domains(settings.ad_blocking_allowances)
+    if set(selected) - {item.mac_address for item in settings.unaffected_devices}:
+        raise ValueError("Ad blocking needs a protected device")
 
     profile_ids = {profile.id for profile in settings.profiles}
     device_ids = {device.id for device in settings.devices}
@@ -221,15 +264,27 @@ def check_settings(
         require_profile(f"browser service profile {assignment.id}", assignment.profile_id)
     if settings.everyone_else_profile_id is not None:
         require_profile("everyone else", settings.everyone_else_profile_id)
-    devices_by_mac = {
-        device.mac_address: device.id for device in settings.devices if device.mac_address
-    }
-    for unaffected in settings.unaffected_devices:
-        if unaffected.mac_address in devices_by_mac:
-            raise ValueError(
-                f"{unaffected.mac_address} is unaffected and belongs to device "
-                f"{devices_by_mac[unaffected.mac_address]}"
-            )
+    if settings.general_profile_id is not None:
+        require_profile("the general profile", settings.general_profile_id)
+    _require_unique("service list", (service_list.id for service_list in settings.service_lists))
+    for service_list in settings.service_lists:
+        require_profile(f"service list {service_list.id}", service_list.profile_id)
+    # A hostname also matches its subdomains and may sit in only one enabled list.
+    listed: list = []
+    for service_list in settings.service_lists:
+        if not service_list.enabled:
+            continue
+        for domain in service_list.domains:
+            for prior, owner in listed:
+                if owner != service_list.id and (
+                    domain == prior or domain.endswith("." + prior) or prior.endswith("." + domain)
+                ):
+                    raise ValueError(
+                        f"service lists {owner} and {service_list.id} overlap on {domain}"
+                    )
+            listed.append((domain, service_list.id))
+    # A saved device whose address is protected stays saved. Its assignment is dormant
+    # while the protection lasts and comes back when it is removed.
     # Only enabled browser service profiles reach the plan.
     assignments = tuple(
         assignment for assignment in settings.service_assignments if assignment.enabled

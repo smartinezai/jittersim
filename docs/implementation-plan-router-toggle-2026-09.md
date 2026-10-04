@@ -1,0 +1,133 @@
+# Router Wi-Fi toggle repair
+
+## Human review summary
+
+Fix the reported Turn off router Wi-Fi failure on the Vodafone firmware. The Pi log confirms that the toggle still searches for an old HTML form. Copy router Wi-Fi already uses the firmware's encrypted settings API successfully.
+
+Use the router's own encrypted write protocol to change only the primary Wi-Fi enabled flags. Preserve the other settings and confirm every supported primary radio after the change. Keep the older form path for older firmware. Return specific safe errors without exposing passwords or router response contents.
+
+This continues the previously authorized router fixes, tests, push and deployment. The owner has requested immediate implementation because they need the app soon. No new design decision is required.
+
+## Evidence and changes
+
+- The installed helper failed at `set_wifi_enabled` before any settings write because `_wifi_form` found no matching form.
+- The router's public `wifi_general_data.js` describes the encrypted write endpoint and its field names.
+- Read current verified settings first. Check recognized radio flags before posting. Preserve the existing primary Wi-Fi settings and change only their enabled flags plus the master Wi-Fi flag when it is present.
+- Use the existing verified login session and the firmware's authenticated encryption envelope. Do not log or retain settings, session material or credentials.
+- Confirm the requested state through the encrypted read API. Reject partial, unknown or tampered confirmation. Bound retries, response size and total operation time. Keep enough helper timeout for the complete operation.
+- Improve helper and dashboard errors with a fixed set of non-sensitive messages. A failed confirmation must explain that the router may already have changed and must not silently retry the write.
+
+## Verification and delivery
+
+1. Review this repair plan against the actual firmware script before implementation.
+2. Add protocol tests with harmless encrypted settings. Check off and on, preservation of unrelated settings, authentication, tampered data, unknown state, partial radio changes and read-back failure. Keep the older form tests.
+3. Check that helper/API failures and logs exclude submitted credentials and router contents. Test the operation timeout separately from quick helper reads.
+4. Run the full Mac suite, focused lint and fresh Linux package checks. Complete the previously pending credential panel browser checks when Chrome permits control.
+5. Commit the router repair separately from the credential panel then push ready commits together once. Build the exact tested release and deploy with the existing installer. Preserve credentials and saved configuration. No database migration or CI build change is required.
+6. Verify the installed code and authenticated dashboard. Real router off/on testing can disconnect devices on Vodafone Wi-Fi. Use wired management access and the existing confirmation before turning Wi-Fi off. Record the starting state and restore it after acceptance when appropriate.
+
+## Risks and recovery
+
+The main risk is changing unintended router settings or losing management connectivity. Match the firmware's write fields and keep Ethernet connected to the Pi. Do not guess unsupported fields. Fail before writing when the starting response is invalid. A write timeout can leave the router changed, so report that uncertainty and require a read before another write. A code rollback restores the adapter but cannot restore Wi-Fi radio state. Use the router's local controls over Ethernet to restore Wi-Fi when needed.
+
+All work stays bounded to one router and one operation. Credentials stay in memory only. There are no new endpoints, stored secrets or analytics.
+
+## Review corrections
+
+The repair review is complete. Use only the firmware's writable fields and exclude read-only fields. Preserve guest settings, band steering, split SSID, security, visibility and isolation. Omit all unchanged passphrase fields using the firmware's demonstrated optional-password behavior. Require recognized states for both primary radios and the master flag before writing. Verify each flag separately after writing.
+
+The master flag also stops guest Wi-Fi activity while it is off, although guest configuration is preserved. Treat any failure after sending the write as an uncertain result. Send no second write and do not switch to the older writer after that point. Share one total deadline across login, reads, write, confirmation and logout. Use a fixed set of safe messages through both helper and API.
+
+The user's previously authorized urgent repair scope covers this reported failure. The existing approved work and push/deploy authorization remain active.
+
+The firmware keeps both configured bands enabled with a shared SSID even when the master switch is off. Match that behavior. With split SSIDs preserve the selected bands and change the master switch. Compare the master and each configured band with the submitted values. A disabled master proves both effective radios are off. Refuse enablement when a split configuration has no enabled band. The protocol fixture must reject a shared-SSID write that sets the configured band flags to zero.
+
+## Validation result
+
+295 tests passed on Mac and in a fresh Linux package installation. Linux network smoke and routed protection packet checks passed. Focused lint, the complete served JavaScript syntax check and diff checks passed. The protocol tests exercise encrypted off/on requests, shared and split SSIDs, preserved passwords and other settings, unknown states, partial changes, failed confirmation, helper timing and slow responses.
+
+Real off/on acceptance on this router remains pending installation and a wired management connection. The existing copy action has already succeeded. Do not report the physical toggle as verified from these local tests.
+
+## Deployment acceptance follow-up
+
+The installed modules match release 2840e2f and all authenticated dashboard reads pass. The live network is deliberately reset. Diagnostics still requests removed traffic tables and reports an avoidable helper failure. Use the same reset-state check as live traffic, keep connected-client inspection available and explain why counters are absent. Cover reset and active states without changing the live network configuration. This is a small correction within the authorized bug fixes.
+
+For the physical router test, prepare a Pi-local check with masked password entry. Verify the starting flags before any write. Run a detached bounded off/on check so losing the Mac's Wi-Fi does not stop restoration. Report only verified flags and fixed errors. Restore the exact starting writable settings and confirm them. Do not store the password or router settings on disk. The live test still needs the user's router password through the masked prompt.
+
+The diagnostics correction passes all 297 tests on Mac and in a fresh Linux package installation. The Linux network smoke check and routed packet protection checks pass. The acceptance helper passes harmless encrypted-router checks for success, partial confirmation, an unsuitable starting state and concurrent settings changes. The helper keeps changes made by another administrator and reports any mismatch. Actual router acceptance still needs masked password entry.
+
+## Actual firmware master-state repair
+
+The masked live inspection confirms that `EnableWiFiFunction` is the only missing writable field in the encrypted Wi-Fi read response. All other required fields and radio flags are present. The public firmware reads its master switch through `_ga.isWifiEnabled`. The actual router index page assigns that field to a recognized boolean string.
+
+When the encrypted response omits the master field, read a fresh index page through the same authenticated session. Parse only the exact `_ga.isWifiEnabled` assignment or global object property. Require a recognized state and fail on conflicting values. Share the existing operation deadline. Use the verified master value with the encrypted band settings for payload construction and read-back. Keep strict per-band checks, preserved settings and no repeated write. Add a fixture that omits the master field just like the actual response and test off/on plus absent, unknown and conflicting page states before deployment.
+
+## Master-state repair validation
+
+304 tests passed on Mac and in a fresh Linux package installation. The firmware fixture omits the master field and exercises verified off/on, missing state, conflicting state and failed confirmation. A missing master page cannot select the older writer. The masked acceptance helper also passes success and restoration against this response shape. Internal review found no remaining blocker after the missing-page correction. Actual router off/on and restoration still require the final masked hardware check after installation.
+
+## Actual firmware security-mode repair
+
+The live masked diagnostic confirms that all three security fields are numeric 4. The router's own wifi_general_data.js maps this value to WPA2-Personal before writing. The adapter currently writes the numeric read values unchanged. The router returns an empty HTTP 200 response and the requested off state does not confirm.
+
+Translate recognized numeric security modes to the exact firmware write names for both primary bands and guest settings. Keep recognized write names when already present. Reject unknown modes before any write. Preserve Wi-Fi names, passwords, guest settings and every other existing choice. Do not add a second write or relax confirmation.
+
+Add a fixture that returns numeric read modes but requires names in writes. Verify off and on, preservation and unknown-mode rejection. Run the full Mac suite and a fresh Linux package check. Build the exact tested commit, push the authorized changes and install it with settings backup. Finish the actual authenticated dashboard off/on check with independent restoration. An empty HTTP response remains insufficient evidence of successful change.
+
+This is a narrow continuation of the approved urgent router repair. There are no new stored secrets, endpoints or database changes. The existing installer and settings backups cover code rollback. Router-state recovery remains the independent on action in the hardware check.
+
+The focused plan review requires rejecting booleans and restricting TG3442 security codes to 0/4/5. The fixture keeps reads numeric after named writes so both directions exercise conversion. The hardware preservation check compares fresh numeric read responses before and after restoration. The urgent takeover and existing repair authorization cover this continuation.
+
+## Physical restart and effective-state repair
+
+The automatic physical trace proves that a Wi-Fi write can exceed the ten-second HTTP timeout while actually applying the change. A fresh authenticated read shows the master off and both bands off. This firmware reports effective band activity while the master is off. The previous confirmation expected the configured shared bands to remain enabled.
+
+Give the single write a longer read timeout within the existing total operation deadline. Divide the remaining connection and read budget so their sum stays bounded. Never repeat the write. After a lost reply use bounded read-back attempts to confirm the state. Refresh authentication at most once if the restart invalidates it, preserving the original deadline.
+
+For a shared SSID accept both known off band flags when the master is verified off. Keep strict checks for turning on and reject mixed or unknown flags. Return verified success without writing when the requested state already matches. On this response shape refuse turning off split SSIDs before writing because the effective read cannot preserve their selected-band configuration across separate operations. Keep support for older configured-band responses.
+
+Cover slow and lost write replies, effective off readings, unknown or mixed flags, idempotent requests, unchanged settings and deadline preservation. Run the full Mac and fresh Linux checks then publish and deploy the exact tested source. Finish actual API off/on with independent restoration. The previous physical test of32b162f failed and is not acceptance evidence.
+
+The focused plan review requires reserving confirmation time before assigning the longer write timeout. Authentication refresh preserves the deadline before making any request. Also refuse off for enabled guest Wi-Fi on the effective-state firmware until its configured-state source is verified. The inspected router has shared Wi-Fi with guest disabled.
+
+## Restart repair verification
+
+314 tests passed on Mac and in a fresh Linux package. Focused lint and diff checks passed. Linux network smoke, routed protection and management-name isolation checks passed. The independent acceptance helper passed seven harmless cases including numeric security, effective off readings and lost write replies. Confirmation tests exercise one successful authentication refresh and persistent loss without another Wi-Fi write or deadline reset. Internal review found no remaining blocker. Actual API off/on and full restoration remain the final acceptance check after deployment.
+
+## Measured slow restoration follow-up
+
+The physical trace verifies the off action. Turning on sends one write but the router web service stays unavailable beyond the 60-second operation limit. A fresh read at about 74 seconds verifies all starting settings were restored. The dashboard reports uncertainty because confirmation ends too early.
+
+Allow 120 seconds for router operations and 150 seconds for the router helper calls. Cap the write connection plus read timeout at 40 seconds and reserve at least half the remaining time for confirmation. Allow up to eight read attempts while preserving the same deadline and one authentication refresh. Keep quick helper calls unchanged. Never repeat the Wi-Fi write.
+
+Add a simulated slow-restart test that advances a clock through failed reads then confirms both off and on. Check deadline exhaustion, one write per change and preserved settings. Update the existing helper timeout integration coverage. Run full Mac and clean Linux checks then push and deploy the exact tested commit. The physical trace already restored Wi-Fi but complete dashboard off/on acceptance must pass before reporting success. This continues the approved urgent repair and uses the existing installer, backup and rollback. Credentials remain in memory only.
+
+The focused review requires ten-second spacing between confirmation attempts so immediate connection failures do not exhaust all eight attempts before recovery. Simulated tests cover both immediate failures and ten-second read timeouts. Raise the Pi acceptance HTTPS timeout to 180 seconds so it exceeds the 150-second helper bound.
+
+Keep router import separately bounded at 180 seconds because wired inspection and AP configuration add up to 50 seconds around the router work. The Wi-Fi toggle helper stays at 150 seconds. Normal helper reads retain their short timeout.
+
+## Slow restoration verification
+
+All 316 tests passed on Mac and in a fresh Linux package installation. The real Linux network smoke check, routed protection checks and management name checks passed. Seven harmless acceptance-helper cases passed. The physical trace independently proves full restoration with the preceding release. Complete authenticated dashboard off/on acceptance remains required on the corrected release.
+
+## Interrupted dashboard connection repair
+
+An isolated local HTTPS reproduction confirms that an unfinished TLS handshake, HTTP header block or authenticated request body blocks every other dashboard request until that client closes. The current server handles one connection at a time and has no accepted-connection deadline. This is a demonstrated freeze bug. It does not prove the cause of the lost physical result on the Pi.
+
+Keep the existing single server worker because the settings connection belongs to its thread. Accept the plain socket first then allow at most five seconds for its TLS handshake. Share one ten-second absolute deadline across request headers and body so a client sending occasional bytes cannot keep the server occupied. Limit response sends separately. Closing or timing out a client must not repeat an action or interrupt a router operation already started from a complete authenticated request.
+
+Use a small deadline-aware input wrapper with the existing body and header size limits. Keep TLS certificate validation and admin authentication unchanged. Log only fixed connection errors. Do not include headers, tokens, request bodies or socket data in logs. There are no new threads, endpoints, database changes or saved secrets. Existing code rollback and settings backups apply.
+
+Verify real isolated HTTPS stalls at the handshake, headers and body. Add a slow byte-stream case to prove the total input limit rather than an inactivity limit. Verify a fully received authenticated operation can outlast the input deadline and complete once. Run the full Mac suite, focused lint and fresh Linux package checks before the authorized push and deployment. Verify installed hashes and authenticated dashboard reads afterward. Do not turn the real router off during this repair because this Mac lacks an Ethernet management connection.
+
+This is a narrow continuation of the approved urgent bug-fix scope. The existing human feedback to proceed, immediate takeover request and push/deployment authorization remain active. Review this correction before editing production code.
+
+The focused review requires the input deadline to start before the first HTTP byte and to cover every raw read across headers and body. Reset the response timeout before sending headers. Close raw or TLS sockets after any failed handshake and close the replacement reader with its original stream. Replace inherited raw request-line and parser-error logs with fixed messages plus numeric response status. A disconnected client never causes an action replay.
+
+## Interrupted connection verification
+
+All 326 tests passed on Mac and in a freshly installed Linux package. Focused lint and diff checks passed. The Linux network smoke check, routed device-protection checks and management-name isolation checks passed. Ten real HTTPS regressions cover incomplete handshakes, stalled or slowly sent headers and bodies, their shared deadline, a client that does not read its response, completed long operations, disconnects after complete requests and private request text in parser logs. The accepted TLS connection and negotiated cipher are verified.
+
+The final focused review found no blocker. A deadline-stalled incomplete request performs no helper action or settings change. Existing malformed or prematurely ended requests may still record a rejected 400 attempt. Complete actions finish exactly once and a later health request succeeds. Actual router off/on acceptance remains unverified on the installed release after the power-cycle recovery. This connection repair does not establish that the earlier physical failure had the same cause.
+
+The remote branch gained the merged credential-storage, device-refresh and panic controls before publication. The unpublished connection repair was reapplied on top without conflicts. All 386 tests passed on the combined source on Mac and in a fresh Linux installation. Lint, diff and all three Linux network checks passed again. Preserve these merged features in the deployed release.

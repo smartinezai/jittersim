@@ -90,7 +90,7 @@ class ApiRuntimeIntegrationTests(unittest.TestCase):
 
         response = self.start_scenario(expected=409)
 
-        self.assertIn("Apply the configuration", response["error"])
+        self.assertIn("Start", response["error"])
         self.assertEqual(self.repository.list_scenario_runs(), ())
         self.assertEqual(self.helper.plans, [])
 

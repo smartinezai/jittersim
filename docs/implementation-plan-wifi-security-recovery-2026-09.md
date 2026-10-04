@@ -46,8 +46,19 @@ Have the plan reviewed and address feedback before production code changes.
   Normal access keep their existing meaning. Saved profiles, devices, access
   rules and the upstream router stay intact.
 - The owner authorized push, merge and Pi deployment on 30 September 2026.
-  Publish the tested main change and port it separately to the current Pi
-  release branch so the deployment retains its existing features.
+  Integrate the main change separately from this Pi release port.
+
+### Pi release integration
+
+This port is based on `feat/service-profiles-and-pi-hardening` at
+`610d63e51f9f8edf3c867097c24c50685fa6d972`. Preserve its router controls,
+credential panel, saved protection list and management name repair. Its console
+only offers simulation so add the Wi-Fi command without importing other main
+commands. Its dashboard uses bearer authentication. Keep that boundary and
+reject cross-site requests to the new reset route. Preserve its longer router
+timeouts and safe router error messages. Verify the port with the full release
+suite, real Linux packet checks, installed-package checks and recovery browser
+journeys before publishing and deploying it.
 
 ## Evidence from the current base
 

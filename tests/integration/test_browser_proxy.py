@@ -1,17 +1,20 @@
 import json
+import hashlib
 import socket
 import socketserver
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from ipaddress import IPv4Address
 from pathlib import Path
 
-from jittersim.config.models import Device, Impairment, Profile, SiteBlock
+from jittersim.config.models import Device, Impairment, MacPolicy, Profile, SiteBlock
+from jittersim.config.adblocking import ActiveBlocking, domain_bytes
 from jittersim.engine.access import AccessPlan
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import ServiceAssignmentRule, WebsiteFilter
+from jittersim.engine.plan import GeneralProfileRule, ServiceAssignmentRule, WebsiteFilter
 from jittersim.networking.access import atomic_write
 from jittersim.networking.browser_proxy import (
     BrowserProxyServer,
@@ -28,6 +31,182 @@ class _EchoHandler(socketserver.BaseRequestHandler):
 
 
 class BrowserProxyTests(unittest.TestCase):
+    def test_ad_identity_survives_a_pattern_change_and_rejects_a_reused_address(self):
+        mac = "02:00:00:00:00:01"
+        device = Device("phone", "Phone", "192.168.50.10", "slow", mac)
+        plan = compile_plan(devices=(device,), profiles={"slow": Profile("slow", "Slow")})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "plan.json"
+            domains = domain_bytes(("advert.example.net",))
+            (root / "domains").write_bytes(domains)
+            (root / "ads.json").write_text(json.dumps({
+                "mac_addresses": [mac], "allowed_domains": [], "expires_at": 105,
+                "list_digest": hashlib.sha256(domains).hexdigest(),
+            }))
+
+            def publish(current):
+                temporary = path.with_suffix(".next")
+                temporary.write_text(json.dumps(plan_to_payload(current)))
+                temporary.replace(path)
+
+            publish(plan)
+            echo = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _EchoHandler)
+            echo.daemon_threads = True
+            threading.Thread(target=echo.serve_forever, daemon=True).start()
+            identity = [mac]
+            proxy = BrowserProxyServer(
+                ("127.0.0.1", 0), active_plan_path=path, client_network="127.0.0.0/8",
+                mark_socket=lambda *_: None, identify_client=lambda _: device.ipv4_address,
+                identify_mac=lambda _: identity[0],
+                resolve_addresses=lambda _: [(socket.AF_INET, socket.SOCK_STREAM, 0, echo.server_address)],
+                ad_blocking=ActiveBlocking(root / "ads.json", root / "domains", clock=lambda: 100),
+            )
+            worker = threading.Thread(target=proxy.serve_forever, daemon=True)
+            worker.start()
+            try:
+                with socket.create_connection(proxy.server_address, timeout=3) as client:
+                    client.sendall(b"CONNECT useful.example.net:443 HTTP/1.1\r\n\r\n")
+                    self.assertIn(b"200 Connection Established", client.recv(4096))
+                    changed = replace(plan, queues=tuple(
+                        replace(queue, impairment=Impairment(delay_ms=200)) for queue in plan.queues
+                    ))
+                    publish(changed)
+                    client.sendall(b"same-ad-client")
+                    self.assertEqual(client.recv(4096), b"same-ad-client")
+                    identity[0] = "02:00:00:00:00:02"
+                    publish(plan)
+                    client.sendall(b"different-client")
+                    self.assertEqual(client.recv(4096), b"")
+            finally:
+                proxy.shutdown()
+                proxy.server_close()
+                worker.join(timeout=3)
+                echo.shutdown()
+                echo.server_close()
+
+    def test_general_profile_marks_both_sockets_for_unassigned_clients(self):
+        protected_mac = "02:00:00:00:00:01"
+        address = IPv4Address("192.168.50.99")
+        profile = Profile("slow", "Slow", download=Impairment(bandwidth_kbit=1000))
+        plan = compile_plan(
+            devices=(), profiles={profile.id: profile},
+            protected_mac_addresses=(protected_mac,),
+            general_profile=GeneralProfileRule(profile.id),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "active.json"
+            path.write_text(json.dumps(plan_to_payload(plan)))
+            echo = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _EchoHandler)
+            echo.daemon_threads = True
+            threading.Thread(target=echo.serve_forever, daemon=True).start()
+            marks = []
+            current_mac = ["02:00:00:00:00:02"]
+            proxy = BrowserProxyServer(
+                ("127.0.0.1", 0), active_plan_path=path, client_network="127.0.0.0/8",
+                mark_socket=lambda _socket, mark: marks.append(mark),
+                identify_client=lambda _ip: address,
+                identify_mac=lambda _ip: current_mac[0],
+                resolve_addresses=lambda _host: [
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, echo.server_address)
+                ],
+            )
+            threading.Thread(target=proxy.serve_forever, daemon=True).start()
+            try:
+                for mac, expected_mark in ((current_mac[0], 1), (protected_mac, 0)):
+                    current_mac[0] = mac
+                    marks.clear()
+                    with socket.create_connection(proxy.server_address, timeout=3) as client:
+                        client.sendall(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
+                        self.assertIn(b"200 Connection Established", client.recv(4096))
+                        client.sendall(b"general-profile-body")
+                        self.assertEqual(client.recv(4096), b"general-profile-body")
+                        self.assertEqual(marks, [expected_mark, expected_mark])
+            finally:
+                proxy.shutdown()
+                proxy.server_close()
+                echo.shutdown()
+                echo.server_close()
+
+    def test_unaffected_tunnel_survives_other_profile_changes_and_rechecks_global_rules(self):
+        mac = "02:00:00:00:00:01"
+        address = IPv4Address("192.168.50.10")
+        # A stale IP assignment must not apply its profile to this verified MAC.
+        device = Device("bob", "Bob", address, "slow", "02:00:00:00:00:02")
+        plan = compile_plan(
+            devices=(device,),
+            profiles={"slow": Profile("slow", "Slow", download=Impairment(loss_percent=100))},
+            protected_mac_addresses=(mac,),
+            website_filters=(WebsiteFilter(address, (IPv4Address("8.8.8.8"),)),),
+        )
+        self.assertEqual(
+            select_mark(plan, client_ip=address, host="example.com", client_mac=mac),
+            (0, "unaffected"),
+        )
+        self.assertTrue(destination_allowed(plan, address, "127.0.0.1", mac))
+        with self.assertRaises(ProxyError):
+            select_mark(plan, client_ip=address, host="example.com")
+        with self.assertRaises(ProxyError):
+            select_mark(
+                replace(plan, mac_policy=MacPolicy(mode="denylist", denylist=(mac,))),
+                client_ip=address,
+                host="example.com",
+                client_mac=mac,
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "active.json"
+
+            def publish(current):
+                temporary = path.with_suffix(".next")
+                temporary.write_text(json.dumps(plan_to_payload(current)))
+                temporary.replace(path)
+
+            publish(plan)
+            echo = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _EchoHandler)
+            echo.daemon_threads = True
+            threading.Thread(target=echo.serve_forever, daemon=True).start()
+            marks = []
+            proxy = BrowserProxyServer(
+                ("127.0.0.1", 0),
+                active_plan_path=path,
+                client_network="127.0.0.0/8",
+                mark_socket=lambda _socket, mark: marks.append(mark),
+                identify_client=lambda _ip: address,
+                identify_mac=lambda _ip: mac,
+                resolve_addresses=lambda _host: [
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, echo.server_address)
+                ],
+            )
+            threading.Thread(target=proxy.serve_forever, daemon=True).start()
+            try:
+                for change in (
+                    replace(
+                        plan,
+                        queues=tuple(
+                            replace(queue, impairment=Impairment(delay_ms=800))
+                            for queue in plan.queues
+                        ),
+                    ),
+                    replace(plan, protected_mac_addresses=()),
+                    replace(plan, global_blocked_addresses=(IPv4Address("127.0.0.1"),)),
+                ):
+                    publish(plan)
+                    with socket.create_connection(proxy.server_address, timeout=3) as client:
+                        client.sendall(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
+                        self.assertIn(b"200 Connection Established", client.recv(4096))
+                        self.assertEqual(marks[-2:], [0, 0])
+                        publish(change)
+                        client.sendall(b"after-plan-change")
+                        if change.protected_mac_addresses and not change.global_blocked_addresses:
+                            self.assertEqual(client.recv(4096), b"after-plan-change")
+                        else:
+                            self.assertEqual(client.recv(4096), b"")
+            finally:
+                proxy.shutdown()
+                proxy.server_close()
+                echo.shutdown()
+                echo.server_close()
+
     def test_existing_blocks_still_apply_to_proxied_traffic(self) -> None:
         device = Device("alice", "Alice", "192.168.50.10", "normal")
         plan = compile_plan(
@@ -142,7 +321,15 @@ class BrowserProxyTests(unittest.TestCase):
                     replacement.write_text(json.dumps(plan_to_payload(plan)))
                     replacement.replace(plan_path)
                     client.sendall(b"stale-tunnel")
+                    self.assertEqual(client.recv(4096), b"stale-tunnel")
+                    replacement.write_text(json.dumps(plan_to_payload(replace(
+                        plan, blocked_device_addresses=(device.ipv4_address,)
+                    ))))
+                    replacement.replace(plan_path)
+                    client.sendall(b"blocked-tunnel")
                     self.assertEqual(client.recv(4096), b"")
+                replacement.write_text(json.dumps(plan_to_payload(plan)))
+                replacement.replace(plan_path)
                 with socket.create_connection(proxy.server_address, timeout=3) as client:
                     client.sendall(b"CONNECT other.example:443 HTTP/1.1\r\n\r\n")
                     self.assertIn(b"200 Connection Established", client.recv(4096))

@@ -7,8 +7,7 @@ let accessRead = null;
 let accessReadAgain = false;
 
 function openAccessRules() {
-  showTab('rules'); showRuleSection('access');
-  history.replaceState(null, '', '#rules');
+  showTab('access');
   element('access-summary').focus();
 }
 
@@ -28,7 +27,7 @@ function populateAccessTargets() {
   const select = element('site-rule-target');
   const selected = select.value;
   const options = [new Option('Everyone on the test Wi-Fi', 'everyone')];
-  devices.forEach(device => options.push(new Option(device.name, 'device:' + device.id)));
+  devices.forEach(device => options.push(new Option(devicePickerLabel(device), 'device:' + device.id)));
   groups.forEach(group => options.push(new Option('Group: ' + group.name, 'group:' + group.id)));
   select.replaceChildren(...options);
   if (options.some(option => option.value === selected)) select.value = selected;
@@ -96,7 +95,8 @@ function renderSiteRules() {
   if (!siteRules.length) container.append(textNode('p', 'No named site rules yet. Add a site or a collection of domains for a service.'));
   siteRules.forEach(rule => {
     const row = textNode('article', '', 'access-rule-row');
-    const owner = rule.device_id ? devices.find(d => d.id === rule.device_id)?.name || rule.device_id :
+    const owner = rule.device_id ? (devices.some(d => d.id === rule.device_id)
+      ? deviceTitle(devices.find(d => d.id === rule.device_id)) : rule.device_id) :
       rule.group_id ? 'Group: ' + (groups.find(g => g.id === rule.group_id)?.name || rule.group_id) : 'Everyone';
     const copy = textNode('div', '');
     copy.append(textNode('h3', rule.name), textNode('p', owner + ' · ' + (rule.enabled ? 'Enabled' : 'Disabled')),
@@ -132,7 +132,7 @@ function renderAccessDevices() {
   const policy = applied || accessState?.saved_policy;
   if (!policy) return;
   container.replaceChildren();
-  const all = new Map(devices.filter(d => d.mac_address).map(d => [d.mac_address, d]));
+  const all = new Map(devices.filter(d => d.mac_address).map(d => [d.mac_address, {...d, name: deviceTitle(d)}]));
   (lastConnectedDevices?.devices || []).forEach(d => {
     if (d.mac_address && !all.has(d.mac_address)) all.set(d.mac_address, {...d, name:d.display_name || d.hostname || d.mac_address});
   });
@@ -185,18 +185,18 @@ function installAccessControls() {
   panic.id = 'normal-access-button'; panic.classList.add('panic-button');
   panic.title = 'Panic button: immediately turn off all profiles and household blocking';
   panic.setAttribute('aria-describedby', 'normal-access-help');
-  element('reset-button').after(panic);
   const panicHelp = textNode('span', 'Panic button. Turn off all profiles, schedules and household blocking immediately. Keep saved settings.', 'sr-only');
-  panicHelp.id = 'normal-access-help'; panic.after(panicHelp);
+  panicHelp.id = 'normal-access-help';
   const notice = textNode('p', 'Normal access is on. Profiles, automation and household blocking are off. Re-enable them explicitly when you are ready.', 'normal-access-notice');
   notice.id = 'normal-access-notice'; notice.hidden = true; notice.setAttribute('role', 'status');
-  document.querySelector('.tabs').before(notice);
+  noticeAnchor().before(notice);
   const card = element('policy-form').closest('section');
   const summary = textNode('p', 'Checking access rules…', 'access-summary');
   summary.id = 'access-summary'; summary.tabIndex = -1; summary.setAttribute('role', 'status');
   card.querySelector('h2').after(summary);
   const options = document.createElement('div'); options.className = 'access-options';
   options.innerHTML = `<label class="quota-check"><input id="access-enabled" type="checkbox" checked>Enable household access rules</label>
+    <p class="form-note">Household rules filter test Wi-Fi DNS through the Pi's own resolver and stay on after Reset. A Pi upgraded from the Pi line starts with them off.</p>
     <label class="quota-check"><input id="access-admission" type="checkbox">Also refuse blocked devices when they join Wi-Fi</label>
     <p id="admission-note" class="form-note"></p>
     <label>DNS failure chance (0 to 100%)
@@ -205,7 +205,7 @@ function installAccessControls() {
     <p class="form-note">Each new DNS request from test Wi-Fi can get a quick connection error. Device and browser DNS caches may hide failures on later page visits. At 100%, test Wi-Fi name lookups will fail. This setting does not affect management traffic.</p>
     <p id="dns-failure-status" class="form-note" role="status">Checking the applied DNS failure chance…</p>`;
   element('policy-form').prepend(options);
-  card.querySelector('.policy-note').textContent = 'These rules persist after an experiment resets. Domain blocks include subdomains. VPNs, encrypted DNS over HTTPS and another internet connection can bypass network-only filtering. Existing direct connections or a device’s cached DNS answer can continue until it looks up the name again. The managed browser proxy also checks hostnames and closes tunnels when rules change.';
+  card.querySelector('.policy-note').textContent = 'These rules persist after an experiment resets. Domain blocks and global blocked domains include subdomains while household access rules are on. VPNs, encrypted DNS over HTTPS and another internet connection can bypass network-only filtering. Existing direct connections or a device’s cached DNS answer can continue until it looks up the name again. The managed browser proxy also checks hostnames and closes tunnels when rules change.';
   const actions = textNode('div', '', 'access-actions');
   const apply = actionButton('Apply access rules', async () => {
     if (formDrafts.has('policy-form') || formDrafts.has('site-rule-form')) throw new Error('Save or discard unfinished access-rule edits before applying.');
@@ -219,10 +219,10 @@ function installAccessControls() {
     if (!await confirmWorkflow('Disable all household device and site restrictions? Saved lists will remain available. Experiment profiles can still restrict traffic.')) return;
     await request('/api/access/disable', 'POST', {version:accessState.version, confirmed:true}); await refresh();
   }); disable.id = 'disable-access';
-  actions.append(apply, disable); card.append(actions);
+  actions.append(apply, disable, panic, panicHelp); card.append(actions);
   const devicesList = textNode('div', ''); devicesList.id = 'access-device-list';
   card.append(textNode('h3', 'Device access'), devicesList);
-  const sites = document.createElement('section'); sites.className = 'card'; sites.dataset.ruleSection = 'access'; sites.hidden = true;
+  const sites = document.createElement('section'); sites.className = 'card';
   sites.innerHTML = `<h2>Block sites and services</h2><p>A service can contain several domains. These restrictions apply independently of profiles.</p>
     <form id="site-rule-form"><input id="site-rule-id" type="hidden">
       <div class="fields"><label>Rule name<input id="site-rule-name" required maxlength="100" placeholder="Streaming on the kids’ devices"></label>
@@ -232,7 +232,7 @@ function installAccessControls() {
       <label class="quota-check"><input id="site-rule-enabled" type="checkbox" checked>Rule enabled</label>
       <div class="access-actions"><button type="submit" class="primary">Save site rule</button><button type="button" id="site-rule-new">Clear form</button></div>
     </form><div id="site-rule-list"></div>`;
-  document.querySelector('.rule-section-grid').append(sites);
+  tabPanel('access').append(sites);
   element('site-rule-new').addEventListener('click', () => {
     const clear = () => { element('site-rule-form').reset(); element('site-rule-id').value = ''; siteVersion = accessState?.version; };
     if (!guardDraft('site-rule-form', clear)) clear();
@@ -251,7 +251,7 @@ function installAccessControls() {
     } catch (error) { formError(element('site-rule-form'), error.message); showMessage(error.message, 'error'); }
   });
   const shortcut = actionButton('Manage device and site access', openAccessRules);
-  shortcut.classList.add('access-shortcut'); element('tab-devices').prepend(shortcut);
+  shortcut.classList.add('access-shortcut'); tabPanel('devices').prepend(shortcut);
 }
 installAccessControls();
 
@@ -259,7 +259,7 @@ const impairmentHelp = {
   delay:'Adds this much waiting time in this direction. 100 ms upload plus 100 ms download adds roughly 200 ms to a round trip. 0 adds no delay.',
   jitter:'Varies the waiting time from packet to packet. 20 ms produces an uneven connection. 0 keeps the delay steady. This differs from periodically rerolling the profile.',
   loss:'Drops this percentage of packets on average. 1% loses about 1 in 100 packets. 0 loses none and 100% prevents traffic in this direction.',
-  bandwidth:'Limits speed in this direction. 1000 kbit/s is 1 Mbit/s. Leave blank for no JitterSim speed limit. Real network speed can still be lower.',
+  bandwidth:'Limits speed in this direction. 1000 kbit/s is 1 Mbit/s. Leave blank for no speed limit from the Pi. Real network speed can still be lower.',
   reorder:'Lets this percentage of packets arrive out of order when delay is present. It can exercise recovery in an app. 0 keeps packets in order.',
   duplicate:'Sends an extra copy of this percentage of packets. 0 sends no duplicates.',
   corrupt:'Changes data in this percentage of packets. Receivers may discard damaged packets. 0 leaves the contents unchanged.'
@@ -268,6 +268,8 @@ const impairmentHelp = {
 function installFieldHelp() {
   for (const direction of ['upload', 'download']) for (const [name, help] of Object.entries(impairmentHelp)) {
     const input = element(direction + '-' + name); const label = input.closest('label');
+    // The stack's forms already explain these fields.
+    if (label.querySelector('.help-icon')) continue;
     const icon = textNode('span', '?', 'help-icon'); icon.dataset.help = help;
     icon.setAttribute('aria-label', direction + ' ' + name + ' help'); label.insertBefore(icon, input);
   }
@@ -275,10 +277,13 @@ function installFieldHelp() {
     'profile-seed':'The same seed repeats the sequence of random choices with the same settings and timing. Leave blank for a different sequence.',
     'profile-website-mode':'Allow only listed domains limits a device while this profile runs. Household site blocks are separate and stay active after a profile changes.',
     'profile-website-domains':'These experimental profile rules use resolved server addresses. For persistent hostname and subdomain blocking, use Access rules.',
-    'site-rule-domains':'A rule for example.com also blocks video.example.com. It does not block unrelated-example.com. Enter names without https:// or a page path.'
+    'site-rule-domains':'A rule for example.com also blocks video.example.com. It does not block unrelated-example.com. Enter names without https:// or a page path.',
+    'website-blocklist':'Block globally on the Traffic page adds names here. While household access rules are on example.com also blocks video.example.com for every test Wi-Fi device. Unblock frees the exact name and the names under it unless one is listed on its own.'
   })) {
-    const input = element(id); const icon = textNode('span', '?', 'help-icon'); icon.dataset.help = help;
-    icon.setAttribute('aria-label', id === 'site-rule-domains' ? 'Blocked domains help' : id.replaceAll('-', ' ') + ' help'); input.before(icon);
+    const input = element(id);
+    if (input.closest('label') && input.closest('label').querySelector('.help-icon')) continue;
+    const icon = textNode('span', '?', 'help-icon'); icon.dataset.help = help;
+    icon.setAttribute('aria-label', id === 'site-rule-domains' ? 'Blocked domains help' : id === 'website-blocklist' ? 'Global blocked domains help' : id.replaceAll('-', ' ') + ' help'); input.before(icon);
   }
   let active = null; let pinned = false; let closeTimer = null;
   function close() { if (active) { active.tip.hidden = true; active.button.setAttribute('aria-expanded', 'false'); } active = null; pinned = false; }
@@ -295,7 +300,9 @@ function installFieldHelp() {
     item.tip.style.top = Math.max(12, Math.min(anchor.top >= size.height + 20 ? anchor.top - size.height - 8 : field.bottom + 8, innerHeight - size.height - 12)) + 'px';
   }
   document.querySelectorAll('.help-icon[data-help]').forEach((old, index) => {
-    const button = textNode('button', '?', 'help-icon'); button.type = 'button';
+    // The sidebar's action buttons keep the Pi line's pinned tips next to the sidebar.
+    if (old.closest('.sidebar-action-row')) return;
+    const button = textNode('button', '?', 'help-icon field-help'); button.type = 'button';
     button.setAttribute('aria-label', old.getAttribute('aria-label') || 'Field help'); button.setAttribute('aria-expanded', 'false');
     const tip = textNode('div', old.dataset.help.replace(/\s+/g, ' ').trim(), 'field-tooltip');
     tip.id = 'field-help-' + index; tip.setAttribute('role', 'tooltip'); tip.hidden = true;

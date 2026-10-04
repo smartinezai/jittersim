@@ -1,0 +1,5245 @@
+{
+  "installed_revision": "959c2bc06a3e76862d3d75bdf856bf0f7ef36f31",
+  "python_suite": {
+    "passed": 503,
+    "failed": 0,
+    "seconds": 26.13
+  },
+  "linux_checks": [
+    {
+      "check": "suite",
+      "passed": true,
+      "seconds": 29.826
+    },
+    {
+      "check": "installer-permissions",
+      "passed": true,
+      "seconds": 4.0
+    },
+    {
+      "check": "peer-identity",
+      "passed": true,
+      "seconds": 3.263
+    },
+    {
+      "check": "network-smoke",
+      "passed": true,
+      "seconds": 0.832
+    },
+    {
+      "check": "protected-packets",
+      "passed": true,
+      "seconds": 2.71
+    },
+    {
+      "check": "management-name",
+      "passed": true,
+      "seconds": 1.018
+    },
+    {
+      "check": "dashboard-isolation",
+      "passed": true,
+      "seconds": 3.613
+    },
+    {
+      "check": "lint",
+      "passed": true,
+      "seconds": 0.253
+    }
+  ],
+  "browser_checks": {
+    "wifi_recovery": "passed",
+    "dashboard_access": "passed"
+  },
+  "concurrent_linux_traffic": {
+    "passed": true,
+    "measurements": [
+      {
+        "case": "normal",
+        "direction": "D",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.0039,
+            "kbit_per_second": 1068491.9
+          },
+          {
+            "ok": true,
+            "seconds": 0.0036,
+            "kbit_per_second": 1163366.5
+          }
+        ]
+      },
+      {
+        "case": "normal",
+        "direction": "U",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.002,
+            "kbit_per_second": 2093822.8
+          },
+          {
+            "ok": true,
+            "seconds": 0.0013,
+            "kbit_per_second": 3245089.4
+          }
+        ]
+      },
+      {
+        "case": "independent-rate-limits",
+        "direction": "D",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 2.1961,
+            "kbit_per_second": 1909.9
+          },
+          {
+            "ok": true,
+            "seconds": 0.7325,
+            "kbit_per_second": 5726.1
+          }
+        ]
+      },
+      {
+        "case": "independent-rate-limits",
+        "direction": "U",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 2.1963,
+            "kbit_per_second": 1909.7
+          },
+          {
+            "ok": true,
+            "seconds": 0.7338,
+            "kbit_per_second": 5715.7
+          }
+        ]
+      },
+      {
+        "case": "combined-packet-effects",
+        "direction": "D",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.294,
+            "kbit_per_second": 1783.2
+          },
+          {
+            "ok": true,
+            "seconds": 0.0014,
+            "kbit_per_second": 370846.8
+          }
+        ]
+      },
+      {
+        "case": "combined-packet-effects",
+        "direction": "U",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 1.4241,
+            "kbit_per_second": 368.1
+          },
+          {
+            "ok": true,
+            "seconds": 0.0014,
+            "kbit_per_second": 378647.4
+          }
+        ]
+      },
+      {
+        "case": "loss-isolation",
+        "clients": [
+          {
+            "ok": false,
+            "error_type": "TimeoutError",
+            "seconds": 3.0065
+          },
+          {
+            "ok": true,
+            "seconds": 0.0019,
+            "kbit_per_second": 272108.2
+          }
+        ]
+      },
+      {
+        "case": "protected-client",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.0024,
+            "kbit_per_second": 1777015.5
+          },
+          {
+            "ok": true,
+            "seconds": 0.0013,
+            "kbit_per_second": 3168082.8
+          }
+        ]
+      },
+      {
+        "case": "global-rule-over-protection",
+        "clients": [
+          {
+            "ok": false,
+            "error_type": "TimeoutError",
+            "seconds": 3.0044
+          },
+          {
+            "ok": true,
+            "seconds": 0.0016,
+            "kbit_per_second": 328439.1
+          }
+        ]
+      },
+      {
+        "case": "reset-recovery",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.0057,
+            "kbit_per_second": 729963.1
+          },
+          {
+            "ok": true,
+            "seconds": 0.0044,
+            "kbit_per_second": 943638.7
+          }
+        ]
+      }
+    ]
+  },
+  "concurrent_pi_traffic": {
+    "passed": true,
+    "measurements": [
+      {
+        "case": "normal",
+        "direction": "D",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.0173,
+            "kbit_per_second": 242583.8
+          },
+          {
+            "ok": true,
+            "seconds": 0.0152,
+            "kbit_per_second": 275044.2
+          }
+        ]
+      },
+      {
+        "case": "normal",
+        "direction": "U",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.0128,
+            "kbit_per_second": 326794.7
+          },
+          {
+            "ok": true,
+            "seconds": 0.0129,
+            "kbit_per_second": 324481.1
+          }
+        ]
+      },
+      {
+        "case": "independent-rate-limits",
+        "direction": "D",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 2.2039,
+            "kbit_per_second": 1903.1
+          },
+          {
+            "ok": true,
+            "seconds": 0.7414,
+            "kbit_per_second": 5657.6
+          }
+        ]
+      },
+      {
+        "case": "independent-rate-limits",
+        "direction": "U",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 2.2042,
+            "kbit_per_second": 1902.9
+          },
+          {
+            "ok": true,
+            "seconds": 0.7416,
+            "kbit_per_second": 5655.9
+          }
+        ]
+      },
+      {
+        "case": "combined-packet-effects",
+        "direction": "D",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.131,
+            "kbit_per_second": 4001.6
+          },
+          {
+            "ok": true,
+            "seconds": 0.0146,
+            "kbit_per_second": 35972.0
+          }
+        ]
+      },
+      {
+        "case": "combined-packet-effects",
+        "direction": "U",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 1.3131,
+            "kbit_per_second": 399.3
+          },
+          {
+            "ok": true,
+            "seconds": 0.0109,
+            "kbit_per_second": 48199.1
+          }
+        ]
+      },
+      {
+        "case": "duplication-with-second-rate-limit",
+        "direction": "D",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.1914,
+            "kbit_per_second": 2739.4
+          },
+          {
+            "ok": true,
+            "seconds": 0.1036,
+            "kbit_per_second": 5058.8
+          }
+        ]
+      },
+      {
+        "case": "duplication-with-second-rate-limit",
+        "direction": "U",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.3581,
+            "kbit_per_second": 1463.9
+          },
+          {
+            "ok": true,
+            "seconds": 0.1022,
+            "kbit_per_second": 5130.9
+          }
+        ]
+      },
+      {
+        "case": "duplication-on-both-clients",
+        "direction": "D",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.3817,
+            "kbit_per_second": 1373.6
+          },
+          {
+            "ok": true,
+            "seconds": 0.2115,
+            "kbit_per_second": 2479.1
+          }
+        ]
+      },
+      {
+        "case": "duplication-on-both-clients",
+        "direction": "U",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.1312,
+            "kbit_per_second": 3996.6
+          },
+          {
+            "ok": true,
+            "seconds": 0.2676,
+            "kbit_per_second": 1959.1
+          }
+        ]
+      },
+      {
+        "case": "loss-isolation",
+        "clients": [
+          {
+            "ok": false,
+            "error_type": "TimeoutError",
+            "seconds": 3.0125
+          },
+          {
+            "ok": true,
+            "seconds": 0.0112,
+            "kbit_per_second": 46902.8
+          }
+        ]
+      },
+      {
+        "case": "protected-client",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.0132,
+            "kbit_per_second": 318383.8
+          },
+          {
+            "ok": true,
+            "seconds": 0.0125,
+            "kbit_per_second": 335592.1
+          }
+        ]
+      },
+      {
+        "case": "global-rule-over-protection",
+        "clients": [
+          {
+            "ok": false,
+            "error_type": "TimeoutError",
+            "seconds": 3.0121
+          },
+          {
+            "ok": true,
+            "seconds": 0.0103,
+            "kbit_per_second": 51149.0
+          }
+        ]
+      },
+      {
+        "case": "reset-recovery",
+        "clients": [
+          {
+            "ok": true,
+            "seconds": 0.0162,
+            "kbit_per_second": 259081.4
+          },
+          {
+            "ok": true,
+            "seconds": 0.0139,
+            "kbit_per_second": 302485.6
+          }
+        ]
+      }
+    ]
+  },
+  "live_mac_before_repair": {
+    "revision": "23ea96e132e690cf2e6d51640f0de85c3110082e",
+    "passed_cases": [
+      "normal",
+      "delay",
+      "rate-limit",
+      "full-loss",
+      "protected",
+      "global-mac-deny",
+      "global-website-block",
+      "global-allowlist",
+      "dns-observations",
+      "service-proxy",
+      "device-quota",
+      "quota-reset",
+      "group-quota",
+      "service-quota",
+      "time-quota",
+      "schedule",
+      "timer-expiry"
+    ],
+    "failed_case": "byte-progression",
+    "dashboard_failure": 403
+  },
+  "live_mac_after_repair": {
+    "revision": "959c2bc06a3e76862d3d75bdf856bf0f7ef36f31",
+    "passed": true,
+    "feature_checks": 29,
+    "stages_including_completion": 30,
+    "api_requests": 188,
+    "api_errors": [],
+    "cases": [
+      {
+        "phase": "normal",
+        "started_at": 1790862943.9216828,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790862948.4334059,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.093
+          },
+          {
+            "host": "example.org",
+            "proxy": false,
+            "started_at": 1790862948.526892,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.094
+          },
+          {
+            "host": "example.com",
+            "proxy": true,
+            "started_at": 1790862948.620589,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.105
+          },
+          {
+            "host": "speed.cloudflare.com",
+            "proxy": false,
+            "started_at": 1790862948.725444,
+            "status": 200,
+            "bytes": 524288,
+            "ok": true,
+            "seconds": 0.249,
+            "kbit_per_second": 16819.4
+          }
+        ],
+        "finished_at": 1790862948.974865
+      },
+      {
+        "phase": "delay",
+        "started_at": 1790862951.2950668,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790862951.296157,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 2.48
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790862953.776233,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 2.536
+          }
+        ],
+        "finished_at": 1790862956.3125172
+      },
+      {
+        "phase": "rate-limit",
+        "started_at": 1790862957.903189,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "speed.cloudflare.com",
+            "proxy": false,
+            "started_at": 1790862957.904583,
+            "status": 200,
+            "bytes": 524288,
+            "ok": true,
+            "seconds": 5.342,
+            "kbit_per_second": 785.2
+          },
+          {
+            "host": "speed.cloudflare.com",
+            "proxy": false,
+            "started_at": 1790862963.246551,
+            "status": 200,
+            "bytes": 524288,
+            "ok": true,
+            "seconds": 4.911,
+            "kbit_per_second": 854.1
+          }
+        ],
+        "finished_at": 1790862968.157473
+      },
+      {
+        "phase": "packet-effects",
+        "started_at": 1790862969.817803,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790862969.818933,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.416
+          },
+          {
+            "host": "example.org",
+            "proxy": false,
+            "started_at": 1790862970.234522,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.147
+          }
+        ],
+        "finished_at": 1790862970.381734
+      },
+      {
+        "phase": "full-loss",
+        "started_at": 1790862971.63502,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790862971.636619,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.002
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790862974.638342,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.001
+          }
+        ],
+        "finished_at": 1790862977.945282
+      },
+      {
+        "phase": "protected",
+        "started_at": 1790862979.185327,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790862979.1865332,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.08
+          },
+          {
+            "host": "example.org",
+            "proxy": false,
+            "started_at": 1790862979.26704,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.11
+          }
+        ],
+        "finished_at": 1790862979.376983
+      },
+      {
+        "phase": "global-mac-deny",
+        "started_at": 1790862981.783173,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790862981.78461,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.002
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790862984.786272,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.001
+          }
+        ],
+        "finished_at": 1790862988.323189
+      },
+      {
+        "phase": "mac-allowlist-deny",
+        "started_at": 1790862991.6253738,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790862991.626991,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.002
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790862994.628855,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.002
+          }
+        ],
+        "finished_at": 1790862997.948656
+      },
+      {
+        "phase": "mac-allowlist-permit",
+        "started_at": 1790862999.23798,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790862999.2391412,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.08
+          },
+          {
+            "host": "example.org",
+            "proxy": false,
+            "started_at": 1790862999.318748,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.08
+          }
+        ],
+        "finished_at": 1790862999.398348
+      },
+      {
+        "phase": "global-website-block",
+        "started_at": 1790863001.860405,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863001.8613818,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.001
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863004.862265,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.002
+          }
+        ],
+        "finished_at": 1790863008.921039
+      },
+      {
+        "phase": "global-allowlist",
+        "started_at": 1790863012.4187179,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863012.42031,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.085
+          },
+          {
+            "host": "example.org",
+            "proxy": false,
+            "started_at": 1790863012.505616,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.002
+          }
+        ],
+        "finished_at": 1790863015.5073438
+      },
+      {
+        "phase": "group-profile",
+        "started_at": 1790863018.299597,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863018.301146,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 2.507
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863020.807822,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 2.504
+          }
+        ],
+        "finished_at": 1790863023.312305
+      },
+      {
+        "phase": "dns-observations",
+        "started_at": 1790863024.6978161,
+        "passed": true,
+        "measurements": [
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          }
+        ],
+        "finished_at": 1790863031.773539
+      },
+      {
+        "phase": "service-proxy",
+        "started_at": 1790863034.115561,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": true,
+            "started_at": 1790863034.116771,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 2.519
+          },
+          {
+            "host": "example.org",
+            "proxy": true,
+            "started_at": 1790863036.636101,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.131
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863036.7675798,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.08
+          }
+        ],
+        "finished_at": 1790863036.847859
+      },
+      {
+        "phase": "device-quota",
+        "started_at": 1790863039.024683,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863039.0264199,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 15.002
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863061.031774,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.002
+          }
+        ],
+        "finished_at": 1790863064.1469178
+      },
+      {
+        "phase": "quota-reset",
+        "started_at": 1790863067.267668,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863067.269207,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.11
+          },
+          {
+            "host": "example.org",
+            "proxy": false,
+            "started_at": 1790863067.3790169,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.093
+          }
+        ],
+        "finished_at": 1790863067.471822
+      },
+      {
+        "phase": "group-quota",
+        "started_at": 1790863069.0286562,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863069.0304918,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 15.002
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863091.037305,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.002
+          }
+        ],
+        "finished_at": 1790863094.213249
+      },
+      {
+        "phase": "service-quota",
+        "started_at": 1790863097.212529,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863097.214081,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.07
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863104.289279,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.002
+          },
+          {
+            "host": "example.org",
+            "proxy": false,
+            "started_at": 1790863107.892815,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.078
+          }
+        ],
+        "finished_at": 1790863107.97083
+      },
+      {
+        "phase": "time-quota",
+        "started_at": 1790863110.903629,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863110.9056451,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.076
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863111.9815412,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.076
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863113.063057,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.095
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863114.1584918,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.076
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863115.2392251,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.1
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863116.339995,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.079
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863117.423743,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.079
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863118.5052118,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.12
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863119.629955,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.078
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863120.7110589,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.097
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863121.812187,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.074
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863122.891605,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.078
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863123.975127,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.074
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863125.052447,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.078
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863126.132558,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.083
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863127.217655,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.077
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863128.298016,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.112
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863129.414495,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.087
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863130.5029619,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.079
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863131.5860422,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.071
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863132.66239,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.101
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863133.765868,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.083
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863134.8512561,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.108
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863135.9652832,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.078
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863137.052164,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.066
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863138.124702,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.071
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863139.20285,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.072
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863140.277039,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.082
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863141.367884,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.076
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863142.449717,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.1
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863143.557523,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.072
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863144.639122,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.071
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863145.71633,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.072
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863146.79423,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.087
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863147.8845298,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.089
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863148.977521,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.083
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863150.065151,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.104
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863151.169514,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.076
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863152.2551901,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.07
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863153.3321888,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.073
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863154.4109828,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.124
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863155.542683,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.092
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863156.635123,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.072
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863157.7108648,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.092
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863158.809746,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.073
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863159.88468,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.093
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863160.9829319,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.076
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863162.068227,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.47
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863163.548008,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.071
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863164.625704,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.085
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863165.720921,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.085
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863166.814827,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.072
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863167.8877141,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.081
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863168.977439,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.135
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863170.1200619,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.078
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863171.204059,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.074
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863172.28737,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.087
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863173.382037,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.003
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863177.3949509,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.002
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863181.403509,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.002
+          },
+          {
+            "host": "example.org",
+            "proxy": false,
+            "started_at": 1790863185.413825,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.119
+          }
+        ],
+        "finished_at": 1790863185.532597
+      },
+      {
+        "phase": "schedule",
+        "started_at": 1790863189.646003,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863189.648248,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 2.556
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863192.204444,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 2.496
+          }
+        ],
+        "finished_at": 1790863194.700723
+      },
+      {
+        "phase": "timer-expiry",
+        "started_at": 1790863198.366347,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863198.367999,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.003
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863263.38115,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.078
+          }
+        ],
+        "finished_at": 1790863263.458658
+      },
+      {
+        "phase": "dns-progression",
+        "started_at": 1790863265.0607061,
+        "passed": true,
+        "measurements": [
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": true
+          },
+          {
+            "domain": "example.org",
+            "reply": true
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": true
+          },
+          {
+            "domain": "example.com",
+            "reply": false
+          },
+          {
+            "domain": "example.org",
+            "reply": false
+          },
+          {
+            "domain": "speed.cloudflare.com",
+            "reply": false
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863279.313853,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.002
+          }
+        ],
+        "finished_at": 1790863284.176791
+      },
+      {
+        "phase": "byte-progression",
+        "started_at": 1790863292.772945,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863292.774765,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 15.002
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863314.781704,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 3.002
+          }
+        ],
+        "finished_at": 1790863317.958998
+      },
+      {
+        "phase": "time-progression",
+        "started_at": 1790863319.426256,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863339.433652,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.898
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863382.335815,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.173
+          }
+        ],
+        "finished_at": 1790863382.509123
+      },
+      {
+        "phase": "random-variation",
+        "started_at": 1790863383.8351738,
+        "passed": true,
+        "measurements": [
+          {
+            "queues": [
+              100,
+              100
+            ]
+          },
+          {
+            "queues": [
+              118,
+              54
+            ]
+          },
+          {
+            "queues": [
+              65,
+              64
+            ]
+          },
+          {
+            "queues": [
+              106,
+              85
+            ]
+          },
+          {
+            "queues": [
+              138,
+              61
+            ]
+          },
+          {
+            "queues": [
+              94,
+              106
+            ]
+          }
+        ],
+        "finished_at": 1790863399.337172
+      },
+      {
+        "phase": "random-outages",
+        "started_at": 1790863401.57571,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863401.57795,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.073
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863402.269109,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.204
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863403.1124558,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.076
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863403.8653178,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.091
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863404.548439,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.081
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863405.427458,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.084
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863407.25916,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.074
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863407.9442,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.075
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863408.6180239,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.074
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863409.327466,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.088
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863410.187656,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.113
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863411.50844,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.077
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863412.200612,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.111
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863412.903641,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.08
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863413.619133,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 2.002
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863417.410812,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 2.002
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863420.022347,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 2.001
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863423.0551538,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.073
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863423.727083,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.13
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863424.476567,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.08
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863425.3557959,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.107
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863427.6202722,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 2.002
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863430.434617,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 2.002
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863433.0902789,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 1.091
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863434.794131,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.082
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863436.254504,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.164
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863437.1933188,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.093
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863437.924756,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.075
+          },
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863438.601716,
+            "ok": false,
+            "error_type": "timeout",
+            "seconds": 2.002
+          }
+        ],
+        "finished_at": 1790863443.178368
+      },
+      {
+        "phase": "random-websites",
+        "started_at": 1790863445.1283479,
+        "passed": true,
+        "measurements": [
+          {
+            "queues": [
+              0,
+              0
+            ]
+          },
+          {
+            "queues": [
+              0,
+              0
+            ]
+          },
+          {
+            "queues": [
+              0,
+              0
+            ]
+          },
+          {
+            "queues": [
+              0,
+              0
+            ]
+          },
+          {
+            "queues": [
+              0,
+              0
+            ]
+          },
+          {
+            "queues": [
+              0,
+              0
+            ]
+          }
+        ],
+        "finished_at": 1790863461.288625
+      },
+      {
+        "phase": "reset-recovery",
+        "started_at": 1790863464.194989,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863464.1970031,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.177
+          },
+          {
+            "host": "example.org",
+            "proxy": false,
+            "started_at": 1790863464.373541,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.3
+          }
+        ],
+        "finished_at": 1790863464.674023
+      },
+      {
+        "phase": "final-normal",
+        "started_at": 1790863466.866078,
+        "passed": true,
+        "measurements": [
+          {
+            "host": "example.com",
+            "proxy": false,
+            "started_at": 1790863466.868375,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.086
+          },
+          {
+            "host": "example.org",
+            "proxy": false,
+            "started_at": 1790863466.954738,
+            "status": 200,
+            "bytes": 713,
+            "ok": true,
+            "seconds": 0.089
+          }
+        ],
+        "finished_at": 1790863467.0433228
+      },
+      {
+        "phase": "complete",
+        "started_at": 1790863468.3021219,
+        "passed": true,
+        "measurements": []
+      }
+    ],
+    "security": "WPA2"
+  },
+  "scope": "Concurrent clients used separate network namespaces. These rates do not measure physical Wi-Fi capacity.",
+  "live_pi_coordination": {
+    "passed": true,
+    "seconds": 616.474,
+    "cases": [
+      {
+        "name": "normal",
+        "started_at": 1790862943.7286675,
+        "passed": true,
+        "finished_at": 1790862949.400233
+      },
+      {
+        "name": "delay",
+        "started_at": 1790862949.7412438,
+        "passed": true,
+        "finished_at": 1790862957.4744678
+      },
+      {
+        "name": "rate-limit",
+        "started_at": 1790862957.7487712,
+        "passed": true,
+        "finished_at": 1790862969.2766793
+      },
+      {
+        "name": "packet-effects",
+        "started_at": 1790862969.5839903,
+        "passed": true,
+        "finished_at": 1790862970.8872535
+      },
+      {
+        "name": "full-loss",
+        "started_at": 1790862971.1563008,
+        "passed": true,
+        "finished_at": 1790862978.5725543
+      },
+      {
+        "name": "protected",
+        "started_at": 1790862978.830601,
+        "passed": true,
+        "finished_at": 1790862980.606042
+      },
+      {
+        "name": "global-mac-deny",
+        "started_at": 1790862980.9369493,
+        "passed": true,
+        "finished_at": 1790862989.238753
+      },
+      {
+        "name": "mac-allowlist-deny",
+        "started_at": 1790862989.5486724,
+        "passed": true,
+        "finished_at": 1790862998.8477225
+      },
+      {
+        "name": "mac-allowlist-permit",
+        "started_at": 1790862999.0873427,
+        "passed": true,
+        "finished_at": 1790863000.5852146
+      },
+      {
+        "name": "global-website-block",
+        "started_at": 1790863001.6842647,
+        "passed": true,
+        "finished_at": 1790863010.1262717
+      },
+      {
+        "name": "global-allowlist",
+        "started_at": 1790863011.2418475,
+        "passed": true,
+        "finished_at": 1790863016.3808472
+      },
+      {
+        "name": "group-profile",
+        "started_at": 1790863017.1726432,
+        "passed": true,
+        "finished_at": 1790863023.5575476
+      },
+      {
+        "name": "dns-observations",
+        "started_at": 1790863031.8472416,
+        "passed": true,
+        "finished_at": 1790863032.3493927
+      },
+      {
+        "name": "service-proxy",
+        "started_at": 1790863032.8289986,
+        "passed": true,
+        "finished_at": 1790863037.2824645
+      },
+      {
+        "name": "device-quota",
+        "started_at": 1790863038.587825,
+        "passed": true,
+        "finished_at": 1790863065.44017
+      },
+      {
+        "name": "quota-reset",
+        "started_at": 1790863067.1087394,
+        "passed": true,
+        "finished_at": 1790863068.3372095
+      },
+      {
+        "name": "group-quota",
+        "started_at": 1790863068.869211,
+        "passed": true,
+        "finished_at": 1790863094.4891326
+      },
+      {
+        "name": "service-quota",
+        "started_at": 1790863096.91599,
+        "passed": true,
+        "finished_at": 1790863108.3366728
+      },
+      {
+        "name": "time-quota",
+        "started_at": 1790863110.4109342,
+        "passed": true,
+        "finished_at": 1790863187.1606095
+      },
+      {
+        "name": "schedule",
+        "started_at": 1790863188.4779203,
+        "passed": true,
+        "finished_at": 1790863195.2026887
+      },
+      {
+        "name": "timer-expiry",
+        "started_at": 1790863198.197161,
+        "passed": true,
+        "finished_at": 1790863264.4769027
+      },
+      {
+        "name": "dns-progression",
+        "started_at": 1790863264.7708063,
+        "passed": true,
+        "finished_at": 1790863284.7875497
+      },
+      {
+        "name": "byte-progression",
+        "started_at": 1790863290.1532326,
+        "passed": true,
+        "finished_at": 1790863318.5913079
+      },
+      {
+        "name": "time-progression",
+        "started_at": 1790863319.2617023,
+        "passed": true,
+        "intermediate_delay_ms": [
+          77,
+          77
+        ],
+        "finished_at": 1790863382.930273
+      },
+      {
+        "name": "random-variation",
+        "started_at": 1790863383.2464433,
+        "passed": true,
+        "finished_at": 1790863399.5128543
+      },
+      {
+        "name": "random-outages",
+        "started_at": 1790863400.0707412,
+        "passed": true,
+        "finished_at": 1790863443.6460493
+      },
+      {
+        "name": "random-websites",
+        "started_at": 1790863444.3789935,
+        "passed": true,
+        "finished_at": 1790863462.0761297
+      },
+      {
+        "name": "reset-recovery",
+        "started_at": 1790863462.7911036,
+        "passed": true,
+        "finished_at": 1790863466.034166
+      },
+      {
+        "name": "final-normal",
+        "started_at": 1790863466.2929635,
+        "passed": true,
+        "finished_at": 1790863467.4535177
+      },
+      {
+        "name": "complete",
+        "started_at": 1790863467.4535325,
+        "passed": true,
+        "finished_at": 1790863468.625406
+      }
+    ],
+    "backup_download_verified": true,
+    "live_graph_limits_verified": true,
+    "dns_capture_verified": true,
+    "dns_progression_queries": 40,
+    "random_website_analytics_nonempty": true,
+    "requests": [
+      {
+        "path": "/api/health",
+        "error_type": "ConnectionRefusedError",
+        "step": "connect",
+        "seconds": 0.001
+      },
+      {
+        "path": "/api/health",
+        "error_type": "ConnectionRefusedError",
+        "step": "connect",
+        "seconds": 0.001
+      },
+      {
+        "path": "/api/health",
+        "status": 200,
+        "seconds": 0.048
+      },
+      {
+        "path": "/api/reset",
+        "status": 200,
+        "seconds": 0.202
+      },
+      {
+        "path": "/api/profiles",
+        "status": 200,
+        "seconds": 0.237
+      },
+      {
+        "path": "/api/profiles",
+        "status": 200,
+        "seconds": 0.095
+      },
+      {
+        "path": "/api/profiles",
+        "status": 200,
+        "seconds": 0.098
+      },
+      {
+        "path": "/api/profiles",
+        "status": 200,
+        "seconds": 0.093
+      },
+      {
+        "path": "/api/profiles",
+        "status": 200,
+        "seconds": 0.097
+      },
+      {
+        "path": "/api/profiles",
+        "status": 200,
+        "seconds": 0.094
+      },
+      {
+        "path": "/api/profiles",
+        "status": 200,
+        "seconds": 0.096
+      },
+      {
+        "path": "/api/profiles",
+        "status": 200,
+        "seconds": 0.09
+      },
+      {
+        "path": "/api/connected-devices/apply-profile",
+        "status": 200,
+        "seconds": 0.334
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.084
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.089
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.256
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.072
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.064
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.066
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/backup",
+        "status": 200,
+        "seconds": 0.053
+      },
+      {
+        "path": "/api/connected-devices/apply-profile",
+        "status": 200,
+        "seconds": 0.288
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.231
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.268
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.585
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.275
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.297
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-devices/apply-profile",
+        "status": 200,
+        "seconds": 0.274
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.127
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.058
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.045
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.087
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.112
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.872
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.103
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/traffic",
+        "status": 200,
+        "seconds": 0.061
+      },
+      {
+        "path": "/api/connected-devices/apply-profile",
+        "status": 200,
+        "seconds": 0.246
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.09
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.174
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-devices/apply-profile",
+        "status": 200,
+        "seconds": 0.269
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.066
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.044
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.044
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.062
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.054
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.07
+      },
+      {
+        "path": "/api/unaffected-devices",
+        "status": 200,
+        "seconds": 0.258
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.068
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.662
+      },
+      {
+        "path": "/api/plan",
+        "status": 200,
+        "seconds": 0.091
+      },
+      {
+        "path": "/api/policies",
+        "status": 200,
+        "seconds": 0.081
+      },
+      {
+        "path": "/api/apply",
+        "status": 200,
+        "seconds": 0.158
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.068
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.076
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.865
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.077
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.063
+      },
+      {
+        "path": "/api/policies",
+        "status": 200,
+        "seconds": 0.141
+      },
+      {
+        "path": "/api/apply",
+        "status": 200,
+        "seconds": 0.168
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.218
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.224
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.61
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.053
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/policies",
+        "status": 200,
+        "seconds": 0.081
+      },
+      {
+        "path": "/api/apply",
+        "status": 200,
+        "seconds": 0.158
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.064
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.058
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.372
+      },
+      {
+        "path": "/api/policies",
+        "status": 200,
+        "seconds": 0.137
+      },
+      {
+        "path": "/api/apply",
+        "status": 200,
+        "seconds": 0.159
+      },
+      {
+        "path": "/api/unaffected-devices/delete",
+        "status": 200,
+        "seconds": 0.23
+      },
+      {
+        "path": "/api/connected-devices/apply-profile",
+        "status": 200,
+        "seconds": 0.258
+      },
+      {
+        "path": "/api/policies",
+        "status": 200,
+        "seconds": 0.083
+      },
+      {
+        "path": "/api/apply",
+        "status": 200,
+        "seconds": 0.231
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.067
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.04
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.259
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.605
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.129
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.265
+      },
+      {
+        "path": "/api/policies",
+        "status": 200,
+        "seconds": 0.708
+      },
+      {
+        "path": "/api/apply",
+        "status": 200,
+        "seconds": 0.407
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.608
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.379
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/policies",
+        "status": 200,
+        "seconds": 0.079
+      },
+      {
+        "path": "/api/apply",
+        "status": 200,
+        "seconds": 0.207
+      },
+      {
+        "path": "/api/groups",
+        "status": 200,
+        "seconds": 0.233
+      },
+      {
+        "path": "/api/apply",
+        "status": 200,
+        "seconds": 0.272
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.13
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.065
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/groups/delete",
+        "status": 200,
+        "seconds": 0.234
+      },
+      {
+        "path": "/api/apply",
+        "status": 200,
+        "seconds": 0.209
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.065
+      },
+      {
+        "path": "/api/observations/scan",
+        "status": 200,
+        "seconds": 6.781
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.295
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.204
+      },
+      {
+        "path": "/api/service-assignments",
+        "status": 200,
+        "seconds": 0.479
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.13
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.156
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.08
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.083
+      },
+      {
+        "path": "/api/service-assignments/delete",
+        "status": 200,
+        "seconds": 0.294
+      },
+      {
+        "path": "/api/data-limits",
+        "status": 200,
+        "seconds": 1.011
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.129
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.829
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.113
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.104
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.24
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.568
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.08
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.197
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.039
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.079
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.156
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.044
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.08
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.448
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.469
+      },
+      {
+        "path": "/api/data-limits",
+        "status": 200,
+        "seconds": 0.585
+      },
+      {
+        "path": "/api/data-limits/reset",
+        "status": 200,
+        "seconds": 0.802
+      },
+      {
+        "path": "/api/data-limits",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/data-limits",
+        "status": 200,
+        "seconds": 0.242
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.13
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.058
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/groups",
+        "status": 200,
+        "seconds": 0.245
+      },
+      {
+        "path": "/api/group-data-limits",
+        "status": 200,
+        "seconds": 0.286
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.132
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.056
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.659
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.302
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.568
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.159
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.045
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.065
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.09
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.961
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.06
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.069
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.055
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.063
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.066
+      },
+      {
+        "path": "/api/group-data-limits",
+        "status": 200,
+        "seconds": 0.046
+      },
+      {
+        "path": "/api/group-data-limits/reset",
+        "status": 200,
+        "seconds": 0.367
+      },
+      {
+        "path": "/api/group-data-limits",
+        "status": 200,
+        "seconds": 0.445
+      },
+      {
+        "path": "/api/groups/delete",
+        "status": 200,
+        "seconds": 0.468
+      },
+      {
+        "path": "/api/service-quotas",
+        "status": 200,
+        "seconds": 1.099
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.255
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.04
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.612
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.248
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/service-quotas",
+        "status": 200,
+        "seconds": 0.039
+      },
+      {
+        "path": "/api/service-quotas/reset",
+        "status": 200,
+        "seconds": 0.391
+      },
+      {
+        "path": "/api/service-quotas",
+        "status": 200,
+        "seconds": 0.259
+      },
+      {
+        "path": "/api/time-quotas",
+        "status": 200,
+        "seconds": 0.337
+      },
+      {
+        "path": "/api/time-quotas/start",
+        "status": 200,
+        "seconds": 1.047
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.212
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.276
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.829
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.23
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.075
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.611
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.298
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.076
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.073
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.594
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.089
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.621
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.081
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.707
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.049
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.056
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.485
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.552
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.04
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 2.241
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.618
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.225
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.572
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.308
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.568
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.758
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.261
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.035
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.104
+      },
+      {
+        "path": "/api/time-quotas",
+        "status": 200,
+        "seconds": 0.062
+      },
+      {
+        "path": "/api/time-quotas/stop",
+        "status": 200,
+        "seconds": 0.351
+      },
+      {
+        "path": "/api/time-quotas/reset",
+        "status": 200,
+        "seconds": 0.336
+      },
+      {
+        "path": "/api/time-quotas",
+        "status": 200,
+        "seconds": 0.255
+      },
+      {
+        "path": "/api/schedules",
+        "status": 200,
+        "seconds": 0.066
+      },
+      {
+        "path": "/api/apply",
+        "status": 200,
+        "seconds": 0.246
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.59
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.738
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.236
+      },
+      {
+        "path": "/api/schedules",
+        "status": 200,
+        "seconds": 0.954
+      },
+      {
+        "path": "/api/apply",
+        "status": 200,
+        "seconds": 1.801
+      },
+      {
+        "path": "/api/timers",
+        "status": 200,
+        "seconds": 0.239
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.066
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.857
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.718
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.046
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.738
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.08
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.228
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.08
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.079
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.613
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.07
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.716
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.286
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.287
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.612
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.612
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.811
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.044
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.2
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.917
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.728
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.045
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.04
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.261
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.083
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.074
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/plan",
+        "status": 200,
+        "seconds": 0.045
+      },
+      {
+        "path": "/api/progressions",
+        "status": 200,
+        "seconds": 0.249
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.205
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.255
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 4.335
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 5.13
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.468
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 3.372
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.208
+      },
+      {
+        "path": "/api/progressions",
+        "status": 200,
+        "seconds": 4.1
+      },
+      {
+        "path": "/api/progressions/stop",
+        "status": 200,
+        "seconds": 0.92
+      },
+      {
+        "path": "/api/progressions",
+        "status": 200,
+        "seconds": 0.344
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.188
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.255
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.594
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.072
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.615
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.167
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.291
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.117
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.294
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.57
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.203
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.57
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/progressions/stop",
+        "status": 200,
+        "seconds": 0.403
+      },
+      {
+        "path": "/api/progressions",
+        "status": 200,
+        "seconds": 0.267
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.133
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.055
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.077
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.222
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.313
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.07
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.04
+      },
+      {
+        "path": "/api/plan",
+        "status": 200,
+        "seconds": 0.214
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.202
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.042
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.661
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.074
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.067
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.259
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.572
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.205
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.041
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.656
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.039
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.276
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.571
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.262
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.109
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.014
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.196
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.215
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/plan",
+        "status": 200,
+        "seconds": 0.045
+      },
+      {
+        "path": "/api/connected-devices/apply-profile",
+        "status": 200,
+        "seconds": 0.27
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.066
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.033
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.063
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.376
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.302
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.113
+      },
+      {
+        "path": "/api/connected-devices/apply-profile",
+        "status": 200,
+        "seconds": 0.558
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.217
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.238
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.128
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.056
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.067
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.355
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.068
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.073
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.067
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.043
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.106
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.234
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.06
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.041
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.309
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.086
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.294
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.107
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.039
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.185
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.048
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.039
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 2.178
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.038
+      },
+      {
+        "path": "/api/connected-devices/apply-profile",
+        "status": 200,
+        "seconds": 0.303
+      },
+      {
+        "path": "/api/schedules",
+        "status": 200,
+        "seconds": 0.106
+      },
+      {
+        "path": "/api/apply",
+        "status": 200,
+        "seconds": 0.323
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.085
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 2.142
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.217
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.085
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.069
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 1.538
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.057
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.082
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.222
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.044
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/random-website-analytics",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/schedules",
+        "status": 200,
+        "seconds": 0.087
+      },
+      {
+        "path": "/api/connected-devices/apply-profile",
+        "status": 200,
+        "seconds": 0.351
+      },
+      {
+        "path": "/api/reset",
+        "status": 200,
+        "seconds": 0.239
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.155
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.239
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.806
+      },
+      {
+        "path": "/api/apply",
+        "status": 200,
+        "seconds": 0.259
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.081
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.091
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/connected-device-labels",
+        "status": 200,
+        "seconds": 0.037
+      },
+      {
+        "path": "/api/health",
+        "error_type": "ConnectionRefusedError",
+        "step": "connect",
+        "seconds": 0.001
+      },
+      {
+        "path": "/api/health",
+        "error_type": "ConnectionRefusedError",
+        "step": "connect",
+        "seconds": 0.001
+      },
+      {
+        "path": "/api/health",
+        "status": 200,
+        "seconds": 0.046
+      },
+      {
+        "path": "/api/health",
+        "status": 200,
+        "seconds": 0.039
+      },
+      {
+        "path": "/api/state",
+        "status": 200,
+        "seconds": 0.037
+      }
+    ]
+  },
+  "restoration": {
+    "configuration_preserved": true,
+    "wifi_settings_preserved": true,
+    "saved_access_preserved": true,
+    "configuration_reapplied": true,
+    "final_state": "applied",
+    "final_health": "ok",
+    "active_services": 5,
+    "verification_profiles_remaining": 0,
+    "configuration_matches_latest_saved_snapshot": true,
+    "mac_returned_to_home_network": true,
+    "vpn": {
+      "initial": "Connected",
+      "paused": true,
+      "restored": true,
+      "final": "Connected",
+      "finished_at": 1790864208.174027
+    },
+    "additional_client_reassociation_verified": false
+  },
+  "remaining_checks": [
+    {
+      "check": "Physical WPA3 client association",
+      "status": "blocked",
+      "reason": "The Mac is locked. Computer control requires manual unlock."
+    }
+  ],
+  "test_harness_notes": [
+    "Association readiness may wait only for an explicit helper-busy response within its existing deadline.",
+    "The Wi-Fi rate check verifies a successful transfer and an upper cap. It does not require a minimum speed.",
+    "Connection refusals during intentional dashboard restarts are logged by the bounded health readiness check."
+  ]
+}

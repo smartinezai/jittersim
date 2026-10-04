@@ -1,0 +1,28 @@
+{
+  "request_sha256": "8caa7a95726e071509bbed3482bfaa56c7844878aa0516b16e8f654258a85491",
+  "decision": "Approve only this complete combined consumer tuple after exact complete-file comparison with reviewed ad83 and the two reviewed pattern counter-report changes. Producer and access consumer are byte-identical to reviewed83.",
+  "consumer_hashes": {
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "391624ec30f18e25cff574db157ca53f84b4be6869734154a0d32dd9da9542e5",
+    "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77"
+  },
+  "approved_original_production_tuple": {
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "e9b0e6070c5bb27d2983711b808e33e541099c762fc562eaf5c73ede3d2045e4",
+    "src/jittersim/networking/access.py": "1d4edebe57877e6db6bbbcd0d1adaecfd9fa48573c0f8830b10a2dcdaaf04ec6"
+  },
+  "inspection": [
+    "Verified complete source bytes, not only reported hashes.",
+    "Reviewed full apply publication, failure cleanup, counter generation, durable gateway/Panic publication and ad resume ordering.",
+    "ApplyReport defaults counters_preserved to false. Counter generation stays stable only when existing counters are retained.",
+    "The two changes do not change persistent Panic producer identity or run-permission witness publication. Explicit ad resume still follows successful durable guard publication."
+  ],
+  "registry_resolution": "Keep exactly the original complete production tuple and this reviewed complete combined tuple. Remove unneeded unpublished standalone feature tuples. No arbitrary combinations.",
+  "remaining_gates": [
+    "Inspect the exact conflict resolution.",
+    "Run combined guarded Panic, restart, settings, counters, proxy and privacy checks.",
+    "Review complete composition and actual published-main changes.",
+    "Run complete configured supported Linux pipeline before publication or merge."
+  ],
+  "scope": "Source approval permits only the narrow registry resolution. No passing combined tests, CI, release publication or Pi acceptance is claimed."
+}

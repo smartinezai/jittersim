@@ -4,7 +4,13 @@ from ipaddress import IPv4Address
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import EveryoneElseRule, ServiceQuotaRule, WebsiteFilter
-from jittersim.networking.renderer import render_command_plan, render_reset_commands
+from jittersim.networking.renderer import (
+    queue_band,
+    queue_handle,
+    queue_parent,
+    render_command_plan,
+    render_reset_commands,
+)
 from jittersim.networking.topology import Topology, TopologyError
 
 
@@ -15,6 +21,79 @@ def make_device(device_id: str, address: str, profile_id: str) -> Device:
         ipv4_address=address,
         profile_id=profile_id,
     )
+
+
+# Copied from a render on the base commit with 8 devices that each delay both directions.
+EIGHT_DEVICE_TC_COMMANDS = """\
+tc qdisc replace dev eth0 root handle 10: prio bands 9 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+tc qdisc replace dev eth0 parent 10:1 handle 100: fq_codel
+tc qdisc del dev eth0 parent 10:2 handle 51:
+tc qdisc del dev eth0 parent 10:3 handle 52:
+tc qdisc del dev eth0 parent 10:4 handle 53:
+tc qdisc del dev eth0 parent 10:5 handle 54:
+tc qdisc del dev eth0 parent 10:6 handle 55:
+tc qdisc del dev eth0 parent 10:7 handle 56:
+tc qdisc del dev eth0 parent 10:8 handle 57:
+tc qdisc del dev eth0 parent 10:9 handle 58:
+tc qdisc replace dev eth0 parent 10:2 handle 41: netem delay 50ms corrupt 0% rate 0bit
+tc filter replace dev eth0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2
+tc qdisc replace dev eth0 parent 10:3 handle 42: netem delay 50ms corrupt 0% rate 0bit
+tc filter replace dev eth0 protocol ip parent 10: pref 2 handle 2 fw flowid 10:3
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 102 handle 2 fw flowid 10:3
+tc qdisc replace dev eth0 parent 10:4 handle 43: netem delay 50ms corrupt 0% rate 0bit
+tc filter replace dev eth0 protocol ip parent 10: pref 3 handle 3 fw flowid 10:4
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 103 handle 3 fw flowid 10:4
+tc qdisc replace dev eth0 parent 10:5 handle 44: netem delay 50ms corrupt 0% rate 0bit
+tc filter replace dev eth0 protocol ip parent 10: pref 4 handle 4 fw flowid 10:5
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 104 handle 4 fw flowid 10:5
+tc qdisc replace dev eth0 parent 10:6 handle 45: netem delay 50ms corrupt 0% rate 0bit
+tc filter replace dev eth0 protocol ip parent 10: pref 5 handle 5 fw flowid 10:6
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 105 handle 5 fw flowid 10:6
+tc qdisc replace dev eth0 parent 10:7 handle 46: netem delay 50ms corrupt 0% rate 0bit
+tc filter replace dev eth0 protocol ip parent 10: pref 6 handle 6 fw flowid 10:7
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 106 handle 6 fw flowid 10:7
+tc qdisc replace dev eth0 parent 10:8 handle 47: netem delay 50ms corrupt 0% rate 0bit
+tc filter replace dev eth0 protocol ip parent 10: pref 7 handle 7 fw flowid 10:8
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 107 handle 7 fw flowid 10:8
+tc qdisc replace dev eth0 parent 10:9 handle 48: netem delay 50ms corrupt 0% rate 0bit
+tc filter replace dev eth0 protocol ip parent 10: pref 8 handle 8 fw flowid 10:9
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 108 handle 8 fw flowid 10:9
+tc qdisc replace dev wlan0 root handle 10: prio bands 9 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+tc qdisc replace dev wlan0 parent 10:1 handle 100: fq_codel
+tc qdisc del dev wlan0 parent 10:2 handle 51:
+tc qdisc del dev wlan0 parent 10:3 handle 52:
+tc qdisc del dev wlan0 parent 10:4 handle 53:
+tc qdisc del dev wlan0 parent 10:5 handle 54:
+tc qdisc del dev wlan0 parent 10:6 handle 55:
+tc qdisc del dev wlan0 parent 10:7 handle 56:
+tc qdisc del dev wlan0 parent 10:8 handle 57:
+tc qdisc del dev wlan0 parent 10:9 handle 58:
+tc qdisc replace dev wlan0 parent 10:2 handle 41: netem delay 60ms corrupt 0% rate 0bit
+tc filter replace dev wlan0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2
+tc qdisc replace dev wlan0 parent 10:3 handle 42: netem delay 60ms corrupt 0% rate 0bit
+tc filter replace dev wlan0 protocol ip parent 10: pref 2 handle 2 fw flowid 10:3
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 102 handle 2 fw flowid 10:3
+tc qdisc replace dev wlan0 parent 10:4 handle 43: netem delay 60ms corrupt 0% rate 0bit
+tc filter replace dev wlan0 protocol ip parent 10: pref 3 handle 3 fw flowid 10:4
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 103 handle 3 fw flowid 10:4
+tc qdisc replace dev wlan0 parent 10:5 handle 44: netem delay 60ms corrupt 0% rate 0bit
+tc filter replace dev wlan0 protocol ip parent 10: pref 4 handle 4 fw flowid 10:5
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 104 handle 4 fw flowid 10:5
+tc qdisc replace dev wlan0 parent 10:6 handle 45: netem delay 60ms corrupt 0% rate 0bit
+tc filter replace dev wlan0 protocol ip parent 10: pref 5 handle 5 fw flowid 10:6
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 105 handle 5 fw flowid 10:6
+tc qdisc replace dev wlan0 parent 10:7 handle 46: netem delay 60ms corrupt 0% rate 0bit
+tc filter replace dev wlan0 protocol ip parent 10: pref 6 handle 6 fw flowid 10:7
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 106 handle 6 fw flowid 10:7
+tc qdisc replace dev wlan0 parent 10:8 handle 47: netem delay 60ms corrupt 0% rate 0bit
+tc filter replace dev wlan0 protocol ip parent 10: pref 7 handle 7 fw flowid 10:8
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 107 handle 7 fw flowid 10:8
+tc qdisc replace dev wlan0 parent 10:9 handle 48: netem delay 60ms corrupt 0% rate 0bit
+tc filter replace dev wlan0 protocol ip parent 10: pref 8 handle 8 fw flowid 10:9
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 108 handle 8 fw flowid 10:9
+""".splitlines()
 
 
 class TopologyTests(unittest.TestCase):
@@ -79,9 +158,10 @@ class RendererTests(unittest.TestCase):
             topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
         )
 
+        self.assertFalse(commands[0].ignore_failure)
         self.assertEqual(commands[0].argv, ("nft", "-f", "-"))
         self.assertIn("ip saddr 192.168.50.10 meta mark set 1", commands[0].stdin or "")
-        self.assertIn("ip daddr 192.168.50.11 meta mark set 2", commands[0].stdin or "")
+        self.assertIn("ip daddr 192.168.50.11 meta mark 0 meta mark set 2", commands[0].stdin or "")
         self.assertIn("usage-service alice-video upload", commands[0].stdin or "")
         self.assertIn("apply-service-quota alice-video download", commands[0].stdin or "")
         self.assertIn("meta mark set 3", commands[0].stdin or "")
@@ -256,21 +336,34 @@ class RendererTests(unittest.TestCase):
                 profiles={profile.id: profile},
             )
             commands = render_command_plan(plan=plan, topology=topology)
-            self.assertFalse(any(command.argv[1:3] == ("qdisc", "del") for command in commands))
-            (argv,) = [
-                command.argv
+            on_band = [
+                command
                 for command in commands
                 if "eth0" in command.argv and "10:2" in command.argv and command.argv[1] == "qdisc"
             ]
-            return argv[argv.index("handle") + 1 :]
+            removed = [
+                command.argv[-1] for command in on_band if command.argv[2] == "del"
+            ]
+            self.assertTrue(all(command.ignore_failure for command in on_band if command.argv[2] == "del"))
+            (argv,) = [command.argv for command in on_band if command.argv[2] == "replace"]
+            return removed, argv[argv.index("handle") + 1 :]
 
         normal = child(Profile(id="normal", name="Normal"))
         slow = child(Profile(id="slow", name="Slow", upload=Impairment(delay_ms=50)))
+        doubled = child(
+            Profile(id="doubled", name="Doubled", upload=Impairment(duplicate_percent=10))
+        )
 
         # tc cannot change a netem into an fq_codel, so a band that switches kind
-        # gets a new child under another handle instead of a change.
-        self.assertEqual(normal, ("61:", "fq_codel"))
-        self.assertEqual(slow[:3], ("41:", "netem", "delay"))
+        # gets a new child under another handle instead of a change. A netem that
+        # starts or stops duplicating is removed first because the kernel checks a
+        # duplicating netem against every other netem on the interface.
+        self.assertEqual(normal, ([], ("61:", "fq_codel")))
+        self.assertEqual(slow[0], ["51:"])
+        self.assertEqual(slow[1][:3], ("41:", "netem", "delay"))
+        self.assertEqual(doubled[0], ["41:"])
+        self.assertEqual(doubled[1][:2], ("51:", "netem"))
+        self.assertIn("duplicate", doubled[1])
 
     def test_nftables_rules_are_replaced_in_one_transaction(self) -> None:
         plan = compile_plan(
@@ -285,11 +378,14 @@ class RendererTests(unittest.TestCase):
 
         nft = [command for command in commands if command.executable == "nft"]
         self.assertEqual([command.argv for command in nft], [("nft", "-f", "-")])
+        # Both project tables are declared, dropped and rebuilt in the one script.
         self.assertTrue(
             (nft[0].stdin or "").startswith(
                 "add table inet jittersim\n"
                 "delete table inet jittersim\n"
-                "add table inet jittersim\n"
+                "add table netdev jittersim_download\n"
+                "delete table netdev jittersim_download\n"
+                "add table netdev jittersim_download\n"
             )
         )
 
@@ -465,15 +561,92 @@ class RendererTests(unittest.TestCase):
         self.assertIn("0ms", upload_command.argv)
         self.assertIn("250ms", upload_command.argv)
 
+    def test_jitter_alone_does_not_allow_reorder(self) -> None:
+        profiles = {
+            "jitter": Profile(
+                id="jitter",
+                name="Jitter",
+                upload=Impairment(jitter_ms=50, reorder_percent=10),
+            )
+        }
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "jitter"),),
+            profiles=profiles,
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        upload = next(c for c in commands if "upload impairment for device alice" in c.purpose)
+        # Jitter renders as a zero delay but tc still rejects "netem delay 0ms 50ms reorder 10%".
+        # The stated rate keeps the jittered packets in order instead.
+        netem = list(upload.argv[upload.argv.index("netem") :])
+        self.assertEqual(netem, ["netem", "delay", "0ms", "50ms", "corrupt", "0%", "rate", "10gbit"])
+
+    def test_a_duplicating_queue_is_created_last_after_its_plain_netem_is_removed(self) -> None:
+        plan = compile_plan(
+            devices=(
+                make_device("alice", "192.168.50.10", "duplicate"),
+                make_device("bob", "192.168.50.11", "normal"),
+            ),
+            profiles={
+                "duplicate": Profile(
+                    id="duplicate",
+                    name="Duplicate",
+                    upload=Impairment(duplicate_percent=10),
+                    download=Impairment(duplicate_percent=10),
+                ),
+                "normal": Profile(id="normal", name="Normal"),
+            },
+        )
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        for interface in ("eth0", "wlan0"):
+            queue_commands = [
+                command
+                for command in commands
+                if command.executable == "tc"
+                and command.arguments[:2] in (("qdisc", "del"), ("qdisc", "replace"))
+                and command.arguments[3] == interface
+                and "parent" in command.arguments
+                and command.arguments[command.arguments.index("parent") + 1] != "10:1"
+            ]
+            # Bob's fair queue comes first (it removes any netem of his band), then
+            # Alice's plain netem is removed before her duplicating one is created:
+            # the kernel refuses a duplicating netem next to any other netem.
+            self.assertEqual(
+                [command.arguments[1] for command in queue_commands],
+                ["replace", "del", "replace"],
+            )
+            self.assertEqual(
+                [command.arguments[command.arguments.index("handle") + 1] for command in queue_commands],
+                ["62:", "41:", "51:"],
+            )
+            self.assertEqual(
+                [command.arguments[command.arguments.index("parent") + 1] for command in queue_commands],
+                ["10:3", "10:2", "10:2"],
+            )
+            self.assertTrue(queue_commands[1].ignore_failure)
+            self.assertIn("duplicate", queue_commands[2].arguments)
+
     def test_reset_targets_only_project_owned_state(self) -> None:
         commands = render_reset_commands(
             topology=Topology(uplink_interface="eth0", test_interface="wlan0")
         )
 
         self.assertEqual(commands[0].argv, ("nft", "delete", "table", "inet", "jittersim"))
+        self.assertEqual(
+            commands[1].argv, ("nft", "delete", "table", "netdev", "jittersim_download")
+        )
+        # Missing tables and queues are not failures: the reset is idempotent.
         self.assertTrue(all(command.ignore_failure for command in commands))
         self.assertEqual(
-            [command.argv for command in commands[1:]],
+            [command.argv for command in commands[2:]],
             [
                 ("tc", "qdisc", "del", "dev", "eth0", "root", "handle", "10:"),
                 ("tc", "qdisc", "del", "dev", "wlan0", "root", "handle", "10:"),
@@ -553,40 +726,55 @@ class EveryoneElseRenderingTests(unittest.TestCase):
             unaffected_macs=("aa:bb:cc:dd:ee:ff",),
         )
 
-        # JitterSim sets, checks and clears only its own bit of the connection mark.
-        expected = [
+        # Protected clients leave the chains before any mark. Uploads are marked in
+        # the forward hook and downloads get a marker that the egress hook on the
+        # test interface, which sees the client MAC, turns into the queue mark.
+        protected = [
             'add rule inet jittersim forward iifname "wlan0" ether saddr { aa:bb:cc:dd:ee:ff } '
-            "ct mark set ct mark or 0x01000000 "
-            'comment "mark connections of unaffected clients"',
-            'add rule inet jittersim forward iifname "wlan0" '
-            "ether saddr != { aa:bb:cc:dd:ee:ff } ct mark and 0x01000000 == 0x01000000 "
-            "ct mark set ct mark and 0xfeffffff "
-            'comment "clear connections of clients no longer unaffected"',
+            'meta mark set 0 return comment "unaffected by profiles"',
+            'add rule netdev jittersim_download download ether daddr { aa:bb:cc:dd:ee:ff } '
+            'meta mark set 0 return comment "unaffected by profiles"',
+        ]
+        expected = [
             'add rule inet jittersim forward iifname "wlan0" meta nfproto ipv4 '
-            "ether saddr != { aa:bb:cc:dd:ee:ff } ip saddr != { 192.168.50.10 } "
-            'meta mark set 2 counter comment "everyone else upload"',
+            'ip saddr != { 192.168.50.10 } meta mark set 2 counter comment "everyone else upload"',
             'add rule inet jittersim forward oifname "wlan0" meta nfproto ipv4 '
-            "ct mark and 0x01000000 != 0x01000000 ip daddr != { 192.168.50.10 } "
+            "ip daddr != { 192.168.50.10 } meta mark set 268435456 "
+            'comment "identify everyone else downloads"',
+            "add rule netdev jittersim_download download meta mark 268435456 "
             'meta mark set 2 counter comment "everyone else download"',
         ]
+        for line in protected:
+            self.assertIn(line, lines)
         start = lines.index(expected[0])
-        self.assertEqual(lines[start:start + 4], expected)
+        self.assertEqual(lines[start:start + 3], expected)
+        self.assertLess(max(lines.index(line) for line in protected), start)
         # Saved devices keep their own rules, which come after these.
         device_rule = next(i for i, line in enumerate(lines) if "usage-device alice upload" in line)
         self.assertLess(start, device_rule)
+        self.assertEqual([line for line in lines if "ct mark" in line], [])
 
     def test_without_a_list_or_saved_devices_every_client_is_marked(self) -> None:
         lines = self.lines()
 
-        for direction, interface in (("upload", "iifname"), ("download", "oifname")):
-            self.assertIn(
-                f'add rule inet jittersim forward {interface} "wlan0" meta nfproto ipv4 '
-                f'meta mark set 1 counter comment "everyone else {direction}"',
-                lines,
-            )
-        self.assertEqual([line for line in lines if "ct mark" in line], [])
+        self.assertIn(
+            'add rule inet jittersim forward iifname "wlan0" meta nfproto ipv4 '
+            'meta mark set 1 counter comment "everyone else upload"',
+            lines,
+        )
+        self.assertIn(
+            'add rule inet jittersim forward oifname "wlan0" meta nfproto ipv4 '
+            'meta mark set 268435456 comment "identify everyone else downloads"',
+            lines,
+        )
+        self.assertIn(
+            "add rule netdev jittersim_download download meta mark 268435456 "
+            'meta mark set 1 counter comment "everyone else download"',
+            lines,
+        )
+        self.assertEqual([line for line in lines if "unaffected by profiles" in line], [])
 
-    def test_an_outage_drops_everyone_else_in_both_chains(self) -> None:
+    def test_an_outage_drops_everyone_else_in_both_directions(self) -> None:
         lines = self.lines(
             devices=(make_device("alice", "192.168.50.10", "normal"),),
             unaffected_macs=("aa:bb:cc:dd:ee:ff",),
@@ -594,19 +782,26 @@ class EveryoneElseRenderingTests(unittest.TestCase):
         )
 
         # A client asking for an address sends from 0.0.0.0 and may be a saved
-        # device, so DHCP still reaches the Pi.
+        # device, so DHCP still reaches the Pi. Protected clients returned earlier.
         self.assertIn(
             'add rule inet jittersim input iifname "wlan0" meta nfproto ipv4 '
-            "ether saddr != { aa:bb:cc:dd:ee:ff } ip saddr != { 192.168.50.10 } "
+            "ip saddr != { 192.168.50.10 } "
             'ip saddr != 0.0.0.0 drop comment "temporarily disconnect everyone else"',
             lines,
         )
         self.assertIn(
             'add rule inet jittersim forward iifname "wlan0" meta nfproto ipv4 '
-            "ether saddr != { aa:bb:cc:dd:ee:ff } ip saddr != { 192.168.50.10 } "
-            'drop comment "temporarily disconnect everyone else"',
+            'ip saddr != { 192.168.50.10 } drop comment "temporarily disconnect everyone else"',
             lines,
         )
+        self.assertIn(
+            "add rule netdev jittersim_download download meta mark 268435456 drop "
+            'comment "temporarily disconnect everyone else"',
+            lines,
+        )
+        protected = next(i for i, line in enumerate(lines) if "unaffected by profiles" in line)
+        dropped = next(i for i, line in enumerate(lines) if "temporarily disconnect" in line)
+        self.assertLess(protected, dropped)
 
     def test_everyone_else_gets_a_queue_on_both_interfaces(self) -> None:
         commands = render_command_plan(plan=self.plan(), topology=self.topology)
@@ -619,6 +814,148 @@ class EveryoneElseRenderingTests(unittest.TestCase):
             and command.arguments[5] == "10:2"
         }
         self.assertEqual(children, {("eth0", "netem"), ("wlan0", "fq_codel")})
+
+# mark -> (band that tc reads as a hexadecimal class minor, parent class, netem child handle)
+QUEUE_NAMES = {
+    1: ("2", "10:2", "41:"),
+    2: ("3", "10:3", "42:"),
+    3: ("4", "10:4", "43:"),
+    4: ("5", "10:5", "44:"),
+    5: ("6", "10:6", "45:"),
+    6: ("7", "10:7", "46:"),
+    7: ("8", "10:8", "47:"),
+    8: ("9", "10:9", "48:"),
+    9: ("a", "10:a", "49:"),
+    10: ("b", "10:b", "4a:"),
+    11: ("c", "10:c", "4b:"),
+    12: ("d", "10:d", "4c:"),
+    13: ("e", "10:e", "4d:"),
+    14: ("f", "10:f", "4e:"),
+    15: ("10", "10:10", "4f:"),
+}
+
+
+HEX_BANDS = ["2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f", "10"]
+
+
+def delayed_devices(count: int) -> tuple:
+    return tuple(
+        make_device(f"d{index:02d}", f"192.168.50.{10 + index}", "delay")
+        for index in range(1, count + 1)
+    )
+
+
+def render_delayed_plan(count: int):
+    profile = Profile(
+        id="delay",
+        name="Delay",
+        upload=Impairment(delay_ms=50),
+        download=Impairment(delay_ms=60),
+    )
+    plan = compile_plan(devices=delayed_devices(count), profiles={"delay": profile})
+    return render_command_plan(
+        plan=plan,
+        topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+    )
+
+
+def argument_after(command, keyword: str) -> str:
+    return command.arguments[command.arguments.index(keyword) + 1]
+
+
+class QueueNameHelperTests(unittest.TestCase):
+    def test_band_parent_and_handle_for_marks_one_to_fifteen(self) -> None:
+        for mark, (band, parent, handle) in QUEUE_NAMES.items():
+            with self.subTest(mark=mark):
+                self.assertEqual(queue_band(mark), band)
+                self.assertEqual(queue_parent(mark), parent)
+                self.assertEqual(queue_handle(mark), handle)
+
+    def test_a_child_handle_never_collides_with_the_root_or_the_ordinary_queue(self) -> None:
+        # tc reads the digits of a handle as a hexadecimal major number.
+        majors = [int(queue_handle(mark).rstrip(":"), 16) for mark in range(1, 16)]
+        self.assertEqual(len(set(majors)), 15)
+        self.assertFalse({0x10, 0x100} & set(majors))
+
+
+class QueueClassTests(unittest.TestCase):
+    def test_fifteen_devices_use_the_same_hex_band_everywhere(self) -> None:
+        commands = [command for command in render_delayed_plan(15) if command.executable == "tc"]
+
+        for interface in ("eth0", "wlan0"):
+            on_interface = [command for command in commands if command.arguments[3] == interface]
+            roots = [command for command in on_interface if "prio" in command.arguments]
+            self.assertEqual([argument_after(command, "bands") for command in roots], ["16"])
+            removals = [
+                command
+                for command in on_interface
+                if command.arguments[:2] == ("qdisc", "del")
+            ]
+            # A netem that duplicated before would refuse the new netems, so the
+            # duplicating handle of every band is cleared first (it may not exist).
+            self.assertEqual(
+                [argument_after(command, "handle") for command in removals],
+                [f"{0x50 + mark:x}:" for mark in range(1, 16)],
+            )
+            self.assertTrue(all(command.ignore_failure for command in removals))
+            netem = [
+                command
+                for command in on_interface
+                if command.arguments[:2] == ("qdisc", "replace") and "netem" in command.arguments
+            ]
+            self.assertEqual(
+                [argument_after(command, "parent") for command in netem],
+                ["10:" + band for band in HEX_BANDS],
+            )
+            self.assertEqual(
+                [argument_after(command, "handle") for command in netem],
+                [f"{0x40 + mark:x}:" for mark in range(1, 16)],
+            )
+            filters = [command for command in on_interface if command.arguments[0] == "filter"]
+            self.assertEqual(len(filters), 30)
+            for protocol in ("ip", "ipv6"):
+                self.assertEqual(
+                    [
+                        argument_after(command, "flowid")
+                        for command in filters
+                        if argument_after(command, "protocol") == protocol
+                    ],
+                    ["10:" + band for band in HEX_BANDS],
+                )
+            self.assertEqual(
+                [
+                    argument_after(command, "handle")
+                    for command in filters
+                    if argument_after(command, "protocol") == "ip"
+                ],
+                [str(mark) for mark in range(1, 16)],
+            )
+
+    def test_every_class_exists_among_the_prio_bands_for_each_device_count(self) -> None:
+        for count in range(1, 16):
+            with self.subTest(devices=count):
+                commands = [
+                    command for command in render_delayed_plan(count) if command.executable == "tc"
+                ]
+                for command in commands:
+                    if "prio" in command.arguments:
+                        bands = int(argument_after(command, "bands"))
+                        self.assertEqual(bands, count + 1)
+                        continue
+                    for keyword in ("parent", "flowid"):
+                        if keyword not in command.arguments:
+                            continue
+                        major, minor = argument_after(command, keyword).split(":")
+                        # A filter's parent is the bare root handle without a class.
+                        if major == "10" and minor:
+                            # tc reads a class minor number as hexadecimal.
+                            self.assertTrue(1 <= int(minor, 16) <= count + 1, command.argv)
+
+    def test_eight_devices_render_the_same_commands_as_before(self) -> None:
+        commands = [command for command in render_delayed_plan(8) if command.executable == "tc"]
+
+        self.assertEqual([" ".join(command.argv) for command in commands], EIGHT_DEVICE_TC_COMMANDS)
+
 
 if __name__ == "__main__":
     unittest.main()

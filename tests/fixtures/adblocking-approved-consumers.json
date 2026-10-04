@@ -1,0 +1,10 @@
+{
+  "source_commit": "c1b709d20972ace146af5b1de2253a00b9358c9b",
+  "archive_sha256": "e239e07f1173fecaf1be83b2ff3e6a3199807c3d28a79bd456f7a6478437c500",
+  "source_sha256": {
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "e9b0e6070c5bb27d2983711b808e33e541099c762fc562eaf5c73ede3d2045e4",
+    "src/jittersim/networking/access.py": "1d4edebe57877e6db6bbbcd0d1adaecfd9fa48573c0f8830b10a2dcdaaf04ec6"
+  },
+  "scope": "Original reviewed Panic producer, helper and household consumer. Other dependencies come from the current isolated test package."
+}

@@ -18,15 +18,15 @@ class WifiRecoveryTests(unittest.TestCase):
         ):
             self.assertEqual(self.executor.settings["802-11-wireless-security." + name], value)
 
-    def test_reset_changes_name_and_security_without_reading_or_writing_password(self):
+    def test_reset_changes_only_name_without_reading_or_writing_password(self):
         for name in ("Home: \\ network", "JitterSim", "家のネット"):
             with self.subTest(name=name):
                 self.executor.settings["802-11-wireless.ssid"] = name
                 result = self.applier.reset_wifi_name()
-                self.assertEqual(result, {"ssid": "JitterSim", "security": "WPA3-SAE"})
+                self.assertEqual(result, {"ssid": "TestNet", "security": "WPA/WPA2"})
                 self.assertEqual(self.executor.settings["802-11-wireless-security.psk"],
                                  "fixture-wifi-password")
-                self.assert_security()
+                self.assertEqual(self.executor.settings["802-11-wireless-security.proto"], "wpa,rsn")
         for command in self.executor.commands:
             self.assertNotIn("802-11-wireless-security.psk", " ".join(command.arguments))
             self.assertNotIn("--show-secrets", command.arguments)
@@ -92,6 +92,7 @@ class WifiRecoveryTests(unittest.TestCase):
         ):
             with self.subTest(name=name, value=value[:30]):
                 self.setUp()
+                self.applier.configure_access_point(ssid="Original", password="fixture-wifi-password")
                 previous = dict(self.executor.settings)
                 self.executor.radio_overrides[name] = value
                 with self.assertRaises(WifiError) as caught:
@@ -103,6 +104,6 @@ class WifiRecoveryTests(unittest.TestCase):
     def test_name_reset_preserves_an_existing_wpa3_network(self):
         self.applier.configure_access_point(ssid="Cloned home network", password="new-test-password")
         result = self.applier.reset_wifi_name()
-        self.assertEqual(result["security"], "WPA3-SAE")
+        self.assertEqual(result["security"], "WPA3")
         self.assert_security()
         self.assertEqual(self.executor.settings["802-11-wireless-security.psk"], "new-test-password")

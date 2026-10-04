@@ -1,7 +1,13 @@
 import random
 import unittest
+from datetime import datetime
 
 from jittersim.config.models import Impairment, Profile, Progression, Randomness, Schedule
+from jittersim.engine.progression import (
+    interpolate_impairment,
+    interpolate_profile,
+    progression_factor,
+)
 from jittersim.engine.randomizer import (
     outage_duration_seconds,
     outage_interval_seconds,
@@ -11,13 +17,7 @@ from jittersim.engine.randomizer import (
     reroll_profile,
     seeded_generator,
 )
-from jittersim.engine.progression import (
-    interpolate_impairment,
-    interpolate_profile,
-    progression_factor,
-)
 from jittersim.engine.schedules import active_schedule, is_schedule_active
-from datetime import datetime
 
 
 class RandomizerTests(unittest.TestCase):
@@ -78,6 +78,45 @@ class RandomizerTests(unittest.TestCase):
         )
 
         self.assertEqual(first, second)
+
+    def test_website_outcomes_match_the_domains_kept_by_a_reroll(self) -> None:
+        profile = Profile(
+            id="website-test",
+            name="Website test",
+            website_mode="allow_only",
+            website_domains=tuple(f"site-{index}.example" for index in range(20)),
+            website_randomness=Randomness(enabled_probability=50),
+            random_seed=42,
+        )
+        outcomes = []
+        recorded = reroll_profile(
+            profile=profile,
+            generator=seeded_generator(
+                profile=profile,
+                device_id="alice",
+                roll_number=3,
+            ),
+            website_outcomes=outcomes,
+        )
+        plain = reroll_profile(
+            profile=profile,
+            generator=seeded_generator(
+                profile=profile,
+                device_id="alice",
+                roll_number=3,
+            ),
+        )
+
+        self.assertEqual(recorded, plain)
+        self.assertEqual(
+            tuple(domain for domain, _ in outcomes),
+            profile.website_domains,
+        )
+        self.assertEqual(
+            recorded.website_domains,
+            tuple(domain for domain, kept in outcomes if kept),
+        )
+        self.assertEqual({kept for _, kept in outcomes}, {False, True})
 
     def test_interval_and_outage_helpers_respect_disabled_values(self) -> None:
         profile = Profile(id="normal", name="Normal")

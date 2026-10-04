@@ -1,0 +1,116 @@
+{
+  "base": "e28ab89ab7b51307bb7012f7873151ab73096eb8",
+  "test_sha256": "7f0a599b5a82ad4fa624fcc77b06fad9bf3b7a304deedc4c52d46d01edeec177",
+  "root_navigation_log": "/private/tmp/jittersim-navigation-preview-final-browser.log",
+  "root_navigation_log_sha256": "724b8544f8d3780b0df1dc7dd28a369a7f5710a563d57d5cc41fd4fa621f82e8",
+  "navigation_exit": 0,
+  "existing_read_only_regression_passed": true,
+  "browser_file_lint_passed": true,
+  "production_changed": false,
+  "failed_run_retention": {
+    "retained": 88,
+    "files": 10729,
+    "inventory_sha256": "6bd9ec02909dbfeddf925377026700f33a06395e10e8e71d8064e766b3d2d272",
+    "manifest_sha256": "5f307e1443bd09ec540b2e629cebd5c5a2b78ad3e157681a1f348dbc281674d3"
+  },
+  "full_pipeline_complete": false,
+  "independent_review": {
+    "base_head": "e28ab89ab7b51307bb7012f7873151ab73096eb8",
+    "test_sha256": "7f0a599b5a82ad4fa624fcc77b06fad9bf3b7a304deedc4c52d46d01edeec177",
+    "snapshot": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-navigation-independent-mqcrz_it",
+    "complete_test_diff": "diff --git a/tests/browser/diagnostics_keyboard.py b/tests/browser/diagnostics_keyboard.py\nindex 0a9eb47..d2fdae1 100644\n--- a/tests/browser/diagnostics_keyboard.py\n+++ b/tests/browser/diagnostics_keyboard.py\n@@ -1,6 +1,7 @@\n \"\"\"Read raw diagnostics with Tab and arrow keys at desktop and phone widths.\"\"\"\n \n import json\n+from urllib.parse import urlsplit\n \n from playwright.sync_api import expect\n \n@@ -12,7 +13,8 @@ def check_diagnostics_keyboard(page):\n     writes = []\n \n     def record_write(request):\n-        if request.method != \"GET\":\n+        preview = request.method == \"POST\" and urlsplit(request.url).path == \"/api/profiles/ranges\"\n+        if request.method != \"GET\" and not preview:\n             writes.append(request.url)\n \n     def diagnostics(route):\n@@ -41,15 +43,25 @@ def check_diagnostics_keyboard(page):\n             assert raw.evaluate(\"node => getComputedStyle(node).outlineWidth\") == \"2px\"\n             assert raw.evaluate(\"node => node.scrollWidth > node.clientWidth\")\n             page.keyboard.press(\"ArrowRight\")\n-            page.wait_for_function(\"() => document.getElementById('diagnostics-json').scrollLeft > 0\")\n+            page.wait_for_function(\n+                \"() => document.getElementById('diagnostics-json').scrollLeft > 0\"\n+            )\n             assert raw.evaluate(\"node => node.getBoundingClientRect().bottom\") <= height\n             if width == 375:\n                 bar = page.locator(\".safety-bar\")\n                 expect(bar).to_be_visible()\n                 expect(page.locator(\"#panic-button\")).to_be_in_viewport(ratio=1)\n                 expect(page.locator(\"#router-wifi-toggle\")).to_be_in_viewport(ratio=1)\n-                assert raw.bounding_box()[\"y\"] + raw.bounding_box()[\"height\"] <= bar.bounding_box()[\"y\"]\n-            page.screenshot(path=f\"test-results/diagnostics-keyboard-{width}-{'large' if enlarged else 'normal'}.png\")\n+                assert (\n+                    raw.bounding_box()[\"y\"] + raw.bounding_box()[\"height\"]\n+                    <= bar.bounding_box()[\"y\"]\n+                )\n+            page.screenshot(\n+                path=(\n+                    f\"test-results/diagnostics-keyboard-{width}-\"\n+                    f\"{'large' if enlarged else 'normal'}.png\"\n+                )\n+            )\n             assert page.evaluate(\"document.documentElement.scrollWidth\") <= width + 1\n         assert writes == [], writes\n     finally:\n",
+    "test_ast": "Only urllib.parse import and exact POST preview exemption differ. All assertions retained. Other diff is formatting.",
+    "protected_source": {
+      "src": {
+        "files": 92,
+        "byte_equal_to": "e28ab89ab7b51307bb7012f7873151ab73096eb8"
+      },
+      "deploy": {
+        "files": 40,
+        "byte_equal_to": "e28ab89ab7b51307bb7012f7873151ab73096eb8"
+      },
+      ".github/workflows": {
+        "files": 3,
+        "byte_equal_to": "e28ab89ab7b51307bb7012f7873151ab73096eb8"
+      },
+      "tests/unit": {
+        "files": 204,
+        "byte_equal_to": "e28ab89ab7b51307bb7012f7873151ab73096eb8"
+      },
+      "tests/kernel": {
+        "files": 7,
+        "byte_equal_to": "e28ab89ab7b51307bb7012f7873151ab73096eb8"
+      }
+    },
+    "classifier_matrix": [
+      {
+        "method": "GET",
+        "path": "/api/diagnostics",
+        "recorded_as_write": false
+      },
+      {
+        "method": "POST",
+        "path": "/api/profiles/ranges",
+        "recorded_as_write": false
+      },
+      {
+        "method": "PUT",
+        "path": "/api/profiles/ranges",
+        "recorded_as_write": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/profiles",
+        "recorded_as_write": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/profiles/ranges/delete",
+        "recorded_as_write": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/router/wifi",
+        "recorded_as_write": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/access-point/reset-name",
+        "recorded_as_write": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/ad-blocking",
+        "recorded_as_write": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/panic",
+        "recorded_as_write": true
+      }
+    ],
+    "actual_runs": [
+      {
+        "command": "Complete dashboard_navigation browser journey on final formatted test bytes",
+        "exit_code": 0,
+        "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-navigation-independent-mqcrz_it/independent-navigation-formatted-final.log",
+        "sha256": "724b8544f8d3780b0df1dc7dd28a369a7f5710a563d57d5cc41fd4fa621f82e8"
+      },
+      {
+        "command": "Existing read-only preview regression",
+        "exit_code": 0,
+        "passed": 1,
+        "skipped": 0,
+        "log": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-navigation-independent-mqcrz_it/independent-readonly-preview.log",
+        "sha256": "c91dad03511eb111dba9f317cdb7962c64ec389c7d259de488e167c78aac1b31"
+      }
+    ],
+    "screenshots": {
+      "diagnostics-keyboard-1440-normal.png": "cef42b1ad443f5c5ae6c473d2623667105fd7278aec8efc9caad5047eafaca1e",
+      "diagnostics-keyboard-375-large.png": "5787dab62fb7a0dbf7e36f3a55e9799ba2084c7cc89cbbb570ce0c8868e058bd",
+      "diagnostics-keyboard-375-normal.png": "9d2c1d730f2b9b223c202d0d719fee3663b04925b6cca126abea97feaf185f4f"
+    },
+    "scope": "Focused host checks only. Renewed complete final Linux sequence is required. Actual e28 failure remains incomplete."
+  },
+  "independent_review_sha256": "ec91537f20a7c627d1a49bd0964392ce2ac153b04378718ab6ea0074a37a2f62"
+}

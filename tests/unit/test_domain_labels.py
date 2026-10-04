@@ -1,0 +1,690 @@
+import pytest
+
+from jittersim.config.domain_labels import (
+    _SECOND_LEVEL,
+    _TENANT_SUFFIXES,
+    LABEL_KINDS,
+    SEEN_WITH_WINDOW_SECONDS,
+    TABLE_SOURCE,
+    group_domain,
+    label_domain,
+    registrable_domain,
+    seen_with,
+)
+from jittersim.config.models import normalize_domain
+from jittersim.config.service_catalogue import SERVICE_CATALOGUE
+
+
+@pytest.mark.parametrize(
+    ("domain", "kind", "name", "category"),
+    [
+        ("mmx-ds.cdn.whatsapp.net", "app", "WhatsApp", "Messaging"),
+        ("a1051.dscg4.akamai.net", "cdn", "Akamai", "Content delivery for many sites"),
+        ("10000.mt.eu.iot.dreame.tech", "iot", "Dreame", "Robot vacuum"),
+        ("api.header.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("osa.s24-media.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("sso.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("tenant-network.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("tracking.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("web.chatbot.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("www.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("www.static-immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("logs.dradis.netflix.com", "app", "Netflix", "Streaming"),
+        ("ipv4-c179-fra002-ix.1.oca.nflxvideo.net", "app", "Netflix", "Streaming"),
+        ("config.extension.grammarly.com", "app", "Grammarly", "Writing assistant"),
+        ("tags-eu.tiqcdn.com", "tracker", "Tealium", "Loads tracking scripts for websites"),
+        ("accounts.google.com", "system", "Google", "Google sign-in"),
+        ("e8091.e3.akamaiedge.net", "cdn", "Akamai", "Content delivery for many sites"),
+        ("smp-device-content.g.aaplimg.com", "system", "Apple", "Apple content delivery"),
+    ],
+)
+def test_real_names_from_the_dashboard(domain, kind, name, category):
+    label = label_domain(domain)
+    assert (label.kind, label.name, label.category, label.known) == (kind, name, category, True)
+
+
+def test_the_longest_suffix_wins():
+    # microsoft.com style parents must not hide a more specific entry.
+    assert label_domain("teams.microsoft.com").name == "Microsoft Teams"
+    assert label_domain("update.microsoft.com").name == "Microsoft"
+    assert label_domain("meet.google.com").name == "Google Meet"
+    assert label_domain("www.google.com").name == "Google"
+
+
+def test_an_unknown_name_shows_its_registrable_domain():
+    label = label_domain("cdn.somesmallsite.io")
+    assert (label.kind, label.name, label.category, label.known) == (
+        "unknown", "somesmallsite.io", "Unknown site", False)
+
+
+def test_the_apex_itself_matches():
+    assert label_domain("whatsapp.net").name == "WhatsApp"
+
+
+def test_a_name_is_normalized_before_matching():
+    assert label_domain("MMX-DS.CDN.WhatsApp.net.").name == "WhatsApp"
+
+
+@pytest.mark.parametrize(
+    ("domain", "expected"),
+    [
+        ("a.b.c.example.com", "example.com"),
+        ("example.com", "example.com"),
+        ("a.b.example.co.uk", "example.co.uk"),
+        ("x.example.com.au", "example.com.au"),
+        ("localhost", "localhost"),
+        ("deep.sub.immobilienscout24.de", "immobilienscout24.de"),
+    ],
+)
+def test_registrable_domain(domain, expected):
+    assert registrable_domain(domain) == expected
+
+
+def test_the_table_is_clean():
+    suffixes = [entry[0] for entry in TABLE_SOURCE]
+    assert len(suffixes) == len(set(suffixes)), "duplicate suffix in the label table"
+    for suffix, name, kind, category in TABLE_SOURCE:
+        assert normalize_domain(suffix) == suffix
+        assert kind in LABEL_KINDS and kind != "unknown"
+        assert name.strip() and category.strip()
+
+
+def test_every_category_fits_on_the_one_line_of_its_label_chip():
+    # The dashboard shows the category in a chip that does not wrap.
+    for suffix, _, _, category in TABLE_SOURCE:
+        assert len(category) <= 40, suffix
+
+
+def test_the_obscure_vendor_names_say_in_plain_words_what_they_are():
+    # The owner had no clue what tiqcdn.com is, so the chip says what the vendor does.
+    tealium = label_domain("tags-eu.tiqcdn.com")
+    assert tealium.name == "Tealium"
+    assert "tracking" in tealium.category.lower()
+    assert "tag manager" not in tealium.category.lower()
+    assert label_domain("a.tealiumiq.com") == tealium
+    akamai = label_domain("e8091.e3.akamaiedge.net")
+    assert "content delivery" in akamai.category.lower()
+    assert "cdn" not in akamai.category.lower()
+
+
+def test_every_catalogue_hostname_is_in_the_table_as_an_app():
+    by_suffix = {entry[0]: entry for entry in TABLE_SOURCE}
+    for service in SERVICE_CATALOGUE:
+        for domain in service.domains:
+            _, name, kind, category = by_suffix[domain]
+            assert (name, kind) == (service.name, "app")
+            assert category != "Online service", service.key
+
+
+def test_as_dict_has_four_keys():
+    assert set(label_domain("whatsapp.net").as_dict()) == {"kind", "name", "category", "known"}
+
+
+def test_a_shared_name_is_seen_with_the_app_at_the_same_time():
+    pairs = [("mmx-ds.cdn.whatsapp.net", 100), ("a1051.dscg4.akamai.net", 100)]
+    assert seen_with(pairs) == {"a1051.dscg4.akamai.net": ["WhatsApp"]}
+
+
+def test_the_window_edge():
+    inside = [("whatsapp.net", 100), ("a.akamai.net", 100 + SEEN_WITH_WINDOW_SECONDS)]
+    outside = [("whatsapp.net", 100), ("a.akamai.net", 101 + SEEN_WITH_WINDOW_SECONDS)]
+    assert seen_with(inside) == {"a.akamai.net": ["WhatsApp"]}
+    assert seen_with(outside) == {}
+
+
+def test_the_window_counts_in_both_directions():
+    pairs = [("a.akamai.net", 100), ("whatsapp.net", 100 + SEEN_WITH_WINDOW_SECONDS)]
+    assert seen_with(pairs) == {"a.akamai.net": ["WhatsApp"]}
+
+
+def test_trackers_and_unknown_names_get_a_hint_but_apps_do_not():
+    pairs = [
+        ("sso.immobilienscout24.de", 5),
+        ("tags-eu.tiqcdn.com", 5),
+        ("cdn.somesmallsite.io", 5),
+    ]
+    assert seen_with(pairs) == {
+        "tags-eu.tiqcdn.com": ["ImmoScout24"],
+        "cdn.somesmallsite.io": ["ImmoScout24"],
+    }
+
+
+def test_system_and_smart_home_names_are_neither_hinted_nor_used_as_hints():
+    pairs = [("10000.mt.eu.iot.dreame.tech", 5), ("www.apple.com", 5), ("a.akamai.net", 5)]
+    assert seen_with(pairs) == {}
+
+
+def test_too_many_apps_at_once_gives_no_hint():
+    pairs = [("whatsapp.net", 1), ("netflix.com", 1), ("spotify.com", 1), ("a.akamai.net", 1)]
+    assert seen_with(pairs) == {}
+
+
+def test_two_names_of_one_app_count_once_and_nearest_first():
+    pairs = [
+        ("a.whatsapp.net", 3), ("b.whatsapp.net", 4), ("netflix.com", 9), ("x.akamai.net", 5),
+    ]
+    assert seen_with(pairs) == {"x.akamai.net": ["WhatsApp", "Netflix"]}
+
+
+def test_two_apps_at_the_same_distance_sort_by_name():
+    pairs = [("netflix.com", 4), ("whatsapp.net", 6), ("x.akamai.net", 5)]
+    assert seen_with(pairs) == {"x.akamai.net": ["Netflix", "WhatsApp"]}
+
+
+def test_no_observations_gives_no_hints():
+    assert seen_with([]) == {}
+
+
+@pytest.mark.parametrize(
+    ("child", "name", "category", "parent", "parent_name"),
+    [
+        ("px.ads.linkedin.com", "LinkedIn Insight", "Advertising", "www.linkedin.com", "LinkedIn"),
+        ("snap.licdn.com", "LinkedIn Insight", "Advertising", "media.licdn.com", "LinkedIn"),
+        ("analytics.tiktok.com", "TikTok Pixel", "Advertising", "www.tiktok.com", "TikTok"),
+        ("analytics.twitter.com", "X Ads", "Advertising", "www.twitter.com", "X (Twitter)"),
+        ("pixel.facebook.com", "Meta Pixel", "Advertising", "www.facebook.com", "Facebook"),
+        ("ct.pinterest.com", "Pinterest Tag", "Advertising", "www.pinterest.com", "Pinterest"),
+        ("ads.pinterest.com", "Pinterest Tag", "Advertising", "i.pinimg.com", "Pinterest"),
+        ("bat.bing.com", "Microsoft Advertising", "Advertising", "www.bing.com", "Bing"),
+        ("adservice.google.com", "Google Ads", "Advertising", "www.google.com", "Google"),
+        ("ads.google.com", "Google Ads", "Advertising", "mail.google.com", "Gmail"),
+    ],
+)
+def test_a_tag_endpoint_under_an_app_is_a_tracker_but_the_app_stays_an_app(
+    child, name, category, parent, parent_name
+):
+    label = label_domain(child)
+    assert (label.kind, label.name, label.category, label.known) == (
+        "tracker", name, category, True)
+    assert label_domain("x." + child).kind == "tracker"
+    assert label_domain(parent).name == parent_name
+    assert label_domain(parent).kind != "tracker"
+
+
+def test_a_tag_endpoint_under_a_social_app_is_not_a_seen_with_source():
+    pairs = [("px.ads.linkedin.com", 5), ("snap.licdn.com", 5), ("a.akamai.net", 5)]
+    assert seen_with(pairs) == {}
+
+
+@pytest.mark.parametrize(
+    ("domain", "name"),
+    [
+        ("storage.googleapis.com", "Google Cloud Storage"),
+        ("my-bucket.storage.googleapis.com", "Google Cloud Storage"),
+        ("1-2-3-4.bc.googleusercontent.com", "Google Cloud"),
+    ],
+)
+def test_google_shared_platforms_are_cdn_names(domain, name):
+    label = label_domain(domain)
+    assert (label.kind, label.name, label.category) == ("cdn", name, "Cloud hosting")
+
+
+def test_the_google_parents_stay_system_names():
+    assert label_domain("www.google.com").kind == "system"
+    assert label_domain("fonts.googleapis.com").kind == "system"
+    assert label_domain("lh3.googleusercontent.com").kind == "system"
+
+
+@pytest.mark.parametrize(
+    "domain", ["amazon.com", "www.amazon.de", "m.media-amazon.com", "x.ssl-images-amazon.com"]
+)
+def test_the_amazon_apex_names_say_amazon_services(domain):
+    label = label_domain(domain)
+    assert (label.kind, label.name, label.category) == ("app", "Amazon", "Amazon services")
+
+
+def test_alexa_com_is_not_a_smart_home_name_but_the_alexa_service_is():
+    assert label_domain("alexa.com").known is False
+    label = label_domain("device-metrics-us.amazonalexa.com")
+    assert (label.kind, label.name) == ("iot", "Amazon Alexa")
+
+
+@pytest.mark.parametrize(
+    ("domain", "name"),
+    [
+        ("notwhatsapp.net", "notwhatsapp.net"),
+        ("evilwhatsapp.net", "evilwhatsapp.net"),
+        ("xt.me", "xt.me"),
+        ("whatsapp.net.evil.com", "evil.com"),
+    ],
+)
+def test_a_partial_label_never_matches(domain, name):
+    label = label_domain(domain)
+    assert (label.kind, label.name, label.known) == ("unknown", name, False)
+
+
+def test_the_nearest_name_of_an_app_decides_the_distance():
+    pairs = [("a.whatsapp.net", 100), ("b.whatsapp.net", 120), ("x.akamai.net", 118)]
+    assert seen_with(pairs) == {"x.akamai.net": ["WhatsApp"]}
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "bucket.s3.amazonaws.com",
+        "d111111abcdef8.cloudfront.net",
+        "a1051.dscg4.akamai.net",
+        "cdn.azureedge.net",
+    ],
+)
+def test_shared_hosting_names_are_cdn_names(domain):
+    assert label_domain(domain).kind == "cdn"
+
+
+@pytest.mark.parametrize("address", ["192.168.1.1", "10.0.0.7", "8.8.8.8"])
+def test_a_bare_ipv4_address_stays_whole_and_is_unknown(address):
+    assert registrable_domain(address) == address
+    label = label_domain(address)
+    assert (label.kind, label.name, label.category, label.known) == (
+        "unknown", address, "Unknown site", False)
+
+
+def test_a_name_that_only_looks_like_an_address_still_uses_the_last_two_labels():
+    assert registrable_domain("1.2.3.example.com") == "example.com"
+    assert registrable_domain("300.1.1.1") == "1.1"
+
+
+@pytest.mark.parametrize(
+    "domain", ["4.3.2.1.in-addr.arpa", "1.0.0.127.in-addr.arpa", "b.a.9.8.7.6.5.4.ip6.arpa"]
+)
+def test_reverse_lookup_names_are_system_names_and_stay_whole(domain):
+    assert registrable_domain(domain) == domain
+    label = label_domain(domain)
+    assert (label.kind, label.name, label.category, label.known) == (
+        "system", "Reverse DNS", "Reverse lookup", True)
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "co.kr", "or.kr", "com.ar", "com.tw", "com.pl", "ne.jp", "or.jp", "co.id", "co.il",
+        "com.my", "com.ph", "com.vn", "com.ua", "org.nz", "net.nz", "co.th",
+    ],
+)
+def test_more_second_level_suffixes_keep_three_labels(suffix):
+    assert registrable_domain("www.shop.example." + suffix) == "example." + suffix
+    assert registrable_domain("example." + suffix) == "example." + suffix
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "google.de", "google.co.uk", "google.fr", "google.at", "google.ch", "google.nl",
+        "google.es", "google.it", "google.pl",
+    ],
+)
+def test_google_country_domains_are_google_system_names(domain):
+    for name in (domain, "www." + domain):
+        label = label_domain(name)
+        assert (label.kind, label.name, label.category, label.known) == (
+            "system", "Google", "Google services", True)
+
+
+def test_ties_sort_case_insensitively():
+    pairs = [("ebay.com", 5), ("netflix.com", 5), ("x.akamai.net", 5)]
+    assert seen_with(pairs) == {"x.akamai.net": ["eBay", "Netflix"]}
+
+
+def test_a_tracker_is_never_seen_with_the_app_of_its_own_name():
+    pairs = [("connect.facebook.net", 5), ("www.facebook.com", 5)]
+    assert seen_with(pairs) == {}
+
+
+def test_the_own_app_is_left_out_before_the_other_apps_are_counted():
+    pairs = [("connect.facebook.net", 5), ("www.facebook.com", 5), ("netflix.com", 5)]
+    assert seen_with(pairs) == {"connect.facebook.net": ["Netflix"]}
+    two_more = pairs + [("whatsapp.net", 5)]
+    assert seen_with(two_more) == {"connect.facebook.net": ["Netflix", "WhatsApp"]}
+    crowded = two_more + [("spotify.com", 5)]
+    assert seen_with(crowded) == {}
+
+
+def test_other_trackers_still_get_the_facebook_hint():
+    pairs = [("tags-eu.tiqcdn.com", 5), ("www.facebook.com", 5)]
+    assert seen_with(pairs) == {"tags-eu.tiqcdn.com": ["Facebook"]}
+
+
+def key_and_name(domain):
+    group = group_domain(domain)
+    return {"key": group["key"], "name": group["name"]}
+
+
+def test_two_netflix_domains_share_a_group():
+    a = key_and_name("logs.dradis.netflix.com")
+    b = key_and_name("ipv4-c179-fra002-ix.1.oca.nflxvideo.net")
+    assert a == b == {"key": "label:netflix", "name": "Netflix"}
+
+
+def test_every_immoscout_name_shares_a_group():
+    names = [
+        "content.header.immobilienscout24.de",
+        "osa.s24-media.immobilienscout24.de",
+        "sso.immobilienscout24.de",
+        "tenant-network.immobilienscout24.de",
+        "tracking.immobilienscout24.de",
+        "web.chatbot.immobilienscout24.de",
+        "api.header.immobilienscout24.de",
+        "www.immobilienscout24.de",
+        # A separate registered domain of the same company.
+        "www.static-immobilienscout24.de",
+    ]
+    assert {group_domain(name)["key"] for name in names} == {"label:immoscout24"}
+
+
+def test_sign_in_stays_in_the_google_group_and_says_what_it_is():
+    sign_in = group_domain("accounts.google.com")
+    assert sign_in == group_domain("www.google.com")
+    assert sign_in == {"key": "label:google", "name": "Google", "kind": "system"}
+
+
+def test_the_screenshot_names_get_the_right_group():
+    assert key_and_name("e8091.e3.akamaiedge.net") == {
+        "key": "domain:akamaiedge.net", "name": "akamaiedge.net"}
+    assert group_domain("e8091.e3.akamaiedge.net")["kind"] == "cdn"
+    assert key_and_name("smp-device-content.g.aaplimg.com") == {
+        "key": "label:apple", "name": "Apple"}
+    assert group_domain("smp-device-content.g.aaplimg.com")["kind"] == "system"
+
+
+def test_shared_infrastructure_groups_by_registrable_domain():
+    assert key_and_name("a1051.dscg4.akamai.net") == {
+        "key": "domain:akamai.net", "name": "akamai.net"}
+    assert key_and_name("tags-eu.tiqcdn.com") == {
+        "key": "domain:tiqcdn.com", "name": "tiqcdn.com"}
+
+
+def test_unknown_names_group_by_registrable_domain():
+    assert key_and_name("a.b.somesmallsite.co.uk") == {
+        "key": "domain:somesmallsite.co.uk", "name": "somesmallsite.co.uk"}
+
+
+# The tests walk the real tables so a suffix that is added or dropped is pinned at once.
+# A two-part public suffix keeps the registered name left of it so two sites never merge.
+TWO_PART_SUFFIXES = sorted(_SECOND_LEVEL)
+# A hosting suffix where every tenant is a different owner so the tenant label stays.
+TENANT_SUFFIXES = sorted(_TENANT_SUFFIXES)
+
+
+# The tables above are walked as they are. These lists are written out so that dropping an entry
+# from a table fails a test instead of shrinking the walk.
+PINNED_TWO_PART_SUFFIXES = [
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp",
+    "co.in", "com.br", "com.mx", "co.za", "com.tr", "com.cn", "com.hk", "com.sg",
+    "co.kr", "or.kr", "com.ar", "com.tw", "com.pl", "ne.jp", "or.jp", "co.id", "co.il",
+    "com.my", "com.ph", "com.vn", "com.ua", "org.nz", "net.nz", "co.th",
+    "co.at", "or.at", "com.co", "com.pe", "com.ve", "co.ve", "com.ec", "com.uy", "com.pk",
+    "com.bd", "com.ng", "com.eg", "com.sa", "co.ke", "com.gh", "co.tz", "net.cn", "org.cn",
+    "gov.cn", "edu.au", "gov.au", "ac.nz", "govt.nz", "ac.jp", "go.jp", "gr.jp", "com.pt",
+    "com.gr", "com.ro", "com.es", "com.fr", "co.hu", "com.ru",
+    "gov.br", "org.br", "net.br", "edu.br", "sch.uk", "nhs.uk", "ltd.uk", "me.uk", "edu.sg",
+    "edu.my", "ed.jp", "gv.at",
+]
+PINNED_TENANT_SUFFIXES = [
+    "github.io", "gitlab.io", "herokuapp.com", "vercel.app", "netlify.app", "pages.dev",
+    "workers.dev", "web.app", "firebaseapp.com", "appspot.com", "azurewebsites.net",
+    "blogspot.com", "wordpress.com", "onrender.com", "fly.dev", "myshopify.com",
+    "cloudfront.net", "trafficmanager.net", "azureedge.net", "akamaized.net", "b-cdn.net",
+]
+
+
+@pytest.mark.parametrize("suffix", PINNED_TWO_PART_SUFFIXES)
+def test_every_pinned_two_part_suffix_keeps_two_sibling_sites_apart(suffix):
+    assert suffix in _SECOND_LEVEL
+    assert group_domain("www.alpha." + suffix)["key"] == "domain:alpha." + suffix
+    assert group_domain("www.beta." + suffix)["key"] == "domain:beta." + suffix
+
+
+@pytest.mark.parametrize("suffix", PINNED_TENANT_SUFFIXES)
+def test_every_pinned_hosting_suffix_keeps_two_tenants_apart(suffix):
+    assert suffix in _TENANT_SUFFIXES
+    assert group_domain("api.alpha." + suffix)["key"] == "domain:alpha." + suffix
+    assert group_domain("api.beta." + suffix)["key"] == "domain:beta." + suffix
+
+
+def test_the_tables_hold_nothing_that_is_not_pinned():
+    assert set(PINNED_TWO_PART_SUFFIXES) == set(_SECOND_LEVEL)
+    assert set(PINNED_TENANT_SUFFIXES) == set(_TENANT_SUFFIXES)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("www.gov.br", "www.org.br"),
+        ("a.alpha.gov.br", "a.beta.gov.br"),
+        ("a.alpha.org.br", "a.beta.org.br"),
+        ("a.alpha.net.br", "a.beta.net.br"),
+        ("a.alpha.edu.br", "a.beta.edu.br"),
+        ("a.alpha.sch.uk", "a.beta.sch.uk"),
+        ("a.alpha.nhs.uk", "a.beta.nhs.uk"),
+        ("a.alpha.ltd.uk", "a.beta.ltd.uk"),
+        ("a.alpha.me.uk", "a.beta.me.uk"),
+        ("a.alpha.edu.sg", "a.beta.edu.sg"),
+        ("a.alpha.edu.my", "a.beta.edu.my"),
+        ("a.alpha.ed.jp", "a.beta.ed.jp"),
+        ("a.alpha.gv.at", "a.beta.gv.at"),
+    ],
+)
+def test_the_added_suffixes_keep_unrelated_sites_apart(first, second):
+    assert group_domain(first)["key"] != group_domain(second)["key"]
+    assert registrable_domain("a." + first) == registrable_domain("b." + first)
+
+
+@pytest.mark.parametrize("suffix", TWO_PART_SUFFIXES)
+def test_names_under_a_two_part_suffix_keep_their_registered_name(suffix):
+    assert registrable_domain("www.alpha." + suffix) == "alpha." + suffix
+    assert registrable_domain("alpha." + suffix) == "alpha." + suffix
+    alpha = key_and_name("www.alpha." + suffix)
+    beta = key_and_name("www.beta." + suffix)
+    assert alpha == {"key": "domain:alpha." + suffix, "name": "alpha." + suffix}
+    assert alpha["key"] != beta["key"]
+
+
+@pytest.mark.parametrize("suffix", TENANT_SUFFIXES)
+def test_tenants_of_a_shared_host_are_different_groups(suffix):
+    alpha = key_and_name("api.alpha." + suffix)
+    beta = key_and_name("api.beta." + suffix)
+    assert alpha == {"key": "domain:alpha." + suffix, "name": "alpha." + suffix}
+    assert beta["key"] == "domain:beta." + suffix
+    assert group_domain("alpha." + suffix)["key"] == alpha["key"]
+
+
+@pytest.mark.parametrize("suffix", TWO_PART_SUFFIXES + TENANT_SUFFIXES)
+def test_a_name_that_is_only_a_suffix_is_not_grouped_with_anything(suffix):
+    assert key_and_name(suffix) == {"key": "domain:" + suffix, "name": suffix}
+    assert registrable_domain(suffix) == suffix
+
+
+def test_no_hosting_suffix_is_nested_in_another_one():
+    # With no nesting the longest match never has to beat a shorter one.
+    for suffix in TENANT_SUFFIXES:
+        parents = [other for other in TENANT_SUFFIXES if suffix.endswith("." + other)]
+        assert parents == [], suffix
+
+
+def test_the_cdn_edges_where_the_customer_is_not_next_to_the_suffix_are_not_tenant_hosts():
+    # The customer label is not directly left of these so a tenant rule would pick a wrong label.
+    assert "fastly.net" not in _TENANT_SUFFIXES
+    assert "edgekey.net" not in _TENANT_SUFFIXES
+    assert registrable_domain("b.global.ssl.fastly.net") == "fastly.net"
+    assert registrable_domain("www.example.com.edgekey.net") == "edgekey.net"
+    assert key_and_name("b.global.ssl.fastly.net")["key"] == "domain:fastly.net"
+    assert key_and_name("www.example.com.edgekey.net")["key"] == "domain:edgekey.net"
+    assert group_domain("b.global.ssl.fastly.net")["kind"] == "cdn"
+
+
+# Real Amazon hostnames carry a region. Each row is two names of one customer then a name of
+# another customer and the key that the first customer gets.
+AWS_CUSTOMERS = [
+    (
+        "photos-prod.s3.amazonaws.com",
+        "photos-prod.s3.eu-west-1.amazonaws.com",
+        "backups-eu.s3.amazonaws.com",
+        "domain:photos-prod.s3.amazonaws.com",
+    ),
+    (
+        "photos-prod.s3.us-west-2.amazonaws.com",
+        "photos-prod.s3-eu-west-1.amazonaws.com",
+        "backups-eu.s3.us-west-2.amazonaws.com",
+        "domain:photos-prod.s3.amazonaws.com",
+    ),
+    (
+        "photos-prod.s3.dualstack.us-east-1.amazonaws.com",
+        "photos-prod.s3-us-west-1.amazonaws.com",
+        "backups-eu.s3.dualstack.us-east-1.amazonaws.com",
+        "domain:photos-prod.s3.amazonaws.com",
+    ),
+    (
+        "abc123xyz0.execute-api.eu-west-1.amazonaws.com",
+        "abc123xyz0.execute-api.us-east-1.amazonaws.com",
+        "def456uvw1.execute-api.eu-west-1.amazonaws.com",
+        "domain:abc123xyz0.execute-api.amazonaws.com",
+    ),
+    (
+        "my-lb-1234567890.eu-west-1.elb.amazonaws.com",
+        "my-lb-1234567890.us-east-1.elb.amazonaws.com",
+        "other-lb-9876543210.eu-west-1.elb.amazonaws.com",
+        "domain:my-lb-1234567890.elb.amazonaws.com",
+    ),
+    (
+        "internal-api-lb-111222333.eu-west-1.elb.amazonaws.com",
+        "internal-api-lb-111222333.us-west-2.elb.amazonaws.com",
+        "internal-web-lb-444555666.eu-west-1.elb.amazonaws.com",
+        "domain:internal-api-lb-111222333.elb.amazonaws.com",
+    ),
+    (
+        "my-nlb-0123456789abcdef.elb.us-east-1.amazonaws.com",
+        "my-nlb-0123456789abcdef.elb.eu-west-1.amazonaws.com",
+        "other-nlb-fedcba9876543210.elb.us-east-1.amazonaws.com",
+        "domain:my-nlb-0123456789abcdef.elb.amazonaws.com",
+    ),
+    (
+        "ec2-1-2-3-4.eu-west-1.compute.amazonaws.com",
+        "ec2-1-2-3-4.compute-1.amazonaws.com",
+        "ec2-5-6-7-8.eu-west-1.compute.amazonaws.com",
+        "domain:ec2-1-2-3-4.compute.amazonaws.com",
+    ),
+    (
+        "ec2-52-10-20-30.us-west-2.compute.amazonaws.com",
+        "ec2-52-10-20-30.compute-1.amazonaws.com",
+        "ec2-52-10-20-31.us-west-2.compute.amazonaws.com",
+        "domain:ec2-52-10-20-30.compute.amazonaws.com",
+    ),
+]
+
+
+@pytest.mark.parametrize(("first", "same", "other", "key"), AWS_CUSTOMERS)
+def test_amazon_names_keep_their_customer_and_drop_the_region(first, same, other, key):
+    assert group_domain(first)["key"] == key
+    assert group_domain(same)["key"] == key
+    assert group_domain(other)["key"] != key
+    assert group_domain(first)["kind"] == "cdn"
+
+
+def test_a_dotted_bucket_name_stays_whole():
+    whole = "my.bucket.name.s3.amazonaws.com"
+    assert registrable_domain(whole) == whole
+    assert registrable_domain("my.bucket.other.s3.eu-west-1.amazonaws.com") == (
+        "my.bucket.other.s3.amazonaws.com"
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "sqs.us-east-1.amazonaws.com",
+        "dynamodb.eu-west-1.amazonaws.com",
+        "s3.us-west-2.amazonaws.com",
+        "s3.amazonaws.com",
+        "elb.amazonaws.com",
+        "ec2.eu-west-1.amazonaws.com",
+        "cognito-idp.us-east-1.amazonaws.com",
+        "x.y.amazonaws.com",
+    ],
+)
+def test_other_amazon_names_keep_the_two_label_result(name):
+    assert registrable_domain(name) == "amazonaws.com"
+
+
+def test_the_korean_shops_from_the_review_are_different_groups():
+    coupang = group_domain("www.coupang.co.kr")
+    naver = group_domain("www.naver.co.kr")
+    assert coupang["key"] == "domain:coupang.co.kr"
+    assert naver["key"] == "domain:naver.co.kr"
+
+
+def test_two_github_pages_and_two_heroku_apps_are_different_groups():
+    assert group_domain("a.github.io")["key"] == "domain:a.github.io"
+    assert group_domain("b.github.io")["key"] == "domain:b.github.io"
+    assert group_domain("foo.herokuapp.com")["key"] != group_domain("bar.herokuapp.com")["key"]
+
+
+def test_deeper_names_under_a_tenant_still_belong_to_that_tenant():
+    assert registrable_domain("a.b.c.herokuapp.com") == "c.herokuapp.com"
+    assert registrable_domain("d111abcdef8.cloudfront.net") == "d111abcdef8.cloudfront.net"
+    assert registrable_domain("x.d111abcdef8.cloudfront.net") == "d111abcdef8.cloudfront.net"
+
+
+def test_a_known_label_still_wins_over_the_registrable_grouping():
+    assert group_domain("logs.dradis.netflix.com")["key"] == "label:netflix"
+    assert group_domain("www.google.com")["key"] == "label:google"
+    assert group_domain("api.header.immobilienscout24.de")["key"] == "label:immoscout24"
+
+
+def test_an_unknown_tenant_is_labelled_with_its_tenant_name():
+    label = label_domain("foo.herokuapp.com")
+    assert (label.known, label.name) == (False, "foo.herokuapp.com")
+
+
+@pytest.mark.parametrize(
+    ("domain", "kind"),
+    [
+        ("logs.dradis.netflix.com", "app"),
+        ("config.extension.grammarly.com", "app"),
+        ("www.google.com", "system"),
+        ("connectivitycheck.gstatic.com", "system"),
+        ("www.msftncsi.com", "system"),
+        ("gateway.icloud.com", "system"),
+        ("10000.mt.eu.iot.dreame.tech", "iot"),
+        ("a1051.dscg4.akamai.net", "cdn"),
+        ("d111abcdef8.cloudfront.net", "cdn"),
+        ("tags-eu.tiqcdn.com", "tracker"),
+        ("cdn.somesmallsite.io", "unknown"),
+        ("a.b.somesmallsite.co.uk", "unknown"),
+        ("co.kr", "unknown"),
+    ],
+)
+def test_the_group_carries_the_label_kind_of_the_name(domain, kind):
+    assert group_domain(domain)["kind"] == kind
+
+
+def test_the_group_of_an_app_is_the_whole_object():
+    assert group_domain("logs.dradis.netflix.com") == {
+        "key": "label:netflix", "name": "Netflix", "kind": "app"}
+    assert group_domain("tags-eu.tiqcdn.com") == {
+        "key": "domain:tiqcdn.com", "name": "tiqcdn.com", "kind": "tracker"}
+
+
+# What survives when one grouping rule is taken away. System and iot names group by their label
+# and a tie in the query count breaks by the name without looking at the case.
+def test_system_names_group_by_their_label():
+    assert key_and_name("www.google.com") == {"key": "label:google", "name": "Google"}
+    assert key_and_name("clients4.google.com")["key"] == "label:google"
+    assert key_and_name("gateway.icloud.com") == {"key": "label:icloud", "name": "iCloud"}
+    assert key_and_name("init.itunes.apple.com")["key"] == "label:apple"
+    assert key_and_name("a.apple.com")["key"] == "label:apple"
+    assert key_and_name("connectivitycheck.gstatic.com")["key"] == "label:google"
+    assert key_and_name("www.msftncsi.com") == {"key": "label:windows", "name": "Windows"}
+
+
+def test_iot_names_group_by_their_label():
+    assert key_and_name("10000.mt.eu.iot.dreame.tech") == {
+        "key": "label:dreame", "name": "Dreame"}
+    assert key_and_name("other.dreame.tech")["key"] == "label:dreame"
+    assert key_and_name("a.meethue.com") == {"key": "label:philips hue", "name": "Philips Hue"}
+
+
+def test_cdn_and_tracker_names_never_group_by_their_label():
+    # Two sites behind one CDN or one tag manager are not one app.
+    assert key_and_name("a.akamaihd.net")["key"] == "domain:akamaihd.net"
+    assert key_and_name("tags.tiqcdn.com")["key"] == "domain:tiqcdn.com"
+    assert key_and_name("www.google-analytics.com")["key"] == "domain:google-analytics.com"

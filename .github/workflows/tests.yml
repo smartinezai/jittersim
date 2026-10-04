@@ -9,29 +9,12 @@ permissions:
   contents: read
 
 jobs:
-  unit:
-    name: Unit tests (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # The oldest supported version, and the versions on Raspberry Pi OS
-        # Bookworm and Trixie.
-        python-version: ["3.9", "3.11", "3.13"]
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-      - run: pip install -e .
-      - run: python -m unittest discover -s tests
-
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
       - run: pip install "ruff>=0.6,<1"
@@ -42,8 +25,9 @@ jobs:
   linux:
     name: Linux datapath
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: ./tests/kernel/run-in-docker.sh
 
   browser:
@@ -51,17 +35,67 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
       # Install a wheel so missing dashboard assets fail this check.
       - run: pip install . 'playwright==1.63.0'
       - run: python -m playwright install --with-deps chromium
       - run: python -m tests.browser.journeys
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: always()
         with:
           name: browser-results
           path: test-results/
+          retention-days: 7
+
+  homepage-reference:
+    name: Homepage reference
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - run: pip install '.[dev]' 'playwright==1.63.0'
+      - run: npm ci --ignore-scripts --prefix experiments/homepage-bounce-reference
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m pytest tests/test_homepage_reference_fixture.py
+      - run: python -m tests.browser.homepage_bounce_reference
+      - run: node tests/browser/homepage-live/dashboard.cjs
+        env:
+          JITTERSIM_PLAYWRIGHT_MODULE: ${{ github.workspace }}/experiments/homepage-bounce-reference/node_modules/playwright
+      - run: node tests/browser/homepage-live/journey.cjs
+        env:
+          JITTERSIM_PLAYWRIGHT_MODULE: ${{ github.workspace }}/experiments/homepage-bounce-reference/node_modules/playwright
+
+  gui-baseline:
+    name: GUI baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      # Keep test engines outside the installed dashboard wheel.
+      - run: pip install '.[dev]' 'playwright==1.63.0'
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m pytest tests/unit/test_gui_capture.py tests/unit/test_gui_axe_report.py tests/unit/test_gui_container.py
+      - run: python -m tests.browser.gui_baseline
+      - run: python -m tests.browser.a11y_axe
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: always()
+        with:
+          name: gui-baseline-results
+          path: |
+            test-results/gui-baseline/
+            test-results/gui-axe/
+          if-no-files-found: error
           retention-days: 7

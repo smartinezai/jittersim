@@ -1,5 +1,7 @@
+import logging
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import replace
 from datetime import datetime
@@ -7,6 +9,7 @@ from ipaddress import IPv4Address
 from pathlib import Path
 from unittest.mock import patch
 
+from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import (
     DataLimit,
     Device,
@@ -24,14 +27,15 @@ from jittersim.config.models import (
     ServiceQuota,
     TimeQuota,
     Timer,
-    UnaffectedDevice,
     time_quota_counter_id,
 )
 from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import PlanError
+from jittersim.engine.randomizer import reroll_profile, seeded_generator
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClientError
+from tests.helper_support import OldHelperService, captures, serving
 
 
 class RecordingHelper:
@@ -39,6 +43,7 @@ class RecordingHelper:
         self.plans = []
         self.resets = 0
         self.observations = []
+        self.excluded_macs_seen = []
         self.counters = {"devices": {}, "services": {}}
 
     def apply(self, *, plan):
@@ -49,7 +54,8 @@ class RecordingHelper:
         self.resets += 1
         return {"commands_run": 1}
 
-    def observe_dns_queries(self):
+    def observe_dns_queries(self, excluded_macs=()):
+        self.excluded_macs_seen.append(list(excluded_macs))
         return self.observations
 
     def traffic_counters(self):
@@ -96,6 +102,18 @@ class RuntimeSchedulerTests(unittest.TestCase):
             Device("alice", "Alice", "192.168.50.10", profile.id)
         )
 
+    def test_is_active_follows_activate_and_pause(self) -> None:
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        try:
+            self.assertFalse(scheduler.is_active)
+
+            scheduler.activate(applied_payload={})
+            self.assertTrue(scheduler.is_active)
+
+            scheduler.pause()
+            self.assertFalse(scheduler.is_active)
+        finally:
+            scheduler.stop()
     def test_confirmed_source_and_next_step_survive_unsaved_preview(self) -> None:
         self._save_device(Profile("normal", "Normal"))
         self.repository.save_profile(Profile("slow", "Slow"))
@@ -242,6 +260,77 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.assertFalse(scheduler.tick(repository=self.repository, now=30))
         self.assertTrue(scheduler.tick(repository=self.repository, now=61))
         self.assertEqual(len(self.helper.plans), 2)
+
+    def test_preview_is_pure_and_tick_records_choices_without_plan_change(self) -> None:
+        profile = Profile(
+            id="website-random",
+            name="Random websites",
+            reroll_interval_seconds=10,
+            random_seed=42,
+            website_mode="allow_only",
+            website_domains=tuple(f"site-{index}.example" for index in range(20)),
+            website_randomness=Randomness(enabled_probability=50),
+        )
+        self._save_device(profile)
+        scheduler = RuntimeScheduler(
+            database_path=":memory:",
+            helper_client=self.helper,
+        )
+        scheduler._paused = False
+        scheduler._current_payload = {}
+
+        self.assertTrue(scheduler.tick(repository=self.repository, now=100))
+        initial_state = scheduler._rolls["alice"]
+        initial_roll = (
+            initial_state.roll_number,
+            initial_state.next_roll_at,
+            initial_state.runtime_profile.website_domains,
+        )
+
+        scheduler.build_plan(repository=self.repository, now=111)
+
+        preview_state = scheduler._rolls["alice"]
+        self.assertEqual(
+            (
+                preview_state.roll_number,
+                preview_state.next_roll_at,
+                preview_state.runtime_profile.website_domains,
+            ),
+            initial_roll,
+        )
+        self.assertEqual(
+            self.repository.list_random_website_analytics(now=111, days=1)["rows"],
+            [],
+        )
+
+        expected_choices = []
+        expected_profile = reroll_profile(
+            profile=profile,
+            generator=seeded_generator(
+                profile=profile,
+                device_id="alice",
+                roll_number=0,
+            ),
+            website_outcomes=expected_choices,
+        )
+        self.assertNotEqual(expected_profile.website_domains, profile.website_domains)
+        self.assertFalse(scheduler.tick(repository=self.repository, now=111))
+        report = self.repository.list_random_website_analytics(now=111, days=1)
+        actual_counts = {
+            row["domain"]: (row["kept_count"], row["removed_count"])
+            for row in report["rows"]
+        }
+        expected_counts = {
+            domain: (int(kept), int(not kept))
+            for domain, kept in expected_choices
+        }
+
+        self.assertEqual(actual_counts, expected_counts)
+        self.assertEqual(
+            scheduler._rolls["alice"].runtime_profile.website_domains,
+            expected_profile.website_domains,
+        )
+        self.assertEqual(scheduler._rolls["alice"].roll_number, 1)
 
     def test_applied_queue_limits_read_only_the_last_successful_plan(self) -> None:
         payload = {
@@ -521,6 +610,230 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         scheduler.tick(repository=self.repository, now=100)
         self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 1_000)
+
+    def _traffic_progression_for_bob(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(
+            Profile(id="degraded", name="Degraded", download=Impairment(delay_ms=1_000))
+        )
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "normal"))
+        self.repository.save_progression(
+            Progression(
+                id="query-driven",
+                device_id="bob",
+                start_profile_id="normal",
+                end_profile_id="degraded",
+                started_at=100,
+                duration_seconds=1_000,
+                mode="traffic",
+                traffic_target_queries=2,
+            )
+        )
+        self.helper.observations = [
+            {"ipv4_address": "192.168.50.10", "domain": "private.example", "query_count": 3},
+            {"ipv4_address": "192.168.50.30", "domain": "live.example", "query_count": 4},
+            {"ipv4_address": "192.168.50.11", "domain": "example.com", "query_count": 2},
+        ]
+
+    def test_traffic_sampling_leaves_protected_clients_out(self) -> None:
+        protected = "02:00:00:00:00:01"
+        self._traffic_progression_for_bob()
+        self.repository.save_device(
+            Device("alice", "Alice", "192.168.50.10", "normal", mac_address=protected)
+        )
+        self.repository.save_unaffected_device(UnaffectedDevice(protected, "Alice", 1))
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        self.assertEqual(self.helper.excluded_macs_seen, [[protected]])
+        stored = {
+            str(item.ipv4_address) for item in self.repository.list_domain_observations()
+        }
+        self.assertNotIn("192.168.50.10", stored)
+        self.assertIn("192.168.50.11", stored)
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.10"), 0)
+
+    def test_traffic_sampling_drops_a_protected_station_that_is_not_saved(self) -> None:
+        protected = "02:00:00:00:00:01"
+
+        class WithStation(RecordingHelper):
+            def connected_device_snapshot(self):
+                return {
+                    "devices": [
+                        {"mac_address": protected, "ipv4_address": "192.168.50.30"},
+                        {"mac_address": "02:00:00:00:00:02", "ipv4_address": "192.168.50.11"},
+                    ],
+                    "association_status_available": True,
+                }
+
+        self.helper = WithStation()
+        self._traffic_progression_for_bob()
+        self.repository.save_unaffected_device(UnaffectedDevice(protected, "Phone", 1))
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        stored = {
+            str(item.ipv4_address) for item in self.repository.list_domain_observations()
+        }
+        self.assertNotIn("192.168.50.30", stored)
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.30"), 0)
+        self.assertIn("192.168.50.11", stored)
+
+    def test_traffic_sampling_records_the_hardware_address_of_each_client(self) -> None:
+        class WithStations(RecordingHelper):
+            def connected_device_snapshot(self):
+                return {
+                    "devices": [
+                        {"mac_address": "02:00:00:00:00:02", "ipv4_address": "192.168.50.11"},
+                        {"mac_address": "02:00:00:00:00:03", "ipv4_address": "192.168.50.30"},
+                    ],
+                    "association_status_available": True,
+                }
+
+        self.helper = WithStations()
+        self._traffic_progression_for_bob()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        stored = {
+            str(item.ipv4_address): item.mac_address
+            for item in self.repository.list_domain_observations()
+        }
+        self.assertEqual(
+            stored,
+            {
+                "192.168.50.10": None,
+                "192.168.50.11": "02:00:00:00:00:02",
+                "192.168.50.30": "02:00:00:00:00:03",
+            },
+        )
+
+    def test_traffic_sampling_drops_a_protected_client_that_the_snapshot_names_in_capitals(
+        self,
+    ) -> None:
+        class WithStation(RecordingHelper):
+            def connected_device_snapshot(self):
+                return {
+                    "devices": [
+                        {"mac_address": "DC:1E:D5:3E:97:4C", "ipv4_address": "192.168.50.30"},
+                    ],
+                    "association_status_available": True,
+                }
+
+        self.helper = WithStation()
+        self._traffic_progression_for_bob()
+        self.repository.save_device(
+            Device("phone", "Phone", "192.168.50.50", "normal", mac_address="dc:1e:d5:3e:97:4c")
+        )
+        self.repository.save_unaffected_device(UnaffectedDevice("dc:1e:d5:3e:97:4c", "Phone", 1))
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        stored = {str(item.ipv4_address) for item in self.repository.list_domain_observations()}
+        self.assertEqual(stored, {"192.168.50.10", "192.168.50.11"})
+
+    def test_traffic_sampling_records_a_capital_snapshot_address_in_its_normal_form(self) -> None:
+        class WithStation(RecordingHelper):
+            def connected_device_snapshot(self):
+                return {
+                    "devices": [
+                        {"mac_address": "DC:1E:D5:3E:97:4C", "ipv4_address": "192.168.50.30"},
+                    ],
+                    "association_status_available": True,
+                }
+
+        self.helper = WithStation()
+        self._traffic_progression_for_bob()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        stored = {
+            str(item.ipv4_address): item.mac_address
+            for item in self.repository.list_domain_observations()
+        }
+        self.assertEqual(stored["192.168.50.30"], "dc:1e:d5:3e:97:4c")
+
+    def test_traffic_sampling_never_captures_through_an_old_helper(self) -> None:
+        protected = "02:00:00:00:00:01"
+        self._traffic_progression_for_bob()
+        self.repository.save_unaffected_device(UnaffectedDevice(protected, "Phone", 1))
+        with serving(OldHelperService) as (client, executor):
+            scheduler = RuntimeScheduler(database_path=":memory:", helper_client=client)
+
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=100)
+
+            self.assertEqual(captures(executor), [])
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_a_refusing_helper_is_reported_once_and_without_a_traceback(self) -> None:
+        class Refusing(RecordingHelper):
+            def __init__(self) -> None:
+                super().__init__()
+                self.message = "The networking helper is out of date."
+
+            def observe_dns_queries(self, excluded_macs=()):
+                raise HelperClientError(self.message)
+
+        self.helper = Refusing()
+        self._traffic_progression_for_bob()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+
+        with self.assertLogs("jittersim.engine.runtime", level="WARNING") as logs:
+            for now in (100, 106, 112, 118):
+                scheduler._sample_traffic_if_needed(repository=self.repository, now=now)
+            self.helper.message = "The networking helper is busy."
+            for now in (124, 130):
+                scheduler._sample_traffic_if_needed(repository=self.repository, now=now)
+
+        self.assertEqual(len(logs.records), 2)
+        self.assertIn("out of date", logs.records[0].getMessage())
+        self.assertIn("busy", logs.records[1].getMessage())
+        self.assertFalse(any(record.exc_info for record in logs.records))
+
+    def test_a_refusal_is_reported_again_after_a_successful_sample(self) -> None:
+        class Flaky(RecordingHelper):
+            def __init__(self) -> None:
+                super().__init__()
+                self.fail = True
+
+            def observe_dns_queries(self, excluded_macs=()):
+                if self.fail:
+                    raise HelperClientError("The networking helper is busy.")
+                return []
+
+        self.helper = Flaky()
+        self._traffic_progression_for_bob()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+
+        with self.assertLogs("jittersim.engine.runtime", level="WARNING") as logs:
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=100)
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=106)
+            self.helper.fail = False
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=112)
+            self.helper.fail = True
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=118)
+
+        self.assertEqual(len(logs.records), 2)
+
+    def test_traffic_sampling_without_protected_clients_passes_an_empty_list(self) -> None:
+        self._traffic_progression_for_bob()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        self.assertEqual(self.helper.excluded_macs_seen, [[]])
+        self.assertEqual(len(self.repository.list_domain_observations()), 3)
 
     def test_byte_progression_advances_with_streaming_and_survives_counter_reset(self) -> None:
         normal = Profile(id="normal", name="Normal")
@@ -849,14 +1162,14 @@ class RuntimeSchedulerTests(unittest.TestCase):
             )
         )
         scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
-        scheduler.build_plan(repository=self.repository, now=0)
+        scheduler.prepare_plan(repository=self.repository, now=0)
 
         # Each build after the first runs one outage check.
         outcomes = {
             bool(
-                scheduler.build_plan(
+                scheduler.prepare_plan(
                     repository=self.repository, now=second
-                ).blocked_device_addresses
+                ).plan.blocked_device_addresses
             )
             for second in range(2, 80, 2)
         }
@@ -1089,8 +1402,8 @@ class EveryoneElseSchedulingTests(unittest.TestCase):
         )
         self.repository.save_everyone_else_profile_id("flaky")
 
-        first = self.scheduler.build_plan(repository=self.repository, now=1_000)
-        later = self.scheduler.build_plan(repository=self.repository, now=1_011)
+        first = self.scheduler.prepare_plan(repository=self.repository, now=1_000).plan
+        later = self.scheduler.prepare_plan(repository=self.repository, now=1_011).plan
 
         self.assertFalse(first.everyone_else.blocked)
         self.assertTrue(later.everyone_else.blocked)
@@ -1105,8 +1418,8 @@ class EveryoneElseSchedulingTests(unittest.TestCase):
         )
         self.repository.save_profile(profile)
         self.repository.save_everyone_else_profile_id("flaky")
-        self.scheduler.build_plan(repository=self.repository, now=1_000)
-        plan = self.scheduler.build_plan(repository=self.repository, now=1_011)
+        self.scheduler.prepare_plan(repository=self.repository, now=1_000)
+        plan = self.scheduler.prepare_plan(repository=self.repository, now=1_011).plan
         self.assertTrue(plan.everyone_else.blocked)
         return profile
 
@@ -1114,7 +1427,7 @@ class EveryoneElseSchedulingTests(unittest.TestCase):
         profile = self._start_an_everyone_else_outage()
         self.repository.save_profile(replace(profile, upload=Impairment(delay_ms=50)))
 
-        plan = self.scheduler.build_plan(repository=self.repository, now=1_012)
+        plan = self.scheduler.prepare_plan(repository=self.repository, now=1_012).plan
 
         self.assertFalse(plan.everyone_else.blocked)
         self.assertEqual(plan.everyone_else.upload_impairment, Impairment(delay_ms=50))
@@ -1123,7 +1436,7 @@ class EveryoneElseSchedulingTests(unittest.TestCase):
         self._start_an_everyone_else_outage()
         self.scheduler.pause()
 
-        plan = self.scheduler.build_plan(repository=self.repository, now=1_012)
+        plan = self.scheduler.prepare_plan(repository=self.repository, now=1_012).plan
 
         self.assertFalse(plan.everyone_else.blocked)
 
@@ -1448,6 +1761,37 @@ class ActivityRecordingTests(unittest.TestCase):
 
         self.assertEqual(self.messages(), [])
 
+    def test_the_log_names_devices_like_the_dashboard_and_not_by_their_placeholder(self) -> None:
+        # A client saved from the connected list gets the placeholder "Client <ip>".
+        self.repository.save_device(
+            Device("laptop", "Client 192.168.50.11", "192.168.50.11", "normal",
+                   "aa:aa:aa:aa:aa:11")
+        )
+        self.repository.save_connected_device_label(
+            mac_address="aa:aa:aa:aa:aa:11", display_name="Sam laptop", device_type="laptop"
+        )
+        self.repository.save_device(
+            Device("spare", "Client 192.168.50.12", "192.168.50.12", "normal")
+        )
+        self.tick(self.BEFORE)
+        for device_id in ("laptop", "spare"):
+            self.repository.save_timer(
+                Timer(
+                    id=device_id + "-timer", device_id=device_id, profile_id="slow",
+                    started_at=int(self.BEFORE), expires_at=int(self.BEFORE) + 600,
+                )
+            )
+
+        self.tick(self.BEFORE + 1)
+
+        self.assertEqual(
+            sorted(self.messages()),
+            [
+                "Sam laptop: timer started, now Slow",
+                "Unknown device (192.168.50.12): timer started, now Slow",
+            ],
+        )
+
     def test_outages_are_recorded(self) -> None:
         self.repository.save_profile(
             Profile(
@@ -1742,6 +2086,33 @@ class DeviceAddressTests(unittest.TestCase):
             [("address", "Phone moved from 192.168.50.10 to 192.168.50.23")],
         )
 
+    def test_address_messages_name_devices_by_their_label_and_not_their_placeholder(self) -> None:
+        self.repository.save_device(
+            Device("phone", "Client 192.168.50.10", "192.168.50.10", "slow", "aa:aa:aa:aa:aa:01")
+        )
+        self.repository.save_connected_device_label(
+            mac_address="aa:aa:aa:aa:aa:01", display_name="Sam phone", device_type="phone"
+        )
+        self.repository.save_device(Device("tablet", "Client 192.168.50.23", "192.168.50.23", "slow"))
+        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23"))
+
+        with self.assertLogs("jittersim.engine.runtime", "WARNING"):
+            self.check(100)
+
+        self.assertEqual(
+            [event["message"] for event in self.repository.list_activity()],
+            [
+                "Sam phone now uses 192.168.50.23, which Unknown device (192.168.50.23) keeps, "
+                "so it stays at 192.168.50.10"
+            ],
+        )
+        self.repository.delete_device("tablet")
+        self.check(131)
+        self.assertEqual(
+            self.repository.list_activity()[0]["message"],
+            "Sam phone moved from 192.168.50.10 to 192.168.50.23",
+        )
+
     def test_devices_that_swap_addresses_both_move(self) -> None:
         self.repository.save_device(
             Device("tablet", "Tablet", "192.168.50.23", "slow", "aa:aa:aa:aa:aa:02")
@@ -1860,6 +2231,219 @@ class DeviceAddressTests(unittest.TestCase):
             self.scheduler.tick(repository=self.repository, now=now)
 
         self.assertEqual(self.helper.snapshots, 2)
+
+
+class PlanRetryBackoffTests(unittest.TestCase):
+    """A failing plan is retried after a growing pause instead of every second."""
+
+    LOGGER_NAME = "jittersim.engine.runtime"
+
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self.addCleanup(self.repository.close)
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.helper = RecordingHelper()
+        self.attempts = []
+        self.now = 0
+        self.failure = HelperClientError("helper is down")
+        self.helper_works = False
+        real_apply = self.helper.apply
+
+        def apply(*, plan):
+            self.attempts.append(self.now)
+            if not self.helper_works:
+                raise self.failure
+            return real_apply(plan=plan)
+
+        self.helper.apply = apply
+        self.scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        self.scheduler._paused = False
+
+    def tick(self, now):
+        self.now = now
+        return self.scheduler.tick(repository=self.repository, now=now)
+
+    def error_records(self, logs):
+        return [record for record in logs.records if record.levelno >= logging.ERROR]
+
+    def test_retries_wait_one_two_four_eight_then_at_most_thirty_seconds(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            for second in range(0, 200):
+                self.tick(second)
+
+        self.assertEqual(self.attempts, [0, 1, 3, 7, 15, 31, 61, 91, 121, 151, 181])
+
+    def test_the_wait_is_not_cut_short_by_ticks_inside_it(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            self.tick(0)
+            self.tick(1)
+            # The second failure waits two seconds, so these ticks do not retry.
+            for now in (1.0, 1.5, 2.0, 2.999):
+                self.assertFalse(self.tick(now))
+
+        self.assertEqual(self.attempts, [0, 1])
+
+    def test_a_success_starts_the_next_failure_at_one_second_again(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            self.tick(0)
+            self.tick(1)
+            self.helper_works = True
+            self.assertTrue(self.tick(3))
+            self.helper_works = False
+            # The helper loses the rules again: the next failure must not inherit the 4 s wait.
+            self.scheduler.invalidate_applied_plan()
+            self.tick(4)
+            self.tick(4.5)
+            self.tick(5)
+
+        self.assertEqual(self.attempts, [0, 1, 3, 4, 5])
+
+    def test_a_saved_change_does_not_wait_for_the_backoff(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            for second in (0, 1, 3, 7):
+                self.tick(second)
+            self.assertEqual(self.attempts, [0, 1, 3, 7])
+            # The next retry is due at 15 s but the user saves a change at 8 s.
+            self.helper_works = True
+            self.repository.save_profile(
+                Profile(id="normal", name="Normal", download=Impairment(delay_ms=50))
+            )
+            self.assertTrue(self.tick(8))
+
+        self.assertEqual(self.attempts, [0, 1, 3, 7, 8])
+
+    def test_a_saved_change_that_still_fails_restarts_the_wait_at_one_second(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            for second in (0, 1, 3, 7):
+                self.tick(second)
+            self.repository.save_profile(
+                Profile(id="normal", name="Normal", download=Impairment(delay_ms=50))
+            )
+            self.tick(8)
+            self.tick(8.5)
+            self.tick(9)
+
+        self.assertEqual(self.attempts, [0, 1, 3, 7, 8, 9])
+
+    def test_a_manual_apply_does_not_wait_for_the_backoff(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            for second in (0, 1, 3, 7):
+                self.tick(second)
+        # The next retry is due at 15 s. The user applies by hand at 8 s and that works.
+        self.helper_works = True
+        prepared = self.scheduler.prepare_plan(repository=self.repository, now=8)
+        with patch.object(self.scheduler, "start"):
+            self.scheduler.activate_plan(repository=self.repository, prepared=prepared)
+        # The helper then drops its rules again without any saved change.
+        self.scheduler.invalidate_applied_plan()
+
+        self.assertTrue(self.tick(8.1))
+        self.assertEqual(self.attempts, [0, 1, 3, 7, 8.1])
+
+    def test_a_backwards_clock_jump_does_not_stall_the_retries(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            self.tick(1_000_000)
+            # The Pi corrects its clock by days: the saved wait is far in the future.
+            self.tick(10)
+
+        self.assertEqual(self.attempts, [1_000_000, 10])
+
+    def test_one_distinct_failure_reason_is_logged_once(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "INFO") as logs:
+            for second in (0, 1, 3, 7):
+                self.tick(second)
+            self.assertEqual(len(self.error_records(logs)), 1)
+            self.failure = HelperClientError("helper refused the plan")
+            for second in (15, 31):
+                self.tick(second)
+            self.assertEqual(len(self.error_records(logs)), 2)
+            self.failure = HelperClientError("helper is down")
+            self.tick(61)
+            # A reason that was logged before but is not the latest one is logged again.
+            self.assertEqual(len(self.error_records(logs)), 3)
+
+        self.assertEqual(self.attempts, [0, 1, 3, 7, 15, 31, 61])
+        self.assertIn("helper is down", logs.output[0])
+
+    def test_a_recovery_is_logged_once_and_makes_the_next_failure_log_again(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "INFO") as logs:
+            self.tick(0)
+            self.tick(1)
+            self.helper_works = True
+            self.tick(3)
+            self.helper_works = False
+            self.scheduler.invalidate_applied_plan()
+            self.tick(4)
+
+        self.assertEqual(len(self.error_records(logs)), 2)
+        recoveries = [record for record in logs.records if record.levelno == logging.INFO]
+        self.assertEqual(len(recoveries), 1)
+        self.assertIn("2 failed attempts", recoveries[0].getMessage())
+
+    def test_a_pause_clears_the_wait(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            self.tick(0)
+            self.tick(1)
+        self.scheduler.pause()
+        self.scheduler._paused = False
+        self.helper_works = True
+
+        self.assertTrue(self.tick(1.5))
+
+    def test_an_unexpected_tick_error_with_one_reason_is_logged_once(self) -> None:
+        scheduler = RuntimeScheduler(
+            database_path=":memory:", helper_client=self.helper, poll_seconds=0.01
+        )
+        calls = []
+        enough = threading.Event()
+
+        def broken_tick():
+            calls.append(len(calls))
+            if len(calls) >= 5:
+                enough.set()
+            raise RuntimeError("database is locked")
+
+        scheduler.tick = broken_tick
+        try:
+            with self.assertLogs(self.LOGGER_NAME, "ERROR") as logs:
+                scheduler.start()
+                self.assertTrue(enough.wait(timeout=5))
+        finally:
+            scheduler.stop()
+
+        self.assertEqual(len(logs.records), 1)
+
+    def test_the_running_loop_does_not_retry_every_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "jittersim.db"
+            with ConfigRepository(database_path) as repository:
+                repository.save_profile(Profile(id="slow", name="Slow"))
+                repository.save_device(Device("alice", "Alice", "192.168.50.10", "slow"))
+            first_attempt = threading.Event()
+            attempts = []
+
+            class FailingHelper(RecordingHelper):
+                def apply(self, *, plan):
+                    attempts.append(time.monotonic())
+                    first_attempt.set()
+                    raise HelperClientError("helper is down")
+
+            scheduler = RuntimeScheduler(
+                database_path=database_path,
+                helper_client=FailingHelper(),
+                poll_seconds=0.01,
+            )
+            try:
+                with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+                    scheduler.activate(applied_payload={})
+                    self.assertTrue(first_attempt.wait(timeout=5))
+                    time.sleep(0.4)
+            finally:
+                scheduler.stop()
+
+        # Without a backoff the 10 ms poll would retry about forty times.
+        self.assertEqual(len(attempts), 1)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
-"""Run jittersim's safe simulation command."""
+"""Run the jittersim command."""
 
-from .cli import main
+from .command import main
 
 
 if __name__ == "__main__":

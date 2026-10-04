@@ -17,13 +17,17 @@ from jittersim.config.models import (
     ScenarioRun,
     ScenarioStep,
     Schedule,
+    ServiceAssignment,
+    ServiceList,
     ServiceQuota,
+    SiteBlock,
     Timer,
     TimeQuota,
     time_quota_counter_id,
     UnaffectedDevice,
     ValidationError,
     WebsitePolicy,
+    normalize_service_hostname,
 )
 
 
@@ -197,6 +201,65 @@ class DeviceGroupTests(unittest.TestCase):
             )
 
 
+class ServiceHostnameTests(unittest.TestCase):
+    """A service name must never stand for a whole top-level domain."""
+
+    def test_accepts_names_with_two_or_more_labels(self) -> None:
+        for value, expected in (
+            ("example.com", "example.com"),
+            ("X.co", "x.co"),
+            ("Www.Example.COM.", "www.example.com"),
+            ("a.b.c.example.org", "a.b.c.example.org"),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(normalize_service_hostname(value), expected)
+
+    def test_rejects_a_single_label_with_a_plain_message(self) -> None:
+        for value in ("com", "COM.", "localhost", "co"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValidationError, "at least two parts such as example.com"
+                ):
+                    normalize_service_hostname(value)
+
+    def test_still_rejects_addresses_and_malformed_names(self) -> None:
+        for value in ("203.0.113.9", "not a hostname", "-bad.example.com", "", "."):
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError):
+                    normalize_service_hostname(value)
+
+    def test_service_lists_assignments_and_site_blocks_reject_a_single_label(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "two parts"):
+            ServiceList(id="tld", name="TLD", profile_id="slow", hostnames=("com",))
+        with self.assertRaisesRegex(ValidationError, "two parts"):
+            ServiceList(
+                id="tld",
+                name="TLD",
+                profile_id="slow",
+                services=("netflix",),
+                hostnames=("example.com", "com"),
+            )
+        with self.assertRaisesRegex(ValidationError, "two parts"):
+            ServiceAssignment(
+                id="tld", device_id="alice", name="TLD", domains=("com",), profile_id="slow"
+            )
+        with self.assertRaisesRegex(ValidationError, "two parts"):
+            SiteBlock(id="tld", name="TLD", domains=("com",))
+
+    def test_service_lists_assignments_and_site_blocks_keep_short_valid_names(self) -> None:
+        self.assertEqual(
+            ServiceList(id="s", name="S", profile_id="slow", hostnames=("x.co",)).domains,
+            ("x.co",),
+        )
+        self.assertEqual(
+            ServiceAssignment(
+                id="s", device_id="alice", name="S", domains=("example.com",), profile_id="slow"
+            ).domains,
+            ("example.com",),
+        )
+        self.assertEqual(SiteBlock(id="s", name="S", domains=("x.co",)).domains, ("x.co",))
+
+
 class DomainObservationTests(unittest.TestCase):
     def test_normalizes_dns_names_and_tracks_time_bounds(self) -> None:
         observation = DomainObservation(
@@ -209,6 +272,33 @@ class DomainObservationTests(unittest.TestCase):
 
         self.assertEqual(observation.domain, "amazon.com")
         self.assertEqual(observation.query_count, 3)
+
+    def test_normalizes_the_client_hardware_address_when_one_is_given(self) -> None:
+        values = dict(ipv4_address="192.168.50.10", domain="example.com", query_count=1)
+
+        self.assertIsNone(DomainObservation(first_seen=1, last_seen=1, **values).mac_address)
+        self.assertIsNone(
+            DomainObservation(first_seen=1, last_seen=1, mac_address=None, **values).mac_address
+        )
+        self.assertEqual(
+            DomainObservation(
+                first_seen=1, last_seen=1, mac_address="AA-BB-CC-DD-EE-01", **values
+            ).mac_address,
+            "aa:bb:cc:dd:ee:01",
+        )
+
+    def test_rejects_an_invalid_client_hardware_address(self) -> None:
+        for value in ("not-a-mac", 5, "01:00:5e:00:00:01", "00:00:00:00:00:00", ""):
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError):
+                    DomainObservation(
+                        ipv4_address="192.168.50.10",
+                        domain="example.com",
+                        query_count=1,
+                        first_seen=1,
+                        last_seen=1,
+                        mac_address=value,
+                    )
 
     def test_rejects_invalid_dns_names_and_time_bounds(self) -> None:
         invalid_values = (
@@ -482,7 +572,8 @@ class UnaffectedDeviceTests(unittest.TestCase):
             ("aa:bb:cc:dd:ee:ff", 5),
         ):
             with self.subTest(mac_address=mac_address, name=name):
-                with self.assertRaises(ValidationError):
+                # The shared device-label checks raise their own ValueError.
+                with self.assertRaises(ValueError):
                     UnaffectedDevice(mac_address, name)
 
 if __name__ == "__main__":

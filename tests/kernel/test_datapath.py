@@ -16,7 +16,7 @@ import time
 import unittest
 from ipaddress import IPv4Address
 
-from jittersim.config.models import Device, Impairment, MacPolicy, Profile
+from jittersim.config.models import Device, Impairment, MacPolicy, Profile, Randomness
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import EveryoneElseRule, ServiceAssignmentRule, ServiceQuotaRule
@@ -92,6 +92,31 @@ class LinuxDatapathTests(unittest.TestCase):
         plan = compile_plan(devices=devices, profiles={p.id: p for p in (NORMAL,) + profiles})
         self.applier.apply(plan=plan)
         return plan
+
+    def test_custom_packet_value_ranges_are_installed(self) -> None:
+        profile = Profile(
+            id="ranges", name="Custom whole percentages",
+            upload=Impairment(delay_ms=10, loss_percent=1, reorder_percent=2,
+                              duplicate_percent=3, corrupt_percent=6,
+                              corrupt_randomness=Randomness(mode="range", minimum=0, maximum=13)),
+            download=Impairment(loss_percent=1, loss_burst_packets=4),
+        )
+        plan = compile_plan(devices=[device("alice", 10, "ranges")],
+                            profiles={"ranges": profile})
+        response = HelperService(self.applier)._handle_payload(
+            {"action": "apply", "plan": plan_to_payload(plan)})
+        self.assertTrue(response["ok"], response)
+        self.assertTrue(plan.queues)
+        upload = _in(PI, "tc", "qdisc", "show", "dev", TOPOLOGY.uplink_interface)
+        self.assertEqual(upload.returncode, 0, upload.stderr)
+        for field, value in (("loss", "1%"), ("reorder", "2%"),
+                             ("duplicate", "3%"), ("corrupt", "6%")):
+            self.assertRegex(upload.stdout, rf"\b{field}\s+{re.escape(value)}(?:\s|$)")
+        download = _in(PI, "tc", "qdisc", "show", "dev", TOPOLOGY.test_interface)
+        self.assertEqual(download.returncode, 0, download.stderr)
+        self.assertIn("loss gemodel p 0.2525% r 25%", download.stdout)
+        for field in ("reorder", "duplicate", "corrupt"):
+            self.assertNotIn(field, download.stdout)
 
     def ping(self, source=None, *, namespace=CLIENT, destination="192.168.0.1", count=3,
              interval="0.2"):
@@ -253,8 +278,27 @@ class LinuxDatapathTests(unittest.TestCase):
         if current:
             runs.append(current)
         lost = sum(runs)
-        self.assertTrue(0.06 <= lost / count <= 0.14, f"{lost} of {count} lost")
-        self.assertTrue(3 <= lost / len(runs) <= 5.5, f"mean run {lost / len(runs):.2f}")
+        # The loss is random so the check allows four standard deviations. Bursts
+        # make successive packets alike. With a 25% chance of leaving the lossy
+        # state and a correlation of about 0.72 the lost fraction over 3000
+        # packets varies by about 1.4 points, six times the variance of
+        # independent loss. A fixed 4 point window was 2.9 deviations wide and
+        # failed one run in about 250 (421 of 3000 lost).
+        loss, burst = 0.10, 4
+        leave = 1 / burst
+        correlation = 1 - leave - loss * leave / (1 - loss)
+        deviation = (
+            loss * (1 - loss) / count * (1 + correlation) / (1 - correlation)
+        ) ** 0.5
+        self.assertLessEqual(
+            abs(lost / count - loss), 4 * deviation, f"{lost} of {count} lost"
+        )
+        # Bad runs are geometric with mean 4 and variance burst * (burst - 1).
+        run_deviation = (burst * (burst - 1)) ** 0.5 / len(runs) ** 0.5
+        self.assertLessEqual(
+            abs(lost / len(runs) - burst), 4 * run_deviation,
+            f"mean run {lost / len(runs):.2f} over {len(runs)} runs",
+        )
 
     def test_frequent_bursty_loss_still_applies(self) -> None:
         frequent = Profile(

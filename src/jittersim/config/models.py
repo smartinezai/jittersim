@@ -1,10 +1,14 @@
 """Validated domain objects used by the jittersim control plane."""
 
+import math
 import re
+from decimal import Decimal
 from dataclasses import dataclass
 from hashlib import sha256
 from ipaddress import AddressValueError, IPv4Address, IPv4Network, ip_address
 from typing import Optional, Tuple, Union
+
+from .exemptions import MAX_UNAFFECTED_DEVICES, UnaffectedDevice, normalize_exempt_mac
 
 
 class ValidationError(ValueError):
@@ -20,6 +24,17 @@ _RFC1918_NETWORKS = (
     IPv4Network("192.168.0.0/16"),
 )
 IPv4Input = Union[str, IPv4Address]
+Number = Union[int, float]
+# Field, lower bound, upper bound, decimal places and displayed unit.
+FEATURE_LIMITS = {
+    "delay": ("delay_ms", 0, 60_000, 0, "ms"),
+    "jitter": ("jitter_ms", 0, 60_000, 0, "ms"),
+    "bandwidth": ("bandwidth_kbit", 1, 1_000_000, 0, "kbit/s"),
+    "loss": ("loss_percent", 0, 100, 0, "%"),
+    "reorder": ("reorder_percent", 0, 100, 0, "%"),
+    "duplicate": ("duplicate_percent", 0, 100, 0, "%"),
+    "corrupt": ("corrupt_percent", 0, 100, 0, "%"),
+}
 
 
 def time_quota_counter_id(quota_id: str) -> str:
@@ -60,6 +75,18 @@ def _validate_percent(value: int, field_name: str) -> int:
     return _validate_number(value, field_name, minimum=0, maximum=100)
 
 
+def _validate_decimal_number(value: Number, field_name: str, minimum: int,
+                             maximum: int, places: int = 2) -> Number:
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not minimum <= value <= maximum or not math.isfinite(value)):
+        raise ValidationError(f"{field_name} must be a finite number between {minimum} and {maximum}")
+    scaled = Decimal(str(value)) * (10 ** places)
+    if scaled != scaled.to_integral_value():
+        step = "a whole number" if places == 0 else "in steps of 0.01"
+        raise ValidationError(f"{field_name} must be {step}")
+    return value
+
+
 def _normalize_string_list(values: Tuple[str, ...], field_name: str) -> Tuple[str, ...]:
     if not isinstance(values, (list, tuple)):
         raise ValidationError(f"{field_name} must be a list")
@@ -86,14 +113,24 @@ def normalize_domain(value: str) -> str:
 
 
 def normalize_service_hostname(value: str) -> str:
-    """Require a DNS name rather than a shared server address."""
+    """Require a DNS name of two or more labels rather than an address or a whole top-level domain.
+
+    A name also matches every name under it. A single label such as `com` would
+    therefore match every .com host in the proxy and the DNS watcher.
+    """
 
     domain = normalize_domain(value)
     try:
         ip_address(domain)
     except ValueError:
-        return domain
-    raise ValidationError("browser service domains must be hostnames, not IP addresses")
+        pass
+    else:
+        raise ValidationError("browser service domains must be hostnames, not IP addresses")
+    if "." not in domain:
+        raise ValidationError(
+            "browser service domains must have at least two parts such as example.com"
+        )
+    return domain
 
 
 def normalize_mac_address(value: str) -> str:
@@ -107,12 +144,16 @@ def normalize_mac_address(value: str) -> str:
     return mac_address
 
 
+# A profile's website list and each global domain list hold at most this many names.
+MAX_LISTED_DOMAINS = 100
+
+
 def _normalize_domain_list(values: Tuple[str, ...], field_name: str) -> Tuple[str, ...]:
     if not isinstance(values, (list, tuple)):
         raise ValidationError(f"{field_name} must be a list")
     normalized = tuple(dict.fromkeys(normalize_domain(value) for value in values))
-    if len(normalized) > 100:
-        raise ValidationError(f"{field_name} must contain no more than 100 domains")
+    if len(normalized) > MAX_LISTED_DOMAINS:
+        raise ValidationError(f"{field_name} must contain no more than {MAX_LISTED_DOMAINS} domains")
     return normalized
 
 
@@ -120,12 +161,25 @@ def _normalize_domain_list(values: Tuple[str, ...], field_name: str) -> Tuple[st
 class Randomness:
     """Variation and enablement controls for one periodically rerolled value."""
 
-    variation_percent: int = 0
+    variation_percent: Number = 0
     enabled_probability: int = 100
+    mode: str = "relative"
+    minimum: Optional[Number] = None
+    maximum: Optional[Number] = None
 
     def __post_init__(self) -> None:
-        _validate_percent(self.variation_percent, "variation_percent")
+        _validate_decimal_number(self.variation_percent, "variation_percent", 0, 100)
         _validate_percent(self.enabled_probability, "enabled_probability")
+        if self.mode not in ("relative", "range"):
+            raise ValidationError("randomness mode must be relative or range")
+        if self.mode == "relative":
+            if self.minimum is not None or self.maximum is not None:
+                raise ValidationError("relative variation cannot also contain range endpoints")
+        else:
+            _validate_decimal_number(self.minimum, "range minimum", 0, 1_000_000)
+            _validate_decimal_number(self.maximum, "range maximum", 0, 1_000_000)
+            if self.minimum > self.maximum:
+                raise ValidationError("range minimum must not exceed maximum")
 
 
 def _parse_test_address(value: IPv4Input) -> IPv4Address:
@@ -181,6 +235,10 @@ class Impairment:
         ):
             if not isinstance(value, Randomness):
                 raise ValidationError(f"{field_name} must be a Randomness")
+            if value.mode == "range":
+                _, lower, upper, places, _ = FEATURE_LIMITS[field_name.removesuffix("_randomness")]
+                _validate_decimal_number(value.minimum, f"{field_name} minimum", lower, upper, places)
+                _validate_decimal_number(value.maximum, f"{field_name} maximum", lower, upper, places)
 
 
 @dataclass(frozen=True)
@@ -199,9 +257,11 @@ class Profile:
     outage_duration_randomness: Randomness = Randomness()
     outage_interval_seconds: int = 0
     outage_interval_randomness: Randomness = Randomness()
+    homepage_bounce_percent: int = 0
     website_mode: str = "unrestricted"
     website_domains: Tuple[str, ...] = ()
     website_randomness: Randomness = Randomness()
+    random_mode: str = "repeatable"
 
     def __post_init__(self) -> None:
         _validate_identifier(self.id, "id")
@@ -212,8 +272,15 @@ class Profile:
             raise ValidationError("download must be an Impairment")
         if self.random_seed is not None:
             _validate_number(self.random_seed, "random_seed", 0, 2**63 - 1)
+        if self.random_mode not in ("repeatable", "fresh"):
+            raise ValidationError("random_mode must be repeatable or fresh")
+        if self.random_mode == "fresh" and self.random_seed is not None:
+            raise ValidationError("Clear the saved seed before choosing a fresh pattern")
         _validate_number(self.reroll_interval_seconds, "reroll_interval_seconds", 0, 604_800)
         _validate_percent(self.outage_probability, "outage_probability")
+        if type(self.homepage_bounce_percent) is not int:
+            raise ValidationError("homepage_bounce_percent must be an integer")
+        _validate_percent(self.homepage_bounce_percent, "homepage_bounce_percent")
         _validate_number(self.outage_duration_seconds, "outage_duration_seconds", 0, 604_800)
         _validate_number(self.outage_interval_seconds, "outage_interval_seconds", 0, 604_800)
         for value, field_name in (
@@ -224,6 +291,8 @@ class Profile:
         ):
             if not isinstance(value, Randomness):
                 raise ValidationError(f"{field_name} must be a Randomness")
+            if value.mode != "relative":
+                raise ValidationError(f"{field_name} does not support a custom value range")
         if self.website_mode not in ("unrestricted", "allow_only"):
             raise ValidationError("website_mode is not supported")
         object.__setattr__(self, "website_domains", _normalize_domain_list(self.website_domains, "website_domains"))
@@ -248,22 +317,9 @@ class Device:
             object.__setattr__(self, "mac_address", normalize_mac_address(self.mac_address))
 
 
-MAX_UNAFFECTED_DEVICES = 256
-
-
-@dataclass(frozen=True)
-class UnaffectedDevice:
-    """A test Wi-Fi client that keeps a normal connection, found by its MAC address."""
-
-    mac_address: str
-    name: str = ""
-
-    def __post_init__(self) -> None:
-        mac_address = normalize_mac_address(self.mac_address)
-        if not isinstance(self.name, str):
-            raise ValidationError("name must be a string")
-        object.__setattr__(self, "mac_address", mac_address)
-        object.__setattr__(self, "name", _validate_name(self.name.strip() or mac_address, "name"))
+# The unaffected (protected) device list lives in exemptions.py and is shared by
+# the general profile, everyone else and the privacy rules.
+__all_unaffected__ = (MAX_UNAFFECTED_DEVICES, UnaffectedDevice)
 
 
 @dataclass(frozen=True)
@@ -301,10 +357,16 @@ class DomainObservation:
     query_count: int
     first_seen: int
     last_seen: int
+    mac_address: Optional[str] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ipv4_address", _parse_test_address(self.ipv4_address))
         object.__setattr__(self, "domain", normalize_domain(self.domain))
+        if self.mac_address is not None:
+            try:
+                object.__setattr__(self, "mac_address", normalize_exempt_mac(self.mac_address))
+            except ValueError as error:
+                raise ValidationError("mac_address must identify one device") from error
         _validate_number(self.query_count, "query_count", 1, 1_000_000_000)
         _validate_number(self.first_seen, "first_seen", 0, 2**63 - 1)
         _validate_number(self.last_seen, "last_seen", 0, 2**63 - 1)
@@ -325,6 +387,23 @@ def _validate_target(
         raise ValidationError("everyone_else must be a boolean")
     if (device_id is not None) + (group_id is not None) + everyone_else != 1:
         raise ValidationError(f"a {owner} needs exactly one of a device, a group or everyone else")
+
+
+@dataclass(frozen=True)
+class RandomWebsiteOutcome:
+    """One generated keep-or-remove choice for a configured website."""
+
+    device_id: str
+    domain: str
+    kept: bool
+    happened_at: int
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.device_id, "device_id")
+        object.__setattr__(self, "domain", normalize_domain(self.domain))
+        if not isinstance(self.kept, bool):
+            raise ValidationError("kept must be a boolean")
+        _validate_number(self.happened_at, "happened_at", 0, 2**63 - 1)
 
 
 @dataclass(frozen=True)
@@ -663,6 +742,61 @@ class ServiceAssignment:
             raise ValidationError("enabled must be a boolean")
 
 
+MAX_SERVICE_LIST_DOMAINS = 100
+
+
+@dataclass(frozen=True)
+class ServiceList:
+    """A profile for named services that overrides every affected device's profile.
+
+    The list names well-known services from the catalogue and any extra
+    hostnames. `domains` is the combined set of hostnames the list matches.
+    """
+
+    id: str
+    name: str
+    profile_id: str
+    services: Tuple[str, ...] = ()
+    hostnames: Tuple[str, ...] = ()
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        from .service_catalogue import catalogue_service, expand_service_domains
+
+        _validate_identifier(self.id, "service list id")
+        object.__setattr__(self, "name", _validate_name(self.name, "service list name"))
+        _validate_identifier(self.profile_id, "profile_id")
+        if not isinstance(self.services, (list, tuple)) or not isinstance(
+            self.hostnames, (list, tuple)
+        ):
+            raise ValidationError("services and hostnames must be lists")
+        services = tuple(self.services)
+        if len(set(services)) != len(services):
+            raise ValidationError("services must not repeat")
+        for key in services:
+            catalogue_service(key)
+        hostnames = tuple(
+            dict.fromkeys(normalize_service_hostname(name) for name in self.hostnames)
+        )
+        object.__setattr__(self, "services", services)
+        object.__setattr__(self, "hostnames", hostnames)
+        domains = expand_service_domains(services, hostnames)
+        if not domains:
+            raise ValidationError("service list requires at least one service or hostname")
+        if len(domains) > MAX_SERVICE_LIST_DOMAINS:
+            raise ValidationError(
+                f"service list must contain no more than {MAX_SERVICE_LIST_DOMAINS} hostnames"
+            )
+        if not isinstance(self.enabled, bool):
+            raise ValidationError("enabled must be a boolean")
+
+    @property
+    def domains(self) -> Tuple[str, ...]:
+        from .service_catalogue import expand_service_domains
+
+        return expand_service_domains(self.services, self.hostnames)
+
+
 @dataclass(frozen=True)
 class ServiceQuota:
     """A weighted byte quota for selected observed domains on one device."""
@@ -904,7 +1038,13 @@ class SavedSettings:
     site_blocks: Tuple[SiteBlock, ...] = ()
     access_options: AccessOptions = AccessOptions()
     persist_profiles_after_gateway_outage: bool = False
+    general_profile_id: Optional[str] = None
+    service_lists: Tuple[ServiceList, ...] = ()
+    ad_blocking_devices: Tuple[str, ...] = ()
+    ad_blocking_allowances: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.persist_profiles_after_gateway_outage, bool):
             raise ValidationError("gateway-outage persistence must be true or false")
+        if self.general_profile_id is not None:
+            _validate_identifier(self.general_profile_id, "general_profile_id")

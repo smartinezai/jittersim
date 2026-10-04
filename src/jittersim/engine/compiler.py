@@ -1,30 +1,37 @@
 """Compile validated configuration into a deterministic network plan."""
 
+import re
 from dataclasses import replace
 from ipaddress import IPv4Address
 from typing import Mapping, Optional, Sequence
 
+from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt_mac
 from jittersim.config.models import (
-    MAX_UNAFFECTED_DEVICES,
     Device,
     MacPolicy,
     Profile,
-    normalize_mac_address,
+    ValidationError,
     normalize_service_hostname,
 )
 
 from .access import AccessPlan
 from .plan import (
     EVERYONE_ELSE_QUEUE_ID,
+    GENERAL_QUEUE_ID,
     Direction,
     EveryoneElseRule,
+    GeneralProfileRule,
     MarkRule,
     NetworkPlan,
     QueueSpec,
     ServiceAssignmentRule,
+    ServiceListRule,
     ServiceQuotaRule,
     WebsiteFilter,
 )
+
+
+_LIST_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 class PlanError(ValueError):
@@ -37,25 +44,56 @@ MAX_SERVICE_QUOTAS_PER_PLAN = 15
 # traffic, so devices and service rules share 15 marks.
 MAX_SHAPED_MARKS_PER_PLAN = 15
 MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN = 200
+MAX_SERVICE_LIST_DOMAINS_PER_PLAN = 400
 
 
 def compile_plan(
     *,
     devices: Sequence[Device],
     profiles: Mapping[str, Profile],
+    protected_mac_addresses: Sequence[str] = (),
+    unverified_device_ids: Sequence[str] = (),
     mac_policy: MacPolicy = MacPolicy(),
     global_blocked_addresses: Sequence[IPv4Address] = (),
+    global_allowed_addresses: Optional[Sequence[IPv4Address]] = None,
     website_filters: Sequence[WebsiteFilter] = (),
     blocked_device_addresses: Sequence[IPv4Address] = (),
     service_quota_rules: Sequence[ServiceQuotaRule] = (),
     service_assignment_rules: Sequence[ServiceAssignmentRule] = (),
+    general_profile: Optional[GeneralProfileRule] = None,
+    service_list_rules: Sequence[ServiceListRule] = (),
     everyone_else: Optional[EveryoneElseRule] = None,
     access: Optional[AccessPlan] = None,
 ) -> NetworkPlan:
     """Compile device assignments into deterministic marks and directional queues."""
 
+    if general_profile is not None and everyone_else is not None:
+        raise PlanError("a profile set for Everyone already covers everyone else")
+
+    if len(protected_mac_addresses) > MAX_UNAFFECTED_DEVICES:
+        raise PlanError("a plan cannot contain more than 256 protected MAC addresses")
+    try:
+        protected_macs = tuple(
+            sorted(set(normalize_exempt_mac(mac) for mac in protected_mac_addresses))
+        )
+    except ValueError as error:
+        raise PlanError(str(error)) from error
+    if any(device.mac_address in protected_macs for device in devices):
+        raise PlanError("a protected client cannot have profile rules")
     if len(devices) > MAX_DEVICES_PER_PLAN:
         raise PlanError(f"a plan cannot contain more than {MAX_DEVICES_PER_PLAN} devices")
+    if general_profile is not None:
+        if devices or service_quota_rules or service_assignment_rules or website_filters or blocked_device_addresses:
+            raise PlanError("a general profile cannot contain individual profile rules")
+        if general_profile.profile_id not in profiles:
+            raise PlanError("the general profile is missing")
+        if type(general_profile.outage_active) is not bool:
+            raise PlanError("the general profile outage state is invalid")
+        if general_profile.allowed_addresses is not None and (
+            len(general_profile.allowed_addresses) > 4096
+            or any(not isinstance(address, IPv4Address) for address in general_profile.allowed_addresses)
+        ):
+            raise PlanError("the general profile destinations are invalid")
 
     devices_by_id = {}
     addresses_by_value = {}
@@ -76,6 +114,12 @@ def compile_plan(
 
     mark_rules = []
     queues = []
+    if general_profile is not None:
+        profile = profiles[general_profile.profile_id]
+        queues.extend((
+            QueueSpec(GENERAL_QUEUE_ID, Direction.UPLOAD, 1, profile.upload),
+            QueueSpec(GENERAL_QUEUE_ID, Direction.DOWNLOAD, 1, profile.download),
+        ))
     for index, device_id in enumerate(sorted(devices_by_id), start=1):
         device = devices_by_id[device_id]
         profile = profiles[device.profile_id]
@@ -85,6 +129,7 @@ def compile_plan(
                 device_id=device.id,
                 ipv4_address=device.ipv4_address,
                 mark=mark,
+                homepage_bounce_percent=profile.homepage_bounce_percent,
             )
         )
         queues.extend(
@@ -127,7 +172,9 @@ def compile_plan(
         len(mark_rules)
         + len(service_quota_rules)
         + len(service_assignment_rules)
-        + (everyone_else is not None)
+        + len(service_list_rules)
+        + (1 if general_profile is not None else 0)
+        + (1 if everyone_else is not None else 0)
         > MAX_SHAPED_MARKS_PER_PLAN
     ):
         raise PlanError(
@@ -187,6 +234,7 @@ def compile_plan(
             upload_impairment=rule.upload_impairment,
             download_impairment=rule.download_impairment,
             active=rule.active,
+            homepage_bounce_percent=rule.homepage_bounce_percent,
         )
         for rule, mark in zip(
             sorted(service_quota_rules, key=lambda rule: rule.quota_id),
@@ -233,6 +281,7 @@ def compile_plan(
                 mark=index,
                 upload_impairment=rule.upload_impairment,
                 download_impairment=rule.download_impairment,
+                homepage_bounce_percent=rule.homepage_bounce_percent,
             )
         )
         assignment_queues.extend(
@@ -259,7 +308,7 @@ def compile_plan(
             unaffected_macs = tuple(
                 sorted(
                     dict.fromkeys(
-                        normalize_mac_address(value) for value in everyone_else.unaffected_macs
+                        normalize_exempt_mac(value) for value in everyone_else.unaffected_macs
                     )
                 )
             )
@@ -288,20 +337,111 @@ def compile_plan(
             ),
         )
 
+    list_queues = []
+    normalized_lists = []
+    list_domains = []
+    first_list_mark = (
+        len(mark_rules)
+        + len(service_quota_rules)
+        + len(service_assignment_rules)
+        + (1 if general_profile is not None else 0)
+        + (1 if everyone_else is not None else 0)
+        + 1
+    )
+    if sum(len(rule.domains) for rule in service_list_rules) > MAX_SERVICE_LIST_DOMAINS_PER_PLAN:
+        raise PlanError(
+            f"a plan cannot contain more than {MAX_SERVICE_LIST_DOMAINS_PER_PLAN} "
+            "service list hostnames"
+        )
+    list_ids = set()
+    for index, list_rule in enumerate(
+        sorted(service_list_rules, key=lambda item: item.list_id), start=first_list_mark
+    ):
+        if not isinstance(list_rule.list_id, str) or not _LIST_ID_PATTERN.fullmatch(list_rule.list_id):
+            raise PlanError("service list id is invalid")
+        if list_rule.list_id in list_ids:
+            raise PlanError(f"duplicate service list id: {list_rule.list_id}")
+        list_ids.add(list_rule.list_id)
+        if type(list_rule.outage_active) is not bool:
+            raise PlanError(f"service list {list_rule.list_id} outage state is invalid")
+        if not list_rule.domains:
+            raise PlanError(f"service list {list_rule.list_id} has no hostnames")
+        try:
+            domains = tuple(
+                dict.fromkeys(normalize_service_hostname(domain) for domain in list_rule.domains)
+            )
+        except ValidationError as error:
+            raise PlanError("service list must contain only DNS hostnames") from error
+        for domain in domains:
+            other = next(
+                (
+                    owner
+                    for prior, owner in list_domains
+                    if owner != list_rule.list_id
+                    and (
+                        domain == prior
+                        or domain.endswith("." + prior)
+                        or prior.endswith("." + domain)
+                    )
+                ),
+                None,
+            )
+            if other is not None:
+                raise PlanError(
+                    f"service lists {other} and {list_rule.list_id} overlap on {domain}"
+                )
+            list_domains.append((domain, list_rule.list_id))
+        normalized_lists.append(
+            ServiceListRule(
+                list_id=list_rule.list_id,
+                domains=domains,
+                mark=index,
+                upload_impairment=list_rule.upload_impairment,
+                download_impairment=list_rule.download_impairment,
+                outage_active=list_rule.outage_active,
+                homepage_bounce_percent=list_rule.homepage_bounce_percent,
+            )
+        )
+        for direction, impairment in (
+            (Direction.UPLOAD, list_rule.upload_impairment),
+            (Direction.DOWNLOAD, list_rule.download_impairment),
+        ):
+            list_queues.append(
+                QueueSpec(
+                    device_id=f"servicelist:{list_rule.list_id}",
+                    direction=direction,
+                    mark=index,
+                    impairment=impairment,
+                )
+            )
+    if first_list_mark + len(normalized_lists) - 1 > MAX_SHAPED_MARKS_PER_PLAN:
+        raise PlanError("service list mark is outside the safe range")
+
     return NetworkPlan(
+        protected_mac_addresses=protected_macs,
+        unverified_device_ids=tuple(unverified_device_ids),
         mark_rules=tuple(mark_rules),
         queues=(
             tuple(queues)
             + tuple(service_queues)
             + tuple(assignment_queues)
             + everyone_else_queues
+            + tuple(list_queues)
         ),
         mac_policy=mac_policy,
+        global_allowed_addresses=None
+        if global_allowed_addresses is None
+        else tuple(sorted(set(global_allowed_addresses), key=str)),
         global_blocked_addresses=tuple(sorted(set(global_blocked_addresses), key=str)),
         website_filters=tuple(website_filters),
         blocked_device_addresses=tuple(sorted(set(blocked_device_addresses), key=str)),
         service_quota_rules=normalized_service_rules,
         service_assignment_rules=tuple(normalized_assignments),
+        general_profile=(replace(general_profile, homepage_bounce_percent=
+            profiles[general_profile.profile_id].homepage_bounce_percent)
+            if general_profile is not None else None),
+        service_list_rules=tuple(normalized_lists),
         everyone_else=normalized_everyone_else,
         access=access,
+        homepage_policy_version=1,
     )

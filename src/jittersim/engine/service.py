@@ -2,18 +2,33 @@
 
 from dataclasses import replace
 
-from jittersim.config.models import WebsitePolicy
 from jittersim.config.storage import ConfigRepository
 
 from .access import build_access_plan
 from .compiler import compile_plan
+from .eligibility import eligible_clients
+from .general import compile_general_plan
 from .plan import EveryoneElseRule, NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
-from .website import build_website_filters, resolve_domains
+from .service_lists import build_service_list_rules
+from .website import build_website_filters, lookup_session, resolve_domains
 
 
-def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
-    """Compile every stored device assignment into one deterministic plan."""
+def compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=None) -> NetworkPlan:
+    """Compile every stored device assignment into one deterministic plan.
 
+    The website lookups share one deadline, so a DNS server that does not answer
+    delays the plan by seconds and not for good.
+    """
+
+    with lookup_session():
+        return _compile_stored_plan(repository=repository, connected_snapshot=connected_snapshot)
+
+
+def _compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=None) -> NetworkPlan:
+    general_profile = repository.get_general_profile()
+    if general_profile is not None:
+        return compile_general_plan(repository=repository, profile=general_profile)
+    clients = eligible_clients(repository, connected_snapshot)
     profiles = {profile.id: profile for profile in repository.list_profiles()}
     devices = []
     data_limits = {
@@ -28,7 +43,7 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
         data_limit.group_id: data_limit
         for data_limit in repository.list_group_data_limits()
     }
-    for device in repository.list_devices():
+    for device in clients.devices:
         group = groups_by_device.get(device.id)
         if group is not None and group.profile_id is not None:
             if group.profile_id not in profiles:
@@ -56,10 +71,11 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
                     )
                 device = replace(device, profile_id=group_data_limit.profile_id)
         devices.append(device)
+    website_policy = repository.get_website_policy()
     global_blocked, website_filters = build_website_filters(
         devices=devices,
         profiles=profiles,
-        global_policy=WebsitePolicy(),
+        global_policy=website_policy,
     )
     devices_by_id = {device.id: device for device in devices}
     service_quota_rules = []
@@ -83,12 +99,13 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
                     mark=0,
                     upload_impairment=profile.upload,
                     download_impairment=profile.download,
+                    homepage_bounce_percent=profile.homepage_bounce_percent,
                     active=quota.used_bytes >= quota.limit_bytes,
                 )
             )
     service_assignment_rules = []
     for assignment in repository.list_service_assignments():
-        if not assignment.enabled:
+        if not assignment.enabled or assignment.device_id in clients.excluded_ids:
             continue
         device = devices_by_id.get(assignment.device_id)
         profile = profiles.get(assignment.profile_id)
@@ -103,6 +120,7 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
                 mark=0,
                 upload_impairment=profile.upload,
                 download_impairment=profile.download,
+                homepage_bounce_percent=profile.homepage_bounce_percent,
             )
         )
     everyone_else = None
@@ -117,6 +135,7 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
             mark=0,
             upload_impairment=profile.upload,
             download_impairment=profile.download,
+            homepage_bounce_percent=profile.homepage_bounce_percent,
             unaffected_macs=tuple(
                 unaffected.mac_address for unaffected in repository.list_unaffected_devices()
             ),
@@ -124,11 +143,17 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
     return compile_plan(
         devices=devices,
         profiles=profiles,
+        protected_mac_addresses=clients.protected_macs,
+        unverified_device_ids=clients.unverified_ids,
         mac_policy=repository.get_mac_policy(),
         access=build_access_plan(repository.access_settings()),
         global_blocked_addresses=global_blocked,
+        global_allowed_addresses=resolve_domains(domains=website_policy.allowed_domains)
+        if website_policy.mode == "allow_only"
+        else None,
         website_filters=website_filters,
         service_quota_rules=service_quota_rules,
         service_assignment_rules=service_assignment_rules,
+        service_list_rules=build_service_list_rules(repository, profiles),
         everyone_else=everyone_else,
     )

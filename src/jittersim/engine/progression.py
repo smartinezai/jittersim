@@ -3,7 +3,8 @@
 from dataclasses import replace
 from typing import Optional
 
-from jittersim.config.models import Impairment, Profile, Progression, Randomness
+from jittersim.config.models import FEATURE_LIMITS, Impairment, Number, Profile, Progression, Randomness
+from jittersim.engine.randomizer import feature_range, quantize_value
 
 
 def progression_factor(
@@ -51,6 +52,9 @@ def interpolate_profile(*, start: Profile, end: Profile, factor: float) -> Profi
             end.reroll_interval_randomness,
             bounded_factor,
         ),
+        homepage_bounce_percent=_interpolate_integer(
+            start.homepage_bounce_percent, end.homepage_bounce_percent, bounded_factor
+        ),
         outage_probability=_interpolate_integer(
             start.outage_probability,
             end.outage_probability,
@@ -77,6 +81,7 @@ def interpolate_profile(*, start: Profile, end: Profile, factor: float) -> Profi
             bounded_factor,
         ),
         random_seed=start.random_seed if bounded_factor < 1 else end.random_seed,
+        random_mode=start.random_mode if bounded_factor < 1 else end.random_mode,
         website_mode=start.website_mode if bounded_factor < 1 else end.website_mode,
         website_domains=start.website_domains if bounded_factor < 1 else end.website_domains,
         website_randomness=_interpolate_randomness(
@@ -115,41 +120,13 @@ def interpolate_impairment(
             end.corrupt_percent,
             factor,
         ),
-        delay_randomness=_interpolate_randomness(
-            start.delay_randomness,
-            end.delay_randomness,
-            factor,
-        ),
-        jitter_randomness=_interpolate_randomness(
-            start.jitter_randomness,
-            end.jitter_randomness,
-            factor,
-        ),
-        loss_randomness=_interpolate_randomness(
-            start.loss_randomness,
-            end.loss_randomness,
-            factor,
-        ),
-        bandwidth_randomness=_interpolate_randomness(
-            start.bandwidth_randomness,
-            end.bandwidth_randomness,
-            factor,
-        ),
-        reorder_randomness=_interpolate_randomness(
-            start.reorder_randomness,
-            end.reorder_randomness,
-            factor,
-        ),
-        duplicate_randomness=_interpolate_randomness(
-            start.duplicate_randomness,
-            end.duplicate_randomness,
-            factor,
-        ),
-        corrupt_randomness=_interpolate_randomness(
-            start.corrupt_randomness,
-            end.corrupt_randomness,
-            factor,
-        ),
+        delay_randomness=_interpolate_feature_randomness(start, end, factor, "delay"),
+        jitter_randomness=_interpolate_feature_randomness(start, end, factor, "jitter"),
+        loss_randomness=_interpolate_feature_randomness(start, end, factor, "loss"),
+        bandwidth_randomness=_interpolate_feature_randomness(start, end, factor, "bandwidth"),
+        reorder_randomness=_interpolate_feature_randomness(start, end, factor, "reorder"),
+        duplicate_randomness=_interpolate_feature_randomness(start, end, factor, "duplicate"),
+        corrupt_randomness=_interpolate_feature_randomness(start, end, factor, "corrupt"),
         loss_burst_packets=_interpolate_integer(
             start.loss_burst_packets,
             end.loss_burst_packets,
@@ -179,8 +156,13 @@ def _interpolate_randomness(
     end: Randomness,
     factor: float,
 ) -> Randomness:
+    interpolate_variation = (
+        _interpolate_integer
+        if float(start.variation_percent).is_integer() and float(end.variation_percent).is_integer()
+        else _interpolate_percent
+    )
     return Randomness(
-        variation_percent=_interpolate_integer(
+        variation_percent=interpolate_variation(
             start.variation_percent,
             end.variation_percent,
             factor,
@@ -190,4 +172,32 @@ def _interpolate_randomness(
             end.enabled_probability,
             factor,
         ),
+    )
+
+
+def _interpolate_percent(start: Number, end: Number, factor: float) -> Number:
+    return quantize_value(start + (end - start) * factor, 2)
+
+
+def _interpolate_feature_randomness(
+    start: Impairment, end: Impairment, factor: float, feature: str
+) -> Randomness:
+
+    first = getattr(start, feature + "_randomness")
+    last = getattr(end, feature + "_randomness")
+    if factor <= 0:
+        return first
+    if factor >= 1:
+        return last
+    if first.mode == last.mode == "relative":
+        return _interpolate_randomness(first, last, factor)
+    first_bounds, last_bounds = feature_range(start, feature), feature_range(end, feature)
+    if first_bounds is None or last_bounds is None:
+        return first
+    places = FEATURE_LIMITS[feature][3]
+    bounds = [quantize_value(a + (b - a) * factor, places)
+              for a, b in zip(first_bounds, last_bounds)]
+    return Randomness(
+        mode="range", minimum=bounds[0], maximum=bounds[1],
+        enabled_probability=_interpolate_integer(first.enabled_probability, last.enabled_probability, factor),
     )

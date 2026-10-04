@@ -1,0 +1,32 @@
+[Unit]
+Description=JitterSim optional DNS ad blocking
+Requires=jittersim-helper.service
+PartOf=jittersim-helper.service
+After=NetworkManager.service jittersim-helper.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=jittersim
+StateDirectory=jittersim-adblocking
+StateDirectoryMode=0750
+EnvironmentFile=/etc/jittersim/runtime.env
+ExecStart=/opt/jittersim/.venv/bin/jittersim-adblocking --test-interface ${JITTERSIM_TEST_INTERFACE}
+ExecStopPost=/opt/jittersim/.venv/bin/jittersim-adblocking --test-interface ${JITTERSIM_TEST_INTERFACE} --clear-only
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=5s
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_KILL
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ReadWritePaths=/etc/jittersim /var/lib/jittersim-adblocking /var/lib/jittersim-control /run/jittersim
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
