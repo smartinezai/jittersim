@@ -2960,7 +2960,11 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             status, data = self.router_operations.result(identifier, password)
             return status, "application/json", _json_bytes(data)
         if path == "/api/router/status":
-            data = self.router_operations.status(password)
+            refresh = payload.get("refresh", False)
+            if type(refresh) is not bool:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid router status request"})
+            data = self.router_operations.status(password, refresh=refresh)
             return HTTPStatus.OK, "application/json", _json_bytes({"result": data})
         if path == "/api/router/wifi":
             if type(payload.get("enabled")) is not bool:

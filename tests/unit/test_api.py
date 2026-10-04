@@ -448,6 +448,38 @@ class ControlServerTests(unittest.TestCase):
                 handler._handle_write()
                 self.assertEqual(captured[0]["status"], expected)
 
+    def test_router_status_contacts_the_router_only_for_an_explicit_refresh(self):
+        calls = []
+
+        class CountingHelper(FakeHelper):
+            def read_router_wifi_status(self, *, admin_password):
+                calls.append(admin_password)
+                return {"enabled": False}
+
+        self.server.helper_client = CountingHelper()
+        for _ in range(50):
+            status, _, body = self.server.write_response_for("/api/router/status", {
+                "admin_password": "private-password"})
+            self.assertEqual(status, 200)
+            self.assertIsNone(json.loads(body)["result"]["enabled"])
+        for refresh in ("true", 1, None, {}):
+            status, _, _ = self.server.write_response_for("/api/router/status", {
+                "admin_password": "private-password", "refresh": refresh})
+            self.assertEqual(status, 400)
+        self.assertEqual(calls, [])
+        self.server.write_response_for("/api/router/status", {
+            "admin_password": "private-password", "refresh": True})
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            _, _, body = self.server.write_response_for("/api/router/status", {
+                "admin_password": "private-password"})
+            state = json.loads(body)["result"]
+            if not state["busy"]:
+                break
+            time.sleep(0.005)
+        self.assertIs(state["enabled"], False)
+        self.assertEqual(calls, ["private-password"])
+
     def test_background_router_change_keeps_dashboard_responsive_and_records_once(self):
         release = threading.Event()
 

@@ -3,6 +3,7 @@
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 from jittersim.api.router_operations import RouterOperations
 
@@ -59,6 +60,7 @@ def test_status_is_shared_without_accepting_a_different_password():
 
     operations = RouterOperations(execute, "fixture")
     try:
+        operations.status("correct", refresh=True)
         assert finish(operations)["enabled"] is True
         for _ in range(50):
             assert operations.status("correct")["enabled"] is True
@@ -75,7 +77,7 @@ def test_background_reads_do_not_discard_the_write_result(monkeypatch):
         _, started = operations.start("/api/router/wifi", {"admin_password": "correct"})
         finish(operations)
         monkeypatch.setattr(operations, "_next_read", 0)
-        operations.status("correct")
+        operations.status("correct", refresh=True)
         finish(operations)
         assert operations.result(started["operation_id"], "correct")[0] == 200
     finally:
@@ -90,6 +92,7 @@ def test_failed_change_invalidates_prior_state_and_cannot_look_successful():
 
     operations = RouterOperations(execute, "fixture")
     try:
+        operations.status("correct", refresh=True)
         assert finish(operations)["enabled"] is True
         _, started = operations.start("/api/router/wifi", {"admin_password": "correct"})
         assert finish(operations)["enabled"] is None
@@ -107,7 +110,7 @@ def test_closed_coordinator_does_not_retain_late_state():
         return response({"result": {"enabled": True}})
 
     operations = RouterOperations(execute, "fixture")
-    operations.status("correct")
+    operations.status("correct", refresh=True)
     operations.close()
     release.set()
     assert finish(operations)["enabled"] is None
@@ -122,5 +125,59 @@ def test_malformed_result_releases_operation_and_hides_exception_details():
         assert status == 502
         assert "private-password" not in str(result)
         assert "Check its state" in result["error"]
+    finally:
+        operations.close()
+
+
+def test_ordinary_status_reads_never_contact_the_router(monkeypatch):
+    calls = []
+    now = [1000.0]
+    monkeypatch.setattr("jittersim.api.router_operations.time",
+                        SimpleNamespace(monotonic=lambda: now[0], time=time.time))
+
+    def execute(path, payload):
+        calls.append(path)
+        return response({"result": {"enabled": True}})
+
+    operations = RouterOperations(execute, "fixture")
+    try:
+        for _ in range(100):
+            assert operations.status("correct")["enabled"] is None
+            now[0] += 60
+        assert calls == []
+        operations.status("correct", refresh=True)
+        assert finish(operations)["enabled"] is True
+        now[0] += operations.STATE_LIFETIME + 1
+        for _ in range(100):
+            assert operations.status("correct")["enabled"] is None
+            now[0] += 60
+        assert calls == ["/api/router/status"]
+    finally:
+        operations.close()
+
+
+def test_explicit_refreshes_share_limits_and_failed_reads_do_not_retry(monkeypatch):
+    calls = []
+    now = [1000.0]
+    monkeypatch.setattr("jittersim.api.router_operations.time",
+                        SimpleNamespace(monotonic=lambda: now[0], time=time.time))
+
+    def execute(path, payload):
+        calls.append(path)
+        return response({"error": "Router status is unavailable."}, 502)
+
+    operations = RouterOperations(execute, "fixture")
+    try:
+        operations.status("correct", refresh=True)
+        assert finish(operations)["enabled"] is None
+        for _ in range(100):
+            operations.status("correct", refresh=True)
+        assert calls == ["/api/router/status"]
+        now[0] += 600
+        assert operations.status("correct")["enabled"] is None
+        assert calls == ["/api/router/status"]
+        operations.status("correct", refresh=True)
+        assert finish(operations)["enabled"] is None
+        assert len(calls) == 2
     finally:
         operations.close()

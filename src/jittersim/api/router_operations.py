@@ -59,10 +59,11 @@ class RouterOperations:
             data["retry_after"] = max(1, int(self._next_read - time.monotonic()) + 1)
         return data
 
-    def status(self, password: str) -> Dict[str, Any]:
+    def status(self, password: str, *, refresh: bool = False) -> Dict[str, Any]:
         context = self._context(password)
         with self._lock:
-            if not self._closed and self._active is None and not self._workers.has_workers and time.monotonic() >= self._next_read:
+            if (refresh and not self._closed and self._active is None
+                    and not self._workers.has_workers and time.monotonic() >= self._next_read):
                 self._next_read = time.monotonic() + self.READ_INTERVAL
                 self._start("/api/router/status", {"admin_password": password}, context)
             return self._view(context)

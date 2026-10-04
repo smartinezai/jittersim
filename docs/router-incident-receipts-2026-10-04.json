@@ -1,0 +1,126 @@
+{
+  "base": "f22d9041d40aedfa39fd32658e4b857e8845c180",
+  "python": "3.12.13",
+  "full_pytest": {
+    "passed": 2187,
+    "warnings": 2,
+    "seconds": 76.45
+  },
+  "configured_lint": "passed: E9,F63,F7,F82,F811",
+  "diff_check": "passed",
+  "python_39_syntax": "passed, not a full Python 3.9 test run",
+  "installed_source_candidate_browser_scenarios": {
+    "passed": 38
+  },
+  "installed_source_candidate_javascript_syntax": "passed",
+  "local_source_sha256": {
+    "src/jittersim/api/server.py": "2ff742c20ce684b9942dd181dc8d9ba172331d7774fffea45e7345675c43ede8",
+    "src/jittersim/api/router_operations.py": "8e4f95ad988f21720ae35d5bb6868ed83dbf478346d821a2a93e7309335b2097"
+  },
+  "installed_source_sha256": {
+    "router_operations.py": "d2805256c939001eea0ef8106588f77ba83b332ab0f815ac7df25ff25844816a",
+    "router.py": "fca1fbdf241b0e9628d1a4efe7ae2e83b5a9314e7ca5d645ed40b5bb8737bfb5",
+    "helper.py": "4aea199e20c2e1dbf389d46eb1c39087b865627304685f7787938a030b617550",
+    "renderer.py": "b00b2e41897cb39d8103126b6f7e2abe9dd2861a767b94f3808e19365a1776ee",
+    "server.py": "61bdc62f60e496e6648b9ebbf0aa14185070c00ba4001f137e1dc8793f6d3500"
+  },
+  "management": {
+    "pi": "192.168.0.17",
+    "gateway": "192.168.0.1",
+    "mac_route": "en0",
+    "ssh_user": "jittersim",
+    "sudo_without_password": false
+  },
+  "live_mutations": [],
+  "cause": "unproven",
+  "deployment": "not performed, owned by the coordinating chat",
+  "original_commit": "201b2445f0e95b18bbb03982f220723e9ddcce9d",
+  "current_release_adaptation": {
+    "base": "d43f2d1e3f5987dde78d83416c55d3607cc85716",
+    "focused_pytest": {
+      "passed": 413,
+      "seconds": 8.87
+    },
+    "router_copy_browser": "passed at desktop and 375px",
+    "phone_layout_browser": "passed at 390px, 360px and 320px with normal and wide fonts plus 1280px and 1920px desktop",
+    "configured_lint": "passed E9,F63,F7,F82,F811 with no cache",
+    "diff_check": "passed",
+    "python_39_syntax": "passed, not full Python3.9 tests",
+    "source_sha256": {
+      "src/jittersim/api/server.py": "9592be2afff5709f93cd1f9bf18af89db4cfbc4e43d251bc2cfca2db1829334d",
+      "src/jittersim/api/router_operations.py": "3ed7a6353d1d0a68aa1426f20a2dfb016440325c605819a0d10e813a1b42ac15",
+      "src/jittersim/api/dashboard.html": "4c31864483d7112122e3100fbd346002840ea0c4077679a032047784112f4fc3",
+      "src/jittersim/api/dashboard.js": "3e561b02fcfdeafc1e912a8e3c3945bbf3a2cffd9e4057251d954cd312aa7a5e",
+      "tests/unit/test_api.py": "571e3b7fbb996199f827605d611ae7d0dea6791b5c244046e6c3cedfb06958e7",
+      "tests/unit/test_router_operations.py": "3e0c23101f3313420aa223ab1784884656d617ed8a3958ca5c105253189d736e",
+      "tests/unit/test_floating_credentials.py": "c0d03cab8eaa9cb24a8f911c9ecfbeb8e34cb93bb85d550566b7213d74be9640",
+      "tests/browser/phone_layout.py": "ecd6cd9d9a7796181298a3fa7b469f045d362efc3fd007c98ce63147f68632e0"
+    },
+    "full_pytest": {
+      "passed": 5274,
+      "skipped": 40,
+      "seconds": 486.19,
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src .venv/bin/python -m pytest -p no:cacheprovider --tb=short --maxfail=3",
+      "python_environment": "primary checkout .venv, Python3.12.13"
+    }
+  },
+  "router_inspection": {
+    "permission": "explicit user permission, user signed in directly",
+    "product_name": "Vodafone Docsis 3.1",
+    "exact_label_model": "unknown",
+    "hardware_version": "7",
+    "firmware": "01.05.069.14.EURO.PC20",
+    "full_build": "AR01.05.069.14_070726_735.PC20.10.VF",
+    "router_display_time": "2026-10-04 02:03",
+    "uptime_minutes": 51,
+    "wifi_bands": "both on, WPA2",
+    "firewall": "on",
+    "provisioned_phone_line": "Operational",
+    "downstream": {
+      "channels": 26,
+      "locks": "all YES",
+      "power_dbmv_range": [
+        -9.6,
+        8.1
+      ],
+      "snr_mer_db_range": [
+        32,
+        43
+      ]
+    },
+    "upstream": {
+      "channels": 4,
+      "ranging": "all SUCCESS",
+      "power_dbmv_range": [
+        39.3,
+        44.8
+      ]
+    },
+    "events": {
+      "visible_rows": 97,
+      "categories": [
+        "Wi-Fi"
+      ],
+      "latest_current_date": "2026-10-04 01:33:20",
+      "earliest_current_date": "2026-10-04 01:14:24",
+      "other_dates": "2022, reliability unknown",
+      "reason_counts": {
+        "PREV_AUTH_NOT_VALID": 8,
+        "CLASS2_FRAME_FROM_NONAUTH_STA": 2,
+        "CLASS3_FRAME_FROM_NONASSOC_STA": 3,
+        "DISASSOC_DUE_TO_INACTIVITY": 2
+      },
+      "configuration_write": {
+        "time": "2026-10-04 01:14:58",
+        "source": "CLIENTTOOL",
+        "field": "Device.WiFi.AccessPoint.2.X_CISCO_COM_KickAssocDevices",
+        "value": "true",
+        "sender_identity": "unknown"
+      }
+    },
+    "incident_causality": "unproven, valid-date entries appear after recovery reboot",
+    "settings_changed": false,
+    "diagnostic_tests_run": false,
+    "session_logged_out": true
+  }
+}

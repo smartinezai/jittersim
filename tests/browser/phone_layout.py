@@ -35,7 +35,7 @@ WIDE_FONTS = (
 STRESSES = (("normal fonts", ""), ("wide fonts", WIDE_FONTS))
 SHEET_CONTROLS = (
     "#active-profile-select", "#active-profile-button", "#apply-button", "#reset-button",
-    "#sync-router-ap", "#open-admin-credentials", "#open-router-credentials",
+    "#sync-router-ap", "#refresh-router-wifi", "#open-admin-credentials", "#open-router-credentials",
 )
 
 
@@ -322,6 +322,7 @@ def check_router_switch(page, what):
     page.locator("#check-router-password").click()
     expect(page.locator("#router-credential-state")).to_contain_text("Accepted")
     page.locator("#close-credentials").click()
+    sidebar_control(page, "#refresh-router-wifi").click()
     close_controls(page)
     switch = page.locator("#router-wifi-toggle")
     expect(switch).to_be_enabled(timeout=10000)

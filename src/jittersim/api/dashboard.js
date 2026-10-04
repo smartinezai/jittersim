@@ -707,7 +707,6 @@
 
     let routerWifiPolling = false;
 
-    let routerWifiTimer = null;
 
     let routerWifiRemoteBusy = false;
 
@@ -757,7 +756,6 @@
       router.className = "credential-state" + (routerPasswordVerified ? " accepted" : "");
       syncRememberedCredentials();
       renderRouterWifi();
-      scheduleRouterWifiPoll();
     }
 
     function openCredentials(kind, opener) {
@@ -835,6 +833,8 @@
       routerWifiCheckedAt = null;
       routerWifiError = "";
       routerWifiMinimumCheck = 0;
+      routerWifiRemoteBusy = false;
+      routerWifiRemoteChanging = false;
       routerPasswordVerified = false;
       routerPasswordRejected = false;
       if (!routerActionPending) element("router-action-message").textContent = "";
@@ -6654,6 +6654,8 @@
       adminTokenRejected = false;
       adminTokenRefused = false;
       adminTokenVerified = false;
+      routerWifiRemoteBusy = false;
+      routerWifiRemoteChanging = false;
       setDashboardUnlocked(false);
       element("allow-dashboard-device").disabled = true;
       updateCredentialStatus();
@@ -6986,6 +6988,8 @@
         routerPasswordRejected ? "Router password rejected. Enter it again." : busy ? "Working…" :
         !password ? "Enter the router password first" : "Copy the router Wi-Fi name, password and security to the Pi";
       element("check-router-password").disabled = busy;
+      element("refresh-router-wifi").disabled = !helperConfigured || !adminTokenVerified ||
+        !password || routerPasswordRejected || busy;
       button.disabled = !helperConfigured || !known || busy;
       button.setAttribute("aria-checked", String(known && routerWifiEnabled));
       button.setAttribute("data-unknown", String(!known));
@@ -6993,21 +6997,11 @@
       status.textContent = !adminTokenVerified ? "Check admin token" : !helperConfigured ? "Needs Pi helper" :
         !password ? "Enter router password" : routerPasswordRejected ? "Password rejected" :
         routerActionPending || routerWifiRemoteChanging ? "Changing…" : busy ? "Checking…" :
-        known ? (routerWifiEnabled ? "On" : "Off") + " · " + new Date(routerWifiCheckedAt * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}) : routerWifiError ? "Status unavailable" : "Checking…";
-      status.title = routerWifiError || (known ? "Last checked " + new Date(routerWifiCheckedAt * 1000).toLocaleTimeString() : status.textContent);
-    }
-
-    function scheduleRouterWifiPoll(delay = 0) {
-      if (typeof window.setTimeout !== "function") return;
-      if (routerWifiTimer !== null) window.clearTimeout(routerWifiTimer);
-      routerWifiTimer = null;
-      if (document.hidden || !adminTokenVerified || !helperConfigured || routerPasswordRejected ||
-          !element("router-admin-password").value || routerActionPending || routerPasswordChecking || routerWifiPolling) return;
-      routerWifiTimer = window.setTimeout(pollRouterWifi, delay);
+        known ? (routerWifiEnabled ? "On" : "Off") + " · " + new Date(routerWifiCheckedAt * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}) : routerWifiError ? "Status unavailable" : "Check router Wi-Fi";
+      status.title = routerWifiError || (known ? "Last checked " + new Date(routerWifiCheckedAt * 1000).toLocaleTimeString() : "Automatic router checks are paused. Choose Check router Wi-Fi.");
     }
 
     async function pollRouterWifi() {
-      routerWifiTimer = null;
       if (document.hidden || !adminTokenVerified || routerPasswordRejected || routerActionPending || routerPasswordChecking || routerWifiPolling) return;
       const password = element("router-admin-password").value;
       if (!password || !helperConfigured) return;
@@ -7015,17 +7009,29 @@
       const tokenRevision = adminTokenRevision;
       routerWifiPolling = true;
       renderRouterWifi();
-      let delay = 15000;
       try {
-        const response = await request("/api/router/status", "POST", {admin_password: password});
-        if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) return;
-        const result = response.result;
-        routerWifiRemoteBusy = result.busy === true;
-        routerWifiRemoteChanging = result.changing === true;
-        routerWifiEnabled = typeof result.enabled === "boolean" && result.checked_at >= routerWifiMinimumCheck ? result.enabled : null;
-        routerWifiCheckedAt = result.checked_at;
-        routerWifiError = result.error || "";
-        delay = Math.min(60000, Math.max(1000, (result.retry_after || 15) * 1000));
+        const context = wifiRecoveryContext(45000);
+        const tokenValid = context.valid;
+        context.valid = () => tokenValid() && passwordRevision === routerPasswordRevision;
+        let refresh = true;
+        for (let attempt = 0; ; attempt++) {
+          const response = await boundedRecoveryRead(options => request(
+            "/api/router/status", "POST", {admin_password: password, refresh}, options), context);
+          if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) return;
+          const result = response.result;
+          routerWifiRemoteBusy = result.busy === true;
+          routerWifiRemoteChanging = result.changing === true;
+          routerWifiEnabled = typeof result.enabled === "boolean" && result.checked_at >= routerWifiMinimumCheck ? result.enabled : null;
+          routerWifiCheckedAt = result.checked_at;
+          routerWifiError = result.error || "";
+          if (!routerWifiRemoteBusy) break;
+          if (attempt >= 44 || context.now() >= context.deadline) {
+            throw new Error("Router check timed out. Wait before checking again.");
+          }
+          refresh = false;
+          await new Promise(resolve => window.setTimeout(resolve, 1000));
+          if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) return;
+        }
         if (routerWifiEnabled !== null) {
           routerPasswordVerified = true;
           routerPasswordRejected = false;
@@ -7039,11 +7045,9 @@
         routerWifiError = error.message;
         routerWifiRemoteBusy = false;
         routerWifiRemoteChanging = false;
-        delay = 30000;
       } finally {
         routerWifiPolling = false;
         renderRouterWifi();
-        scheduleRouterWifiPoll(delay);
       }
     }
 
@@ -7222,12 +7226,14 @@
     }
 
     element("check-router-password").addEventListener("click", checkRouterPassword);
+    element("refresh-router-wifi").addEventListener("click", pollRouterWifi);
 
     element("sync-router-ap").addEventListener("click", (event) => {
       routerAction("/api/router/sync-ap", {}, "Checking the router Wi-Fi security...", event.currentTarget);
     });
 
     element("router-wifi-toggle").addEventListener("click", (event) => {
+      renderRouterWifi();
       if (typeof routerWifiEnabled !== "boolean" || event.currentTarget.disabled) return;
       const enabled = !routerWifiEnabled;
       if (!enabled && !window.confirm("Turn off router Wi-Fi, including guest Wi-Fi? Keep the Pi connected by Ethernet. A Mac that is using the router's Wi-Fi loses its connection and needs to join the Pi's test Wi-Fi network.")) return;
@@ -7237,7 +7243,6 @@
 
     document.addEventListener("visibilitychange", () => {
       renderRouterWifi();
-      scheduleRouterWifiPoll();
     });
 
     element("random-website-device").addEventListener("change", loadRandomWebsiteAnalytics);
