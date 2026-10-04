@@ -1,0 +1,55 @@
+{
+  "head": "717b452f82bbc6427384150e4a6199a84dc189fb",
+  "consumer_bytes_also_equal_commit": "ceda75c4d81f4df1d38587ed57abce0b4dd42081",
+  "base": "b87f861c228787c132325663870ef02be93d0fa4",
+  "consumer_hashes": {
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "84683fdeb036d0b4872ab32d8f1539bbeb32f8f8879af3caf507f23bc4205e7e",
+    "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77"
+  },
+  "approved_base_tuple": {
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "391624ec30f18e25cff574db157ca53f84b4be6869734154a0d32dd9da9542e5",
+    "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77"
+  },
+  "snapshot": "/var/folders/10/tx9fmdfs2fvfqvsrx37t22240000gn/T/jittersim-capability-independent-k1s2jr9a",
+  "complete_byte_comparison": "Producer and access consumer are byte-identical to approved b87. Entire helper differs only by adding capabilities to the immediate fixed/read path and clarifying two comments. No other byte changes.",
+  "inspection": [
+    "Capabilities returns a fixed literal dictionary without touching network state",
+    "Policy-only action restriction and main-socket homepage refusal both precede the immediate path",
+    "Control revision, update retry, separate release-stage lock and bounded worker slots remain identical",
+    "All apply/reset locking, durable Panic publication, ad run-permission witness and resume ordering are byte-identical to b87"
+  ],
+  "remaining_gates": [
+    "Final consumer hashes after any range integration",
+    "Exact final combined Linux release checks",
+    "Root-owned registry acceptance and release publication",
+    "Router recovery and isolation acceptance before Pi deployment"
+  ],
+  "decision": "Approve only this exact complete consumer tuple after full-byte comparison with approved b87 and independent bounded concurrency, policy socket, persistent Panic and combined ad/pattern checks.",
+  "tests": {
+    "312": {
+      "counts": {
+        "tests": 69,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "xml": "/private/tmp/jittersim-capability-independent-host312.xml",
+      "xml_sha256": "a2f8cdc80a6a7a9ba7c2bbf06a7d2a044632ad967924b8a3de1dab3c32141047",
+      "log": "/private/tmp/jittersim-capability-independent-host312.log"
+    },
+    "39": {
+      "counts": {
+        "tests": 69,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "xml": "/private/tmp/jittersim-capability-independent-host39.xml",
+      "xml_sha256": "75ebc5052d8525ec71a352f3048febd3146b566b98a2ed4046c57499036aeccb",
+      "log": "/private/tmp/jittersim-capability-independent-host39.log"
+    }
+  },
+  "scope": "No registry or source changes. Supported full Linux CI, final merge, release and physical Pi acceptance remain root-owned gates. Host 3.9 uses LibreSSL and is not Linux TLS equivalence."
+}

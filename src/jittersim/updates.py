@@ -976,9 +976,9 @@ PANIC_APPROVED_SOURCES = ({
     "src/jittersim/networking/helper.py": "e9b0e6070c5bb27d2983711b808e33e541099c762fc562eaf5c73ede3d2045e4",
     "src/jittersim/networking/access.py": "1d4edebe57877e6db6bbbcd0d1adaecfd9fa48573c0f8830b10a2dcdaaf04ec6",
 }, {
-    # See docs/review-results-adblocking-pattern-consumers-2026-10-04.json.
+    # See docs/review-results-final-panic-consumers-2026-10-04.json.
     "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
-    "src/jittersim/networking/helper.py": "391624ec30f18e25cff574db157ca53f84b4be6869734154a0d32dd9da9542e5",
+    "src/jittersim/networking/helper.py": "84683fdeb036d0b4872ab32d8f1539bbeb32f8f8879af3caf507f23bc4205e7e",
     "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
 },)
 
