@@ -80,3 +80,35 @@ preview status and expected value after focus changes before capturing either
 range method. This strengthens the displayed-value check without changing
 application source. Preserve the earlier source preparation as preparation
 only and rebuild the exact test-source bundle before the final Linux run.
+
+## Actual full-run failures and repaired source
+
+The445 full Linux Python3.13 run returned two failures,5445 passing tests and
+40 kernel skips. A phone-layout assertion still expected the removed old
+pseudo-tooltip. A deployment shell test exposed the watchdog terminating its
+child before publishing the timeout marker. Parent cleanup could interrupt
+that publication and misreport a timeout as an ordinary connection failure.
+The complete failed run and stopped follower are retained with returned
+artifacts and successful owned-container cleanup. No browser checks ran.
+
+The corrected assertion checks the current fixed scrollable help above the
+phone safety bar. The deployment watchdog now completes its decision despite
+parent cancellation and reports a successful timeout termination by exit
+status. It no longer writes a marker. A controlled regression failed under
+all three available shells before repair. The complete deployment and phone
+suites pass149 cases on both Python3.9 and3.12. An independent63-case review
+passes without skips on both versions and confirms the whole deployment
+script outside the deadline function remains unchanged.
+
+The urgent router safeguard refuses unknown legacy form controls before any
+mutation or write. Otherwise the older fallback could forward an unrelated
+action captured from the router form. Fixture checks prove this risk without
+establishing that it occurred during either outage. Known legacy forms and
+read-only imports remain supported. The composed router/helper/copy checks
+pass194 cases on both Python3.9 and3.12. Only the focused guard is admitted.
+Hardware observations and subsequent logging plans remain outside this batch.
+
+Freeze this repaired source, rebuild the exact wheel and source inputs then
+repeat every final configured Linux check. None of the earlier full-source
+results substitutes for this changed candidate. Keep normal publication and
+management/recovery gates.

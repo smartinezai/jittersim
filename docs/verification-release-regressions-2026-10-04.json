@@ -1,0 +1,35 @@
+{
+  "base_failed_source": "44538ddad13611a91379b1030d6f063d5c54b419",
+  "source_parent": "709bc20c48bcdd4db52442466fbba7c8ae7d47fa",
+  "status": "Focused source verification only. Renewed full configured pipeline remains required.",
+  "checks": {
+    "jittersim-release-regressions-status-after": {
+      "passed": 149,
+      "xml_sha256": "3ca98f939ae2f22a3ff0c449356ed3c8b3d0a3f2aabaef4643e324a68fab56cb",
+      "log_sha256": "6160d69b5386e837d1b086ffe579409f57df7fd04435850cb9141a1119a5488e"
+    },
+    "jittersim-release-regressions-status-python39": {
+      "passed": 149,
+      "xml_sha256": "6360285656125aff12ba8a084a7f093332e23d6ce4adabf0d9311f3d6f49c451",
+      "log_sha256": "ee6c9fdf23d6e2e95a892abe279e0432a35923ceb2210d70e797aa4da784e91a"
+    },
+    "jittersim-composed-router-guard": {
+      "passed": 194,
+      "xml_sha256": "5d3cdfd8f8231246fbeac1e58611fe4cdaa3b9bd06c69b4a2f9fff14189c9514",
+      "log_sha256": "87a9ecdf3de1de40356e92c44bb94665134e9106d724b421a8ae7ff4d713b223"
+    },
+    "jittersim-composed-router-guard-python39": {
+      "passed": 194,
+      "xml_sha256": "2fbd85689443d95c371236f2f51d0d1e5ff5052253d061aef3b042aa5c07c09a",
+      "log_sha256": "77e53f6adbdd5087bd9f429eb35f05b49d4daaa0d07d0405d9c05e6f7d2dad5f"
+    }
+  },
+  "deadline_review_sha256": "ec8dc42b947f566790859e0b7c1851d470364a407f360603186288c33f0c2a8b",
+  "source_hashes": {
+    "deploy/raspberry-pi/deploy-from-mac.sh": "b1e5ae53148861e3eedf964647de497d709a8ba72eca4c827d51026f0b9a9de3",
+    "tests/unit/test_deploy_from_mac.py": "40f0bc1cebcc755019fc9cadeb04d84024012a71fb98bb47fee0e9a36daedd6f",
+    "tests/unit/test_dashboard_phone_layout.py": "760576c01eb224273f0e562e85d3da143dc78e0b470cc477103e4892c18306a9",
+    "src/jittersim/networking/router.py": "2fa9ea14fc49c861e40b64fc4df30c891dc392832a6f3d8a6ee4f9d9652aef5a",
+    "tests/unit/test_router.py": "206d000d0ee1d042d2d42025e11c8091302d6062386e05405f58c60423d1a638"
+  }
+}
