@@ -107,10 +107,16 @@ class LinuxDatapathTests(unittest.TestCase):
             {"action": "apply", "plan": plan_to_payload(plan)})
         self.assertTrue(response["ok"], response)
         self.assertTrue(plan.queues)
-        result = _in(PI, "tc", "qdisc", "show", "dev", "wlan0")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        for value in ("1%", "2%", "3%", "6%"):
-            self.assertIn(value, result.stdout)
+        upload = _in(PI, "tc", "qdisc", "show", "dev", TOPOLOGY.uplink_interface)
+        self.assertEqual(upload.returncode, 0, upload.stderr)
+        for field, value in (("loss", "1%"), ("reorder", "2%"),
+                             ("duplicate", "3%"), ("corrupt", "6%")):
+            self.assertRegex(upload.stdout, rf"\b{field}\s+{re.escape(value)}(?:\s|$)")
+        download = _in(PI, "tc", "qdisc", "show", "dev", TOPOLOGY.test_interface)
+        self.assertEqual(download.returncode, 0, download.stderr)
+        self.assertIn("loss gemodel p 0.2525% r 25%", download.stdout)
+        for field in ("reorder", "duplicate", "corrupt"):
+            self.assertNotIn(field, download.stdout)
 
     def ping(self, source=None, *, namespace=CLIENT, destination="192.168.0.1", count=3,
              interval="0.2"):

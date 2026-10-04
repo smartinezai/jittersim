@@ -38,7 +38,7 @@ returned artifacts and owned-container cleanup. The final workflow inventory
 must match every executed command. It includes the ad-blocking packet command
 and all admitted browser modules. Actual collection finds40 kernel tests after
 adding the custom-range case. Only that verified inventory may replace the
-previous39-case count. The separate clean image skips48 deployment and13 signing
+previous39-case count. The separate clean image skips57 deployment and13 signing
 cases that require Git metadata. Ordinary Git matrices execute those cases.
 
 The final exact source still needs Linux Python3.9/3.11/3.13, configured lint,
@@ -181,3 +181,31 @@ confirms only the import and precise request exemption change behavior. Controll
 method/path checks confirm configuration, router, access-point, ad-blocking and
 Panic writes remain detected. The enlarged-phone diagnostics capture was
 inspected. The complete final Linux sequence remains required.
+
+## Kernel acceptance contract corrections
+
+The exact748 Linux source passed all three Python matrices with5461 passing
+tests and40 expected kernel skips each. All browser journeys, both Node
+journeys, both40-state GUI runners and all13 native commands completed.
+Independent returned-proof reviews accepted the native and Git-backed3.11
+results. The clean kernel build passed. Its actual40-case run passed38 cases
+and failed two. That run remains retained with attach/exit1 and cleanup0.
+
+The post-Panic test reused a direct apply request without a current control
+revision or an explicit Start. The reviewed helper correctly refused it.
+The corrected test checks missing and stale revisions, refuses a fresh implicit
+restart and requires both the current public revision and explicit Start.
+Before restarting it verifies no active plan, no shaping queues and working
+traffic in both directions. Existing household-disabled, MAC, queue and traffic
+checks after restart remain intact.
+
+The range test inspected the download interface while expecting upload effects.
+It now checks all four named upload percentages on the uplink interface.
+Download uses bursty loss, so the separate test checks its two kernel
+probabilities and the absence of upload-only effects on the test interface.
+No production, deployment, unit-test or workflow source changed.
+
+Configured lint and85 existing host Panic/range regressions pass. The corrected
+kernel cases must pass before restarting the entire final frozen pipeline.
+Neither these focused checks nor the earlier incomplete kernel run establish
+release readiness. Keep physical Pi acceptance separate.
