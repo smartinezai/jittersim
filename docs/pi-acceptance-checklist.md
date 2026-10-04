@@ -2,12 +2,14 @@
 
 This is the one list of things the owner tries on the Pi after installing a release. Each box says what to do and what you should see. Tick a box only when you saw the result. If the result differs write down what you saw and the time. Panic in the sidebar is always the way back.
 
-Last updated: 2026-10-02. Nobody has ticked these boxes on a real Pi yet unless a line says so.
+Last updated: 2026-10-03. Nobody has ticked these boxes on a real Pi yet unless a line says so.
 
 Release tried: ________________  Date: ________________
 
-- **Part A** is for every build of the Pi line. It also applies to the integration build.
-- **Part B** is only for the integration build (the draft pull request "Integrate main into the Pi line"). Do part A first.
+- **Part A** covers everyday controls.
+- **Part B** covers installation, trusted access and recovery. Do part A first.
+  Use a signed release from the verified official `main` after its required
+  checks are complete. A local fixture or branch test does not tick these boxes.
 
 ## Before you start
 
@@ -18,7 +20,7 @@ Release tried: ________________  Date: ________________
 - **Use test phones and a throwaway profile.** Never block or slow the computer you control the Pi from.
 - If the Pi login password was ever pasted into a chat change it now with `passwd` on the Pi.
 
-## Part A: the Pi line
+## Part A: everyday controls
 
 ### Start up
 
@@ -96,31 +98,53 @@ Release tried: ________________  Date: ________________
 - [ ] **Router password memory**
   - Do: tick **Remember for 24 hours** under the router password. Reload the page.
   - Expect: the password comes back and the router status keeps updating without typing. Press **Clear** afterwards if the computer is shared.
-- [ ] **Copy router Wi-Fi name and password**
-  - Do: with the router password accepted press **Copy Wi-Fi name** and **Copy Wi-Fi password** in the sidebar. Paste each into a harmless note. Then copy something else.
-  - Expect: you get the router's own Wi-Fi name and password and neither shows on the screen. A wrong router password disables both buttons until you change it.
-  - **Warning:** do not press **Copy router Wi-Fi to Pi** for this check. It renames the test Wi-Fi to the router's name and can move your computer onto the Pi.
+- [ ] **Copy router Wi-Fi to Pi from the sidebar**
+  - Do: from Ethernet with the router password accepted press **Copy router Wi-Fi to Pi** in the sidebar. Check the preview then cancel once. Repeat and confirm only when a test Wi-Fi restart is acceptable.
+  - Expect: there is one combined button. Cancelling changes nothing. Confirming applies the router's Wi-Fi name and password together. The password is not displayed or copied to the clipboard. A rejected router password blocks another attempt until you edit it.
+  - **Warning:** this changes the test Wi-Fi and disconnects its clients while it restarts. Keep Ethernet access throughout the check.
 - [ ] **Router Wi-Fi switch**
   - Do: from a computer on Ethernet turn the sidebar **Router Wi-Fi** switch off then on again. A separate session also owns this check so tick it only if you did it yourself.
   - Expect: the switch shows `Changing` then the confirmed state. Devices on the router Wi-Fi drop and come back.
   - **Warning:** turning it off cuts every device on the router Wi-Fi. Turn it back on with the same switch or from a computer on Ethernet. The test Wi-Fi cannot reach the router page.
 
-## Part B: only the integration build
+## Part B: installation, trusted access and recovery
 
 ### Install
 
 - [ ] **Back up the database first**
-  - Do: before installing run `sudo cp -p /var/lib/jittersim/jittersim.db ~/jittersim.db.before-integration` on the Pi. Also keep the backup the Pi guide asks for.
-  - Expect: the copy exists. You need it because the old dashboard fails with `stored schedule is malformed` after a rollback if group or everyone-else schedules were created.
-- [ ] **The first install makes a new certificate**
-  - Do: install the release then open the dashboard in the browser. Compare the SHA-256 fingerprint the installer printed with the one the browser shows.
-  - Expect: the browser warns once because the certificate is new. The fingerprints match. After you trust it the warning is gone.
-- [ ] **The Pi name resolves**
-  - Do: on the Mac run `ping -c 2 <pi-name>.local` and open `https://<pi-name>.local:8080`. Do the same with `jittersim.local`.
-  - Expect: both names answer and the dashboard opens. If a name does not resolve from the management Wi-Fi use the Ethernet address.
+  - Do: before installing make the [private consistent database backup](../deploy/raspberry-pi/README.md#private-database-backup) and keep the configuration and service backups from the same recovery point.
+  - Expect: the backup command completed and the private copy is available. Copying only the live database file does not establish a consistent backup. Keep a current backup before any later rollback as well.
+- [ ] **Verify and trust the retained certificate authority**
+  - Do: after installing the signed official release verify the authority fingerprint on the Pi or through an independently trusted management connection. Sign in and open **Trust this Pi** under **Access and rules**. Compare its authority fingerprint with the installer's before installing the public certificate or Apple profile. Follow the displayed steps for the actual device.
+  - Expect: a fresh Pi creates its authority once. An existing valid authority keeps the same fingerprint. The card and installer show the same authority fingerprint. After enrollment the canonical dashboard address opens without a warning on that device. The browser's leaf-certificate fingerprint is a different value.
+  - **Warning:** keep this box unticked until the real browser and operating-system trust steps succeed. Never copy the private CA key.
+- [ ] **The public sign-in page stays neutral**
+  - Do: open a fresh browser context without a saved token. Check the title, visible page and downloaded page source before signing in.
+  - Expect: the public page uses neutral names and shows the canonical address. Private device details, certificate details and product branding appear only after the token and device access are accepted.
+- [ ] **The Pi name resolves on the router network**
+  - Do: on a Mac on the home router's Wi-Fi run `dns-sd -G v4 netlab.local`, then open `https://netlab.local:8080`. For an existing installation also test any saved compatibility name.
+  - Expect: the canonical name shows the Pi's Ethernet address and the dashboard opens. A fresh installation adds no product or host-name alias. Required existing certificate aliases may remain on Ethernet. If discovery fails use a certificate-covered IP address.
+- [ ] **The same name resolves on the test Wi-Fi with the test address**
+  - Do: switch the same Mac to the configured test Wi-Fi and run `dns-sd -G v4 netlab.local`, then open `https://netlab.local:8080`.
+  - Expect: the name answers with `192.168.50.1`, the dashboard opens and the remembered sign-in from the router network is still there. Before the first visit at this address you sign in once.
+- [ ] **Only the one name is announced on the test Wi-Fi**
+  - Do: on the Mac on the test Wi-Fi run `dns-sd -B _ssh._tcp local.` and `dns-sd -B _workstation._tcp local.` and `dns-sd -G v4 <pi-name>.local` for a few seconds each. On the Pi run `sudo tcpdump -ni wlan0 udp port 5353`.
+  - Expect: no SSH or workstation service appears and `<pi-name>.local` does not resolve on the test Wi-Fi. The capture shows the question and answer for `netlab.local` only.
+- [ ] **The name follows an Ethernet address change**
+  - Do: on the Pi run `sudo nmcli connection down <ethernet-connection>; sudo nmcli connection up <ethernet-connection>` (or renew the DHCP lease so the address changes). Then on the Mac run `dns-sd -G v4 netlab.local`.
+  - Expect: within a few seconds the name answers with the new Ethernet address on the router network and still with `192.168.50.1` on the test Wi-Fi. `sudo jittersim diagnostics` shows both.
+- [ ] **A name conflict is reported**
+  - Do: on another computer on the router network run `dns-sd -P Conflict _http._tcp local. 80 netlab.local 192.168.0.250` (or any device that claims `netlab.local`), then restart the name service with `sudo systemctl restart jittersim-mdns`.
+  - Expect: `sudo jittersim diagnostics` and the dashboard's diagnostics say another device already uses the name and give the fix. The Pi does not announce `netlab-2.local`. The dashboard still opens by IP address.
+- [ ] **Changing the name works**
+  - Do: `sudo jittersim dashboard-name set bench.local`, then open `https://bench.local:8080` on both networks.
+  - Expect: the new name opens on both networks without a warning on a device that trusts the retained authority. Its fingerprint stays unchanged and you sign in once at the new address. Existing required aliases may still resolve on Ethernet.
+- [ ] **A failure of the name service never blocks the dashboard**
+  - Do: `sudo systemctl stop avahi-daemon avahi-daemon.socket`, then open the dashboard by its IP address.
+  - Expect: the dashboard opens and diagnostics say the name is not announced and how to fix it.
 - [ ] **Sign in again**
   - Do: choose **Check token**. From the test Wi-Fi also choose **Allow this device**.
-  - Expect: the dashboard unlocks. Known limit of this build: the page still shows the name jittersim before you sign in.
+  - Expect: the dashboard unlocks and shows private controls and product branding only after accepted access.
 
 ### Access rules
 
@@ -152,9 +176,9 @@ Release tried: ________________  Date: ________________
 ### More features
 
 - [ ] **Staged update flow**
-  - Do: stage a newer release on the Pi (for example with the deploy script below without `--install`). On **Router and Wi-Fi** press **Check for updates** then **Install staged release**.
+  - Do: stage a newer signed release from verified official `main` using `--stage-only`. On **Router and Wi-Fi** press **Check for updates** then **Install staged release**.
   - Expect: the **Release staged** badge shows beside the page name and the check shows the staged and installed labels. After the install the dashboard comes back with the new release label.
-  - **Warning:** keep Ethernet or SSH ready. The dashboard and the test network are cut for a short time. **Restore previous installation** brings back the settings from before the update and drops later changes so try it last or skip it.
+  - **Warning:** keep independent management access ready. **Restore previous installation** uses the selected complete recovery point. Later ordinary profile, protection, device-access and usage changes can revert. Current signing trust, update token, certificate authority and Panic state have separate protections. Back up current data before trying restore.
 - [ ] **Scenarios**
   - Do: under **Schedules and limits** save a scenario with two or three short steps for one test phone. Start it.
   - Expect: the phone's profile changes at each step on time and the **Activity** page records each change. A finished scenario does not start again by itself.
@@ -185,23 +209,22 @@ Release tried: ________________  Date: ________________
 ### From the Mac
 
 - [ ] **Remote commands**
-  - Do: copy `/etc/jittersim/dashboard.crt` from the Pi over a connection you trust and compare its fingerprint with the installer's. Run `jittersim connect --url https://<pi-address>:8080 --ca-cert ~/jittersim-dashboard.crt`. Then run `jittersim status` and `jittersim profiles list` and `jittersim traffic --scan` and `jittersim impact`.
+  - Do: copy `/etc/jittersim/ca/ca.crt` from the Pi over a connection you trust and compare its fingerprint with the installer's. Run `jittersim connect --url https://<pi-address>:8080 --ca-cert ~/jittersim-ca.crt`. Then run `jittersim status` and `jittersim profiles list` and `jittersim traffic --scan` and `jittersim impact`.
   - Expect: each command asks for the admin token with a hidden prompt and prints its result. Status names the release on the Pi and the affected devices. The impact check waits about ten seconds.
   - **Warning:** never type the token or a password in the command itself. Skip `jittersim wifi show --password` because it prints the Wi-Fi password on the screen.
 - [ ] **Deploy script**
-  - Do: from a JitterSim checkout on the Mac run `deploy/raspberry-pi/deploy-from-mac.sh --ref RELEASE_REF --dry-run`. Then run it without `--dry-run` and once more with `--install`.
-  - Expect: it prints the commit and the SHA-256 and stages the release. The Pi asks for its `sudo` password in your terminal and you type it yourself. After `--install` it prints the release the Pi runs and that matches `git rev-parse --short RELEASE_REF`.
-  - **Warning:** SSH times out from the test Wi-Fi. Put the Mac on Ethernet or the router network first.
+  - Do: verify the official Git remote and fetch `main`. Confirm the exact reviewed commit and completed checks. Use `--ref origin/main --dry-run`, then `--ref origin/main --stage-only`. Install that signed release through the verified update route with independent management recovery available.
+  - Expect: the printed source commit and checksum match the exact signed archive. After install its semantic version and source commit match the manifest. Any required sudo password is entered by the owner in the terminal.
+  - **Warning:** a dry run does not prove completed checks or management recovery. SSH is blocked on the test Wi-Fi. Trusted HTTPS can upload a signed release there but initial manager upgrades and physical recovery need an independent route.
 - [ ] **Phone layout on a real phone** (only if your build has the phone layout change)
   - Do: sign in from a real phone on the test Wi-Fi after **Allow this device** and again on the router network. Open a long page and scroll to the bottom.
   - Expect: Panic is always in view and the router switch is one tap away. A page starts on the first screen after you tap its name. Buttons are easy to hit and nothing scrolls sideways.
   - **Warning:** do not turn the router Wi-Fi off from a phone that uses it.
 
-## Known limits of the integration build
+## Remaining physical checks
 
-These are on the list of planned features. Do not count them as failures of a check.
-
-- The page shows the name jittersim before sign-in.
-- The certificate does not cover `192.168.50.1`.
-- A device in a random outage also loses the Pi's DNS.
-- Browser tunnels to a listed service are not counted in a device's data.
+Local tests do not establish actual radio behavior, native browser trust or
+discovery on either physical network. Keep those acceptance boxes unticked
+until tested on the installed official release. Verify normal Chrome separately
+from automated Chromium. Also record real reboot recovery and the behavior of
+ordinary browser traffic through profiles and service rules.

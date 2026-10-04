@@ -1,6 +1,7 @@
 """Authenticated dashboard workflows separate from ordinary configuration routes."""
 
 import json
+import re
 import shutil
 import time
 from importlib.metadata import PackageNotFoundError, version
@@ -25,8 +26,20 @@ WORKFLOW_WRITES = frozenset(
         "/api/update-preferences",
         "/api/updates/install",
         "/api/updates/rollback",
+        "/api/updates/retry",
+        "/api/updates/check-online",
+        "/api/updates/online-settings",
     )
 )
+ONLINE_JOB = re.compile(r"[0-9a-f]{16}\Z")
+UPDATE_RETRY = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def online_unavailable():
+    return response(
+        {"state": "unavailable", "message": "Online checks need the Pi network helper and the "
+         "release service."}, 503,
+    )
 
 
 def response(value, status=200):
@@ -144,6 +157,23 @@ def read_workflow(server, path):
                     "message": "Install the release service on the Pi to enable update controls.",
                 }
             )
+    if path == "/api/updates/check-online" or path.startswith("/api/updates/check-online/"):
+        job = path.removeprefix("/api/updates/check-online").lstrip("/") or None
+        if job is not None and not ONLINE_JOB.fullmatch(job):
+            return response({"error": "unknown check"}, 404)
+        if server.helper_client is None:
+            return online_unavailable()
+        try:
+            return response(server.helper_client.online_status(job))
+        except (HelperClientError, AttributeError):
+            return online_unavailable()
+    if path == "/api/updates/online-settings":
+        if server.helper_client is None:
+            return online_unavailable()
+        try:
+            return response(server.helper_client.online_settings())
+        except (HelperClientError, AttributeError):
+            return online_unavailable()
     if path == "/api/history":
         return response({"versions": store.history(), "warning": store.history_warning()})
     if path == "/api/test-sessions":
@@ -181,6 +211,55 @@ def write_workflow(server, path, payload, parse_settings):
             return response(
                 server.helper_client.install_release(version=release, rollback=rollback), 202
             )
+        if path == "/api/updates/retry":
+            retry_id = payload.get("retry_id")
+            if (set(payload) != {"retry_id"} or not isinstance(retry_id, str)
+                    or UPDATE_RETRY.fullmatch(retry_id) is None):
+                raise ValueError("choose the current failed update to retry")
+            unavailable = {"error": "update retry is unavailable"}
+            client = server.helper_client
+            retry = getattr(client, "retry_update", None)
+            if not callable(retry):
+                return response(unavailable, 503)
+            try:
+                status = retry(retry_id=retry_id)
+            except HelperClientError as error:
+                if error.reason in {"helper-busy", "retry-refused", "update-retry-refused"}:
+                    return response({"error": "the update cannot be retried right now"}, 409)
+                return response(unavailable, 503)
+            except AttributeError:
+                return response(unavailable, 503)
+            if (not isinstance(status, dict)
+                    or not isinstance(status.get("request_id"), str)
+                    or re.fullmatch(r"[0-9a-f]{32}", status["request_id"]) is None
+                    or status.get("request_kind") not in ("install", "rollback")):
+                return response(unavailable, 503)
+            return response({"status": status}, 202)
+        if path == "/api/updates/check-online":
+            force = payload.get("force", False)
+            if not isinstance(force, bool) or set(payload) - {"force"}:
+                raise ValueError("force must be true or false")
+            if server.helper_client is None:
+                return online_unavailable()
+            try:
+                # Returns at once with a job. The root fetch unit does the work.
+                return response(server.helper_client.online_check(force=force), 202)
+            except (HelperClientError, AttributeError) as error:
+                return response({"state": "unavailable", "message": str(error)}, 503)
+        if path == "/api/updates/online-settings":
+            changes = {name: payload[name] for name in ("daily_check", "install_automatically")
+                       if name in payload}
+            if (not changes or set(payload) - {"daily_check", "install_automatically", "confirm"}
+                    or not all(isinstance(value, bool) for value in changes.values())):
+                raise ValueError("daily_check and install_automatically must be true or false")
+            if changes.get("install_automatically") is True and payload.get("confirm") is not True:
+                raise ValueError("confirm that releases may install without a button press")
+            if server.helper_client is None:
+                return online_unavailable()
+            try:
+                return response(server.helper_client.online_settings(changes))
+            except (HelperClientError, AttributeError) as error:
+                return response({"state": "unavailable", "message": str(error)}, 503)
         if path == "/api/test-sessions/start":
             session = store.start_session(payload)
             server._record_activity("apply", "Test session started: " + session["name"])

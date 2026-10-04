@@ -1,0 +1,16 @@
+page.waitForEvent: Timeout 30000ms exceeded while waiting for event "filechooser"
+=========================== logs ===========================
+waiting for event "filechooser"
+============================================================
+    at /Users/samantha.martinez/.codex/worktrees/homepage-live-plan-review/jittersim/tests/browser/homepage-live/trusted.cjs:24:34 {
+  log: [],
+  name: 'TimeoutError'
+}
+Traceback (most recent call last):
+  File "/Users/samantha.martinez/.codex/worktrees/homepage-live-plan-review/jittersim/tests/browser/homepage-live/trusted_fixture.py", line 101, in <module>
+    run()
+  File "/Users/samantha.martinez/.codex/worktrees/homepage-live-plan-review/jittersim/tests/browser/homepage-live/trusted_fixture.py", line 90, in run
+    subprocess.run([node, str(root / "tests/browser/homepage-live/trusted.cjs")],
+  File "/opt/homebrew/Cellar/python@3.12/3.12.13_4/Frameworks/Python.framework/Versions/3.12/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/Users/samantha.martinez/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node', '/Users/samantha.martinez/.codex/worktrees/homepage-live-plan-review/jittersim/tests/browser/homepage-live/trusted.cjs']' returned non-zero exit status 1.

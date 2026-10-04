@@ -3,6 +3,7 @@
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -15,12 +16,15 @@ def served_functions():
     def block(start, end):
         return script[script.index(start) : script.index(end, script.index(start))]
 
+    reconnect = Path(__file__).resolve().parents[2] / "src/jittersim/api/reconnect.js"
     return (
-        block("const privateDataPanelIds =", "function setDashboardUnlocked(")
+        reconnect.read_text() + "\n"
+        + "hideWifiBanner = () => {}; showWifiBanner = () => {}; resumeWifiChangeNotice = async () => {};\n"
+        + block("const privateDataPanelIds =", "function setDashboardUnlocked(")
         + block("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
         + block("let helperConfigured =", "let profiles =")
-        + block("async function request(", "const adminTokenHelp =")
-        + block("async function checkAdminToken()", "async function refresh()")
+        + block("const PI_NOT_ANSWERING", "const adminTokenHelp =")
+        + block("async function checkAdminToken()", "async function refresh(")
         + block(
             'element("check-admin-token").addEventListener("click",',
             'element("traffic-rate-form").addEventListener("submit",',
@@ -33,7 +37,7 @@ def served_functions():
             'element("refresh-diagnostics").addEventListener',
             'element("download-backup").addEventListener',
         )
-        + block("function renderRouterWifi(", 'element("sync-router-ap").addEventListener')
+        + block("function renderRouterWifi(", 'element("random-website-device").addEventListener')
     )
 
 
@@ -41,13 +45,18 @@ HARNESS = r"""
 const assert = require("node:assert/strict");
 const nodes = new Map();
 const messages = [];
-const document = {activeElement: null, documentElement: {style: {setProperty() {}}},
-                  addEventListener() {}};
+const documentListeners = new Map();
+const timers = new Map();
+let timerSerial = 0;
+const document = {hidden: false, activeElement: null, documentElement: {style: {setProperty() {}}},
+                  addEventListener(type, callback) {documentListeners.set(type, callback)}, getElementById: (id) => element(id)};
 const storage = new Map();
 let storageBroken = false;
 const blocked = () => {if (storageBroken) throw new Error("storage blocked")};
 const windowListeners = new Map();
-const window = {innerHeight: 800, setInterval() {}, confirm() {return true},
+const window = {innerHeight: 800, setInterval() {}, setTimeout(callback, delay) {const id = ++timerSerial; timers.set(id, {callback, delay}); return id},
+  clearTimeout(id) {timers.delete(id)},
+  confirm() {return true},
   addEventListener(type, callback) {windowListeners.set(type, callback)}, localStorage: {
   getItem(key) {blocked(); return storage.has(key) ? storage.get(key) : null},
   setItem(key, value) {blocked(); storage.set(key, String(value))},
@@ -89,7 +98,10 @@ function setDashboardUnlocked() {}
 async function refresh() {refreshCalls++}
 async function loadTrafficSettings() {}
 async function startTrafficSampling() {}
-async function fetch(path, options) {networkCalls.push({path, options}); return await network()}
+async function fetch(path, options) {
+  if (path === "/api/wifi-operation/request-id") return {ok:true,json:async()=>({request_id:"fixture-request"})};
+  networkCalls.push({path, options}); return await network();
+}
 function deferred() {
   let resolve;
   const promise = new Promise(done => {resolve = done});
@@ -123,6 +135,152 @@ function savedEntry(key) {
 
 
 CASES = {
+    "credentials_and_visibility_never_start_router_checks": r"""
+      helperConfigured = true;
+      enter("admin-token", "fixture token");
+      adminTokenVerified = true;
+      enter("router-admin-password", "fixture password");
+      for (let i = 0; i < 100; i++) {
+        clock += 60000;
+        updateCredentialStatus();
+        document.hidden = i % 2 === 0;
+        documentListeners.get("visibilitychange")();
+      }
+      assert.equal(timers.size, 0);
+      assert.equal(networkCalls.length, 0);
+      assert.match(element("router-wifi-status").textContent, /Check router Wi-Fi/);
+    """,
+    "explicit_check_requests_one_refresh_then_only_reads_its_result": r"""
+      helperConfigured = true;
+      enter("admin-token", "fixture token");
+      adminTokenVerified = true;
+      enter("router-admin-password", "fixture password");
+      let calls = 0;
+      network = async () => ({ok:true, json:async () => ({result: ++calls === 1 ? {
+        enabled:null, checked_at:null, busy:true, retry_after:1
+      } : {enabled:false, checked_at:clock/1000, busy:false}})});
+      const checking = element("refresh-router-wifi").listeners.get("click")();
+      for (let i = 0; i < 50 && timers.size === 0; i++) await Promise.resolve();
+      assert.equal(timers.size, 1);
+      await pollRouterWifi();
+      assert.equal(networkCalls.length, 1);
+      const [id, timer] = timers.entries().next().value;
+      timers.delete(id);
+      timer.callback();
+      await checking;
+      assert.deepEqual(
+        networkCalls.map(call => JSON.parse(call.options.body).refresh), [true, false]);
+      assert.equal(timers.size, 0);
+      assert.equal(element("router-wifi-toggle").disabled, false);
+    """,
+    "failed_explicit_check_does_not_schedule_another_check": r"""
+      helperConfigured = true;
+      enter("admin-token", "fixture token");
+      adminTokenVerified = true;
+      enter("router-admin-password", "fixture password");
+      network = async () => ({ok:true, json:async () => ({result: {
+        enabled:null, busy:false, error:"Router status is unavailable."}})});
+      await pollRouterWifi();
+      assert.equal(timers.size, 0);
+      assert.equal(networkCalls.length, 1);
+      assert.equal(element("router-wifi-toggle").disabled, true);
+    """,
+    "busy_check_is_bounded_even_when_the_clock_does_not_advance": r"""
+      helperConfigured = true;
+      enter("admin-token", "fixture token");
+      adminTokenVerified = true;
+      enter("router-admin-password", "fixture password");
+      network = async () => ({ok:true, json:async () => ({result: {
+        enabled:null, checked_at:null, busy:true, retry_after:1}})});
+      let done = false;
+      const checking = pollRouterWifi().finally(() => {done = true});
+      for (let i = 0; i < 2000 && !done; i++) {
+        await Promise.resolve();
+        if (timers.size) {
+          const [id, timer] = timers.entries().next().value;
+          timers.delete(id);
+          timer.callback();
+        }
+      }
+      assert.equal(done, true);
+      await checking;
+      assert.equal(networkCalls.length, 45);
+      assert.equal(timers.size, 0);
+      assert.match(routerWifiError, /timed out/);
+      assert.equal(element("router-wifi-toggle").disabled, true);
+    """,
+    "expired_switch_cannot_write_without_a_recent_check": r"""
+      helperConfigured = true;
+      enter("admin-token", "fixture token");
+      adminTokenVerified = true;
+      enter("router-admin-password", "fixture password");
+      network = async () => ({ok:true, json:async () => ({result: {
+        enabled:true, checked_at:clock/1000, busy:false}})});
+      await pollRouterWifi();
+      assert.equal(element("router-wifi-toggle").disabled, false);
+      clock += 46000;
+      const before = networkCalls.length;
+      element("router-wifi-toggle").listeners.get("click")({
+        currentTarget:element("router-wifi-toggle")});
+      await Promise.resolve();
+      assert.equal(networkCalls.length, before);
+      assert.equal(element("router-wifi-toggle").disabled, true);
+    """,
+    "replacing_credentials_during_a_busy_check_keeps_manual_recovery_available": r"""
+      for (const field of ["admin-token", "router-admin-password"]) {
+        helperConfigured = true;
+        enter("admin-token", "fixture token");
+        adminTokenVerified = true;
+        enter("router-admin-password", "fixture password");
+        network = async () => ({ok:true, json:async () => ({result: {
+          enabled:null, checked_at:null, busy:true, changing:true}})});
+        const checking = pollRouterWifi();
+        for (let i = 0; i < 50 && timers.size === 0; i++) await Promise.resolve();
+        assert.equal(timers.size, 1);
+        enter(field, "replacement value");
+        const [id, timer] = timers.entries().next().value;
+        timers.delete(id);
+        timer.callback();
+        await checking;
+        adminTokenVerified = true;
+        updateCredentialStatus();
+        assert.equal(routerWifiRemoteBusy, false);
+        assert.equal(routerWifiRemoteChanging, false);
+        assert.equal(element("refresh-router-wifi").disabled, false);
+        assert.equal(element("router-wifi-toggle").disabled, true);
+      }
+    """,
+    "old_router_failure_keeps_new_credential_status": r"""
+      helperConfigured = true;
+      enter("admin-token", "fixture token");
+      adminTokenVerified = true;
+      enter("router-admin-password", "fixture password");
+      const pending = deferred(); network = () => pending.promise;
+      const running = routerAction("/api/router/wifi", {enabled:true}, "Changing", element("router-wifi-toggle"));
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(networkCalls.length, 1);
+      enter("router-admin-password", "replacement password");
+      element("router-action-message").textContent = "New action state";
+      element("credential-router-status").textContent = "New credential state";
+      pending.resolve({ok:false,status:502,json:async()=>({error:"old failure"})});
+      await running;
+      assert.equal(element("router-action-message").textContent, "New action state");
+      assert.equal(element("credential-router-status").textContent, "New credential state");
+      assert.equal(routerWifiError, "");
+      assert.equal(routerActionPending, false);
+    """,
+    "lost_diagnostics_keeps_token_and_does_not_reject_it": r"""
+      enter("admin-token", "fixture token");
+      await checkAdminToken();
+      tick("remember-admin-token", true);
+      recheckTokenWhenPiAnswers = () => {};
+      toolResult = {ok:false,message:LOST_CONNECTION_TEXT,connectionLost:true};
+      await checkAdminToken();
+      assert.equal(adminTokenRejected, false);
+      assert.equal(adminTokenVerified, false);
+      assert.equal(element("admin-token").value, "fixture token");
+      assert.equal(savedEntry(ADMIN_KEY).value, "fixture token");
+    """,
     "router_switch_tracks_confirmed_state_and_expires": r"""
       helperConfigured = true;
       enter("admin-token", "fixture token");
@@ -252,6 +410,7 @@ CASES = {
       for (const id of ["sync-router-ap", "router-wifi-toggle"])
         assert.equal(element(id).disabled, true);
       await routerAction("/api/router/wifi", {enabled:true}, "Enabling", element("router-wifi-toggle"));
+      await new Promise(resolve => setImmediate(resolve));
       assert.equal(networkCalls.length, 1);
       enter("router-admin-password", "");
       enter("router-admin-password", "fixture password");
@@ -283,7 +442,7 @@ CASES = {
       assert.equal(networkCalls[0].options.method, "POST");
       assert.equal(networkCalls[0].options.headers.Authorization, "Bearer fixture token");
       assert.deepEqual(
-        JSON.parse(networkCalls[0].options.body), {admin_password:"fixture password", background:true});
+        JSON.parse(networkCalls[0].options.body), {admin_password:"fixture password", background:true, request_id:"fixture-request"});
       assert.equal(element("router-credential-state").textContent, "Accepted");
       assert.equal(element("router-credential-state").className, "credential-state accepted");
       assert.match(element("credential-router-status").textContent, /accepted.*nothing.*changed/i);
@@ -385,6 +544,36 @@ CASES = {
       tick("remember-admin-token", false);
       assert.equal(storage.size, 0);
       assert.equal(element("remember-admin-token-note").textContent, "");
+    """,
+    "remembers_acceptance_before_a_slow_refresh_finishes": r"""
+      enter("admin-token", "fixture token");
+      tick("remember-admin-token", true);
+      assert.equal(storage.has(ADMIN_KEY), false);
+      const started = deferred();
+      const release = deferred();
+      let trustCalls = 0;
+      globalThis.loadTrustDetails = () => {
+        trustCalls++;
+        assert.equal(JSON.parse(storage.get(ADMIN_KEY)).value, "fixture token");
+      };
+      refresh = async () => {
+        refreshCalls++;
+        started.resolve();
+        await release.promise;
+      };
+      const checking = checkAdminToken();
+      await started.promise;
+      assert.equal(adminTokenVerified, true);
+      assert.equal(refreshCalls, 1);
+      assert.equal(trustCalls, 1);
+      assert.equal(element("check-admin-token").disabled, true);
+      assert.deepEqual(JSON.parse(storage.get(ADMIN_KEY)), {
+        value: "fixture token", expires: clock + DAY
+      });
+      release.resolve();
+      await checking;
+      assert.equal(element("check-admin-token").disabled, false);
+      assert.equal(JSON.parse(storage.get(ADMIN_KEY)).value, "fixture token");
     """,
     "waits_for_acceptance_and_replaces_the_saved_token": r"""
       tick("remember-admin-token", true);
@@ -950,7 +1139,7 @@ def test_diagnostics_failures_report_their_http_status():
         pytest.skip("Node.js is required to exercise the served dashboard")
     script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
     real = script[
-        script.index("async function loadAdminTools()") : script.index(
+        script.index("let adminToolsPhysicalRead =") : script.index(
             "async function checkAdminToken()"
         )
     ]
@@ -959,6 +1148,7 @@ def test_diagnostics_failures_report_their_http_status():
 const assert = require("node:assert/strict");
 const nodes = new Map();
 let randomWebsiteAnalyticsRequestVersion = 0;
+let adminTokenRevision=0,adminToolsGeneration=0,adminTokenVerified=true,adminTokenChecking=false;
 let failure = null;
 function element(id) {
   if (!nodes.has(id)) nodes.set(id, {value: "fixture token", textContent: "", className: "",
@@ -966,17 +1156,19 @@ function element(id) {
   return nodes.get(id);
 }
 async function request() {throw failure}
+function isConnectionLost(error) {return error.connectionLost === true}
 async function loadRandomWebsiteAnalytics() {}
 """
         + real
         + r"""
 (async () => {
   failure = Object.assign(new Error("unauthorized"), {status: 401});
-  assert.deepEqual(await loadAdminTools(), {ok: false, message: "unauthorized", status: 401});
-  failure = new Error("Failed to fetch");
+  assert.deepEqual(await loadAdminTools(), {ok: false, message: "unauthorized", status: 401, connectionLost:false});
+  failure = Object.assign(new Error("Lost connection"), {connectionLost:true});
   const network = await loadAdminTools();
   assert.equal(network.ok, false);
   assert.equal(network.status, undefined);
+  assert.equal(network.connectionLost, true);
   console.log("CASE-COMPLETE");
 })().catch(error => {console.error(error); process.exitCode = 1});
 """

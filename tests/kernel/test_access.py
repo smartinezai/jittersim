@@ -454,12 +454,32 @@ class AccessDatapathTests(unittest.TestCase):
         helper, plan = self.integrated_mac_profile()
         answer = helper.handle_payload({"action": "apply", "plan": plan_to_payload(plan)})
         self.assertTrue(answer["ok"], answer)
+        before_panic = helper.handle_payload({"action": "control-revision"})
+        self.assertTrue(before_panic["ok"], before_panic)
         self.assertTrue(helper.handle_payload({"action": "normal-access"})["ok"])
         self.assertFalse(self.manager.applied.options.enabled)
         self.assertEqual(self.manager.applied.mac, plan.mac_policy)
 
         restarted = replace(plan, access=self.manager.applied)
-        answer = helper.handle_payload({"action": "apply", "plan": plan_to_payload(restarted)})
+        payload = {"action": "apply", "plan": plan_to_payload(restarted)}
+        for intent in ({}, {"expected_control_revision": before_panic["control_revision"]}):
+            refused = helper.handle_payload({**payload, **intent})
+            self.assertFalse(refused["ok"], refused)
+            self.assertEqual(refused["reason"], "control-changed")
+        current = helper.handle_payload({"action": "control-revision"})
+        self.assertTrue(current["ok"], current)
+        self.assertFalse(current["recovery_required"])
+        self.assertNotEqual(current["control_revision"], before_panic["control_revision"])
+        payload["expected_control_revision"] = current["control_revision"]
+        implicit = helper.handle_payload(payload)
+        self.assertFalse(implicit["ok"], implicit)
+        self.assertIn("Panic stopped profiles", implicit["error"])
+        self.assertFalse((self.directory / "active-plan.json").exists())
+        for settings in self.profile_queue_settings().values():
+            self.assertFalse(any(queue["kind"] == "netem" for queue in settings))
+        for direction in (False, True):
+            self.assertTrue(self.client_datagram_arrives(download=direction))
+        answer = helper.handle_payload({**payload, "explicit_apply": True})
 
         self.assertTrue(answer["ok"], answer)
         self.assertFalse(self.manager.applied.options.enabled)

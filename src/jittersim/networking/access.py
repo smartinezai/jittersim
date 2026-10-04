@@ -7,9 +7,10 @@ import logging
 import os
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
+from typing import Optional
 
 from jittersim.config.models import AccessOptions
 from jittersim.engine.access import (
@@ -19,6 +20,9 @@ from jittersim.engine.access import (
     access_from_payload,
     domain_matches,
 )
+from jittersim.panic_guard import PanicGuard
+
+from jittersim.localname import GATEWAY_ADDRESS, read_local_name, resolver_names, validate_local_name
 
 from .commands import Command
 from .executor import CommandExecutionError, SubprocessExecutor
@@ -68,8 +72,20 @@ def read_access(path: Path) -> AccessPlan:
     return access_from_payload(json.loads(content))
 
 
-def render_dns(plan: AccessPlan) -> str:
+def _local_name_records(name: str) -> list:
+    """The dashboard's neutral names, answered here whatever the rules block."""
+    records = []
+    for item in resolver_names(name):
+        records += [
+            f'  local-zone: "{item}." static',
+            f'  local-data: "{item}. 60 IN A {GATEWAY_ADDRESS}"',
+        ]
+    return records
+
+
+def render_dns(plan: AccessPlan, local_name: Optional[str] = None) -> str:
     """Use Unbound views to check each client's rules before answering from cache."""
+    local = validate_local_name(local_name) if local_name else read_local_name()
     lines = [
         "server:",
         f"  interface: 127.0.0.1@{DNS_PORT}",
@@ -101,6 +117,7 @@ def render_dns(plan: AccessPlan) -> str:
         f"  local-data: 'jittersim-policy.invalid. 0 IN TXT \"{plan.digest()}\"'",
         '  access-control-view: 192.168.50.0/24 "everyone"',
     ]
+    lines += _local_name_records(local)
     views = {plan.blocked_domains() if plan.options.enabled else (): "everyone"}
     if plan.options.enabled:
         for client in plan.clients:
@@ -113,6 +130,7 @@ def render_dns(plan: AccessPlan) -> str:
     lines += ["forward-zone:", '  name: "."', "  forward-addr: 192.168.50.1@53"]
     for blocked, name in views.items():
         lines += ["view:", f'  name: "{name}"', "  view-first: no"]
+        lines += _local_name_records(local)
         if plan.options.enabled and plan.websites.mode == "allow_only":
             lines.append('  local-zone: "." always_nxdomain')
             for domain in plan.websites.allowed_domains:
@@ -160,6 +178,10 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
         f'add rule inet {table} input iifname "{interface}" tcp dport {DASHBOARD_PORT} '
         'accept comment "keep dashboard sign-in reachable"'
     )
+    lines.append(
+        f'add rule inet {table} input iifname "{interface}" ip daddr 192.168.50.1 '
+        'tcp dport 8443 accept comment "allow verified homepage policy reads"'
+    )
     if plan.options.dns_failure_percent:
         # nftables' random generator returns values from 0 to 99. At 100%,
         # reject directly instead of comparing against an invalid value.
@@ -180,6 +202,17 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
             # Decide once per TCP connection. A later segment is part of the
             # same request and must not reset it part-way.
             f"ip saddr {TEST_NETWORK} tcp dport {DNS_PORT} ct state new {chance}"
+            "counter reject with tcp reset"
+        )
+        # Optional ad filtering must preserve the household DNS failure choice.
+        lines.append(
+            f'add rule inet {table} input iifname "{interface}" '
+            f"ip saddr {TEST_NETWORK} udp dport 5354 {chance}"
+            "counter reject with icmpx type port-unreachable"
+        )
+        lines.append(
+            f'add rule inet {table} input iifname "{interface}" '
+            f"ip saddr {TEST_NETWORK} tcp dport 5354 tcp flags & (syn | ack) == syn {chance}"
             "counter reject with tcp reset"
         )
     mac = plan.mac
@@ -306,12 +339,14 @@ class AccessManager:
         directory=ACCESS_DIRECTORY,
         runtime_path=ACCESS_RUNTIME,
         hostapd_path=Path("/run/jittersim-hostapd"),
+        ad_blocking_store=None,
     ):
         self.executor = executor
         self.topology = topology
         self.directory = Path(directory)
         self.runtime_path = Path(runtime_path)
         self.hostapd_path = Path(hostapd_path)
+        self.ad_blocking_store = ad_blocking_store
         self.lock = threading.RLock()
         self.error = None
         self.health_error = None
@@ -515,36 +550,40 @@ class AccessManager:
                 self._nft(render_access_firewall(plan, self.topology), check=True)
             finally:
                 candidate.unlink(missing_ok=True)
-            self._nft(transition_firewall(self.topology))
-            try:
-                self._install(plan)
-                content = json.dumps(plan.payload(), sort_keys=True) + "\n"
-                atomic_write(self.directory / "policy.json", content)
-                atomic_write(self.runtime_path, content)
-                self._nft(transition_firewall(self.topology, clear=True))
-            except Exception:
-                self.error = "Access update failed. Previous rules were restored."
+            transition = (self.ad_blocking_store.access_transition()
+                          if self.ad_blocking_store is not None else nullcontext())
+            with transition:
+                self._nft(transition_firewall(self.topology))
                 try:
-                    if old is None:
-                        raise ValueError("no readable previous access policy")
-                    self._install(old)
-                    content = json.dumps(old.payload(), sort_keys=True) + "\n"
+                    self._install(plan)
+                    content = json.dumps(plan.payload(), sort_keys=True) + "\n"
                     atomic_write(self.directory / "policy.json", content)
                     atomic_write(self.runtime_path, content)
                     self._nft(transition_firewall(self.topology, clear=True))
-                    self.applied = old
                 except Exception:
-                    self.error = (
-                        "Access recovery failed. "
-                        "The test network is closed until recovery succeeds."
-                    )
-                    LOGGER.exception("persistent access recovery failed")
-                raise
-            self.applied = plan
-            self.generation = self._generation()
-            self.error = None
-            self.health_error = None
-            return self.status()
+                    self.error = "Access update failed. Previous rules were restored."
+                    try:
+                        if old is None:
+                            raise ValueError("no readable previous access policy")
+                        self._install(old)
+                        content = json.dumps(old.payload(), sort_keys=True) + "\n"
+                        atomic_write(self.directory / "policy.json", content)
+                        atomic_write(self.runtime_path, content)
+                        self._nft(transition_firewall(self.topology, clear=True))
+                        self.applied = old
+                    except Exception:
+                        self.error = (
+                            "Access recovery failed. "
+                            "The test network is closed until recovery succeeds."
+                        )
+                        LOGGER.exception("persistent access recovery failed")
+                    raise
+                self.applied = plan
+                self.generation = self._generation()
+                self.error = None
+                self.health_error = None
+                return self.status()
+
 
     def restore(self):
         return self.apply(None, force=True)
@@ -589,11 +628,21 @@ def main(argv=None):
     parser.add_argument("--uplink", default="eth0")
     parser.add_argument("--test-interface", default="wlan0")
     args = parser.parse_args(argv)
-    AccessManager(
+    try:
+        guard = PanicGuard().provision(ACCESS_RUNTIME.parent / "gateway-state.json")
+        stopped = guard["household_stop_latched"]
+    except OSError:
+        LOGGER.exception("Panic state was not readable. Household rules remain disabled.")
+        stopped = True
+    manager = AccessManager(
         executor=SubprocessExecutor(timeout_seconds=20),
         topology=Topology(
             uplink_interface=args.uplink,
             test_interface=args.test_interface,
         ),
-    ).restore()
+    )
+    if stopped:
+        manager.disable()
+    else:
+        manager.restore()
     return 0

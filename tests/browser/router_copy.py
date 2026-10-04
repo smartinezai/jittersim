@@ -150,7 +150,13 @@ def api_calls(requests, path):
 
 def check_confirmation(dialog, accept):
     assert f"{WIFI_NAME} using WPA2 (2.4 GHz)" in dialog.message
-    assert "Test clients disconnect while Wi-Fi restarts." in dialog.message
+    for warning in (
+        "Wi-Fi will restart now", "lose its connection for up to a minute",
+        "cannot rejoin by itself", "choose the network again in the Wi-Fi menu",
+        "waits for the Pi", "shows how the change went",
+        "Keep a separate management connection",
+    ):
+        assert warning in dialog.message
     assert WIFI_PASSWORD not in dialog.message
     if accept:
         dialog.accept()
@@ -266,6 +272,10 @@ def run_width(browser, base, width, height):
     sidebar_control(page, "#sync-router-ap").click()
     expect(button).to_be_disabled()
     expect(page.locator("#router-wifi-toggle")).to_be_disabled()
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
     assert len(held) == 1
     assert api_calls(requests, SYNC_PATH) == []
     held[0].continue_()

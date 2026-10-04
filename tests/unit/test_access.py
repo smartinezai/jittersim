@@ -37,7 +37,7 @@ class AccessPolicyTests(unittest.TestCase):
         plan = AccessPlan(options=AccessOptions(dns_failure_percent=35))
         rules = render_access_firewall(plan, Topology("eth0", "wlan0"))
 
-        self.assertEqual(rules.count("numgen random mod 100 < 35"), 2)
+        self.assertEqual(rules.count("numgen random mod 100 < 35"), 4)
         self.assertIn(
             'iifname "wlan0" ip saddr 192.168.50.0/24 udp dport 5335 '
             "numgen random mod 100 < 35 counter reject with icmpx type port-unreachable",
@@ -54,7 +54,9 @@ class AccessPolicyTests(unittest.TestCase):
             Topology("eth0", "wlan0"),
         )
         self.assertNotIn("numgen random", every_request)
-        self.assertEqual(every_request.count("ip saddr 192.168.50.0/24"), 2)
+        self.assertEqual(every_request.count("ip saddr 192.168.50.0/24"), 4)
+        self.assertIn("udp dport 5354 counter reject", every_request)
+        self.assertIn("tcp dport 5354 tcp flags & (syn | ack) == syn counter reject", every_request)
         self.assertIn("udp dport 5335 counter reject", every_request)
         self.assertIn("tcp dport 5335 ct state new counter reject", every_request)
 

@@ -1,21 +1,29 @@
 """SQLite persistence for validated jittersim configuration."""
 
+import functools
+import inspect
 import json
+import re
 import sqlite3
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Sequence, Tuple, Union
 
+from .adblocking import allowed_domains, blocking_macs
 from .device_labels import (
     MAX_SAVED_CONNECTED_DEVICE_LABELS,
     normalize_device_display_name,
     normalize_device_mac,
     normalize_device_type,
 )
-from .exemptions import MAX_UNAFFECTED_DEVICES, UnaffectedDevice, normalize_exempt_mac
+from .exemptions import (
+    MAX_ADDRESS_MOVES, MAX_UNAFFECTED_DEVICES, AddressMove, UnaffectedDevice, normalize_exempt_mac,
+)
+from .payloads import impairment_payload, profile_payload
 from .models import (
     AccessOptions,
     DataLimit,
@@ -43,6 +51,7 @@ from .models import (
     Timer,
     ValidationError,
     WebsitePolicy,
+    time_quota_counter_id,
 )
 
 
@@ -98,7 +107,7 @@ _SCHEDULES_TABLE_SQL = """
 
 
 def _serialize_impairment(impairment: Impairment) -> str:
-    return json.dumps(asdict(impairment), sort_keys=True)
+    return json.dumps(impairment_payload(impairment), sort_keys=True)
 
 
 def _deserialize_randomness(data: dict, field_name: str) -> None:
@@ -131,9 +140,13 @@ def _deserialize_impairment(value: str) -> Impairment:
 
 
 def _serialize_profile_settings(profile: Profile) -> str:
-    settings = asdict(profile)
+    settings = profile_payload(profile)
     for field_name in ("id", "name", "upload", "download", "random_seed"):
         settings.pop(field_name, None)
+    if profile.homepage_bounce_percent == 0:
+        settings.pop("homepage_bounce_percent", None)
+    if profile.random_mode == "repeatable":
+        settings.pop("random_mode", None)
     return json.dumps(settings, sort_keys=True)
 
 
@@ -152,11 +165,18 @@ def _deserialize_profile_settings(value: str) -> dict:
 
 
 class ConfigRepository:
-    """Store profiles and device assignments in a local SQLite database."""
+    """Store profiles and device assignments in a local SQLite database.
+
+    The dashboard serves requests on several threads that share one repository,
+    so the connection may be used from any thread and every method holds one
+    re-entrant lock. A call that needs several statements to stay together uses
+    `transaction()`, which keeps the lock for the whole block.
+    """
 
     def __init__(self, database_path: DatabasePath) -> None:
+        self._lock = threading.RLock()
         self._transaction_depth = 0
-        self._connection = sqlite3.connect(str(database_path))
+        self._connection = sqlite3.connect(str(database_path), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._initialize_schema()
@@ -184,30 +204,31 @@ class ConfigRepository:
     def transaction(self):
         """Commit related configuration writes together or restore all of them."""
 
-        depth = self._transaction_depth
-        savepoint = f"configuration_{depth}"
-        self._connection.execute("BEGIN IMMEDIATE" if depth == 0 else f"SAVEPOINT {savepoint}")
-        self._transaction_depth += 1
-        try:
-            yield
-        except BaseException:
-            self._transaction_depth -= 1
-            if depth == 0:
-                self._connection.rollback()
-            else:
-                self._connection.execute(f"ROLLBACK TO {savepoint}")
-                self._connection.execute(f"RELEASE {savepoint}")
-            raise
-        else:
-            self._transaction_depth -= 1
-            if depth == 0:
-                try:
-                    self._connection.commit()
-                except BaseException:
+        with self._lock:
+            depth = self._transaction_depth
+            savepoint = f"configuration_{depth}"
+            self._connection.execute("BEGIN IMMEDIATE" if depth == 0 else f"SAVEPOINT {savepoint}")
+            self._transaction_depth += 1
+            try:
+                yield
+            except BaseException:
+                self._transaction_depth -= 1
+                if depth == 0:
                     self._connection.rollback()
-                    raise
+                else:
+                    self._connection.execute(f"ROLLBACK TO {savepoint}")
+                    self._connection.execute(f"RELEASE {savepoint}")
+                raise
             else:
-                self._connection.execute(f"RELEASE {savepoint}")
+                self._transaction_depth -= 1
+                if depth == 0:
+                    try:
+                        self._connection.commit()
+                    except BaseException:
+                        self._connection.rollback()
+                        raise
+                else:
+                    self._connection.execute(f"RELEASE {savepoint}")
 
     def _initialize_schema(self) -> None:
         # An existing settings table without access options comes from the Pi line.
@@ -268,6 +289,17 @@ class ConfigRepository:
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 profile_id TEXT REFERENCES profiles(id) ON DELETE RESTRICT
             );
+            CREATE TABLE IF NOT EXISTS pattern_events (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                scope TEXT NOT NULL,
+                happened_at INTEGER NOT NULL,
+                event_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS pattern_events_session ON pattern_events(session_id, id);
+            CREATE INDEX IF NOT EXISTS pattern_events_time ON pattern_events(happened_at);
+            CREATE INDEX IF NOT EXISTS pattern_events_scope ON pattern_events(scope);
             INSERT OR IGNORE INTO general_profile_setting (id, profile_id) VALUES (1, NULL);
             CREATE TABLE IF NOT EXISTS unaffected_devices (
                 mac_address TEXT PRIMARY KEY,
@@ -278,6 +310,13 @@ class ConfigRepository:
                 mac_address TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
                 device_type TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ad_blocking_devices (
+                mac_address TEXT PRIMARY KEY REFERENCES unaffected_devices(mac_address)
+                    ON DELETE CASCADE ON UPDATE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS ad_blocking_allowances (
+                domain TEXT PRIMARY KEY
             );
             CREATE TABLE IF NOT EXISTS traffic_rate_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -450,6 +489,14 @@ class ConfigRepository:
                 mac_address TEXT PRIMARY KEY,
                 name TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS address_moves (
+                old_mac TEXT PRIMARY KEY,
+                new_mac TEXT NOT NULL,
+                name TEXT NOT NULL,
+                moved_access INTEGER NOT NULL CHECK (moved_access IN (0, 1)),
+                moved_protection INTEGER NOT NULL CHECK (moved_protection IN (0, 1)),
+                moved_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS runtime_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 configuration_version INTEGER NOT NULL,
@@ -530,6 +577,14 @@ class ConfigRepository:
             """
         )
         self._migrate_unaffected_devices()
+        self._add_column_if_missing("unaffected_devices", "address_move_id", "TEXT NOT NULL DEFAULT ''")
+        for column, definition in (
+            ("move_id", "TEXT NOT NULL DEFAULT ''"),
+            ("phase", "TEXT NOT NULL DEFAULT 'saved'"),
+            ("previous_protection_owner", "TEXT NOT NULL DEFAULT ''"),
+            ("prepared_version", "INTEGER NOT NULL DEFAULT -1"),
+        ):
+            self._add_column_if_missing("address_moves", column, definition)
         self._connection.execute(_SCHEDULES_TABLE_SQL.format(name="schedules"))
         self._upgrade_schedules_table()
         self._connection.execute("""
@@ -577,6 +632,9 @@ class ConfigRepository:
         self._migrate_domain_observations()
         self._commit()
         self._prune_random_website_analytics(now=int(time.time()))
+        self._connection.execute(
+            "DELETE FROM pattern_events WHERE happened_at < ?", (int(time.time()) - 7 * 86400,)
+        )
         self._commit()
 
     def _upgrade_schedules_table(self) -> None:
@@ -1223,9 +1281,18 @@ class ConfigRepository:
                 raise StorageError("The unaffected-device list can contain at most 256 devices")
             self._connection.execute(
                 "INSERT INTO unaffected_devices (mac_address, display_name, created_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(mac_address) DO UPDATE SET display_name = excluded.display_name",
+                "ON CONFLICT(mac_address) DO UPDATE SET display_name = excluded.display_name, "
+                "address_move_id = ''",
                 (device.mac_address, device.display_name, device.created_at),
             )
+            device_ids = {row[0] for row in self._connection.execute(
+                "SELECT id FROM devices WHERE mac_address = ?", (device.mac_address,)
+            )}
+            scopes = set(device_ids)
+            scopes.update(f"assignment:{item.id}" for item in self.list_service_assignments() if item.device_id in device_ids)
+            scopes.update(f"quota:{item.id}" for item in self.list_service_quotas() if item.device_id in device_ids)
+            scopes.update(f"quota:{time_quota_counter_id(item.id)}" for item in self.list_time_quotas() if item.device_id in device_ids)
+            self._connection.executemany("DELETE FROM pattern_events WHERE scope = ?", ((scope,) for scope in scopes))
             self._bump_configuration_version()
 
     def delete_unaffected_device(self, mac_address: str) -> bool:
@@ -1237,6 +1304,152 @@ class ConfigRepository:
             if cursor.rowcount:
                 self._bump_configuration_version()
             return bool(cursor.rowcount)
+
+    @contextmanager
+    def address_move_transaction(self):
+        """Keep a failed identity commit from leaving an open transaction."""
+        depth = self._transaction_depth
+        try:
+            with self.transaction():
+                yield
+        except sqlite3.Error as error:
+            if depth == 0:
+                self._connection.rollback()
+            raise StorageError("Device move could not be saved.") from error
+
+    def address_move_protection_owner(self, mac_address: str) -> Optional[str]:
+        row = self._connection.execute(
+            "SELECT address_move_id FROM unaffected_devices WHERE mac_address = ?",
+            (normalize_exempt_mac(mac_address),),
+        ).fetchone()
+        if row is None:
+            return None
+        owner = row[0]
+        if not isinstance(owner, str) or owner and not re.fullmatch(r"[0-9a-f]{32}", owner):
+            raise StorageError("Saved protection ownership is invalid.")
+        return owner
+
+    def claim_address_move_protection(self, mac_address: str, move_id: str) -> None:
+        if move_id and not re.fullmatch(r"[0-9a-f]{32}", move_id):
+            raise ValueError("move ownership identifier is invalid")
+        self._connection.execute(
+            "UPDATE unaffected_devices SET address_move_id = ? WHERE mac_address = ?",
+            (move_id, normalize_exempt_mac(mac_address)),
+        )
+        self._commit()
+
+    def list_address_moves(self) -> tuple:
+        rows = self._connection.execute(
+            "SELECT old_mac, new_mac, name, moved_access, moved_protection, moved_at, "
+            "move_id, phase, previous_protection_owner, prepared_version "
+            "FROM address_moves ORDER BY moved_at DESC, old_mac LIMIT ?",
+            (MAX_ADDRESS_MOVES + 1,),
+        ).fetchall()
+        if len(rows) > MAX_ADDRESS_MOVES:
+            raise StorageError("The device move history exceeds its limit.")
+        try:
+            return tuple(
+                AddressMove(
+                    row[0],
+                    row[1],
+                    row[2],
+                    bool(row[3]),
+                    bool(row[4]),
+                    row[5],
+                    row[6],
+                    row[7],
+                    row[8],
+                    row[9],
+                )
+                for row in rows
+            )
+        except (TypeError, ValueError) as error:
+            raise StorageError("stored address move is invalid") from error
+
+    def get_address_move(self, old_mac: str):
+        key = normalize_exempt_mac(old_mac)
+        return next((move for move in self.list_address_moves() if move.old_mac == key), None)
+
+    def save_address_move(self, move: AddressMove) -> None:
+        """Keep bounded ownership evidence without evicting unfinished recovery."""
+        with self.address_move_transaction():
+            moves = self.list_address_moves()
+            existing = next((item for item in moves if item.old_mac == move.old_mac), None)
+            if existing is not None and existing.move_id != move.move_id:
+                raise StorageError("Resolve the existing move before replacing it.")
+            if existing is not None and (
+                existing.new_mac != move.new_mac
+                or existing.phase == "undoing"
+                and move.phase != "undoing"
+                or existing.phase == "saved"
+                and move.phase == "pending"
+            ):
+                raise StorageError("Move recovery cannot be replaced by an earlier phase.")
+            if existing is None and len(moves) >= MAX_ADDRESS_MOVES:
+                raise StorageError("Device move history is full. Resolve earlier moves first.")
+            self._connection.execute(
+                "INSERT INTO address_moves "
+                "(old_mac, new_mac, name, moved_access, moved_protection, moved_at, "
+                "move_id, phase, previous_protection_owner, prepared_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(old_mac) DO UPDATE SET "
+                "new_mac = excluded.new_mac, name = excluded.name, "
+                "moved_access = excluded.moved_access, moved_protection = excluded.moved_protection, "
+                "moved_at = excluded.moved_at, phase = excluded.phase, "
+                "previous_protection_owner = excluded.previous_protection_owner, "
+                "prepared_version = excluded.prepared_version",
+                (
+                    move.old_mac,
+                    move.new_mac,
+                    move.name,
+                    int(move.moved_access),
+                    int(move.moved_protection),
+                    move.moved_at,
+                    move.move_id,
+                    move.phase,
+                    move.previous_protection_owner,
+                    move.prepared_version,
+                ),
+            )
+
+    def delete_address_move(self, old_mac: str) -> bool:
+        with self.transaction():
+            cursor = self._connection.execute(
+                "DELETE FROM address_moves WHERE old_mac = ?", (normalize_exempt_mac(old_mac),)
+            )
+            return bool(cursor.rowcount)
+
+    def list_ad_blocking_devices(self) -> tuple:
+        return blocking_macs(tuple(row['mac_address'] for row in self._connection.execute(
+            'SELECT mac_address FROM ad_blocking_devices ORDER BY mac_address LIMIT 257'
+        )))
+
+    def set_ad_blocking(self, mac_address: str, enabled: bool) -> None:
+        mac = normalize_exempt_mac(mac_address)
+        if type(enabled) is not bool:
+            raise ValueError('Choose whether ad blocking is on or off')
+        with self.transaction():
+            if self._connection.execute('SELECT 1 FROM unaffected_devices WHERE mac_address = ?',
+                                        (mac,)).fetchone() is None:
+                raise ValueError('Protect this device before enabling ad blocking')
+            if enabled:
+                self._connection.execute('INSERT OR IGNORE INTO ad_blocking_devices VALUES (?)', (mac,))
+            else:
+                self._connection.execute('DELETE FROM ad_blocking_devices WHERE mac_address = ?', (mac,))
+            self._bump_configuration_version()
+
+    def list_ad_blocking_allowances(self) -> tuple:
+        return allowed_domains(tuple(row['domain'] for row in self._connection.execute(
+            'SELECT domain FROM ad_blocking_allowances ORDER BY domain LIMIT 257'
+        )))
+
+    def set_ad_blocking_allowances(self, values) -> None:
+        domains = allowed_domains(values)
+        with self.transaction():
+            self._connection.execute('DELETE FROM ad_blocking_allowances')
+            self._connection.executemany('INSERT INTO ad_blocking_allowances VALUES (?)',
+                                         ((domain,) for domain in domains))
+            self._bump_configuration_version()
 
     def rebase_time_quota_sample(self, quota_id: str, *, now: int) -> None:
         self._connection.execute(
@@ -1325,6 +1538,37 @@ class ConfigRepository:
         except sqlite3.Error as error:
             self._rollback()
             raise StorageError("could not remove connected-device label") from error
+
+    def save_pattern_events(self, events: Sequence[dict], *, now: int) -> None:
+        """Retain bounded configuration choices without recording traffic contents."""
+
+        if len(events) > 1000:
+            raise StorageError("Too many pattern events in one update")
+        try:
+            with self.transaction():
+                for event in events:
+                    self._connection.execute(
+                        "INSERT INTO pattern_events (session_id, profile_id, scope, happened_at, event_json) VALUES (?, ?, ?, ?, ?)",
+                        (event["session_id"], event["profile_id"], event["scope"], event["happened_at"], json.dumps(event)),
+                    )
+                self._connection.execute("DELETE FROM pattern_events WHERE happened_at < ?", (now - 7 * 86400,))
+                for session_id in {event["session_id"] for event in events}:
+                    self._connection.execute(
+                        "DELETE FROM pattern_events WHERE session_id = ? AND id NOT IN (SELECT id FROM pattern_events WHERE session_id = ? ORDER BY id DESC LIMIT 1000)",
+                        (session_id, session_id),
+                    )
+                self._connection.execute(
+                    "DELETE FROM pattern_events WHERE id NOT IN (SELECT id FROM pattern_events ORDER BY id DESC LIMIT 10000)"
+                )
+        except sqlite3.Error as error:
+            raise StorageError("Could not save pattern history") from error
+
+    def list_pattern_events(self, *, now: int) -> tuple:
+        rows = self._connection.execute(
+            "SELECT event_json FROM pattern_events WHERE happened_at >= ? ORDER BY id DESC LIMIT 100",
+            (now - 7 * 86400,),
+        ).fetchall()
+        return tuple(json.loads(row[0]) for row in rows)
 
     def list_profiles(self) -> tuple:
         """Return all stored profiles in stable identifier order."""
@@ -1471,6 +1715,8 @@ class ConfigRepository:
             ),
             general_profile_id=self._general_profile_id(),
             service_lists=self.list_service_lists(),
+            ad_blocking_devices=self.list_ad_blocking_devices(),
+            ad_blocking_allowances=self.list_ad_blocking_allowances(),
         )
 
     def _general_profile_id(self) -> Optional[str]:
@@ -1570,6 +1816,10 @@ class ConfigRepository:
                     and self.get_runtime_state().configuration_version != expected_version
                 ):
                     raise StorageError("settings changed since the preview")
+                ad_devices = blocking_macs(settings.ad_blocking_devices)
+                ad_allowances = allowed_domains(settings.ad_blocking_allowances)
+                if set(ad_devices) - {item.mac_address for item in settings.unaffected_devices}:
+                    raise ValueError("Ad blocking needs a protected device")
                 usage = {}
                 if preserve_usage:
                     for table, key, columns in (
@@ -1652,6 +1902,9 @@ class ConfigRepository:
                     self.save_service_list(service_list)
                 for unaffected in settings.unaffected_devices:
                     self.save_unaffected_device(unaffected)
+                for mac in ad_devices:
+                    self.set_ad_blocking(mac, True)
+                self.set_ad_blocking_allowances(ad_allowances)
                 self.save_everyone_else_profile_id(settings.everyone_else_profile_id)
                 self.save_general_profile(settings.general_profile_id)
                 if newly_protected:
@@ -3657,3 +3910,18 @@ class ConfigRepository:
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
             raise StorageError("stored time quota is malformed") from error
+
+
+def _serialized(method):
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
+# Every plain method runs under the repository lock. `transaction` holds the lock itself.
+for _name, _member in tuple(vars(ConfigRepository).items()):
+    if inspect.isfunction(_member) and _name not in ("__init__", "transaction"):
+        setattr(ConfigRepository, _name, _serialized(_member))

@@ -6,4 +6,5 @@ def test_protected_rows_say_traffic_is_not_monitored():
 
 
 def test_traffic_discovery_says_protected_devices_never_appear():
-    assert "Protected devices are never monitored and never appear here." in DASHBOARD_HTML
+    assert "Protected devices never appear here." in DASHBOARD_HTML
+    assert "Optional ad blocking checks domain names without saving history." in DASHBOARD_HTML

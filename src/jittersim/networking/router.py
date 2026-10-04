@@ -145,7 +145,7 @@ class _FormParser(HTMLParser):
         if tag == "form":
             self._form = _Form(
                 action=attributes.get("action") or "",
-                method=(attributes.get("method") or "post").lower(),
+                method=(attributes.get("method") or "get").lower(),
                 controls={},
             )
             return
@@ -200,6 +200,7 @@ class TG3442DERouter:
     _WIFI_PAGE = "/?wifi_general&mid=WifiGeneral"
     _WIFI_DATA = "/php/wifi_general_data.php"
     _WIFI_WRITE = "/php/ajaxSet_wifi_general_data.php"
+    _LEGACY_WIFI_WRITE = "/php/save_wifi.php"
     _OPERATION_TIMEOUT_SECONDS = 120.0
     _CONFIRMATION_ATTEMPTS = 8
     _CONFIRMATION_DELAY_SECONDS = 10.0
@@ -242,6 +243,10 @@ class TG3442DERouter:
         "main_wifi24_state",
         "main_wifi5_state",
         "main_wifi6_state",
+    )
+    _LEGACY_WIFI_FIELDS = frozenset(
+        _STATE_NAMES + _SSID_NAMES + _PASSWORD_NAMES
+        + ("wifi_security24", "wifi_security5", "wifi_security6")
     )
 
     def __init__(
@@ -561,6 +566,14 @@ class TG3442DERouter:
 
     def _set_legacy_wifi_enabled(self, *, enabled: bool) -> RouterWifiSettings:
         form, _ = self._wifi_form()
+        try:
+            destination = urljoin(f"{self.base_url}/", form.action)
+        except ValueError:
+            destination = ""
+        if form.method != "post" or destination != f"{self.base_url}{self._LEGACY_WIFI_WRITE}":
+            raise RouterError("router Wi-Fi form has an unverified destination", reason="unsupported")
+        if not form.controls.keys() <= self._LEGACY_WIFI_FIELDS:
+            raise RouterError("router Wi-Fi form has unverified controls", reason="unsupported")
         state = "1" if enabled else "0"
         present = [name for name in self._STATE_NAMES if name in form.controls]
         if not present or any(_radio_state(form.controls[name]) is None for name in present):
@@ -570,7 +583,7 @@ class TG3442DERouter:
         try:
             self._request(
                 "post",
-                urljoin(f"{self.base_url}/", form.action or self._WIFI_PAGE),
+                destination,
                 data=form.controls,
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",

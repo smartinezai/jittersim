@@ -129,6 +129,7 @@ def compile_plan(
                 device_id=device.id,
                 ipv4_address=device.ipv4_address,
                 mark=mark,
+                homepage_bounce_percent=profile.homepage_bounce_percent,
             )
         )
         queues.extend(
@@ -233,6 +234,7 @@ def compile_plan(
             upload_impairment=rule.upload_impairment,
             download_impairment=rule.download_impairment,
             active=rule.active,
+            homepage_bounce_percent=rule.homepage_bounce_percent,
         )
         for rule, mark in zip(
             sorted(service_quota_rules, key=lambda rule: rule.quota_id),
@@ -279,6 +281,7 @@ def compile_plan(
                 mark=index,
                 upload_impairment=rule.upload_impairment,
                 download_impairment=rule.download_impairment,
+                homepage_bounce_percent=rule.homepage_bounce_percent,
             )
         )
         assignment_queues.extend(
@@ -396,6 +399,7 @@ def compile_plan(
                 upload_impairment=list_rule.upload_impairment,
                 download_impairment=list_rule.download_impairment,
                 outage_active=list_rule.outage_active,
+                homepage_bounce_percent=list_rule.homepage_bounce_percent,
             )
         )
         for direction, impairment in (
@@ -433,8 +437,11 @@ def compile_plan(
         blocked_device_addresses=tuple(sorted(set(blocked_device_addresses), key=str)),
         service_quota_rules=normalized_service_rules,
         service_assignment_rules=tuple(normalized_assignments),
-        general_profile=general_profile,
+        general_profile=(replace(general_profile, homepage_bounce_percent=
+            profiles[general_profile.profile_id].homepage_bounce_percent)
+            if general_profile is not None else None),
         service_list_rules=tuple(normalized_lists),
         everyone_else=normalized_everyone_else,
         access=access,
+        homepage_policy_version=1,
     )

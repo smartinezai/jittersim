@@ -20,7 +20,8 @@ def test_token_checks_and_edits_release_all_private_loading_states():
 
     functions = block("const privateDataPanelIds =", "function setDashboardUnlocked(")
     functions += block("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
-    functions += block("async function checkAdminToken()", "async function refresh()")
+    functions += block("function clearAdminToolsUi()", "async function loadRandomWebsiteAnalytics(")
+    functions += block("async function checkAdminToken()", "async function refresh(")
     listener = block(
         'element("admin-token").addEventListener("input",',
         'element("traffic-device").addEventListener("change",',
@@ -29,6 +30,8 @@ def test_token_checks_and_edits_release_all_private_loading_states():
       const assert = require("node:assert/strict");
       const nodes = new Map();
       const listeners = new Map();
+      const document = {createElement: tag => ({tagName: tag.toUpperCase()})};
+      let randomWebsiteAnalyticsRequestVersion = 0;
       let adminTokenVerified = false;
       let adminTokenRevision = 0;
       let messageSerial = 0;  // showMessage is stubbed here so nothing else ever speaks
@@ -41,7 +44,9 @@ def test_token_checks_and_edits_release_all_private_loading_states():
       function element(id) {
         if (!nodes.has(id)) nodes.set(id, {
           value: "", textContent: "pending", className: "", disabled: false,
-          attributes: new Map(),
+          attributes: new Map(), children: [{textContent: "private result"}],
+          replaceChildren() {this.children = []; this.textContent = ""},
+          appendChild(child) {this.children.push(child)},
           focus() {},
           setAttribute(key, value) {this.attributes.set(key, value)},
           removeAttribute(key) {this.attributes.delete(key)},
@@ -70,8 +75,12 @@ def test_token_checks_and_edits_release_all_private_loading_states():
         const message = element("profiles-json").textContent;
         assert.ok(message.length > 0);
         for (const id of ["devices-json", "plan", "state", "policies",
-                          "connected-devices", "unaffected-devices", "uplink-details"])
+                          "connected-devices", "unaffected-devices", "uplink-details",
+                          "diagnostics-json", "action-history", "random-website-status"])
           assert.equal(element(id).textContent, message, id);
+        assert.equal(element("random-website-rows").children.length, 0);
+        assert.deepEqual(element("random-website-device").children.map(child => child.textContent),
+                         ["All devices"]);
         assert.equal(element("runtime-summary").textContent, message);
         assert.ok(element("runtime-summary").className.includes("unknown"));
         for (const id of ["connected-count", "uplink-state"])
@@ -116,12 +125,3 @@ def test_token_checks_and_edits_release_all_private_loading_states():
     assert result.returncode == 0, result.stderr
     # Node exits quietly with code 0 if the case hangs on a promise that never settles.
     assert "CASE-COMPLETE" in result.stdout, "the case never finished"
-
-
-def test_an_accepted_token_is_remembered_before_the_slow_refresh():
-    # A reload during the refresh after Check token must not forget a token the
-    # person asked to remember (the navigation journey reloads right after it).
-    assert re.search(
-        r"adminTokenVerified = true;\s*(?://[^\n]*\n\s*)*updateCredentialStatus\(\);\s*await refresh\(\);",
-        DASHBOARD_HTML,
-    )

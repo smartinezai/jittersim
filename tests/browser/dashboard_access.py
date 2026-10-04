@@ -77,6 +77,7 @@ def run():
                     expect(page.locator("#allow-dashboard-device")).to_be_enabled()
                     expect(page.locator("#private-dashboard")).to_be_hidden()
                     assert not any(url.endswith("/api/devices") for url in requested)
+                    assert not any("/api/updates" in url or "/api/update-preferences" in url for url in requested)
                     page.locator("#close-credentials").click()
                     page.route("**/api/dashboard-access/register-self", lambda route: route.fulfill(
                         status=503, content_type="application/json", body='{"error":"Cannot save fixture access"}'))
@@ -93,7 +94,10 @@ def run():
                     expect(page).to_have_title("JitterSim")
                     expect(page.locator("#brand-title")).to_have_text("JitterSim")
                     expect(page.locator("#measure-command")).to_have_text("jittersim measure --label normal")
-                    expect(page.locator("#access-point-ssid")).to_have_value("JitterSim")
+                    expect(page.locator("#update-token-command")).to_have_text("sudo jittersim update set-token")
+                    expect(page.locator("#release-status")).not_to_have_text("Sign in to read update status.")
+                    assert any(url.endswith("/api/updates") for url in requested)
+                    expect(page.locator("#access-point-ssid")).to_have_value("TestNet")
                     sidebar_control(page, "#open-admin-credentials").click()
                     page.locator("#remember-admin-token").check()
                     page.locator("#close-credentials").click()
@@ -103,6 +107,27 @@ def run():
                     page.screenshot(path=f"test-results/dashboard-access-{width}.png")
                     assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
                     page.locator('[data-page-link="access"]').click()
+                    for _ in range(100):
+                        if page.evaluate("() => adminToolsPhysicalRead === null"):
+                            break
+                        page.wait_for_timeout(50)
+                    assert page.evaluate("() => adminToolsPhysicalRead === null"), (
+                        "the previous diagnostics read did not finish within five seconds"
+                    )
+                    held_diagnostics = []
+
+                    def hold_diagnostics(route):
+                        response = route.fetch()
+                        assert response.ok, response.status
+                        held_diagnostics.append((route, response))
+
+                    page.route("**/api/diagnostics", hold_diagnostics)
+                    page.evaluate("() => { window.delayedPrivateRead = loadAdminTools(); }")
+                    for _ in range(500):
+                        if held_diagnostics:
+                            break
+                        page.wait_for_timeout(10)
+                    assert len(held_diagnostics) == 1, "the private diagnostics read did not start"
                     page.once("dialog", lambda dialog: dialog.accept())
                     page.locator("#dashboard-access-list button").click()
                     expect(page.locator("#private-dashboard")).to_be_hidden()
@@ -110,7 +135,19 @@ def run():
                     # Signed out again, the name goes away again.
                     expect(page).to_have_title("Sign in")
                     expect(page.locator("#brand-title")).to_have_text("Network lab")
+                    expect(page.locator("#update-token-command")).to_have_text("the setup command shown after sign-in")
+                    expect(page.locator("#online-check-status")).to_have_text("Sign in to read update status.")
+                    expect(page.locator("#online-daily-check")).to_be_disabled()
                     assert not NAME.search(page.evaluate(MARKUP))
+                    # A reply read while enrolled must not restore private text after removal.
+                    route, response = held_diagnostics.pop()
+                    route.fulfill(response=response)
+                    page.evaluate("window.delayedPrivateRead")
+                    page.unroute("**/api/diagnostics", hold_diagnostics)
+                    assert not NAME.search(page.evaluate(MARKUP))
+                    expect(page.locator("#random-website-rows")).to_be_empty()
+                    expect(page.locator("#random-website-device option")).to_have_count(1)
+                    expect(page.locator("#random-website-device")).to_have_text("All devices")
                     assert not errors, errors
                     context.close()
                 print("Dashboard access browser acceptance passed.")

@@ -17,6 +17,7 @@ CASES = {
       assert.equal(document.title, "Sign in");
       assert.equal(element("measure-command").textContent, "the measure command");
       assert.equal(brandInfo, null);
+      assert.equal(element("update-token-command").textContent, "the setup command shown after sign-in");
     """,
     "old_rejection_after_new_sign_in": """
       const pending = deferred(); request = () => pending.promise;
@@ -27,6 +28,14 @@ CASES = {
       assert.equal(element("measure-command").textContent, "the measure command");
       assert.equal(element("access-point-ssid").value, "");
       assert.equal(document.title, "Sign in");
+    """,
+    "private_command_is_cleared_on_sign_out": """
+      applyBrand(false);
+      assert.equal(element("update-token-command").textContent, "the setup command shown after sign-in");
+      request = async () => brand; await loadBrand();
+      assert.equal(element("update-token-command").textContent, "sudo " + brand.command + " update set-token");
+      applyBrand(false);
+      assert.equal(element("update-token-command").textContent, "the setup command shown after sign-in");
     """,
     "newest_reply_wins": """
       const pending = deferred(); request = () => pending.promise;

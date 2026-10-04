@@ -2,9 +2,11 @@
 
 import argparse
 import json
+import os
 import shlex
 import sqlite3
 import subprocess
+import time
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -32,11 +34,28 @@ LOG_SERVICES = {
     "dashboard": "jittersim-dashboard.service",
     "dns": "jittersim-dns.service",
     "helper": "jittersim-helper.service",
+    "name": "jittersim-mdns.service",
     "service-watch": "jittersim-service-watch.service",
     "update": "jittersim-update.service",
 }
 MAX_LOG_LINES = 200
 MAX_LOG_OUTPUT_CHARS = 32_000
+REMOTE_COMMANDS = ("connect", "profiles", "traffic", "impact", "remote")
+# `jittersim update` commands that the root update manager runs in this process.
+LOCAL_UPDATE_COMMANDS = {
+    "stage": "verify a signed release archive and stage it (root)",
+    "trust-key": "trust one ed25519 release signing key (root)",
+    "untrust-key": "stop trusting a release signing key (root)",
+    "list-keys": "show the trusted release signing keys",
+    "enable-passwordless-staging": "let the jittersim login stage signed releases "
+                                   "without a password (root)",
+    "disable-passwordless-staging": "ask for the sudo password again (root)",
+    "set-token": "save the read-only GitHub token of the online check, read from standard "
+                 "input (root)",
+    "clear-token": "remove the saved GitHub token (root)",
+}
+UPDATE_SERVICE = "jittersim-update.service"
+UPDATE_WAIT_SECONDS = 20 * 60
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -125,15 +144,23 @@ def _build_operations_parser() -> argparse.ArgumentParser:
     )
     _add_local_options(set_chance)
 
-    updates = commands.add_parser("update", help="check and manage verified staged releases")
+    updates = commands.add_parser("update", help="check and manage signed staged releases")
     update_commands = updates.add_subparsers(dest="update_command", required=True)
-    for name in ("check", "install", "rollback"):
+    for name in ("check", "install", "rollback", "retry"):
         command = update_commands.add_parser(name)
         if name != "check":
             command.add_argument(
                 "--yes", action="store_true", help="confirm without an interactive prompt"
             )
+        if name in ("install", "retry"):
+            command.add_argument(
+                "--wait", action="store_true",
+                help="as root: wait until the update service installed and checked the release",
+            )
         _add_local_options(command)
+    # Listed for --help only: main() hands these to the update manager before parsing.
+    for name, text in LOCAL_UPDATE_COMMANDS.items():
+        update_commands.add_parser(name, help=text, add_help=False)
 
     persistence = commands.add_parser(
         "persistence", help="show or change profile recovery after gateway outages"
@@ -227,6 +254,8 @@ def _status(arguments: argparse.Namespace) -> int:
     repository = _open_repository(arguments.database)
     if repository is None:
         print(f"Database: not readable at {arguments.database}")
+        print("On your Mac use 'jittersim connect --url https://PI:8080 --ca-cert PATH' once "
+              "and then 'jittersim status'.", file=sys.stderr)
     else:
         try:
             state = repository.get_runtime_state()
@@ -462,6 +491,15 @@ def _apply_access(arguments) -> int:
     if repository is None:
         print(f"Settings database is not readable at {arguments.database}", file=sys.stderr)
         return 1
+    client = HelperClient(
+        socket_path=arguments.helper_socket, timeout_seconds=arguments.timeout_seconds
+    )
+    try:
+        revision = client.control_revision()
+    except HelperClientError as error:
+        repository.close()
+        print(f"Access apply failed: {error}", file=sys.stderr)
+        return 1
     try:
         plan = build_access_plan(repository.access_settings())
     except (StorageError, sqlite3.Error, ValueError) as error:
@@ -469,11 +507,8 @@ def _apply_access(arguments) -> int:
         return 1
     finally:
         repository.close()
-    client = HelperClient(
-        socket_path=arguments.helper_socket, timeout_seconds=arguments.timeout_seconds
-    )
     try:
-        result = client.apply_access(plan)
+        result = client.apply_access(plan, control_revision=revision)
     except HelperClientError as error:
         print(f"Access apply failed: {error}", file=sys.stderr)
         return 1
@@ -492,7 +527,44 @@ def _release_status(arguments):
     return client.release_status()
 
 
+def _wait_for_update(*, request_id=None, recovering=False) -> int:
+    """Join the queued run of the one-shot update service and report how it ended."""
+    from jittersim.updates import update_status
+
+    print("Waiting for the update service to install and check the release.", flush=True)
+    try:
+        if request_id is not None:
+            until = time.monotonic() + UPDATE_WAIT_SECONDS
+            while time.monotonic() < until:
+                final = update_status()
+                if final.get("request_id") != request_id:
+                    print("The update changed. Check 'jittersim update check'.", file=sys.stderr)
+                    return 1
+                if final.get("phase") in ("complete", "rolled-back", "failed"):
+                    print(f"Update state: {final.get('message', 'unknown')}")
+                    return 0 if final.get("phase") == "complete" or (recovering and final.get("phase") == "rolled-back") else 1
+                time.sleep(min(1, max(0, until - time.monotonic())))
+            print("The update is still running. Check 'jittersim update check'.", file=sys.stderr)
+            return 1
+        subprocess.run(
+            ["systemctl", "start", UPDATE_SERVICE], check=False, timeout=UPDATE_WAIT_SECONDS,
+            stdin=subprocess.DEVNULL,
+        )
+        final = update_status()
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        print(f"Could not follow the update: {error}. Check 'jittersim update check'.",
+              file=sys.stderr)
+        return 1
+    print(f"Installed: {final.get('installed', 'unknown')}")
+    print(f"Update state: {final.get('message', 'unknown')}")
+    return 0 if final.get("phase") == "complete" else 1
+
+
 def _update_command(arguments) -> int:
+    if arguments.update_command in ("install", "retry") and arguments.wait and os.geteuid() != 0:
+        print(f"--wait needs root: run 'sudo jittersim update {arguments.update_command} --yes --wait'.",
+              file=sys.stderr)
+        return 1
     try:
         status = _release_status(arguments)
     except HelperClientError as error:
@@ -501,16 +573,61 @@ def _update_command(arguments) -> int:
     if arguments.update_command == "check":
         print(f"Installed: {status.get('installed', 'unknown')}")
         print(f"Staged: {status.get('available') or 'none'}")
+        if status.get("available"):
+            print(f"Signed by: {status.get('signed_by') or 'nobody'}")
+            if status.get("installable"):
+                print("Ready to install: yes")
+            else:
+                print(f"Ready to install: no. {status.get('reason') or ''}".rstrip())
+        if "trusted_keys" in status:
+            print(f"Trusted signing keys: {status['trusted_keys']}")
+        if "token_set" in status:
+            # Only whether one is saved. The value stays with root.
+            print(f"Online check token: {'set' if status['token_set'] else 'not set'}")
+        print(f"Update phase: {status.get('phase', 'unknown')}")
         print(f"Update state: {status.get('message', 'unknown')}")
+        if status.get("retry"):
+            print("Retry available: run 'sudo jittersim update retry --yes --wait'.")
+        elif status.get("retry_unavailable_reason"):
+            print(f"Retry unavailable: {status['retry_unavailable_reason']}")
         print(
-            "This checks verified releases staged on the Pi. "
+            "This checks signed releases staged on the Pi. "
             "It does not check the private repository online."
         )
+        return 0
+    if arguments.update_command == "retry":
+        retry = status.get("retry")
+        if not isinstance(retry, dict) or not isinstance(retry.get("id"), str):
+            print(status.get("retry_unavailable_reason") or "No failed update is ready to retry.", file=sys.stderr)
+            return 1
+        question = "Retry the failed update or recovery?"
+        if retry.get("recovering") is True or retry.get("kind") == "rollback":
+            question += " If recovery restores the saved backup, changes after that backup will be replaced."
+        if not _confirm(question, arguments.yes):
+            print("Cancelled. The failed update was not retried.")
+            return 0
+        try:
+            queued = HelperClient(socket_path=arguments.helper_socket,
+                                  timeout_seconds=arguments.timeout_seconds).retry_update(retry_id=retry["id"])
+        except HelperClientError as error:
+            print(f"Retry request failed: {error}", file=sys.stderr)
+            return 1
+        if arguments.wait:
+            if (not isinstance(queued, dict) or queued.get("request_id") != retry.get("request_id")
+                    or not isinstance(queued.get("request_id"), str)):
+                print("The retry answer could not be checked. Check 'jittersim update check'.", file=sys.stderr)
+                return 1
+            return _wait_for_update(request_id=queued["request_id"], recovering=retry.get("recovering") is True)
+        print("Retry queued. Check with 'jittersim update check'.")
         return 0
     if arguments.update_command == "install":
         version = status.get("available")
         if not version or version == status.get("installed"):
             print("No newer staged release is ready to install.", file=sys.stderr)
+            return 1
+        if status.get("installable") is False:
+            print(f"The staged release {version} cannot be installed: "
+                  f"{status.get('reason') or 'stage a signed release'}", file=sys.stderr)
             return 1
         confirmed = _confirm(
             f"Install {version}? The dashboard and test network will pause briefly.",
@@ -520,20 +637,24 @@ def _update_command(arguments) -> int:
             print("Cancelled. The staged release was not installed.")
             return 0
         try:
-            HelperClient(
+            queued = HelperClient(
                 socket_path=arguments.helper_socket,
                 timeout_seconds=arguments.timeout_seconds,
             ).install_release(version=version)
         except HelperClientError as error:
             print(f"Install request failed: {error}", file=sys.stderr)
             return 1
+        if arguments.wait:
+            if isinstance(queued, dict) and isinstance(queued.get("request_id"), str):
+                return _wait_for_update(request_id=queued["request_id"])
+            return _wait_for_update()
         print(f"Installation of {version} was queued. Check with 'jittersim update check'.")
         return 0
     if not status.get("rollback_available"):
         print("No previous installation is available for recovery.", file=sys.stderr)
         return 1
     if not _confirm(
-        "Restore the previous installation and its settings backup?",
+        "Restore the previous installation and its settings backup? Changes after that backup will be replaced.",
         arguments.yes,
     ):
         print("Cancelled. The previous installation was not restored.")
@@ -568,6 +689,18 @@ def _service_states():
         name: states[index].strip() if index < len(states) else "unavailable"
         for index, name in enumerate(LOG_SERVICES)
     }
+
+
+def _print_dashboard_name(config_dir=None, status_path=None) -> None:
+    """The one dashboard address and whether it is announced on both networks."""
+    from jittersim import localname, mdnsname
+
+    name = localname.read_local_name((config_dir or localname.CONFIG_DIR) / "trust.env")
+    print(f"Dashboard address: https://{name}:8080")
+    status = mdnsname.read_status(status_path or mdnsname.STATUS_FILE, name=name)
+    print(f"Dashboard name announcement: {status['state']}")
+    for line in mdnsname.summary_lines(status):
+        print(f"  {line}")
 
 
 def _diagnostics(arguments) -> int:
@@ -609,6 +742,7 @@ def _diagnostics(arguments) -> int:
             print("Applied access: unavailable")
     except HelperClientError:
         print("Applied access: unavailable")
+    _print_dashboard_name()
     print("Services:")
     service_states = _service_states()
     for short_name in LOG_SERVICES:
@@ -679,21 +813,53 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     raw_arguments = list(sys.argv[1:] if argv is None else argv)
     if raw_arguments and raw_arguments[0] in MEASUREMENT_COMMANDS:
         return measure_main(raw_arguments)
+    if raw_arguments and raw_arguments[0] in REMOTE_COMMANDS:
+        from jittersim.remote_cli import main as remote_main
+
+        return remote_main(raw_arguments)
+    if raw_arguments and raw_arguments[0] == "status":
+        from jittersim.remote_cli import main as remote_main
+        from jittersim.remote_cli import remote_status_wanted
+
+        if remote_status_wanted(raw_arguments[1:]):
+            return remote_main(raw_arguments)
     if raw_arguments and raw_arguments[0] in CONTROL_COMMANDS:
         command = raw_arguments[0]
         arguments = _build_control_parser(command).parse_args(raw_arguments[1:])
         return (_reset(arguments, all_restrictions=command == "normal-access")
                 if command != "status" else _status(arguments))
+    if raw_arguments[:2] == ["update", "check"] and "--online" in raw_arguments[2:]:
+        from jittersim.updates import main as manager_main
+
+        extra = [item for item in raw_arguments[2:] if item != "--online"]
+        if extra:
+            print("jittersim update check --online takes no other argument.", file=sys.stderr)
+            return 2
+        return manager_main(["check-online"], prog="jittersim update")
+    if raw_arguments[:1] == ["update"] and raw_arguments[1:2] and (
+        raw_arguments[1] in LOCAL_UPDATE_COMMANDS
+    ):
+        from jittersim.updates import main as manager_main
+
+        return manager_main(raw_arguments[1:], prog="jittersim update")
     if raw_arguments and raw_arguments[0] in (
         "access", "update", "persistence", "diagnostics", "logs"
     ):
         return _run_operations(raw_arguments)
+    if raw_arguments and raw_arguments[0] == "dashboard-name":
+        from jittersim.dashboard_name_cli import main as name_main
+
+        return name_main(raw_arguments[1:])
     if raw_arguments and raw_arguments[0] in ("-h", "--help"):
         parser = _build_parser()
         parser.epilog = (
-            "Headless commands: access status, access apply, access dns-failure, "
+            "Headless commands on the Pi: access status, access apply, access dns-failure, "
             "persistence show, persistence set on/off, diagnostics, logs, "
-            "update check, update install, update rollback and wifi reset."
+            "update check, update install, update rollback, dashboard-name, update stage, update trust-key "
+            "and wifi reset. "
+            "Commands for your Mac through the Pi's HTTPS dashboard: connect, status, "
+            "profiles list/apply-all/stop-all, traffic, wifi show and impact. "
+            "Run one with --help for details."
         )
         parser.print_help()
         return 0
@@ -763,15 +929,29 @@ def _simulate(argv: Sequence[str]) -> int:
 
 
 def _wifi_command(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(prog="jittersim wifi")
+    if list(argv[:1]) == ["show"]:
+        from jittersim.remote_cli import main as remote_main
+
+        return remote_main(["wifi", *argv])
+    parser = argparse.ArgumentParser(
+        prog="jittersim wifi",
+        description="'wifi reset' runs on the Pi with sudo and talks to the local helper. "
+                    "'wifi show' runs on your Mac through the Pi's HTTPS dashboard.",
+    )
     commands = parser.add_subparsers(dest="wifi_command", required=True)
-    reset = commands.add_parser("reset", help="restore the name and keep the password")
+    commands.add_parser(
+        "show", add_help=False,
+        help="on your Mac: show the router's own Wi-Fi name (see 'jittersim wifi show --help')",
+    )
+    reset = commands.add_parser(
+        "reset", help="on the Pi: restore the test Wi-Fi name and keep the password"
+    )
     reset.add_argument("--yes", action="store_true", help="confirm without a prompt")
     reset.add_argument("--helper-socket", type=Path, default=Path("/run/jittersim/helper.sock"))
     arguments = parser.parse_args(argv)
     if not arguments.yes:
         try:
-            answer = input("Restore the Wi-Fi name to JitterSim and disconnect test clients? "
+            answer = input(f"Restore the Wi-Fi name to {DEFAULT_WIFI_NAME} and disconnect test clients? "
                            "The password stays the same. Type yes to continue: ")
         except EOFError:
             answer = ""
@@ -788,7 +968,7 @@ def _wifi_command(argv: Sequence[str]) -> int:
               "Check sudo systemctl status jittersim-helper.service "
               "and sudo nmcli connection show jittersim-ap.", file=sys.stderr)
         return 1
-    print("Wi-Fi name restored to JitterSim with " + result["security"] + ". "
+    print(f"Wi-Fi name restored to {DEFAULT_WIFI_NAME} with " + result["security"] + ". "
           "Reconnect test devices using the same password.")
     return 0
 

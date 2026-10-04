@@ -24,7 +24,8 @@ require the admin token plus saved device access on test Wi-Fi. Choose
 **Check token** then **Allow this device** to register the requesting computer.
 Anyone holding the admin token may register their own device. The saved
 hardware address is not a second password. The nftables service keeps SSH
-and mDNS traffic blocked on the test interface. The service blocks
+blocked on the test interface and lets in only the mDNS questions (UDP 5353)
+that find the dashboard name. The service blocks
 private IPv4 destinations and local IPv6 addresses forwarded from the test
 interface to the uplink, including the router's web interface. The generated
 test Wi-Fi uses IPv4 sharing and does not offer client IPv6. Browser proxy
@@ -43,12 +44,39 @@ for the Mac command and Pi recovery commands.
 
 ## Install or update
 
-Run the installer as root from a checked-out source tree or an extracted source
-archive:
+For this appliance deploy only a signed release built from the verified official
+`main` after its required checks are complete. This is the deployment policy.
+The scripts' general `--ref` option does not itself prove that a commit meets it.
+Keep an independent management connection before changing the installed release.
+The installer requires a root-owned source tree that other users cannot change.
+Keep it outside `/opt/jittersim`, `/etc` and the appliance's data or runtime
+folders. A checkout or archive extracted by the login user does not meet this
+requirement. Do not copy credentials into the source tree.
+
+For a first installation, verify the official signed archive and its matching
+signature against the trusted release key before extracting it. Replace the
+archive path below with that verified file. Use a new source folder. If the
+folder already exists, stop and inspect the earlier attempt before retrying.
 
 ```sh
-sudo deploy/raspberry-pi/install.sh
+sudo test ! -e /root/jittersim-install-source
+sudo mkdir -m 0700 /root/jittersim-install-source
+sudo tar --extract --no-same-owner --no-same-permissions \
+  --file /path/to/verified-release.tar.gz \
+  --directory /root/jittersim-install-source
+sudo chmod -R go-w /root/jittersim-install-source
+sudo sh /root/jittersim-install-source/deploy/raspberry-pi/install.sh \
+  /root/jittersim-install-source
 ```
+
+Run these commands in order and stop if any command fails. Keep the verified
+archive and source until installation and recovery checks are complete. The
+installer's lock covers the complete attempt. Do not remove a lock file or
+change source permissions to bypass a refusal.
+
+From a Mac, `deploy/raspberry-pi/deploy-from-mac.sh --ref origin/main --use-installer --install`
+copies the release of a commit to the Pi and runs this installer from it. See
+[Deploy from a Mac](#deploy-from-a-mac).
 
 This Pi release replaces its source folders on upgrade so removed modules do
 not remain in the installed package. The installer installs the access
@@ -61,6 +89,46 @@ private backup of `/opt/jittersim`, `/etc/jittersim`, `/var/lib/jittersim`,
 the current service definitions and NetworkManager connections before changing
 releases. A software rollback must restore those service definitions and their
 previous enabled state as well as code and settings.
+
+### Private database backup
+
+Use SQLite's [online backup API](https://docs.python.org/3/library/sqlite3.html#sqlite3.Connection.backup)
+for a consistent database copy while services are running. Copying only the live
+database file can miss committed changes held in its separate journal files.
+Choose a new destination for each backup. This command refuses to replace an
+existing file and stops after sixty seconds if copying or checking stalls:
+
+```sh
+sudo python3 - /var/lib/jittersim/jittersim.db /var/backups/jittersim-before-upgrade.db <<'PY'
+from contextlib import closing
+from pathlib import Path
+import os
+import sqlite3
+import sys
+import time
+
+source = Path(sys.argv[1]).resolve(strict=True)
+destination = Path(sys.argv[2])
+descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+os.close(descriptor)
+deadline = time.monotonic() + 60
+
+def check_progress(*unused):
+    if time.monotonic() >= deadline:
+        raise TimeoutError("database backup exceeded sixty seconds")
+
+with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=5)) as original:
+    with closing(sqlite3.connect(destination, timeout=5)) as backup:
+        backup.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        original.backup(backup, pages=128, progress=check_progress, sleep=0.05)
+        if backup.execute("PRAGMA quick_check").fetchone() != ("ok",):
+            raise RuntimeError("database backup did not pass its check")
+print("Private database backup completed:", destination)
+PY
+```
+
+Keep the completed database and configuration backups private. A failed command
+does not establish a usable backup. Choose another filename when retrying.
 
 If the source tree is stored elsewhere, pass its path as the first argument:
 
@@ -94,21 +162,94 @@ settings changed, restart it during a planned maintenance window. The
 installer preserves existing credential files and an existing access-point
 password so an update does not silently invalidate access. The values in
 `ap.env` are the initial credentials. Later dashboard changes are stored in the
-network connection. The installer also creates a local HTTPS certificate. Its
-private key is readable only by root and the JitterSim service. The installer
-prints the certificate fingerprint. It also links the `jittersim` command into
+network connection. The installer also creates a small local certificate
+authority once and issues the dashboard's HTTPS certificate from it. The
+authority is kept across updates and rollbacks. A damaged or incomplete existing
+authority stops installation without replacing it. It can vouch for `.local`
+and `home.arpa` names and the configured network address ranges. Check its
+fingerprint before trusting it. Its private key is readable only by root. The
+installer prints the authority's fingerprint. It also links the `jittersim` command into
 `/usr/local/bin`.
 
-Open the dashboard at `https://jittersim.local:8080` or use the Pi's Ethernet
-address. Avahi publishes the name on the local network and the installer
-refreshes it when the management interface receives a new address. Routers do
-not normally carry mDNS between separate networks. If the name does not
-resolve from the management Wi-Fi, use the Pi's Ethernet address. Before
-trusting the local certificate in a browser, compare its SHA-256 fingerprint
-with the value printed by the installer. The certificate includes the Pi's
-current Ethernet address and the test Wi-Fi address `192.168.50.1`. If the
-Ethernet address changes, run the installer again and verify and trust the
-newly printed certificate.
+**One address for both networks.** Open the dashboard at
+`https://netlab.local:8080`. The Pi announces this neutral name with mDNS
+(Avahi) on Ethernet, where it answers with the current Ethernet address, and on
+the test Wi-Fi, where it answers `192.168.50.1`. A Mac on the home router's
+Wi-Fi and the same Mac on the Pi's test Wi-Fi therefore use the same address
+and the same remembered sign-in. The Pi's Ethernet address and `192.168.50.1`
+remain as a fallback, and `https://pi.home.arpa:8080` still works on the test
+Wi-Fi for bookmarks made with the earlier name.
+
+Changing the dashboard name requires completed certificate adoption. If the
+command reports an old self-signed identity or an unfinished adoption, complete
+the verified installer route over management access first. A rename does not
+replace an unfinished trust transition.
+
+How it works:
+
+- Avahi publishes an address record on every network unless the record is
+  bound to one interface, and its command line tools cannot bind a record. The
+  `jittersim-mdns` service talks to Avahi over D-Bus and binds each record to
+  its own interface, so each network gets the address that works for it. The
+  service uses the system Python and the `python3-dbus` package that the
+  installer adds.
+- Avahi's own publishing is switched off (`publish-addresses=no`,
+  `publish-workstation=no`, `publish-hinfo=no`, `publish-domain=no`,
+  `disable-user-service-publishing=yes`, no reflector, and the SSH, SFTP and
+  other `*.service` files in `/etc/avahi/services` are renamed to
+  `*.jittersim-disabled`) because Avahi cannot limit these to one network.
+  The Pi's host name is not changed. Fresh settings announce no host or product
+  aliases. Existing `.local` aliases required by the retained certificate stay
+  reachable on Ethernet only. Nothing but the one neutral name is announced on
+  the test Wi-Fi.
+  The original settings are kept in `avahi-daemon.conf.jittersim-original`.
+  To undo this run `sudo systemctl disable --now jittersim-mdns.service`,
+  then `sudo /opt/jittersim/.venv/bin/python -m jittersim.mdnsname restore`
+  and `sudo systemctl restart avahi-daemon`.
+- The installer limits Avahi first and only then installs the control firewall
+  rules that let mDNS (UDP 5353, nothing else) in on the test Wi-Fi. If Avahi
+  cannot be limited the installer stops Avahi and does not start the name
+  service. The dashboard stays reachable by IP address either way.
+- A NetworkManager hook (`80-jittersim-mdns`) wakes the service when the
+  Ethernet address or the test Wi-Fi changes, and the service also checks every
+  few seconds. A renewed lease with the same address changes nothing.
+- The test Wi-Fi's own resolver also answers the name with `192.168.50.1` for
+  devices that do not use mDNS. Test Wi-Fi traffic is not reflected to
+  Ethernet or the other way round.
+
+Choose another name with `sudo jittersim dashboard-name set bench.local`. It
+must be one word of letters, digits and hyphens followed by `.local`, and must
+not contain the product name. The command issues the new certificate from the
+same authority, saves the name in `/etc/jittersim/trust.env`
+(`JITTERSIM_DASHBOARD_NAME`), updates the test Wi-Fi resolver record and
+restarts the name service and the dashboard. Devices that trust the authority
+need nothing. Each browser needs one fresh sign-in at the new address.
+`jittersim dashboard-name` shows the address and whether it is announced.
+
+If another device already uses the name, Avahi reports a conflict. The Pi never
+silently switches to `netlab-2.local`, because the certificate would not match.
+`sudo jittersim diagnostics`, the dashboard's diagnostics and `jittersim logs
+name` say which network has the conflict and the fix: choose another name with
+the command above or change the name on the other device.
+
+The name is also covered by the first sign-in. If the page was opened at an IP
+address or `pi.home.arpa`, the dashboard offers a link to the one address and
+says that the remembered sign-in is entered once there.
+
+**Trust the Pi once** to stop certificate warnings. The first time, open
+the one address, accept the warning once, sign in with the admin token and
+choose **Allow this device**. A **Trust this Pi** section then offers the
+authority certificate as a `.crt` file and as an Apple profile
+(`.mobileconfig`) with three short steps for a Mac and for an iPhone or iPad.
+Compare the fingerprint shown there with the one the installer printed.
+After that, names and addresses covered by the installed certificate open
+without a warning on that device. Test Wi-Fi devices receive a separate
+certificate that names only the one address, the earlier test Wi-Fi name and
+`192.168.50.1`, so the sign-in page does not reveal other names.
+
+The leaf certificate is renewed by the installer (and by dashboard updates)
+when its names or the Ethernet address change or fewer than 30 days remain.
+Devices that already trust the authority need nothing when that happens.
 
 After updating from a version before September 2026, choose **Reset network**
 once. Older versions left duplicate traffic filters behind and a reset removes
@@ -118,10 +259,14 @@ An update also upgrades the saved schedules so they can apply to a group or to
 everyone else. Older versions can't read those schedules, so before going back
 to one, delete them or restore a backup from before the update.
 
-The certificate is named after the Pi (`<pi-name>.local`) and also covers
-`jittersim.local` and the current Ethernet address. If the host name or the
-address changes, run the installer again and verify and trust the newly
-printed certificate.
+The dashboard certificate is named after the Pi (`<pi-name>.local`) and also
+covers `jittersim.local`, the one dashboard name and the current Ethernet address. If the
+host name or the address changes, run the installer again. It issues a new
+certificate from the same authority, so trusted devices keep working. The
+Ethernet address must stay in the same private range (for example
+`192.168.x.x`) as when the authority was created. For an address in another
+range, use the one address, or delete `/etc/jittersim/ca` as root to create a
+new authority and trust it again on every device.
 
 Open **Admin token** in the sidebar and choose **Check token** to load the
 dashboard: `sudo grep JITTERSIM_ADMIN_TOKEN /etc/jittersim/control.env` shows
@@ -447,7 +592,7 @@ for current command behavior.
 
 To recover from a copied router network name, run `sudo jittersim wifi reset`
 on the Pi through its management connection or a local terminal. Add `--yes`
-to confirm without a prompt. The command restores `JitterSim` and keeps the
+to confirm without a prompt. The command restores `TestNet` and keeps the
 current password and security type. It restarts test Wi-Fi and needs the
 helper but works with the dashboard stopped. The dashboard has the same
 **Reset Wi-Fi name** control on its **Router and Wi-Fi** page.
@@ -519,11 +664,11 @@ sudo jittersim wifi reset --yes
 
 Use either command on the Pi through a management connection or local terminal.
 The first asks for confirmation. The second confirms without a prompt. Both
-restore the name to `JitterSim`, keep the current password and restart test
+restore the name to `TestNet`, keep the current password and restart test
 Wi-Fi. They require the helper service but work with the dashboard stopped.
 Saved profiles and household access rules are preserved.
 
-The Setup tab has the same **Reset Wi-Fi name** action. It cannot be reached
+Router and Wi-Fi has the same **Reset Wi-Fi name** action. It cannot be reached
 from the test network. Keep the router Wi-Fi on and a working management route
 before copying its name to the Pi. If your computer has already joined the
 copied Pi network, reconnect to the router before trying dashboard recovery.
@@ -594,11 +739,13 @@ sudo jittersim update install
 sudo jittersim update rollback
 ```
 
-`update check` reports releases already staged on the Pi. It does not query
-the private repository online. Install and rollback ask for confirmation and
-briefly interrupt the dashboard and test network. Keep Ethernet or SSH
-available for recovery. Run `sudo jittersim --help` or
-`sudo jittersim update --help` for command help.
+`update check` reports releases already staged on the Pi, who signed them and
+whether they can be installed. It does not query the private repository
+online. Install and rollback ask for confirmation and briefly interrupt the
+dashboard and test network. Keep Ethernet or SSH available for recovery.
+`sudo jittersim update stage`, `trust-key`, `untrust-key`, `list-keys` and
+`enable-passwordless-staging` manage [signed releases](#signed-releases). Run
+`sudo jittersim --help` or `sudo jittersim update --help` for command help.
 
 ## Troubleshoot a failed apply
 
@@ -622,9 +769,13 @@ Chrome**. Then reload the page. A VPN that routes the Pi's address through its
 tunnel causes the same error in every browser, so pause the VPN while you use
 the dashboard from the Pi Wi-Fi.
 
-Chrome also warns about the dashboard's own certificate the first time. Compare
-the SHA-256 fingerprint in the warning with the one the installer printed and
-only then continue. The dashboard is on the Pi's test Wi-Fi at
+An unenrolled browser may warn about the dashboard certificate. Verify the
+public authority fingerprint through the Pi or an independently trusted
+management connection. After signing in use **Trust this Pi** under **Access
+and rules** and compare its authority fingerprint with the installer's before
+following the device's trust steps. The browser's leaf-certificate fingerprint
+is different. Test actual Chrome and operating-system trust separately from
+automated Chromium. The dashboard is on the Pi's test Wi-Fi at
 `https://192.168.50.1:8080` and on the router network at the Pi's Ethernet
 address.
 
@@ -644,12 +795,13 @@ Never commit those files or paste their contents into a chat or ticket.
 From the management network, the dashboard should be reachable at:
 
 ```text
-https://<pi-name>.local:8080
+https://netlab.local:8080
 ```
 
 Without signing in, it must show only the plain sign-in page. From a device
-connected to the test Wi-Fi, the dashboard and SSH ports must
-not be reachable and `192.168.0.1` must not be reachable through the Pi. The
+connected to the test Wi-Fi, HTTPS must reach the neutral sign-in page while
+private controls require accepted token and device access. SSH and
+`192.168.0.1` must not be reachable through the Pi. The
 device should still receive public internet access through the Pi gateway.
 This is an intentional block rather than a password redirect because a
 redirect cannot safely intercept HTTPS or router traffic.
@@ -675,30 +827,52 @@ JitterSim database.
 ## Approved release updates
 
 Install this version once using the normal installer to add the update service.
-After that, Setup can check the installed version, install an approved staged
-release and restore the previous installation. The Pi stores no GitHub
-credentials. An administrator transfers the release over the existing SSH path.
+After that, Router and Wi-Fi can check the installed version, install a signed staged
+release and restore the previous installation. Optional online checks may use
+a separately configured private GitHub token. Signing keys on the Pi are public
+trust keys. The private release key stays on the signing machine. See
+[Signed releases](#signed-releases) for the key that approves a release.
 
-Build a bundle from a reviewed tag or commit on the development machine:
+Releases have version numbers: MAJOR.MINOR.PATCH. A new feature raises
+MINOR and a fix raises PATCH. A change that needs a reinstall with the installer
+or breaks saved settings raises MAJOR. Put the number in `pyproject.toml` and in
+`src/jittersim/__init__.py` then mark the reviewed official `main` commit with
+`git tag vMAJOR.MINOR.PATCH`. A test fails when the tag and the files disagree.
+
+Build a bundle from the tag on the development machine:
 
 ```sh
-./deploy/raspberry-pi/build-release.sh RELEASE_REF /tmp/jittersim-release.tar.gz
+./deploy/raspberry-pi/build-release.sh vMAJOR.MINOR.PATCH /tmp ~/.ssh/jittersim_release_ed25519
 ```
 
-Save the printed SHA-256 checksum with the release record. Transfer that exact
-bundle to the Pi using the existing SSH account then stage it as root:
+The bundle is named `jittersim-MAJOR.MINOR.PATCH.tar.gz` and the script prints
+the version it built. A commit without a tag builds a test build named
+`NUMBER.dev+COMMIT` that never looks like a release. A second argument that ends
+in `.tar.gz` names the file yourself. `build-release.sh --version REF` only prints the version
+the commit would build.
+
+The archive includes the signed source commit, version and release order.
+The separate signature is saved beside it with `.sig` added to its name.
+Save the printed SHA-256 checksum with the release record.
+The update refuses to install an older number over a newer one. Use Restore previous
+installation to go back on purpose. Transfer the exact archive and its signature
+to the Pi using the existing SSH account then stage it as root.
+An older signed manager cannot read the new development label. Use
+`deploy-from-mac.sh --use-installer` once for the first upgrade. Later updates
+use the ordinary one-command signed route.
 
 ```sh
-sudo /opt/jittersim/.venv/bin/python -m jittersim.updates stage /tmp/jittersim-release.tar.gz --version RELEASE_VERSION --sha256 APPROVED_SHA256
+sudo jittersim update stage /tmp/jittersim-release.tar.gz
 ```
 
-The checksum must come from the trusted release record. Staging an archive is
-approval to run its code as root. Staging rejects unsafe archive paths, links,
-wrong checksums, more than 5000 files and excessive compressed or expanded size.
-Only the administrator can write the staged files. The dashboard can select
-only that staged release and cannot submit a URL, path or shell command.
+Staging checks the signature before it reads anything inside the archive. It
+also rejects a release that is not newer than the installed one, unsafe archive
+paths, links, more than 5000 files and excessive compressed or expanded size.
+`--sha256 CHECKSUM` and `--version LABEL` add two more checks. Only root can
+write the staged files. The dashboard can select only that staged release and
+cannot submit a URL, path or shell command.
 
-In Setup, press Check for updates then Install staged release. The operation
+On Router and Wi-Fi press Check for updates then Install staged release. The operation
 runs the release steps of `install.sh`. It first runs the release's network
 preflight and kernel egress-hook check. If either fails nothing changes. It
 then stops the dashboard, helper and browser proxy. It backs up the
@@ -710,15 +884,16 @@ including the DNS watcher and the dashboard name publisher. A running test
 Wi-Fi is never restarted. It then checks the authenticated HTTPS health
 response and helper connection. A failure after installation begins restores
 that backup. Allow a brief test-network interruption and keep the Ethernet or
-SSH recovery path available. OS packages, credentials, the certificate and
-Wi-Fi settings still use the normal installer. The recovery program already on
-the Pi runs the update so changed install steps apply from the update after
-it. Run the installer once for a release that changes them.
+SSH recovery path available. The update keeps current credentials and the
+verified certificate authority and prepares the required dashboard certificates.
+New OS packages still require the full installer. A first upgrade from an older
+manager may require the verified installer route over management access. Inspect
+the installed manager before choosing that route.
 
 The recovery program uses system Python and is stored outside the app's virtual
 environment. A queued operation runs again after reboot. An interrupted install
 with a complete recovery copy restores the old installation before another
-attempt. Recovery failures remain visible in Setup when the dashboard can run.
+attempt. Recovery failures remain visible on Router and Wi-Fi when the dashboard can run.
 Inspect a failure over SSH with:
 
 ```sh
@@ -726,8 +901,11 @@ sudo systemctl status jittersim-update.service
 sudo journalctl -u jittersim-update.service -n 80 --no-pager
 ```
 
-Restore previous installation replaces settings and usage with the backup made
-before that update. This differs from Diagnostics' settings-version restore,
+Restore previous installation uses the selected complete recovery copy.
+Ordinary profiles, protection settings, saved device access and usage may return
+to that earlier point. Later ordinary edits can be lost. Current signing trust,
+update token, checks against older releases, certificate authority and Panic state have separate
+recovery protections. This differs from Diagnostics' settings-version restore,
 which retains current usage for matching limits. One previous installation and
 one staged release are retained. A new successful backup replaces the previous
 recovery copy. Ensure enough free disk space for two installation copies plus
@@ -737,6 +915,216 @@ Automated tests exercise file validation and recovery with disposable files.
 They do not establish radio coverage, uninterrupted household service or actual
 Pi restart behavior. Complete the household and recovery trial on the Pi before
 relying on it for everyday access.
+
+### Deploy from a Mac
+
+`deploy/raspberry-pi/deploy-from-mac.sh` builds, copies, stages and installs
+above in one command. It runs on the **Mac** in a JitterSim checkout and needs
+git, ssh-keygen, ssh, scp, curl, tar, shasum and Python 3:
+
+```sh
+git fetch origin main --tags
+git rev-parse origin/main
+deploy/raspberry-pi/deploy-from-mac.sh --ref origin/main --dry-run
+deploy/raspberry-pi/deploy-from-mac.sh --ref origin/main --stage-only
+deploy/raspberry-pi/deploy-from-mac.sh --ref origin/main
+```
+
+The defaults are `--host jittersim@192.168.0.17`,
+`--key ~/.ssh/jittersim_ed25519` and
+`--signing-key ~/.ssh/jittersim_release_ed25519`. Verify that `origin` is the
+official repository and that the printed commit is the reviewed `main` with
+completed checks before deploying. A dry run does not establish those checks.
+Although `--ref` defaults to `HEAD`, use the explicitly verified `origin/main`
+for this appliance rather than a working branch.
+
+Deploying works on the Pi's router network or its own test Wi-Fi. On the test
+Wi-Fi the command uses the HTTPS dashboard. It also uses HTTPS when SSH cannot
+answer. Give the dashboard's certificate with `--ca-cert` and store the admin
+token once with `--save-token`. Open the dashboard and choose Allow this device
+once before uploading from the test Wi-Fi. The script prints its destination.
+HTTPS installation waits up to 900 seconds in total, including status reads.
+
+1. It builds the archive of the commit with `build-release.sh` so uncommitted
+   changes are left out. With the release signing key it signs the archive
+   with `sign-release.sh`, which refuses a key that others may read. It prints
+   the commit and the SHA-256 checksum and checks that checksum with `shasum`.
+2. It asks the Pi (without a password) whether it has the update service,
+   whether it installs only signed releases, whether it trusts a key, whether
+   passwordless staging is on and which release it runs. If the Pi already
+   runs that commit nothing else happens.
+3. A Pi with signed releases gets the archive and its signature in
+   `~/incoming/` and stages it with
+   `sudo /usr/local/bin/jittersim update stage ...`. With passwordless staging
+   this runs in `BatchMode` with `sudo -n` and asks for nothing. Without it the
+   step runs in one `ssh -t` session so the Pi asks for its `sudo` password once
+   in your terminal. A Pi from before signed releases gets the old staging
+   command with the update service's own copy of `updates.py`. The script never
+   reads, stores or passes a password.
+4. With `--stage-only` it prints the exact command to install the staged
+   release. You can also choose **Check for updates** and then **Install staged
+   release** on Router and Wi-Fi. By default the same session runs
+   `sudo jittersim update install --yes --wait` (`sudo jittersim update
+   install --yes` and a wait for the update service on a Pi from before signed
+   releases). Then it reads `jittersim update check` and prints the release the
+   Pi now runs. Compare its semantic version and recorded source commit with
+   the exact built manifest and `git rev-parse origin/main`.
+
+A Pi with signed releases but no trusted key or a Mac without the signing key
+stops the deploy before anything is copied and says what to run.
+
+The release has a semantic version with its source commit in the manifest.
+The Pi records it in `/opt/jittersim/.jittersim-release.json`.
+Router and Wi-Fi shows it and so does
+`jittersim status` on the Mac.
+
+A Pi without the update service (a release from before staged updates) needs
+the full installer once. `--use-installer` copies the archive then makes a
+root-private copy on the Pi and checks its checksum before unpacking to
+`/root/jittersim-install-source-COMMIT`. The source belongs to root so the
+installer can verify it safely. It runs the installer by default in the same
+sudo terminal. With `--stage-only` it prints the installer command. Use it
+as well for OS package or Wi-Fi changes. The source folder stays under `/root`
+for checking. An existing folder is refused rather than overwritten.
+
+Every ssh and scp call has a ten second connection timeout, notices a dead
+connection within 45 seconds and uses only the given key. All of them except
+the `sudo` step run in `BatchMode` so they never ask anything and each has a
+time limit (one minute for a check, ten minutes for the copy, five minutes for
+passwordless staging and 25 minutes for a passwordless install). The `sudo`
+step that asks for the password has none because the install can take several
+minutes. Host keys come from your `known_hosts` as they are: connect once with
+`ssh -i ~/.ssh/jittersim_ed25519 jittersim@192.168.0.17` and check the host
+key before the first deploy. `--dry-run` prints every command and runs none.
+
+## Signed releases
+
+The Pi's root update manager stages and installs only an archive signed by a
+release signing key the owner trusts. A valid signature is the permission to
+install code as root. The admin token and the SSH login are not.
+
+- The owner's signing key lives on the Mac only
+  (`~/.ssh/jittersim_release_ed25519`, an ed25519 OpenSSH key).
+  `make-release-key.sh` creates it and prints the one command that makes the
+  Pi trust it.
+- `/etc/jittersim/release-signers` lists the trusted public keys (root, mode
+  0644). Only `sudo jittersim update trust-key` and `untrust-key` change it.
+  Staging refuses every signature while the file holds a line those commands
+  did not write or while others can change it.
+- Staging copies the archive and its signature `ARCHIVE.sig` into a root-only
+  folder first. `ssh-keygen -Y verify` then checks that copy against the trusted
+  keys in the `jittersim-release` namespace. Only that same copy is unpacked so
+  a file swapped in afterwards changes nothing. A signature for anything else
+  (for example a signed git commit) never approves a release.
+- Every archive carries a signed manifest `deploy/RELEASE` with its commit,
+  label and sequence (the build time). The Pi stages only a sequence newer than
+  the installed release and than every release it installed before. An older
+  release comes back only with the local rollback (`sudo jittersim update
+  rollback` or **Restore previous installation**), which restores the recovery
+  copy and never stages an archive.
+- Install staged release (dashboard, `jittersim update install`) checks again
+  that the staged release was signed by a key that is still trusted and is
+  still newer. A release staged without a signature cannot be installed.
+
+### One-time setup
+
+1. On the Mac: `deploy/raspberry-pi/make-release-key.sh`. Add `--passphrase`
+   for a key with a passphrase (keep it in ssh-agent with `ssh-add`).
+2. Install a release with signed updates once. On a Pi from before signed
+   releases `deploy-from-mac.sh --install` still uses the old staging command
+   and asks for the sudo password.
+3. Run the one command `make-release-key.sh` printed on the Pi. It asks for the
+   sudo password once. It looks like
+   `echo 'ssh-ed25519 AAAA… mac-20261002' | sudo jittersim update trust-key --label mac-20261002 --enable-passwordless-staging -`.
+
+From then on `deploy-from-mac.sh --install` signs, copies, stages and installs
+without a password. `sudo jittersim update list-keys` shows the trusted keys and
+whether passwordless staging is on.
+
+### Passwordless staging
+
+`sudo jittersim update enable-passwordless-staging` (or `trust-key
+--enable-passwordless-staging` or `install.sh --enable-passwordless-staging`)
+writes `/etc/sudoers.d/jittersim-update` (mode 0440) after `visudo -cf`
+accepted it. It works only while at least one key is trusted and the installer
+never turns it on by itself. The rule lets the `jittersim` login run exactly
+two commands without a password and nothing else:
+
+```text
+/usr/local/bin/jittersim update stage /home/jittersim/incoming/jittersim-release.tar.gz
+/usr/local/bin/jittersim update install --yes --wait
+```
+
+There is no wildcard in the rule so no other path or argument matches. Staging
+checks the signature itself so the rule alone installs nothing. The install
+command can only install the release already staged. `sudo jittersim update
+disable-passwordless-staging` removes the rule. The dashboard service cannot
+use sudo at all (`NoNewPrivileges`).
+
+### Deploy without SSH (HTTPS upload)
+
+`deploy-from-mac.sh` picks the way by itself. On the Pi's test Wi-Fi
+(192.168.50.0/24) SSH is blocked on purpose, so the script builds, signs and
+uploads the release to `https://PI:8080/api/updates/upload`. Everywhere else it
+tries SSH first and uses HTTPS when SSH does not answer. `--https` and `--ssh`
+force one way. The upload path needs:
+
+- the admin token in `JITTERSIM_TOKEN` or in the macOS Keychain. Store it once
+  with `deploy-from-mac.sh --save-token` (Keychain item `jittersim-admin-token`).
+  The token is never printed and never put on a command line;
+- a verified copy of the Pi's public authority `/etc/jittersim/ca/ca.crt`
+  (`--ca-cert FILE` or the file saved by `jittersim connect`). That authority
+  verifies the dashboard certificate;
+- on the test Wi-Fi: open the dashboard once in a browser on the Mac and choose
+  **Allow this device**.
+
+The dashboard streams the archive and signature into a spool folder of its own
+user (`/var/lib/jittersim/incoming-release`). The root helper copies them into a
+root-only folder and runs the same staging as `jittersim update stage`: a trusted
+key must have signed exactly those bytes and the sequence must be newer than the
+high-water mark. Limits: Content-Length is required, the archive is at most 25 MiB,
+the signature at most 16 KiB and the whole upload must finish within 120 seconds.
+`jittersim remote update status|upload|install` does the same from the command
+line. Publishing stable releases requires the retained signed package and owner
+approval. Follow the [release guide](../../docs/releases/README.md).
+
+### Who can do what
+
+| Someone has | They can | They cannot |
+| --- | --- | --- |
+| A leaked admin token | Use the dashboard from a registered device (on the test Wi-Fi the device must be allowed first). Upload a release over HTTPS and install it, but the Pi stages it only when a key in `release-signers` signed it and it is newer than every release installed before. Install the release already staged. Restore the one previous installation. | Stage or install any release you did not sign. Get root. |
+| A stolen SSH key for the `jittersim` login | Log in as `jittersim` and do what that user can. With passwordless staging also stage and install releases you signed. | Install their own code or get root unless they also learn the sudo password (for example by watching you type it). |
+| A stolen release signing key | Sign archives. | Put an archive on the Pi. A signature alone stages nothing. |
+| The signing key and the SSH key | With passwordless staging install their own signed code and so get root. Without it they still need the sudo password. | Install anything once you remove the key with `untrust-key`. |
+
+Keep the signing key on the Mac only and give it a passphrase if the Mac is
+shared. A release you signed stays installable on this Pi until a newer one is
+installed, so sign only what you want installed.
+
+### Rotate or remove a key
+
+To replace a key, rename the old key files on the Mac, run
+`make-release-key.sh` again and run its command on the Pi. Then remove the old
+key on the Pi:
+
+```sh
+sudo jittersim update list-keys
+sudo jittersim update untrust-key OLD_LABEL_OR_FINGERPRINT
+```
+
+After `untrust-key`:
+
+- archives signed by that key are refused from then on,
+- a staged release it signed is removed and cannot be installed,
+- releases already installed stay installed: a signature is checked when a
+  release is staged and installed, not while it runs,
+- passwordless staging turns off when no key is left,
+- a rollback keeps the key list of now. Recovery copies leave
+  `release-signers` out so a restore never brings back a removed key.
+
+If a signing key was stolen together with SSH access, treat the Pi as possibly
+compromised: remove the key, then reinstall the Pi from a fresh image and a
+release you build and sign with a new key.
 
 ## Persistent access rules and normal access
 
@@ -763,8 +1151,8 @@ leaving the Ethernet management path available.
 
 The filtered resolver listens on `127.0.0.1` and `192.168.50.1` at port 5335.
 The access table redirects test-client DNS there and keeps that port closed to
-every other interface. Port 5353 stays free for the Avahi publisher so
-`<pi-name>.local` and `jittersim.local` keep resolving from the laptop.
+every other interface. Port 5353 stays free for Avahi, which answers the one
+dashboard name (and on Ethernet `<pi-name>.local` and `jittersim.local`).
 
 `jittersim-dns.service` is installed but not enabled. The helper starts it
 when saved access rules are on, at boot through `jittersim-access-boot` and
@@ -812,3 +1200,73 @@ backup from the same recovery point.
 Hardware acceptance still needs two Wi-Fi clients and the actual Pi: verify
 client isolation, DHCP and management access, a changed client address,
 startup restoration, normal access and any supported association rejection.
+
+Initial Wi-Fi setup preserves every existing credentials file. An empty,
+unreadable or nonregular `ap.env` needs recovery through management access.
+Setup also refuses an existing `jittersim-ap` profile assigned to another
+interface so it cannot move a possible management connection. Confirm the
+intended test interface before repairing that configuration.
+
+A setup interrupted during first profile creation leaves a secured inactive
+profile with `connection.stable-id` set to `jittersim-initial-ap-pending:<UUID>`.
+The installer refuses to reuse it. Through management access inspect the exact
+UUID, interface, AP mode, SAE security and disabled automatic connection.
+Recover the saved credentials or remove only that confirmed incomplete profile
+before running setup again. Do not remove an unrelated profile or the shared
+update lock file.
+
+
+### Optional ad blocking for protected devices
+
+Each protected device has a separate **Block ads** switch that starts off.
+It reduces advertising domains without putting the device back under
+profiles or quotas. Existing household access rules still apply.
+The sidecar Unbound listener uses port 5354 and preserves household global,
+per-device and allow-only rules before applying the shared ad list.
+Ad-blocking allowances do not override those rules.
+
+The installer enables `jittersim-adblocking.service` with the helper.
+It needs no extra DNS package beyond the Unbound already installed for
+household rules. The DNS child drops root identity. Query and reply logging
+are disabled. The service stores settings, the public domain list and
+bounded health state. It does not save browsing history or per-device query
+counts. Upstream DNS still sees forwarded names.
+
+Only selected MAC addresses sending ordinary DNS to `192.168.50.1` use
+this listener. The managed browser proxy checks the same expiring policy
+before opening new connections. Encrypted DNS, VPNs, cached answers and ads
+sharing useful content domains can reduce coverage. Blocking is not an
+ad-free guarantee.
+
+The routing set expires after five seconds unless the controller confirms
+working DNS. A stopped or stalled controller therefore restores normal DNS
+rules without requiring the dashboard. Reset and Panic clear the routing
+set and pause blocking while retaining switches. Explicit Start or enabling
+Block ads resumes it. Automatic profile refresh does not resume it.
+Household rule changes suspend ads until the new rules finish applying.
+
+The list comes from the fixed [StevenBlack hosts source](https://github.com/StevenBlack/hosts).
+Downloads have an 8 MiB limit, a 200,000-domain limit and one worker.
+A separate process enforces a 20-second deadline including DNS resolution
+and slow partial replies. It drops root identity before network access.
+The resolver uses one shared advertising tree, bounded caches and 256
+concurrent query slots. Updates replace a validated list atomically and
+retain the last list on download failure. After three failed automatic
+attempts they wait until the next day. Allowed domains are limited to 256.
+No arbitrary remote source URL is accepted.
+
+Removing protection also removes the device's switch. The configuration
+database and root settings are covered by existing recovery copies.
+The downloaded list is a reproducible cache in `/var/lib/jittersim-adblocking`.
+The durable run or stop choice is kept outside recovery copies in the
+root-private `/var/lib/jittersim-control/adblocking-intent.json`.
+Restoring earlier settings cannot reverse a later Panic. Missing intent
+keeps selected devices paused until explicit Start or enabling a switch.
+The updater includes the new unit in stop, health and rollback handling.
+Recovery to a release without the feature removes the added unit while
+preserving compatibility with older recovery metadata. The five-second
+expiry remains the fallback if a process dies during an update.
+
+Before live deployment verify Ethernet or independent management Wi-Fi.
+Physical Wi-Fi isolation, device reconnection, Pi memory and throughput
+still require acceptance on the actual hardware.

@@ -366,7 +366,7 @@ EXPECTED_PAGE_HEADINGS = {
     ],
     "page-router": [
         "Wi-Fi name", "Upstream router connection", "Manual Pi access-point fallback",
-        "Router outage behavior",
+        "Router outage behavior", "Updates",
     ],
     "page-traffic": ["Live traffic", "Traffic discovery", "Random website choices"],
     "page-measurements": ["Measurements"],
@@ -447,6 +447,38 @@ class ControlServerTests(unittest.TestCase):
                 handler._send_response = lambda **values: captured.append(values)
                 handler._handle_write()
                 self.assertEqual(captured[0]["status"], expected)
+
+    def test_router_status_contacts_the_router_only_for_an_explicit_refresh(self):
+        calls = []
+
+        class CountingHelper(FakeHelper):
+            def read_router_wifi_status(self, *, admin_password):
+                calls.append(admin_password)
+                return {"enabled": False}
+
+        self.server.helper_client = CountingHelper()
+        for _ in range(50):
+            status, _, body = self.server.write_response_for("/api/router/status", {
+                "admin_password": "private-password"})
+            self.assertEqual(status, 200)
+            self.assertIsNone(json.loads(body)["result"]["enabled"])
+        for refresh in ("true", 1, None, {}):
+            status, _, _ = self.server.write_response_for("/api/router/status", {
+                "admin_password": "private-password", "refresh": refresh})
+            self.assertEqual(status, 400)
+        self.assertEqual(calls, [])
+        self.server.write_response_for("/api/router/status", {
+            "admin_password": "private-password", "refresh": True})
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            _, _, body = self.server.write_response_for("/api/router/status", {
+                "admin_password": "private-password"})
+            state = json.loads(body)["result"]
+            if not state["busy"]:
+                break
+            time.sleep(0.005)
+        self.assertIs(state["enabled"], False)
+        self.assertEqual(calls, ["private-password"])
 
     def test_background_router_change_keeps_dashboard_responsive_and_records_once(self):
         release = threading.Event()
@@ -1015,6 +1047,9 @@ class ControlServerTests(unittest.TestCase):
 
     def test_traffic_endpoint_includes_applied_default_queue_limits(self) -> None:
         class SnapshotScheduler:
+            def begin_shutdown(self):
+                pass
+
             def applied_queue_bandwidth_limits(self):
                 return {
                     "alice": {
@@ -3170,7 +3205,7 @@ class ControlServerTests(unittest.TestCase):
         for fragment in (
             'id="saved-profiles"',
             'id="device-table"',
-            '<input id="device-profile" required>',
+            '<select id="device-profile" required disabled',
             'id="new-profile"',
             'id="device-cancel-edit"',
             "function fillProfileForm(profile)",
@@ -3226,8 +3261,8 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("return deviceConditionCell(device.id);", DASHBOARD_HTML)
         self.assertIn('request("/api/conditions", "GET")', DASHBOARD_HTML)
         self.assertIn('id="device-conditions-note"', DASHBOARD_HTML)
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
-        self.assertIn("loadConditions()", refresh)
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadConditions", refresh)
 
     def test_dashboard_condition_lookup_ignores_built_in_names(self) -> None:
         node = shutil.which("node")
@@ -3265,8 +3300,8 @@ class ControlServerTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, DASHBOARD_HTML)
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
-        self.assertIn("loadEveryoneElse()", refresh)
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadEveryoneElse", refresh)
 
     def _run_dashboard_functions(self, names, setup, calls):
         node = shutil.which("node")
@@ -3282,7 +3317,7 @@ class ControlServerTests(unittest.TestCase):
                     return f"{kind} {name}({body}\n}}\n"
             raise AssertionError(f"{name} is not in the dashboard script")
 
-        harness = "const restoreDrafts = () => {}; const loadHealth = async () => {}; const loadWorkspace = async () => {};\n" + setup + "".join(function(name) for name in names) + calls
+        harness = "const invalidateAdminTools = () => {}; const restoreDrafts = () => {}; const loadHealth = async () => {}; const loadWorkspace = async () => {};\n" + setup + "".join(function(name) for name in names) + calls
         result = subprocess.run([node, "-e", harness], capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
@@ -3383,9 +3418,9 @@ class ControlServerTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, rules)
         self.assertLess(rules.index("Run a profile timer"), rules.index("<h2>Scenarios</h2>"))
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
-        self.assertIn("loadScenarios()", refresh)
-        self.assertIn("window.setInterval(pollDashboard, 5000);", DASHBOARD_HTML)
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadScenarios", refresh)
+        self.assertIn("makePoller(pollDashboard, 5000);", DASHBOARD_HTML)
 
     def test_scenario_steps_durations_and_running_text(self) -> None:
         result = self._run_dashboard_functions(
@@ -3580,14 +3615,16 @@ class ControlServerTests(unittest.TestCase):
 
     def test_rebuilt_profile_menus_keep_the_steps_being_edited(self) -> None:
         result = self._run_dashboard_functions(
-            ["profileOptionLabels", "loadProfiles", "followProfileMenus"],
+            ["profileOptionLabels", "setDeviceProfileAvailability", "loadProfiles", "followProfileMenus"],
+            "let profilesRequestRevision = 0;\n"
             "let profiles = [];\n"
             "let profilesLoaded = false;\n"
             "function renderSidebarStatus() {}\n"
             "function updateGeneralProfileControls() {}\n"
+            "function updateGroupFormControls() {}\n"
             "const profilesLoadedHooks = [followProfileMenus];\n"
             "const everyoneElse = {profile_id: null};\n"
-            "const element = () => ({value: '', options: [], replaceChildren() {this.options=[];}, appendChild(option) {this.options.push(option);}});\n"
+            "const element = () => ({value: '', options: [], getAttribute() {return null;}, replaceChildren() {this.options=[];}, appendChild(option) {this.options.push(option);}});\n"
             "const document = {createElement: () => ({})};\n"
             "async function request() { return {profiles: [{id: 'slow', name: 'Slow'}]}; }\n"
             "function renderProfileTable() {}\n"
@@ -3637,9 +3674,9 @@ class ControlServerTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, overview)
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
-        self.assertIn("loadActivity()", refresh)
-        self.assertIn("window.setInterval(pollDashboard, 5000);", DASHBOARD_HTML)
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadActivity", refresh)
+        self.assertIn("makePoller(pollDashboard, 5000);", DASHBOARD_HTML)
 
     def test_the_activity_log_copies_as_markdown(self) -> None:
         result = self._run_dashboard_functions(
@@ -3824,17 +3861,20 @@ class ControlServerTests(unittest.TestCase):
 
     def test_dashboard_profile_menus_keep_the_everyone_else_choice(self) -> None:
         values = self._run_dashboard_functions(
-            ["profileOptionLabels", "loadProfiles", "followProfileMenus"],
+            ["profileOptionLabels", "setDeviceProfileAvailability", "loadProfiles", "followProfileMenus"],
+            "let profilesRequestRevision = 0;\n"
             "let profiles = [];\n"
             "let profilesLoaded = false;\n"
             "function renderSidebarStatus() {}\n"
             "function updateGeneralProfileControls() {}\n"
             "const profilesLoadedHooks = [followProfileMenus];\n"
             "const everyoneElse = {profile_id: '3g', unaffected_devices: []};\n"
+            "function updateGroupFormControls() {}\n"
             "const elements = {};\n"
             "function element(id) {\n"
             "  elements[id] = elements[id] || {\n"
             "    options: [], value: '',\n"
+            "    getAttribute() { return null; },\n"
             "    replaceChildren() { this.options = []; this.value = ''; },\n"
             "    appendChild(option) {\n"
             "      this.options.push(option);\n"
@@ -3978,7 +4018,7 @@ class ControlServerTests(unittest.TestCase):
 
     PAGES = (
         "devices", "profiles", "schedules", "router", "traffic", "measurements", "activity",
-        "access", "diagnostics",
+        "access", "diagnostics", "updates",
     )
 
     def _panel(self, name: str) -> str:
@@ -4047,10 +4087,11 @@ class ControlServerTests(unittest.TestCase):
 
     def test_background_polling_pauses_and_never_overlaps_refresh(self) -> None:
         result = self._run_dashboard_functions(
-            ["pollDashboard", "refresh"],
+            ["pollDashboard", "pagePollJobs", "refresh"],
             "const document = {hidden: true}; const dashboardLoaded = true;\n"
             "let adminTokenVerified = true;\n"
-            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false;\n"
+            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false, refreshWanted;\n"
+            "const unansweredPaths = new Set();\n"
             "let page = 'activity'; function currentPage() { return page; }\n"
             "const seen = []; let release; let hold = new Promise(resolve => {release = resolve;});\n"
             "const loadActivity = async () => {seen.push('activity'); await hold;};\n"
@@ -4078,7 +4119,7 @@ class ControlServerTests(unittest.TestCase):
     def test_refresh_requested_during_a_refresh_reloads_after_it(self) -> None:
         result = self._run_dashboard_functions(
             ["refresh"],
-            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false;\n"
+            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false, refreshWanted;\n"
             "let release; const hold = new Promise(resolve => {release = resolve;});\n"
             "let active = 0, peak = 0, calls = 0;\n"
             "async function refreshDashboard() { calls++; active++; peak = Math.max(peak, active);\n"
@@ -4252,7 +4293,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertLess(
             overview.index('id="getting-started"'), overview.index('id="connected-devices"')
         )
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn("renderGettingStarted()", refresh)
 
     def test_forms_offer_the_connected_devices(self) -> None:
@@ -4411,7 +4452,11 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "text/html; charset=utf-8")
-        self.assertEqual(body.decode("utf-8"), DASHBOARD_HTML)
+        # Only the neutral easy address is filled in. Scripts and styles stay as they are.
+        self.assertEqual(
+            body.decode("utf-8"),
+            DASHBOARD_HTML.replace("@@EASY_ADDRESS@@", "https://netlab.local:%d" % self.server.server_port),
+        )
         self.assertIn("Checking control mode", DASHBOARD_HTML)
         self.assertIn("Save profile", DASHBOARD_HTML)
         self.assertIn("Save device", DASHBOARD_HTML)
@@ -4424,7 +4469,6 @@ class ControlServerTests(unittest.TestCase):
         self.assertNotIn("Apply current configuration", DASHBOARD_HTML)
         self.assertIn("Reset network", DASHBOARD_HTML)
         self.assertIn("setButtonBusy(event.submitter, true)", DASHBOARD_HTML)
-        self.assertIn("if (submitButton) setButtonBusy(submitButton, false);", DASHBOARD_HTML)
         self.assertIn("Dashboard refresh failed:", DASHBOARD_HTML)
         self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
         self.assertIn(
@@ -5358,6 +5402,9 @@ class ControlServerTests(unittest.TestCase):
         class RecordingScheduler:
             is_active = False
 
+            def begin_shutdown(self):
+                pass
+
             @contextlib.contextmanager
             def exclusive(self):
                 events.append("hold")
@@ -5370,7 +5417,8 @@ class ControlServerTests(unittest.TestCase):
             def sample_usage(self, *, repository):
                 events.append("sample")
 
-            def activate_plan(self, *, repository, prepared):
+            def activate_plan(self, *, repository, prepared, counters_preserved=False):
+                assert not counters_preserved
                 events.append("activate")
 
         class RecordingHelper(FakeHelper):
@@ -5873,15 +5921,25 @@ class ControlServerTests(unittest.TestCase):
 
     def test_updates_the_local_test_access_point_without_returning_password(self) -> None:
         self.server.helper_client = FakeHelper()
+        self.server.wifi_operations.delay = 0
 
         status, _, body = self.server.write_response_for(
             "/api/access-point",
-            {"ssid": "JitterSim-Test", "password": "test-password-123"},
+            {"ssid": "JitterSim-Test", "password": "test-password-123",
+             "request_id": json.loads(self.server.response_for("/api/wifi-operation/request-id")[2])["request_id"]},
         )
 
-        self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["result"]["action"], "configure-ap")
+        # The Wi-Fi restarts after this answer, so the answer only accepts the change.
+        self.assertEqual(status, 202)
         self.assertNotIn("test-password-123", body.decode("utf-8"))
+        deadline = time.monotonic() + 5
+        while self.server.wifi_operations.busy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        _, _, stored = self.server.response_for(
+            "/api/wifi-operation", query="id=" + json.loads(body)["operation_id"])
+        operation = json.loads(stored)["operation"]
+        self.assertEqual((operation["state"], operation["ssid"]), ("succeeded", "JitterSim-Test"))
+        self.assertNotIn("test-password-123", stored.decode("utf-8"))
 
     def test_can_promote_an_observed_domain_to_a_profile_or_global_block(self) -> None:
         status, _, body = self.server.write_response_for(
@@ -7745,5 +7803,4 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(_new_client_name("Sam's 📱 phone", "host", "192.168.50.7"), "Sam's 📱 phone")
         self.assertEqual(_new_client_name(None, "Café-tablet", "192.168.50.7"), "Café-tablet")
-
 

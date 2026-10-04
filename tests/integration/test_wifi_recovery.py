@@ -6,6 +6,8 @@ import tempfile
 import threading
 import time
 import unittest
+
+from jittersim.api.wifi_operations import issue_request_id
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -63,6 +65,7 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
         self.api_thread.start()
         self.assertTrue(ready.wait(timeout=3))
         self.assertFalse(startup_errors, startup_errors)
+        self.api.wifi_operations.delay = 0
         self.addCleanup(self.stop_api)
 
     def stop_helper(self):
@@ -75,16 +78,35 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
         self.api.server_close()
         self.api_thread.join(timeout=3)
 
-    def request(self, headers=None):
+    def call(self, method, path, headers=None, payload=None):
         connection = http.client.HTTPConnection(*self.api.server_address, timeout=3)
         try:
-            connection.request("POST", "/api/access-point/reset-name", body="{}",
+            connection.request(method, path, body=json.dumps(payload or {}) if method == "POST" else None,
                                headers={"Content-Type": "application/json",
                                         "Accept": "application/json", **(headers or {})})
             response = connection.getresponse()
             return response.status, json.loads(response.read())
         finally:
             connection.close()
+
+    def request(self, headers=None):
+        """Ask for the reset and follow it to its stored outcome, as the page does."""
+        status, body = self.call("POST", "/api/access-point/reset-name", headers,
+                                 {"request_id": issue_request_id()})
+        if status != 202:
+            return status, body
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            status, stored = self.call("GET", "/api/wifi-operation?id=" + body["operation_id"],
+                                       headers)
+            operation = stored["operation"]
+            if operation["state"] != "running":
+                break
+            time.sleep(0.02)
+        if operation["state"] == "succeeded":
+            return 200, {"result": {"ssid": operation["ssid"], "security": operation["security"]},
+                         "message": operation["message"]}
+        return operation["status"], {"error": operation["message"]}
 
     def console(self, *extra):
         output, errors = io.StringIO(), io.StringIO()
@@ -100,7 +122,7 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
                    side_effect=AssertionError("database used")):
             code, _, errors = self.console("--yes")
         self.assertEqual(code, 0, errors)
-        self.assertEqual(self.executor.settings["802-11-wireless.ssid"], "JitterSim")
+        self.assertEqual(self.executor.settings["802-11-wireless.ssid"], "TestNet")
         self.assertEqual(self.executor.settings["802-11-wireless-security.psk"],
                          "fixture-wifi-password")
         self.assertEqual(self.repository.get_runtime_state(), state)
@@ -120,6 +142,8 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
 
     def test_api_requires_authentication_and_rejects_other_sites(self):
         self.assertEqual(self.request()[0], 401)
+        # The stored outcome names the network, so it needs the token as well.
+        self.assertEqual(self.call("GET", "/api/wifi-operation")[0], 401)
         self.assertFalse(self.executor.commands)
         headers = {"Authorization": "Bearer wifi-test"}
         self.assertEqual(self.request({**headers, "Sec-Fetch-Site": "cross-site"})[0], 403)
@@ -128,7 +152,7 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
         state = self.repository.get_runtime_state()
         status, body = self.request(headers)
         self.assertEqual(status, 200, body)
-        self.assertEqual(body["result"]["ssid"], "JitterSim")
+        self.assertEqual(body["result"]["ssid"], "TestNet")
         self.assertNotIn("fixture-wifi-password", json.dumps(body))
         self.assertEqual(self.repository.get_runtime_state(), state)
 
@@ -143,6 +167,21 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 502)
         self.assertIn("recovery failed", body["error"])
         self.assertNotIn("fixture-wifi-password", json.dumps(body) + "".join(logs.output))
+
+    def test_old_helper_default_is_not_confirmed_or_replayed(self):
+        class OldHelper:
+            calls = 0
+
+            def reset_wifi_name(self):
+                self.calls += 1
+                return {"ssid": "JitterSim", "security": "WPA3"}
+
+        helper = OldHelper()
+        self.api.helper_client = helper
+        status, body = self.request({"Authorization": "Bearer wifi-test"})
+        self.assertEqual(status, 502)
+        self.assertIn("error", body)
+        self.assertEqual(helper.calls, 1)
 
     def test_competing_wifi_changes_are_refused_while_ping_still_answers(self):
         entered, release = threading.Event(), threading.Event()
@@ -161,7 +200,7 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
                 self.assertEqual(status, 409)
             finally:
                 release.set()
-            self.assertEqual(pending.result(timeout=3)["ssid"], "JitterSim")
+            self.assertEqual(pending.result(timeout=3)["ssid"], "TestNet")
 
     def test_idle_socket_clients_cannot_create_unbounded_workers(self):
         clients = []

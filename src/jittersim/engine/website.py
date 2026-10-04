@@ -50,6 +50,18 @@ _MAX_REPORTED_SETS = 32
 _reported: Dict[tuple, float] = {}
 
 
+@contextmanager
+def without_dns() -> Iterator[None]:
+    """Validate saved structure without starting or waiting for external work."""
+
+    previous = getattr(_session_state, "without_dns", False)
+    _session_state.without_dns = True
+    try:
+        yield
+    finally:
+        _session_state.without_dns = previous
+
+
 class LookupSession:
     """The shared deadline of one plan and the names that missed it."""
 
@@ -238,6 +250,8 @@ def resolve_domains(
 ) -> tuple:
     """Resolve names within the plan deadline and process-wide worker limits."""
 
+    if getattr(_session_state, "without_dns", False):
+        return ()
     names = deque(dict.fromkeys(domains))
     if not names:
         return ()

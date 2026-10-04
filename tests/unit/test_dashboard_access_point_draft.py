@@ -73,11 +73,47 @@ def handler(source_start):
 
 def test_the_reset_and_the_save_clear_the_draft_after_setting_the_field():
     reset = handler('element("reset-wifi-name").addEventListener("click"')
-    assert reset.index("element(\"access-point-ssid\").value = response.result.ssid") < reset.index(
+    assert reset.index("element(\"access-point-ssid\").value = operation.ssid") < reset.index(
         'clearDraft("access-point-form")'
     )
     # The failure path keeps the typed name so nothing the person wrote is lost.
     assert reset.index('clearDraft("access-point-form")') < reset.index("} catch (error)")
     save = handler('element("access-point-form").addEventListener("submit"')
-    assert save.index('request("/api/access-point"') < save.index('clearDraft("access-point-form")')
+    assert save.index('runWifiChange("/api/access-point"') < save.index('clearDraft("access-point-form")')
     assert save.index('clearDraft("access-point-form")') < save.index("} catch (error)")
+
+
+@NODE
+def test_remembering_credentials_does_not_create_or_restore_a_settings_draft():
+    script = r"""
+const assert = require("node:assert/strict");
+const choice = {id: "remember-admin-token", type: "checkbox", value: "on", checked: true,
+  hasAttribute: () => false, getAttribute: () => null, setAttribute() {}};
+const credentials = {id: "admin-token-form", querySelectorAll: () => [choice]};
+const field = {id: "dns-failure-percent", type: "number", value: "37",
+  hasAttribute: () => false, getAttribute: () => null, setAttribute() {}};
+const policy = {id: "policy-form", querySelectorAll: () => [field]};
+const notice = {hidden: true};
+const count = {textContent: ""};
+function element(id) {
+  return {"admin-token-form": credentials, "policy-form": policy,
+          "draft-notice": notice, "draft-count": count}[id] || null;
+}
+""" + drafts_source() + r"""
+rememberDraft(credentials);
+assert.equal(formDrafts.size, 0);
+assert.equal(notice.hidden, true);
+rememberDraft(policy);
+rememberDraft(credentials);
+assert.deepEqual(Array.from(formDrafts.keys()), ["policy-form"]);
+assert.equal(notice.hidden, false);
+choice.checked = false;
+field.value = "100";
+restoreDrafts();
+assert.equal(choice.checked, false);
+assert.equal(field.value, "37");
+clearDraft("policy-form");
+assert.equal(notice.hidden, true);
+"""
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr

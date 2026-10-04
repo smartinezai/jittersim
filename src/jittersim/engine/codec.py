@@ -1,11 +1,12 @@
 """Encode and validate network plans for the control-plane wire format."""
 
 import re
-from dataclasses import asdict
+from dataclasses import replace
 from ipaddress import AddressValueError, IPv4Address
 from typing import Any, Dict, List, Mapping, Set
 
 from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt_mac
+from jittersim.config.payloads import impairment_payload
 from jittersim.config.models import (
     Device,
     Impairment,
@@ -87,7 +88,7 @@ def _impairment_from_payload(value: Any) -> Impairment:
 def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
     """Convert a compiled plan into JSON-compatible values."""
 
-    return {
+    payload = {
         "general_profile": None if plan.general_profile is None else {
             "profile_id": plan.general_profile.profile_id,
             "allowed_addresses": None if plan.general_profile.allowed_addresses is None else [
@@ -111,7 +112,7 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
                 "device_id": queue.device_id,
                 "direction": queue.direction.value,
                 "mark": queue.mark,
-                "impairment": asdict(queue.impairment),
+                "impairment": impairment_payload(queue.impairment),
             }
             for queue in plan.queues
         ],
@@ -142,8 +143,8 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
                 "device_ip": str(rule.device_ip),
                 "destination_addresses": [str(address) for address in rule.destination_addresses],
                 "mark": rule.mark,
-                "upload_impairment": asdict(rule.upload_impairment),
-                "download_impairment": asdict(rule.download_impairment),
+                "upload_impairment": impairment_payload(rule.upload_impairment),
+                "download_impairment": impairment_payload(rule.download_impairment),
                 "active": rule.active,
             }
             for rule in plan.service_quota_rules
@@ -155,8 +156,8 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
                 "device_ip": str(rule.device_ip),
                 "domains": list(rule.domains),
                 "mark": rule.mark,
-                "upload_impairment": asdict(rule.upload_impairment),
-                "download_impairment": asdict(rule.download_impairment),
+                "upload_impairment": impairment_payload(rule.upload_impairment),
+                "download_impairment": impairment_payload(rule.download_impairment),
             }
             for rule in plan.service_assignment_rules
         ],
@@ -165,8 +166,8 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
                 "list_id": rule.list_id,
                 "domains": list(rule.domains),
                 "mark": rule.mark,
-                "upload_impairment": asdict(rule.upload_impairment),
-                "download_impairment": asdict(rule.download_impairment),
+                "upload_impairment": impairment_payload(rule.upload_impairment),
+                "download_impairment": impairment_payload(rule.download_impairment),
                 "outage_active": rule.outage_active,
             }
             for rule in plan.service_list_rules
@@ -176,19 +177,57 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
             if plan.everyone_else is None
             else {
                 "mark": plan.everyone_else.mark,
-                "upload_impairment": asdict(plan.everyone_else.upload_impairment),
-                "download_impairment": asdict(plan.everyone_else.download_impairment),
+                "upload_impairment": impairment_payload(plan.everyone_else.upload_impairment),
+                "download_impairment": impairment_payload(plan.everyone_else.download_impairment),
                 "unaffected_macs": list(plan.everyone_else.unaffected_macs),
                 "blocked": plan.everyone_else.blocked,
             }
         ),
     }
 
+    if plan.homepage_policy_version == 1:
+        payload["homepage_policy_version"] = 1
+        for name in ("mark_rules", "service_quota_rules", "service_assignment_rules", "service_list_rules"):
+            for raw, rule in zip(payload[name], getattr(plan, name)):
+                raw["homepage_bounce_percent"] = rule.homepage_bounce_percent
+        for name in ("general_profile", "everyone_else"):
+            if payload[name] is not None:
+                payload[name]["homepage_bounce_percent"] = getattr(plan, name).homepage_bounce_percent
+    return payload
+
+
+def _homepage_metadata(plan: NetworkPlan, raw: Mapping[str, Any]) -> NetworkPlan:
+    version = raw.get("homepage_policy_version", 0)
+    if type(version) is not int or version not in (0, 1):
+        raise PlanCodecError("unsupported homepage policy version")
+    changes = {"homepage_policy_version": version}
+    for name in ("mark_rules", "service_quota_rules", "service_assignment_rules", "service_list_rules", "general_profile", "everyone_else"):
+        rules = getattr(plan, name)
+        single = name in ("general_profile", "everyone_else")
+        pairs = [(rules, raw[name])] if single and rules is not None else ([] if single else list(zip(rules, raw.get(name, []))))
+        decoded = []
+        for rule, values in pairs:
+            value = values.get("homepage_bounce_percent", 0)
+            if type(value) is not int or not 0 <= value <= 100 or (version == 0 and "homepage_bounce_percent" in values):
+                raise PlanCodecError("invalid homepage chance")
+            decoded.append(replace(rule, homepage_bounce_percent=value))
+        changes[name] = (decoded[0] if decoded else None) if single else tuple(decoded)
+    return replace(plan, **changes)
+
 
 def plan_from_payload(payload: Any) -> NetworkPlan:
     """Validate and decode a serialized plan received by a privileged boundary."""
 
-    plan_data = _as_mapping(payload, "plan")
+    raw_plan = _as_mapping(payload, "plan")
+    plan_data = dict(raw_plan)
+    for name in ("mark_rules", "service_quota_rules", "service_assignment_rules", "service_list_rules"):
+        if isinstance(plan_data.get(name), list):
+            plan_data[name] = [{key: value for key, value in item.items() if key != "homepage_bounce_percent"}
+                               if isinstance(item, dict) else item for item in plan_data[name]]
+    for name in ("general_profile", "everyone_else"):
+        if isinstance(plan_data.get(name), dict):
+            plan_data[name] = {key: value for key, value in plan_data[name].items()
+                               if key != "homepage_bounce_percent"}
     mark_data = _as_list(plan_data.get("mark_rules"), "mark_rules")
     queue_data = _as_list(plan_data.get("queues"), "queues")
     if len(mark_data) > MAX_DEVICES_PER_PLAN:
@@ -675,7 +714,7 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         )
     except (TypeError, ValueError) as error:
         raise PlanCodecError("access policy is invalid") from error
-    return NetworkPlan(
+    return _homepage_metadata(NetworkPlan(
         protected_mac_addresses=protected_macs,
         unverified_device_ids=tuple(unverified_ids),
         mark_rules=tuple(mark_rules),
@@ -691,4 +730,4 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         service_list_rules=tuple(service_list_rules),
         everyone_else=everyone_else,
         access=access,
-    )
+    ), raw_plan)

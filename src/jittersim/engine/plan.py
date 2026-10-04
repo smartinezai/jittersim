@@ -24,6 +24,7 @@ class MarkRule:
     device_id: str
     ipv4_address: IPv4Address
     mark: int
+    homepage_bounce_percent: int = 0
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class ServiceQuotaRule:
     upload_impairment: Impairment
     download_impairment: Impairment
     active: bool = False
+    homepage_bounce_percent: int = 0
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,7 @@ class ServiceAssignmentRule:
     mark: int
     upload_impairment: Impairment
     download_impairment: Impairment
+    homepage_bounce_percent: int = 0
 
 
 # Queue key for everyone else. Device IDs can't contain a colon.
@@ -87,6 +90,7 @@ class EveryoneElseRule:
     unaffected_macs: Tuple[str, ...] = ()
     # True while an outage of the everyone-else profile disconnects them.
     blocked: bool = False
+    homepage_bounce_percent: int = 0
 
 
 @dataclass(frozen=True)
@@ -106,6 +110,7 @@ class ServiceListRule:
     # True while a random outage of the list's profile cuts the listed services
     # for every affected client.
     outage_active: bool = False
+    homepage_bounce_percent: int = 0
 
 
 # Queue and roll key prefix of a service list. Device IDs can't contain a colon.
@@ -128,6 +133,7 @@ class GeneralProfileRule:
     profile_id: str
     allowed_addresses: Optional[Tuple[IPv4Address, ...]] = None
     outage_active: bool = False
+    homepage_bounce_percent: int = 0
 
 
 @dataclass(frozen=True)
@@ -149,3 +155,4 @@ class NetworkPlan:
     service_list_rules: Tuple[ServiceListRule, ...] = ()
     everyone_else: Optional[EveryoneElseRule] = None
     access: Optional[AccessPlan] = None
+    homepage_policy_version: int = 0

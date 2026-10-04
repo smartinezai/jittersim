@@ -380,7 +380,8 @@ class ServiceListOutageTests(_SchedulerCase):
         self.repository.save_profile(chancy)
         self.preview_rule(0)
 
-        outcomes = [self.preview_rule(2 + 2 * check).outage_active for check in range(40)]
+        # A selected one-second outage is followed by a two-second recovery interval.
+        outcomes = [self.preview_rule(2 + 3 * check).outage_active for check in range(40)]
 
         self.assertEqual(outcomes, [expected_outage(chancy, check)[0] for check in range(40)])
         self.assertEqual(set(outcomes), {True, False})
@@ -434,7 +435,7 @@ class ServiceListOutageTests(_SchedulerCase):
         self.preview_rule(0)
         outcomes = {"streaming": [], "work": []}
         for check in range(40):
-            plan = self.scheduler.prepare_plan(repository=self.repository, now=2 + 2 * check).plan
+            plan = self.scheduler.prepare_plan(repository=self.repository, now=2 + 3 * check).plan
             for rule in plan.service_list_rules:
                 outcomes[rule.list_id].append(rule.outage_active)
 
@@ -831,6 +832,8 @@ class ServiceListOutageClientTests(unittest.TestCase):
             sent.append(payload["action"])
             if payload["action"] == "capabilities":
                 return {"ok": True, **capabilities}
+            if payload["action"] == "control-revision":
+                return {"ok": True, "control_revision": "a" * 32, "recovery_required": False}
             return {"ok": True, "action": payload["action"], "commands_run": 1}
 
         client._request = answer
@@ -846,7 +849,7 @@ class ServiceListOutageClientTests(unittest.TestCase):
         self.assertNotIn("apply", sent)
         self.assertNotIn("apply-experiment", sent)
 
-    def test_rerolled_values_without_an_outage_work_with_an_older_helper(self) -> None:
+    def test_rerolled_values_work_with_a_fenced_helper_without_outage_support(self) -> None:
         client, sent = self.client({"service_lists": True})
 
         client.apply_experiment(plan=list_plan(impairment=replace(VARIABLE.upload, delay_ms=233)))

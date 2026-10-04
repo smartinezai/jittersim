@@ -11,6 +11,7 @@ import pytest
 
 from jittersim.api.server import DASHBOARD_HTML
 from jittersim.config.models import Impairment, Profile, Randomness
+from jittersim.config.payloads import profile_payload
 
 SCRIPT = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
 HTML = DASHBOARD_HTML.split("<script>")[0]
@@ -80,11 +81,13 @@ class FakeNode {
     this.hidden = false;
     this.readOnly = false;
   }
+  setCustomValidity(message) { this.validationMessage = message; }
   append(...nodes) { this.children.push(...nodes); }
   appendChild(node) { this.children.push(node); return node; }
   replaceChildren(...nodes) { this.children = nodes; }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   removeAttribute(name) { delete this.attributes[name]; }
+  getAttribute(name) { return this.attributes[name] ?? null; }
   addEventListener(type, listener) { this.listeners[type] = listener; }
   querySelector() { return null; }
   contains(node) { return node === this || descendants(this).includes(node); }
@@ -109,10 +112,12 @@ function showMessage(text, kind) { messages.push([text, kind]); }
 function refreshAfterSuccess(message) { messages.push([message, "success"]); }
 function revealElement(node) { revealed.push(node); }
 function updateGeneralProfileControls() { renderSavedProfiles(); }
+function updateGroupFormControls() {}
 function setActionBusy(busy) { networkActionBusy = busy; updateGeneralProfileControls(); }
 async function loadPrivateDataPanel() {}
 async function loadGeneralProfile() {}
 function renderSidebarStatus() {}
+function pickerProfile(id, name) { return {id, name, upload: {}, download: {}}; }
 function descendants(node) {
   return node.children.reduce((all, child) => all.concat([child], descendants(child)), []);
 }
@@ -159,7 +164,7 @@ def program(body):
         + script_between(
             "function profileSummary(", 'element("device-form").addEventListener("submit"'
         )
-        + script_between("async function loadProfiles(", "async function loadGeneralProfile(")
+        + script_between("let profilesRequestRevision = 0;", "async function loadGeneralProfile(")
         + "\nconst formDefaults = " + json.dumps(form_defaults()) + ";\n"
         "let formResets = 0;\n"
         'element("profile-form").reset = () => {\n'
@@ -180,6 +185,141 @@ def run_node(body):
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+@NEEDS_NODE
+def test_device_profile_choice_survives_rename_and_clears_when_missing():
+    result = run_node(r"""
+      request = async () => ({profiles: [pickerProfile('slow', 'Slow office')]});
+      await loadProfiles();
+      const initial = element('device-profile').value;
+      element('device-profile').value = 'slow';
+      element('device-name').value = 'My laptop';
+      request = async () => ({profiles: [pickerProfile('slow', 'Renamed')]});
+      await loadProfiles();
+      const renamed = {value: element('device-profile').value,
+        label: element('device-profile').children[1].textContent};
+      request = async () => ({profiles: [pickerProfile('other', 'Other')]});
+      await loadProfiles();
+      console.log(JSON.stringify({initial, renamed, missing: element('device-profile').value,
+        note: element('device-profile-note').textContent, name: element('device-name').value}));
+    """)
+    assert result == {
+        "initial": "", "renamed": {"value": "slow", "label": "Renamed"},
+        "missing": "", "name": "My laptop",
+        "note": "The selected profile is no longer available. Choose another profile.",
+    }
+
+
+@NEEDS_NODE
+def test_device_profile_empty_failed_and_loading_states_block_saving_and_recover():
+    result = run_node(r"""
+      function state() {
+        return {disabled: element('device-profile').disabled, save: element('save-device').disabled,
+          note: element('device-profile-note').textContent,
+          retry: !element('device-profile-refresh').hidden};
+      }
+      request = async () => ({profiles: []});
+      await loadProfiles();
+      const empty = state();
+      request = async () => {throw new Error('fixture failure');};
+      try {await loadProfiles();} catch (error) {}
+      const failed = state();
+      let answer;
+      request = () => new Promise(resolve => {answer = resolve;});
+      const pending = loadProfiles();
+      const loading = state();
+      answer({profiles: [pickerProfile('slow', 'Slow')]});
+      await pending;
+      console.log(JSON.stringify({empty, failed, loading, recovered: state(),
+        value: element('device-profile').value}));
+    """)
+    for name in ("empty", "failed", "loading"):
+        assert result[name]["disabled"] and result[name]["save"]
+    assert "Save a profile" in result["empty"]["note"]
+    assert result["failed"]["retry"]
+    assert not result["loading"]["retry"]
+    assert result["recovered"] == {"disabled": False, "save": False, "note": "", "retry": False}
+    assert result["value"] == ""
+
+
+@NEEDS_NODE
+def test_device_profile_lock_discards_a_late_response():
+    result = run_node(r"""
+      let answer;
+      request = () => new Promise(resolve => {answer = resolve;});
+      const pending = loadProfiles();
+      setPrivateDataPanels('Token changed.');
+      answer({profiles: [{id: 'private', name: 'Private name'}]});
+      await pending;
+      console.log(JSON.stringify({options: element('device-profile').children.length,
+        value: element('device-profile').value, disabled: element('device-profile').disabled,
+        save: element('save-device').disabled, retry: !element('device-profile-refresh').hidden,
+        profiles}));
+    """)
+    assert result == {
+        "options": 0, "value": "", "disabled": True, "save": True, "retry": False,
+        "profiles": [],
+    }
+
+
+@NEEDS_NODE
+@pytest.mark.parametrize("old_fails", [False, True])
+def test_device_profile_latest_refresh_wins_even_if_an_older_request_fails(old_fails):
+    result = run_node(r"""
+      let answer, fail;
+      request = () => new Promise((resolve, reject) => {answer = resolve; fail = reject;});
+      const old = loadProfiles();
+      request = async () => ({profiles: [pickerProfile('new', 'Current profile')]});
+      await loadProfiles();
+    """ + (
+        "fail(new Error('Old failure'));\n" if old_fails else
+        "answer({profiles: [{id: 'old', name: 'Old profile'}]});\n"
+    ) + r"""
+      await old;
+      console.log(JSON.stringify({profiles: profiles.map(({id, name}) => ({id, name})), disabled: element('device-profile').disabled,
+        retry: !element('device-profile-refresh').hidden}));
+    """)
+    assert result == {
+        "profiles": [{"id": "new", "name": "Current profile"}],
+        "disabled": False, "retry": False,
+    }
+
+
+@NEEDS_NODE
+def test_device_save_uses_selected_id_and_rejects_unavailable_choices():
+    listener = script_between(
+        'element("device-form").addEventListener("submit"',
+        'element("unaffected-form").addEventListener("submit"',
+    )
+    result = run_node(listener + r"""
+      const formDrafts = new Map();
+      const editingDeviceSnapshot = null;
+      function stopEditing() {}
+      element('device-id').value = 'laptop';
+      element('device-name').value = 'My laptop';
+      element('device-ip').value = '192.168.50.100';
+      profiles = [{id: 'slow', name: 'Same name'}, {id: 'other', name: 'Same name'}];
+      const select = element('device-profile');
+      select.value = 'other';
+      await element('device-form').listeners.submit({preventDefault() {}});
+      for (const value of ['', 'missing']) {
+        select.value = value;
+        await element('device-form').listeners.submit({preventDefault() {}});
+      }
+      select.value = 'slow';
+      setDeviceProfileAvailability('Loading saved profiles...');
+      await element('device-form').listeners.submit({preventDefault() {}});
+      setDeviceProfileAvailability('Ready', true);
+      adminTokenVerified = false;
+      await element('device-form').listeners.submit({preventDefault() {}});
+      console.log(JSON.stringify({sent, errors: messages.filter(item => item[1] === 'error')}));
+    """)
+    assert result["sent"] == [["/api/devices", "POST", {
+        "id": "laptop", "name": "My laptop", "ipv4_address": "192.168.50.100",
+        "profile_id": "other", "mac_address": None,
+    }]]
+    assert len(result["errors"]) == 4
 
 
 def direction(**values):
@@ -321,6 +461,7 @@ def every_field_set_profile(profile_id="every-field", name="Every field", other=
         reroll_interval_randomness=Randomness(
             variation_percent=9 if other else 7, enabled_probability=55 if other else 80
         ),
+        homepage_bounce_percent=37,
         outage_probability=12,
         outage_duration_seconds=33,
         outage_duration_randomness=Randomness(
@@ -339,7 +480,7 @@ def every_field_set_profile(profile_id="every-field", name="Every field", other=
 
 
 def as_json(profile):
-    data = json.loads(json.dumps(asdict(profile)))
+    data = json.loads(json.dumps(profile_payload(profile)))
     if data["website_mode"] == "allow_only":
         # The model lowercases domains. The form must keep what the server sends in order.
         data["website_domains"] = list(UNSORTED_DOMAINS)
@@ -356,7 +497,7 @@ def test_the_round_trip_profile_sets_every_field_to_a_non_default_value():
     default_impairment = as_json(Profile(id="x", name="x"))["upload"]
     assert set(profile) == set(default)
     for key in profile:
-        if key in ("id", "name", "upload", "download"):
+        if key in ("id", "name", "upload", "download", "random_mode"):
             continue
         assert profile[key] != default[key], key
     for side in ("upload", "download"):
@@ -382,6 +523,17 @@ def test_the_round_trip_profile_has_distinct_hidden_values_and_unsorted_mixed_ca
 @NEEDS_NODE
 def test_fill_then_read_returns_the_original_profile():
     profile = as_json(every_field_set_profile())
+    body = (
+        "const profile = " + json.dumps(profile) + ";\n"
+        "fillProfileForm(profile);\n"
+        "console.log(JSON.stringify(profileFormPayload(profile)));\n"
+    )
+    assert run_node(body) == profile
+
+
+@NEEDS_NODE
+def test_fresh_mode_round_trip_clears_the_saved_seed():
+    profile = as_json(Profile("fresh", "Fresh", random_mode="fresh"))
     body = (
         "const profile = " + json.dumps(profile) + ";\n"
         "fillProfileForm(profile);\n"

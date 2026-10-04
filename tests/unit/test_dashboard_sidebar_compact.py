@@ -5,8 +5,8 @@ import re
 from jittersim.api.server import DASHBOARD_HTML
 
 
-def test_the_nine_page_links_are_compact_up_to_1000px_of_height():
-    assert len(re.findall(r'data-page-link="[a-z]+"', DASHBOARD_HTML)) == 9
+def test_the_ten_page_links_are_compact_up_to_1000px_of_height():
+    assert len(re.findall(r'data-page-link="[a-z]+"', DASHBOARD_HTML)) == 10
     match = re.search(
         r"@media \(min-width: 48\.01rem\) and \(max-height: 1000px\) \{(.*?)\n    \}",
         DASHBOARD_HTML,

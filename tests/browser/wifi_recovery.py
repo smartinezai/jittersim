@@ -41,11 +41,12 @@ def check_wifi_recovery(page):
     held = []
     page.route("**/api/access-point/reset-name", lambda route: held.append(route))
     page.once("dialog", lambda dialog: dialog.accept())
-    button.click()
+    with page.expect_request("**/api/access-point/reset-name", timeout=10000):
+        button.click()
     expect(button).to_be_disabled()
     assert len(held) == 1
     held[0].continue_()
-    expect(field).to_have_value("JitterSim")
+    expect(field).to_have_value("TestNet")
     expect(button).to_be_enabled()
     assert len(requests) == 2
     page.unroute("**/api/access-point/reset-name")
@@ -85,12 +86,23 @@ def check_router_copy(page):
     expect(page.locator("#router-action-message")).to_contain_text("Copied Browser home using WPA2")
     assert len(copies) == 1
     assert len(copies[0].post_data_json["expected_fingerprint"]) == 64
+    # The network to join stays on screen until it is dismissed. It sits above the controls.
+    banner = page.locator("#wifi-change-banner")
+    expect(banner).to_contain_text("Browser home")
+    banner.get_by_role("button", name="Dismiss").click()
+    expect(banner).to_be_hidden()
 
 
 def check_router_switch(page):
     button = page.locator("#router-wifi-toggle")
     state = page.locator("#router-wifi-status")
+    checks = []
+    page.on("request", lambda request: checks.append(request.post_data_json["refresh"])
+            if request.url.endswith("/api/router/status") else None)
+    expect(button).to_be_disabled()
+    page.locator("#refresh-router-wifi").click()
     expect(button).to_be_enabled(timeout=10000)
+    assert checks and checks[0] is True and all(refresh is False for refresh in checks[1:])
     expect(button).to_have_attribute("aria-checked", "true")
     expect(button).to_be_in_viewport()
     writes = []
@@ -104,7 +116,8 @@ def check_router_switch(page):
     held = []
     page.route("**/api/router/wifi", lambda route: held.append(route))
     page.once("dialog", lambda dialog: dialog.accept())
-    button.click()
+    with page.expect_request("**/api/router/wifi", timeout=10000):
+        button.click()
     expect(button).to_be_disabled()
     expect(state).to_contain_text("Changing")
     assert len(held) == 1 and held[0].request.post_data_json["background"] is True
@@ -151,6 +164,8 @@ def run():
                 check_router_switch(page)
                 check_wifi_recovery(page)
                 expect(page.locator("#reset-wifi-name")).to_be_in_viewport()
+                expect(page.locator("#router-wifi-toggle")).to_be_disabled()
+                page.locator("#refresh-router-wifi").click()
                 expect(page.locator("#router-wifi-toggle")).to_be_enabled(timeout=10000)
                 page.screenshot(path="test-results/wifi-pi-desktop.png", animations="disabled")
                 page.set_viewport_size({"width": 1280, "height": 800})

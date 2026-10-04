@@ -7,6 +7,7 @@ import threading
 import re
 import time
 import unittest
+from dataclasses import replace
 from ipaddress import IPv4Address
 from pathlib import Path
 from unittest import mock
@@ -2493,7 +2494,7 @@ class QueueReadAndWriteTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 handler = object.__new__(HelperRequestHandler)
                 handler.server = self.server
-                handler.rfile = io.BytesIO(b'{"action":"capabilities"}\n')
+                handler.rfile = io.BytesIO(b'{"action":"gateway-status"}\n')
                 handler.wfile = mock.Mock()
                 if phase == "service":
                     answer = mock.Mock(side_effect=RuntimeError("service failed"))
@@ -2539,6 +2540,48 @@ class QueueReadAndWriteTests(unittest.TestCase):
         self.assertEqual(writer["result"]["action"], "apply")
         self.assertIn("result", reader)
         self.assertEqual(self.service._plan_count, 2)
+
+    def assert_profile_apply_waits_for_queue_read(self, plan) -> None:
+        reader, reader_thread = self.hold_a_read()
+        writer, writer_thread = self.in_thread(lambda: self.client().apply(plan=plan))
+        writer_thread.join(0.3)
+
+        try:
+            self.assertTrue(writer_thread.is_alive(), writer)
+            self.assertEqual(writer, {})
+            self.assertEqual(self.service._plan_count, 1)
+        finally:
+            self.executor.release.set()
+        writer_thread.join(5)
+        reader_thread.join(5)
+
+        self.assertFalse(writer_thread.is_alive())
+        self.assertFalse(reader_thread.is_alive())
+        self.assertEqual(writer["result"]["action"], "apply")
+        self.assertIn("result", reader)
+        # Ordinary plans omit homepage negotiation on the wire. All their actual
+        # traffic rules must still reach the helper unchanged after the read.
+        self.assertEqual(self.service._active_plan, replace(plan, homepage_policy_version=0))
+        self.assertEqual(self.service._plan_count, 2)
+
+    def test_general_profile_apply_waits_for_a_slow_queue_read(self) -> None:
+        profile = Profile("shared", "Shared", upload=Impairment(loss_percent=7))
+        plan = compile_plan(
+            devices=(),
+            profiles={profile.id: profile},
+            general_profile=GeneralProfileRule(profile.id),
+        )
+        self.assert_profile_apply_waits_for_queue_read(plan)
+
+    def test_service_list_apply_waits_for_a_slow_queue_read(self) -> None:
+        plan = compile_plan(
+            devices=(),
+            profiles={},
+            service_list_rules=(
+                ServiceListRule("video", ("video.example",), 0, Impairment(loss_percent=7), Impairment()),
+            ),
+        )
+        self.assert_profile_apply_waits_for_queue_read(plan)
 
     def test_normal_access_that_arrives_during_a_slow_queue_read_waits_and_runs(self) -> None:
         # Panic runs Normal access. It must wait for a read like Reset does and
@@ -2628,13 +2671,33 @@ class QueueReadAndWriteTests(unittest.TestCase):
         for read in (
             self.client().queue_stats,
             lambda: self.client()._request({"action": "traffic-counters"}),
-            lambda: self.client()._request({"action": "capabilities"}),
         ):
             answer, thread = self.in_thread(read)
             thread.join(5)
             self.assertEqual(answer["error"].reason, "helper-busy")
             self.assertLess(answer["seconds"], 0.25)
         self.executor.release.set()
+        writer_thread.join(5)
+        self.assertEqual(writer["result"]["action"], "apply")
+
+    def test_capabilities_remain_available_during_a_write(self) -> None:
+        self.executor.gate = is_queue_install
+        writer, writer_thread = self.in_thread(lambda: self.client().apply(plan=lossy_plan()))
+        self.assertTrue(self.executor.gated.wait(5))
+
+        answer, thread = self.in_thread(
+            lambda: self.client()._request({"action": "capabilities"})
+        )
+        thread.join(5)
+        try:
+            self.assertFalse(thread.is_alive())
+            self.assertIn("result", answer, answer)
+            self.assertIs(answer["result"]["general_profile"], True)
+            self.assertIs(answer["result"]["service_lists"], True)
+            self.assertTrue(self.server.operation_lock.locked())
+            self.assertEqual(self.service._plan_count, 1)
+        finally:
+            self.executor.release.set()
         writer_thread.join(5)
         self.assertEqual(writer["result"]["action"], "apply")
 

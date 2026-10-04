@@ -45,6 +45,7 @@ def build_service_list_rules(
                 mark=0,
                 upload_impairment=profile.upload,
                 download_impairment=profile.download,
+                homepage_bounce_percent=profile.homepage_bounce_percent,
                 outage_active=outage_active,
             )
         )

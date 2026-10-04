@@ -30,9 +30,9 @@ class DeploymentFirewallTests(unittest.TestCase):
 
         self.assertIn("--tls-cert /etc/jittersim/dashboard.crt", service)
         self.assertIn("--tls-key /etc/jittersim/dashboard.key", service)
-        self.assertIn('chown root:jittersim "$CONFIG_DIR/dashboard.key"', installer)
-        self.assertIn('chmod 0640 "$CONFIG_DIR/dashboard.key"', installer)
-        self.assertIn('openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text', installer)
+        # The helper sets root:jittersim 0640 on the key (tests/unit/test_local_ca.py).
+        self.assertIn("-m jittersim.localca ensure", installer)
+        self.assertIn("--group jittersim", installer)
 
     def test_dns_watcher_runs_unprivileged_with_only_packet_capture(self) -> None:
         service = (
@@ -55,24 +55,30 @@ class DeploymentFirewallTests(unittest.TestCase):
         project = (REPOSITORY_ROOT / "pyproject.toml").read_text()
 
         self.assertIn('jittersim-service-watch = "jittersim.networking.dns_watch:main"', project)
-    def test_the_certificate_is_named_after_the_pi(self) -> None:
+    def test_the_certificate_comes_from_a_kept_local_authority(self) -> None:
         installer = (REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "install.sh").read_text()
 
-        # The browser shows the certificate's name to anyone who opens the address.
+        # Names, addresses and reissue rules live in a tested helper, not in shell.
         self.assertIn('dashboard_host="$(hostname -s).local"', installer)
-        self.assertIn('-subj "/CN=$dashboard_host"', installer)
-        # It also covers the name the Avahi publisher announces and the test Wi-Fi
-        # gateway that browsers on the test Wi-Fi open.
-        self.assertIn(
-            "subjectAltName=DNS:$dashboard_host,DNS:jittersim.local,IP:$dashboard_ip,"
-            "IP:192.168.50.1",
-            installer,
-        )
-        # A certificate for another name or address is made again.
-        self.assertIn('grep -Fq "DNS:$dashboard_host"', installer)
-        self.assertIn('grep -Fq "DNS:jittersim.local"', installer)
-        self.assertIn('grep -Fq "IP Address:$dashboard_ip"', installer)
-        self.assertIn('grep -Fq "IP Address:192.168.50.1"', installer)
+        self.assertIn("-m jittersim.localca ensure", installer)
+        self.assertIn('--host-name "$dashboard_host"', installer)
+        self.assertIn('--ethernet-ip "$dashboard_ip"', installer)
+        self.assertNotIn("openssl req -x509", installer)
+        self.assertNotIn("rsa:3072", installer)
+        # Modes and owners are set by the tested helper: only root reads the
+        # authority key, and the dashboard group reads the rest.
+        self.assertIn("--group jittersim", installer)
+        # Nothing in the installer deletes the authority.
+        self.assertNotIn('rm -rf "$CONFIG_DIR', installer)
+        self.assertNotIn('rm -f "$CONFIG_DIR/ca', installer)
+
+    def test_the_dashboard_serves_the_neutral_certificate_to_the_test_wifi(self) -> None:
+        service = (
+            REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-dashboard.service"
+        ).read_text()
+
+        self.assertIn("--tls-cert-wifi /etc/jittersim/dashboard-wifi.crt", service)
+        self.assertIn("--trust-ca /etc/jittersim/ca/ca.crt", service)
 
 
 class InstallerTests(unittest.TestCase):
@@ -104,16 +110,16 @@ class InstallerTests(unittest.TestCase):
 
     def test_installer_checks_the_pi_before_creating_the_test_wifi(self) -> None:
         # The helper manages a NetworkManager connection with this name.
-        self.assertIn("con-name jittersim-ap", self.installer)
+        self.assertIn("create-ap-profile.py", self.installer)
         self.assertIn("ipv4.method shared", self.installer)
         # The preflight refuses to take over a Wi-Fi connection in use, such as
         # one carrying this SSH session, before anything changes.
         preflight = self.installer.index("preflight.py")
         self.assertLess(preflight, self.installer.index("apt-get update"))
-        self.assertLess(preflight, self.installer.index("nmcli connection add"))
+        self.assertLess(preflight, self.installer.index('create --interface "$JITTERSIM_TEST_INTERFACE"'))
 
     def test_the_test_wifi_has_a_neutral_name_and_isolates_its_clients(self) -> None:
-        self.assertIn("JITTERSIM_AP_SSID=JitterSim", self.installer)
+        self.assertIn("JITTERSIM_AP_SSID=TestNet", self.installer)
         self.assertNotIn("JitterSim-Test", self.installer)
         # On unless ap.env turns it off, so an update keeps the owner's choice.
         self.assertIn('ap_isolation="${JITTERSIM_AP_ISOLATION:-yes}"', self.installer)
@@ -228,7 +234,7 @@ class AccessPointStartTests(unittest.TestCase):
         modify = modify[: modify.index("ap_settings_after")]
         self.assertIn("connection.autoconnect no", modify)
         self.assertNotIn("connection.autoconnect yes", self.installer)
-        self.assertIn("autoconnect no", self.installer.split("nmcli connection add", 1)[1][:200])
+        self.assertIn("create-ap-profile.py", self.installer)
 
     def test_an_installer_run_never_restarts_stops_or_drops_the_running_wifi(self):
         for forbidden in (

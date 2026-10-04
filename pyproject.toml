@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "jittersim"
-version = "0.1.0"
+version = "0.2.0"
 description = "A controlled network impairment simulator for Raspberry Pi test networks"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -18,11 +18,12 @@ dependencies = [
 ]
 
 [project.scripts]
-jittersim = "jittersim.cli:main"
+jittersim = "jittersim.command:main"
 jittersim-dashboard = "jittersim.api.server:main"
 jittersim-helper = "jittersim.networking.helper:main"
 jittersim-browser-proxy = "jittersim.networking.browser_proxy:main"
 jittersim-service-watch = "jittersim.networking.dns_watch:main"
+jittersim-adblocking = "jittersim.networking.adblocking:main"
 jittersim-reset = "jittersim.cli:reset_main"
 jittersim-access-restore = "jittersim.networking.access:main"
 
@@ -47,4 +48,4 @@ target-version = "py39"
 select = ["E", "F", "I"]
 
 [tool.setuptools.package-data]
-"jittersim.api" = ["*.js", "*.css"]
+"jittersim.api" = ["*.html", "*.js", "*.css"]

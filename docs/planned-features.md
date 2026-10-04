@@ -117,6 +117,16 @@ The things the owner has to try on the Pi are in the [Pi acceptance checklist](p
   - Seven id patterns in the forms (nine on the integration branch) use `[a-z0-9_-]` which browsers with the newer `v` regex flag reject and ignore. Escape the hyphen as the service list form does.
   - **Add to profile** switches a profile to "allow only listed domains" when it was not an allow list. Every other site then stops working for devices on that profile. Ask for confirmation first.
 
+### 12. Signed releases and deploys without the sudo password
+
+- **Branch:** `feat/signed-releases` (draft pull request "Install only signed releases and let the Pi fetch them").
+- **Why:** the owner does not want to type the `sudo` password for every deploy and does not want a stranger or a leaked admin token to get root.
+- **What:** the Pi's root update manager stages and installs only archives signed by a release signing key the owner trusts on the Pi (`ssh-keygen -Y` signatures, no new dependency). Every release carries a signed sequence and the Pi refuses older releases except through its own rollback. `make-release-key.sh` makes the key on the Mac and prints the one `sudo jittersim update trust-key` command for the Pi. An optional sudoers rule lets the `jittersim` login stage and install signed releases without a password. Key rotation and removal use `trust-key` and `untrust-key`.
+- **Notes:**
+  - The threat table and the one-time steps are in the deployment guide under "Signed releases".
+  - On the Pi: check that `ssh-keygen -Y verify` of Pi OS accepts the signatures (OpenSSH 8.2 or newer) and that `sudo -n -l` reports the rule.
+  - Next step, not built yet: the Pi finds and stages the newest signed release on GitHub itself with a read-only token. See `docs/implementation-plan-online-release-source-2026-10-03.md`.
+
 ## Ideas that look useful
 
 These come from reviews of the recent work. Nobody has asked for them yet unless an entry says so.

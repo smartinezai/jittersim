@@ -108,10 +108,13 @@ def test_the_page_and_its_messages_keep_clear_of_the_bar():
     assert phone(".toast")["top"] == "auto"
     assert "--phone-bar-height" in phone(".toast")["bottom"]
     assert phone(".toast")["width"] == "min(22rem, calc(100vw - 1.5rem))"
-    tip = phone(".sidebar .sidebar-action-row .help-icon::after")
-    assert tip["bottom"] == "calc(var(--phone-bar-height) + 0.75rem)"
-    narrow = re.search(r"@media \(max-width: 700px\) \{([^@]*?)\n\}", CSS).group(1)
-    assert "bottom: calc(var(--phone-bar-height) + 0.75rem)" in narrow
+    rules = declarations(CSS.replace(PHONE, ""))
+    assert rules[".sidebar .sidebar-action-row .help-icon::after"]["display"] == "none"
+    tip = rules[".sidebar-action-help"]
+    assert tip["position"] == "fixed"
+    assert tip["max-height"] == "calc(100dvh - 2rem)"
+    assert tip["overflow-y"] == "auto"
+    assert int(tip["z-index"]) > int(phone(".safety-bar")["z-index"])
 
 
 def test_every_page_link_stays_in_one_row_that_scrolls_inside_itself():

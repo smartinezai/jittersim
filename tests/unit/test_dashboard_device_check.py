@@ -18,7 +18,8 @@ def served_functions():
     return (
         block("const privateDataPanelIds =", "async function loadPrivateDataPanel(")
         + block("function requireAdminToken(", "function closeCredentials(")
-        + block("async function loadConnectedDevices(", "async function loadUplink(")
+        + block("function interactionInside(", "// Draws a container again")
+        + block("const CONNECTED_FAILURES_BEFORE_UNAVAILABLE", "async function loadUplink(")
     )
 
 
@@ -31,7 +32,12 @@ const rendered = [];
 const openedCredentials = [];
 let adminTokenVerified = true;
 let adminTokenChecking = false;
+let adminTokenRevision = 0;
+let adminTokenRejected = false;
+let adminTokenRefused = false;
 let connectedDevicesRequestInFlight = false;
+let connectedRenderKey = null;
+let lastConnectedData = null;
 let tokenChecks = 0;
 let responses = {};
 const document = {activeElement: null};
@@ -42,8 +48,11 @@ function element(id) {
     setAttribute(key, value) {this.attributes.set(key, value)},
     removeAttribute(key) {this.attributes.delete(key)},
     getAttribute(key) {return this.attributes.get(key)},
+    replaceChildren(...values) {this.children = values; this.textContent = ""},
     addEventListener(kind, callback) {this.listeners.set(kind, callback)},
-    contains() {return false}
+    replaceChildren() {},
+    contains() {return false},
+    querySelector() {return null}
   });
   return nodes.get(id);
 }

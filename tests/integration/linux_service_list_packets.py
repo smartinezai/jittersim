@@ -16,6 +16,7 @@ from pathlib import Path
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import compile_plan
+from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.plan import (
     GeneralProfileRule,
     ServiceListRule,
@@ -24,6 +25,7 @@ from jittersim.engine.plan import (
 )
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.executor import SubprocessExecutor
+from jittersim.networking.helper import HelperService
 from jittersim.networking.topology import Topology
 
 PROTECTED = "02:00:00:00:00:01"
@@ -194,12 +196,36 @@ def main():
         )
         assert both(AFFECTED, CLIENT, OTHER) == (True, True), "a removed address stayed shaped"
 
-        # 3. A new table starts with the addresses already learned.
-        applier.apply(plan=plan, service_addresses={"streaming": [IPv4Address(OTHER)]})
+        # 3. A live apply reconciles learned addresses while retaining the counters.
+        before = [list_counter(applier, f"service-list streaming {direction}") for direction in ("upload", "download")]
+        report = applier.apply(plan=plan, service_addresses={"streaming": [IPv4Address(OTHER)]})
+        assert report.counters_preserved, "an address-only change rebuilt the queues"
+        assert before == [list_counter(applier, f"service-list streaming {direction}") for direction in ("upload", "download")]
         assert both(AFFECTED, CLIENT, OTHER) == (False, False), "known addresses were lost on apply"
         assert both(AFFECTED, CLIENT, LISTED) == (True, True), (
             "an address that was not known stayed"
         )
+
+        # Helper expiry must remove the physical set entry during a live apply.
+        clock = [1000.0]
+        helper = HelperService(applier, service_address_clock=lambda: clock[0])
+        payload = {"action": "apply", "plan": plan_to_payload(plan)}
+        assert helper.handle_payload(payload)["ok"]
+        assert helper.handle_payload({
+            "action": "service-addresses", "addresses": {"streaming": [LISTED]},
+        })["ok"]
+        assert both(AFFECTED, CLIENT, LISTED) == (False, False)
+        before = [list_counter(applier, f"service-list streaming {direction}") for direction in ("upload", "download")]
+        clock[0] += 6 * 3600 + 1
+        reply = helper.handle_payload(payload)
+        assert reply["ok"] and reply["counters_preserved"], reply
+        assert before == [list_counter(applier, f"service-list streaming {direction}") for direction in ("upload", "download")]
+        assert both(AFFECTED, CLIENT, LISTED) == (True, True), "an expired address stayed in the kernel"
+        assert helper.handle_payload({
+            "action": "service-addresses", "addresses": {"streaming": [OTHER]},
+        })["ok"]
+        assert helper.handle_payload(payload)["counters_preserved"]
+        assert both(AFFECTED, CLIENT, OTHER) == (False, False), "a later DNS update was lost"
 
         # 4. A list replaces the profile of a device, including its outage and website rules.
         device = Device("affected", "Affected", CLIENT, OFFLINE.id, AFFECTED)

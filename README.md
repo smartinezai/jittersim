@@ -8,6 +8,9 @@ Wi-Fi.
 Use JitterSim only on equipment and networks that you own or have permission
 to test. It is for experiments, not a replacement for your home router.
 
+Stable versions use tested signed packages with owner approval. See the
+[release guide](docs/releases/README.md) for candidate builds and publication.
+
 ## See it in action
 
 <div align="center">
@@ -51,6 +54,13 @@ You can turn automatic checking off and use **Check for updates** manually.
 Checking does not download or install a release. The **Router and Wi-Fi** page shows a badge
 when the staged and installed release labels differ. The terminal command
 `sudo jittersim update check` shows the same status.
+
+The Pi stages and installs only releases signed by a release signing key you
+trust on it and newer than the one it runs. The admin token can only install
+the release already staged. See
+[Signed releases](deploy/raspberry-pi/README.md#signed-releases) for the
+one-time setup, passwordless deploys and what a leaked token or a stolen key
+can do.
 
 ## What you can try
 
@@ -98,11 +108,81 @@ applying access rules, so run `sudo jittersim access apply` after changing it.
 Run `sudo jittersim --help` for the command list. More examples are in the
 [Pi installation and recovery guide](deploy/raspberry-pi/README.md).
 
-Use **Reset Wi-Fi name** on Setup or run `sudo jittersim wifi reset` on the Pi.
+Use **Reset Wi-Fi name** on Router and Wi-Fi or run `sudo jittersim wifi reset` on the Pi.
 It restores `JitterSim` and keeps the current password. Confirming the reset
 restarts test Wi-Fi, so its clients need to reconnect. Add `--yes` when running
 without a prompt. This command needs the local helper but not the dashboard or
 its settings database.
+
+### Use the terminal on your Mac
+
+These commands run on your **Mac** (or any computer that reaches the dashboard)
+and talk to the Pi's HTTPS dashboard with the same checks as the browser. They
+need no `sudo` and no SSH. Install the command once from a checkout:
+
+```sh
+python3 -m venv ~/.jittersim-cli
+~/.jittersim-cli/bin/pip install .
+echo 'export PATH="$HOME/.jittersim-cli/bin:$PATH"' >> ~/.zshrc
+```
+
+Open a new terminal afterwards so `jittersim` is found.
+
+Copy `/etc/jittersim/ca/ca.crt` from the Pi through a connection you
+already trust and compare its SHA-256 fingerprint with the one the installer
+printed. Then save the address and the certificate path once:
+
+```sh
+jittersim connect --url https://192.168.0.17:8080 --ca-cert ~/jittersim-ca.crt
+```
+
+`connect` checks the dashboard certificate against that authority and saves
+only the address and the certificate path in `~/.config/jittersim/cli.json`.
+The certificate file decides where the token goes, so it must belong to you and
+must not be writable by others. If the check fails the command says why: an
+unknown certificate (compare the fingerprint), an address the certificate does
+not cover (for example after the Pi got a new address: use its covered name or
+renew the leaf through the verified update route) or an expired certificate.
+
+Every other command asks for the **admin token** with a hidden prompt each time.
+The token is never saved and never accepted as an argument. Scripts may set
+`JITTERSIM_ADMIN_TOKEN` instead: other programs that can read your environment
+can then read it too. Plain HTTP, redirects and addresses with a user name,
+path or query are refused. Names from the dashboard are shown without terminal
+control characters.
+
+| Command (on the Mac) | What it does |
+| --- | --- |
+| `jittersim status` | The release the Pi runs (and a staged one), whether JitterSim is running, the general profile and each affected connected device with its profile. Protected devices are never listed. |
+| `jittersim profiles list` | The saved profiles with a one-line summary. The general profile is marked. |
+| `jittersim profiles apply-all PROFILE_ID` | Makes that profile the general profile for every connected device. Protected devices stay untouched. |
+| `jittersim profiles stop-all` | Stops the general profile. Saved device rules resume. |
+| `jittersim traffic` | The names each test device looked up, grouped by app or site like **Traffic discovery**. Add `--scan` to sample first, `--expand` for every name, `--blocked` for blocked names only or `--device NAME_OR_IP`. |
+| `jittersim traffic block DOMAIN` | Adds a name to the global block list. While household access rules are on the names under it are blocked too. `traffic unblock DOMAIN` removes the exact name. Both say so when nothing had to change. |
+| `jittersim wifi show` | The router's own Wi-Fi name, read live from the router. It also asks for the router admin password with a hidden prompt. Add `--password` to show the Wi-Fi password too. |
+| `jittersim impact` | The **Impact** check: two samples of the Pi's queues `--wait` seconds apart (10 by default, at most 50) judged with the dashboard's rules. The verdicts name the time it measured such as "in the last 10 seconds". |
+
+Add `--json` to any of them for machine-readable output (a failure is then
+`{"error": ..., "exit_code": ...}` on standard output) or `--help` for details.
+On the Pi itself `sudo jittersim status` still shows the local helper status
+and `sudo jittersim wifi reset` still runs there.
+
+For this appliance deploy only a signed release from the verified official
+`main` after its required checks are complete. This is the deployment policy,
+not a guarantee provided by an arbitrary `--ref` value. To put that release on
+the Pi from the Mac run
+`deploy/raspberry-pi/deploy-from-mac.sh` in a checkout. It runs on the Mac and
+needs git, ssh-keygen, ssh, scp, curl, tar, shasum and Python 3. It builds the
+release archive of a commit, signs it with your release signing key and
+installs it through the verified update service. It shows the
+release the Pi now runs. Use `--stage-only` to upload without installing.
+When using SSH the Pi asks for its `sudo` password in your terminal unless
+passwordless staging is on (see
+[Signed releases](deploy/raspberry-pi/README.md#signed-releases)). Deploying needs a
+connection to the Pi's router network or its own test Wi-Fi. The command uses
+the trusted HTTPS dashboard on the test Wi-Fi and when SSH cannot answer.
+See
+[Deploy from a Mac](deploy/raspberry-pi/README.md#deploy-from-a-mac).
 
 ## Features
 
@@ -128,8 +208,16 @@ its settings database.
 - Progression sessions that move from a starting profile to an ending profile
   over time, after a DNS-query target or after a device-data target, then
   recover automatically.
-- Random value variation such as `200 ± 30%`.
+- Relative variation such as `200 ms ± 30%` or a custom minimum and maximum.
+- Relative variation can use steps of 0.01%. Applied packet percentages
+  stay whole. A base of 6% with 7% variation rounds to a fixed 6%. Use a
+  custom range for 0% to 13%.
+- Previews use the same rounding and limits as the selected values. Delay
+  and jitter use whole milliseconds. Bandwidth uses whole kbit/s.
+- Ordinary profiles use their base values until the first reroll. Setting
+  **Reroll every** to 0 keeps those base values and preserves saved ranges.
 - Random feature enablement, reroll timing and short connection outages.
+- Fresh patterns per target or repeatable saved seeds with bounded history.
 - Inline help in the dashboard for the variation settings.
 - Daily counts of kept and removed website choices for scheduled random
   profile rerolls, with up to 30 days stored on the Pi. These counts show the
@@ -156,8 +244,9 @@ its settings database.
 - Local DNS observations with query counts and plain-language labels. Names that
   belong to one app collapse into a group. Buttons add observed domains to a
   profile or the global block list and show when a name is already blocked.
-- Protected devices are never monitored. They are greyed out and never appear
+- Protected devices stay out of traffic monitoring. They are greyed out and never appear
   in traffic discovery or in the impact check.
+- Optional DNS ad blocking for each protected device without saved browsing history.
 - An impact check in Diagnostics that shows packet loss and speed limits
   actually happening to each device.
 
@@ -238,10 +327,22 @@ requires the router network or a local Pi terminal.
 
 ### Dashboard access from Pi Wi-Fi
 
-Open the HTTPS dashboard using the Pi address covered by its certificate,
-for example `https://192.168.0.17:8080`. Choose **Admin token** then **Check
+On the Pi Wi-Fi open `https://netlab.local:8080`, the same address that works
+on the router's Wi-Fi. The Pi announces this neutral name on the test Wi-Fi
+itself, so it needs no router and no Ethernet cable. Change it with
+`sudo jittersim dashboard-name set <name>.local` (see the Pi deployment guide).
+You can also use an address covered by the certificate, for example
+`https://192.168.50.1:8080`. A browser keeps its remembered sign-in per
+address, so use the one address on both networks to sign in once. Choose **Admin token** then **Check
 token** and **Allow this device**. This registers the actual requesting
 computer. The dashboard lists saved devices and supports removal.
+
+The first visit shows a certificate warning. After signing in, **Trust this Pi**
+offers the Pi's local certificate as a `.crt` file and as an Apple profile with
+three short steps for a Mac and an iPhone. Once installed, the warning is gone.
+The certificate permits local `.local` and `home.arpa` names and the configured
+network address ranges. Check its fingerprint against the installer output
+before installing it on your device.
 
 Only dashboard traffic avoids simulated loss and client blocks. Your ordinary
 internet traffic still follows its profile. The separate unaffected-device
@@ -255,16 +356,16 @@ register their own device. Changed private Wi-Fi addresses need registration
 again. If current device observations cannot be verified, reconnect and retry.
 
 From your **Mac**, with JitterSim installed and a trusted copy of the Pi's
-public dashboard certificate:
+public authority certificate (`/etc/jittersim/ca/ca.crt`):
 
 ```sh
 jittersim dashboard-access allow-self --url https://192.168.0.17:8080 \
-  --ca-cert ~/jittersim-dashboard.crt --name 'My Mac'
+  --ca-cert ~/jittersim-ca.crt --name 'My Mac'
 ```
 
 The hidden prompt asks for the **JitterSim admin token**. Certificate checks
 stay enabled. No `sudo` or Linux firewall command is needed on the Mac. Copy
-`/etc/jittersim/dashboard.crt` through a previously trusted Pi connection.
+`/etc/jittersim/ca/ca.crt` through a previously trusted Pi connection, or download it from **Trust this Pi**.
 Do not copy the private key or accept an unverified replacement certificate.
 
 From a **Pi terminal**, root recovery works while the dashboard is stopped:
@@ -374,34 +475,46 @@ list from the device's own profile does not cut a listed service. A device in
 a random outage still loses the Pi's DNS and browser proxy so it reaches a
 listed service only through addresses it already has.
 
-The list uses the profile's delay, jitter, loss, speed limit, reordering,
-duplication and corruption and also its random variation and random outages.
-Its website list is not used. All affected devices share one speed limit for
-each list in the same way the general profile shares its limit. Delay, jitter
-and loss apply to each packet.
+The profile's packet settings, random variation and outage settings apply while
+the dashboard scheduler runs. A service list uses one shared changing pattern.
+Browser assignments use their own pattern for each assignment. Active byte and
+time quota fallbacks also use changing settings. A service outage temporarily
+uses 100% packet loss in that service's queues. Profile website allowlists are
+rejected on these service paths because their scope cannot be preserved there.
+Global access rules still apply.
 
-Random variation works for the whole list. With **Reroll every** set the list
-gets new values at that interval such as `200 ± 30%` and every affected device
-gets the same new values. The first start uses the saved values and the first
-new values come one interval later. The same **Random seed** gives the list the
-same values in the same order each time. Two lists with the same profile get
-different values. Editing the profile or choosing another one starts again
-from the saved values. So do **Reset network** and **Panic**.
+All affected devices share one speed limit for each list in the same way the
+general profile shares its limit. Delay, jitter and loss apply to each packet.
 
-A random outage also works for the whole list. At each outage check the
-profile's **Outage chance** decides whether the listed services go away for
-the **Outage length**. During the outage every affected device loses them in
-both directions and the browser proxy refuses their hostnames. The Pi's DNS
-and the dashboard and all other sites keep working and devices in **Unaffected
-by profiles** still reach the listed services. Other sites on the same server
-address as a listed service go away too. The **Service lists** card shows
-`random outage now` for the list and the activity log records when an outage
-starts and ends. The **Impact** card shows no traffic for the list while the
-outage lasts.
+### Changing patterns
 
-New values and the start and end of an outage reach the Pi like a saved change
-within a few seconds. Connections that are shaped carry on with the new values.
-Browser proxy tunnels close so the browser opens them again.
+Under **Randomness, outages and website access**, choose **Repeat saved pattern**
+or **Fresh pattern**. Existing profiles keep their saved behaviour. An empty
+saved seed continues to mean zero. Clear the seed when choosing a fresh pattern.
+Stop then start to choose new seeds. Changing a target's profile settings also
+starts a new pattern. Pressing Start again with unchanged active settings keeps
+the current pattern.
+
+Outage choices advance independently of packet-setting changes. An outage ends
+before the next check interval begins so repeated choices cannot extend it
+forever. The dashboard scheduler must remain running to apply these changes.
+If it stops unexpectedly, use Reset or Panic through a working management
+connection. Independent expiry for future temporary scenarios is still planned.
+
+**Recent pattern choices** shows the latest 100 recorded choices with their
+target and seed. History keeps at most 1000 entries per session and 10000 overall
+for seven days. It contains selected settings rather than application contents.
+Copy a recorded seed into a saved pattern for the same target to repeat its
+choices. Packet timing, scheduler delays and application results can differ.
+
+Compatible changes to existing non-duplicating impairment queues preserve their
+counters. Changes of target membership, queue type or duplication still replace
+the queues. Valid managed-browser tunnels survive unrelated plan publications.
+Changes that block their destination or change their selected queue close them.
+
+Before a code downgrade, change fresh profiles back to saved patterns or restore
+a compatible private configuration backup. Older releases reject the fresh
+pattern setting. Stop profiles and verify normal traffic before replacing code.
 
 Matching is by destination address. A small service on the Pi reads the DNS
 answers that leave the Pi towards the test Wi-Fi. When an answer names a listed
@@ -531,9 +644,9 @@ you typed always beats one that a device announces. The IP address stays as
 small text under the name. A connected client saved without a name takes its
 announced name instead of `Client <ip>`.
 
-### Protected devices are never monitored
+### Protected devices and privacy
 
-A device in **Unaffected by profiles** is not monitored. Its row says `Traffic
+A device in **Unaffected by profiles** stays out of traffic monitoring. Its row says `Traffic
 is not monitored` and is greyed out with its profile and group controls
 disabled. **Remove protection** and the name and type editor stay active.
 
@@ -546,6 +659,43 @@ disabled. **Remove protection** and the name and type editor stay active.
   the scan refuses to run and asks you to restart the services or reinstall.
 - Protection follows the MAC address. A device that randomises its Wi-Fi address
   looks like a new unprotected device until you add its new address.
+
+### Optional ad blocking
+
+Each saved entry in **Protected devices** has a **Block ads** switch.
+It starts off and works independently from profiles and quotas. The saved
+choice follows the Wi-Fi MAC address even when the device disconnects.
+Removing protection also removes its ad-blocking choice. Adding it again
+starts with the switch off.
+
+Blocking checks requested domain names against an advertising list. It
+does not save query logs, per-device counts or browsing history. Ordinary
+traffic discovery still excludes the device. A small DNS answer cache is
+held in memory so repeated lookups do not need another upstream request.
+
+The first version filters DNS sent to the Pi on JitterSim Wi-Fi and checks
+new connections through the managed browser proxy. Expect fewer ads.
+Encrypted DNS, VPNs, direct IP connections, existing browser connections
+and cached DNS answers can bypass filtering. Ads that share a domain with
+useful content cannot be blocked separately. DNS aliases can also hide an
+advertising destination from the requested-name check.
+
+Open **Ad-blocking options** to allow domains for broken sites. An allowed
+domain includes its subdomains and applies to all devices whose switch is
+on. Existing global access rules still apply. **Update ad list** requests
+an update. Otherwise the service refreshes the list daily while blocking
+is enabled. Failed updates retain the last valid list. Downloads come from
+the fixed [StevenBlack hosts list](https://github.com/StevenBlack/hosts).
+The publisher lists the contributing sources and their licenses.
+
+The dashboard separates the saved choice from whether blocking is active.
+If the DNS blocker dies or its controller stops responding, temporary
+routing expires within five seconds and normal DNS rules resume. A failed
+initial download leaves normal DNS available. **Reset network** and
+**Panic** pause blocking while keeping the saved switches. **Start**
+resumes it. Explicitly enabling a switch also resumes
+blocking. Turning off a switch keeps profile protection.
+Restoring earlier settings preserves a later Panic stop.
 
 ### Traffic discovery
 
@@ -712,15 +862,31 @@ through the Pi. The [Pi guide](deploy/raspberry-pi/README.md#remote-control-with
 has setup, access rules, checks and removal steps. Tailscale's Personal plan
 is [free for eligible home use](https://tailscale.com/pricing).
 
-On the Pi, open the dashboard over HTTPS at `https://jittersim.local:8080` or
-the Pi's Ethernet address. The installer publishes the local name through
-Avahi on the management network. If the router does not carry local name
-traffic between Ethernet and Wi-Fi, use the Ethernet address. The installer
-creates a local certificate and prints its SHA-256 fingerprint. Verify that
-fingerprint before trusting the certificate in your browser. A DHCP address
-change may require a new certificate. HTTPS protects the browser-to-Pi
-connection, but the TG3442DE's own local web interface still uses HTTP between
-the Pi and router.
+Open the dashboard at one address on every network: `https://netlab.local:8080`.
+The Pi announces this neutral name with mDNS on the home router's network and on
+the test Wi-Fi. The same address works whether the computer is on the router's
+Wi-Fi or on the Pi's test Wi-Fi, so a browser keeps one remembered sign-in
+instead of one per network. Bookmark it once. The Pi's Ethernet address and
+`192.168.50.1` can be used when covered by the installed certificate if name
+lookup fails.
+
+The name is one word followed by `.local` and never contains the product name,
+because anyone on the test Wi-Fi can read it before signing in. Only that one
+address record is announced on the test Wi-Fi: no host name, no SSH or other
+services. To use another name run `sudo jittersim dashboard-name set
+bench.local` (and `jittersim dashboard-name` to see the address and whether it
+is announced). Browsers keep a remembered sign-in per address, so a new name
+needs one fresh sign-in. If another device on the network already uses the
+name, `sudo jittersim diagnostics` and the dashboard say so and what to run.
+
+The installer creates a local certificate authority once and prints its SHA-256
+fingerprint. An existing valid authority is retained. Verify its fingerprint
+through a trusted management connection before installing its public certificate
+on your device. The browser's leaf certificate has a different fingerprint. A
+DHCP address change on Ethernet is handled by the name itself: the Pi announces
+the new address, and the certificate is renewed by the next update. HTTPS
+protects the browser-to-Pi connection, but the TG3442DE's own local web
+interface still uses HTTP between the Pi and router.
 
 ## Set up the Pi
 
@@ -728,15 +894,15 @@ the Pi and router.
    available as a recovery path.
 2. Use Raspberry Pi OS with NetworkManager 1.50 or newer. Set the correct
    wireless country for the Pi before starting its access point.
-3. From the project folder run:
+3. From the verified official release folder run:
 
    ```sh
    sudo deploy/raspberry-pi/install.sh
    ```
 
-4. Open `https://<pi-name>.local:8080` or use the Pi's Ethernet address.
-   Check the certificate fingerprint printed by the installer before trusting
-   it in your browser.
+4. Open `https://netlab.local:8080` or use an IP address covered by its
+   certificate. Verify the public authority fingerprint through the Pi or an
+   independent management connection before following **Trust this Pi**.
 5. Open **Admin token** in the sidebar, enter the admin token and choose
    **Check token**. On the Pi, run
    `sudo grep JITTERSIM_ADMIN_TOKEN /etc/jittersim/control.env` to read it.

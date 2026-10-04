@@ -13,6 +13,7 @@ from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
 from typing import Callable, Optional, Sequence, Set, Tuple
 
+from jittersim.config.adblocking import ActiveBlocking
 from jittersim.config.exemptions import normalize_exempt_mac
 from jittersim.config.models import MacPolicy, ValidationError, normalize_domain
 from jittersim.engine.codec import PlanCodecError, plan_from_payload
@@ -89,7 +90,7 @@ def select_mark(
 
     if plan is None:
         return 0, "reset"
-    if plan.protected_mac_addresses or plan.general_profile is not None:
+    if plan.protected_mac_addresses or plan.general_profile is not None or plan.mac_policy.mode != "disabled":
         if client_mac is None:
             raise ProxyError("current Wi-Fi identity could not be verified")
         if plan.access is None:
@@ -260,8 +261,9 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
             if not policy.permits_host(str(client_ip), host):
                 raise ProxyError("this destination is blocked by an access rule")
             active_mac_rules = policy.options.enabled and policy.mac.mode != "disabled"
-            needs_mac = active_mac_rules or bool(
-                plan and (plan.protected_mac_addresses or plan.general_profile is not None)
+            needs_mac = self.server.ad_blocking.enabled() or active_mac_rules or bool(
+                plan and (plan.protected_mac_addresses or plan.general_profile is not None
+                          or plan.mac_policy.mode != "disabled")
             )
             client_mac = self.server.identify_mac(peer_ip) if needs_mac else None
             if active_mac_rules:
@@ -269,6 +271,8 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
             mark, assignment_id = select_mark(
                 plan, client_ip=client_ip, host=host, client_mac=client_mac
             )
+            if self.server.ad_blocking.blocks(client_mac, host):
+                raise ProxyError("This domain is blocked by ad blocking.")
             addresses = self.server.resolve_host(host)
             if not addresses:
                 raise ProxyError("destination has no public address")
@@ -300,26 +304,31 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
                 raise ProxyError("destination connection failed")
             with upstream:
 
-                def keep_protected_tunnel() -> bool:
+                def keep_valid_tunnel() -> bool:
                     try:
                         current_plan, _ = _read_active_plan(self.server.active_plan_path)
-                        current_mac = self.server.identify_mac(peer_ip)
+                        current_mac = (
+                            self.server.identify_mac(peer_ip)
+                            if self.server.ad_blocking.enabled() or active_mac_rules or (current_plan and (
+                                current_plan.protected_mac_addresses or current_plan.general_profile is not None
+                                or current_plan.mac_policy.mode != "disabled"
+                            )) else None
+                        )
                         return (
-                            assignment_id == "unaffected"
-                            and current_plan is not None
-                            and current_mac == client_mac
+                            current_plan is not None
+                            and (client_mac is None or current_mac == client_mac)
                             and select_mark(
                                 current_plan, client_ip=client_ip, host=host, client_mac=current_mac
-                            )[1]
-                            == "unaffected"
+                            ) == (mark, assignment_id)
                             and destination_allowed(
-                                current_plan, client_ip, upstream.getpeername()[0], current_mac
+                                current_plan, client_ip, upstream.getpeername()[0], current_mac,
+                                service_list=assignment_id.startswith("service-list:"),
                             )
                         )
                     except (OSError, ProxyError, ValueError):
                         return False
 
-                allow_change = keep_protected_tunnel if assignment_id == "unaffected" else None
+                allow_change = keep_valid_tunnel
                 if _plan_generation(self.server.active_plan_path) != generation and not (
                     allow_change and allow_change()
                 ):
@@ -374,8 +383,10 @@ class BrowserProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         identify_mac: Optional[Callable[[IPv4Address], Optional[str]]] = None,
         access_policy_path: Optional[Path] = None,
         require_access_policy: bool = False,
+        ad_blocking: Optional[ActiveBlocking] = None,
     ) -> None:
         self.active_plan_path = active_plan_path
+        self.ad_blocking = ad_blocking or ActiveBlocking()
         self.access_policy_path = access_policy_path or active_plan_path.with_name(
             "access-policy.json"
         )

@@ -1,0 +1,152 @@
+{
+  "transport": "real dashboard HTTP with explicitly substituted homepage responses",
+  "identity": "simulated fixture Wi-Fi commands",
+  "checks": [],
+  "failures": [
+    {
+      "check": "1440px existing token",
+      "error": "AssertionError [ERR_ASSERTION]: The old pairing code is still present in the locked DOM\n+ actual - expected\n\n+ 'Pair within two minutes: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n- ''\n"
+    },
+    {
+      "check": "1440px existing access",
+      "error": "AssertionError [ERR_ASSERTION]: The old pairing code is still present in the locked DOM\n+ actual - expected\n\n+ 'Pair within two minutes: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n- ''\n"
+    },
+    {
+      "check": "1440px delayed token pairing-code 200 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'Pair within two minutes: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n- ''\n"
+    },
+    {
+      "check": "1440px delayed token pairing-code 500 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "1440px delayed token pairing-code 200 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'Pair within two minutes: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n- ''\n"
+    },
+    {
+      "check": "1440px delayed token pairing-code 500 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "1440px delayed token revoke 200 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'All homepage pairings revoked.'\n- ''\n"
+    },
+    {
+      "check": "1440px delayed token revoke 500 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "1440px delayed token revoke 200 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'All homepage pairings revoked.'\n- ''\n"
+    },
+    {
+      "check": "1440px delayed token revoke 500 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "1440px delayed access pairing-code 200 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'Pair within two minutes: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n- ''\n"
+    },
+    {
+      "check": "1440px delayed access pairing-code 500 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "1440px delayed access pairing-code 200 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'Pair within two minutes: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n- ''\n"
+    },
+    {
+      "check": "1440px delayed access pairing-code 500 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "1440px delayed access revoke 200 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'All homepage pairings revoked.'\n- ''\n"
+    },
+    {
+      "check": "1440px delayed access revoke 500 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "1440px delayed access revoke 200 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'All homepage pairings revoked.'\n- ''\n"
+    },
+    {
+      "check": "1440px delayed access revoke 500 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "390px existing token",
+      "error": "AssertionError [ERR_ASSERTION]: The old pairing code is still present in the locked DOM\n+ actual - expected\n\n+ 'Pair within two minutes: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n- ''\n"
+    },
+    {
+      "check": "390px existing access",
+      "error": "AssertionError [ERR_ASSERTION]: The old pairing code is still present in the locked DOM\n+ actual - expected\n\n+ 'Pair within two minutes: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n- ''\n"
+    },
+    {
+      "check": "390px delayed token pairing-code 200 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'Pair within two minutes: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n- ''\n"
+    },
+    {
+      "check": "390px delayed token pairing-code 500 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "390px delayed token pairing-code 200 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'Pair within two minutes: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n- ''\n"
+    },
+    {
+      "check": "390px delayed token pairing-code 500 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "390px delayed token revoke 200 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'All homepage pairings revoked.'\n- ''\n"
+    },
+    {
+      "check": "390px delayed token revoke 500 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "390px delayed token revoke 200 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'All homepage pairings revoked.'\n- ''\n"
+    },
+    {
+      "check": "390px delayed token revoke 500 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "390px delayed access pairing-code 200 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'Pair within two minutes: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n- ''\n"
+    },
+    {
+      "check": "390px delayed access pairing-code 500 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "390px delayed access pairing-code 200 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'Pair within two minutes: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n- ''\n"
+    },
+    {
+      "check": "390px delayed access pairing-code 500 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "390px delayed access revoke 200 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'All homepage pairings revoked.'\n- ''\n"
+    },
+    {
+      "check": "390px delayed access revoke 500 restored=false",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    },
+    {
+      "check": "390px delayed access revoke 200 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request changed the private output after access changed\n+ actual - expected\n\n+ 'All homepage pairings revoked.'\n- ''\n"
+    },
+    {
+      "check": "390px delayed access revoke 500 restored=true",
+      "error": "AssertionError [ERR_ASSERTION]: An earlier request displayed an error in a changed private session\n+ actual - expected\n\n+ 'Earlier private session failed'\n- 'Token accepted. Diagnostics loaded.'\n"
+    }
+  ],
+  "browser": "148.0.7778.96"
+}
