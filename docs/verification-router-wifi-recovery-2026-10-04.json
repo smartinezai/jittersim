@@ -45,5 +45,13 @@
     ],
     "new_function": "HelperService._record_router",
     "comparison": "AST comparison against installed revision, not independent source approval"
+  },
+  "http_integration_validation": {
+    "macos_python_3_12_passed": 25,
+    "linux_python_3_13_passed": 25,
+    "real_http_and_unix_helper_socket": true,
+    "sync_and_background_router_write_refusal": true,
+    "router_factory_never_called": true,
+    "production_source_unchanged_since_f8a46e7": true
   }
 }

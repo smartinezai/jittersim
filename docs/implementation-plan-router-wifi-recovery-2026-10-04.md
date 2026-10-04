@@ -113,3 +113,19 @@ router-write handling, startup, parser and main. The only new helper method
 is the diagnostic record wrapper. Panic and normal-access bodies are
 unchanged. This is additional internal evidence, not independent approval
 of the complete source or completion of the release pipeline.
+
+
+## HTTP verification checkpoint
+
+25 integration checks pass on macOS Python 3.12 and Linux Python 3.13.
+The four new regression cases cross a real HTTP server and helper socket.
+Both synchronous and background requests to turn router Wi-Fi on or off
+are refused. A router factory spy confirms no router connection is attempted.
+The refusal response does not contain the test password. Existing dashboard
+access and API-helper integration checks also pass. Error lint and whitespace
+checks pass. Production source is unchanged since the implementation commit.
+
+The repair remains local. Independent complete-source approval, exact source
+admission and full release validation still prevent deployment. Passing these
+HTTP checks does not identify the original outage cause or establish readiness
+for another copied-name cutover.
