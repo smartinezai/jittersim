@@ -290,3 +290,34 @@ No VM was started. The prepared VM configuration passed Lima validation.
 Independent complete-file approval, final source admission, Linux checks, an
 actual reboot, rotation and age cleanup remain prerequisites. No remote push,
 PR creation, merge, Pi installation or household network change occurred.
+
+## Disposable retention proof preparation
+
+`tests/integration/linux_outage_retention.py` follows the actual reboot proof.
+Both scripts refuse containers, physical hosts, unrecognized virtualization
+and missing disposable-VM permission. The retention script also requires a
+separate `JITTERSIM_DISPOSABLE_RETENTION_PROOF=yes` permission inside the guest.
+It cannot run through the Docker test route. No VM or real clock was changed
+while preparing or checking these scripts.
+
+The reboot verifier saves a private result and filtered export. The retention
+proof requires that same-source result before proceeding. It preserves up to
+64 archived journal files within a 96 MiB total bound in a fresh private guest
+evidence folder. It refuses an existing folder or insufficient space.
+It keeps the actual one-day file rotation and seven-day retention policy.
+
+After saving clock and time-sync recovery information it advances only the
+verified VM guest clock by two days. A new safe marker must cause automatic
+rotation of the earlier active journal. The proof then advances the guest by
+eight days and requires automatic removal of that old archive. It issues no
+manual age-vacuum command and does not shorten the retention setting. It checks
+that size and free-space limits cannot explain the earlier archive removal.
+Safe exports and the saved original journals remain available for review.
+
+The helper has a 120-second work deadline, fixed command timeouts, bounded
+archive copies and a separate five-second restoration allowance. Normal
+completion and raised failures restore the original guest clock and time-sync
+choice. Abrupt termination can interrupt restoration, so discard the disposable
+VM if the proof is killed or its state is uncertain. Never run this test on the
+Pi, a host system or a container. The host and shared Docker clock remain outside
+the proof. Actual rotation and cleanup evidence is still pending.

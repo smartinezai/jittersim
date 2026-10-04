@@ -12,6 +12,7 @@ from pathlib import Path
 from jittersim import diagnostic_export, diagnostic_privacy, diagnostic_records, journal_policy
 
 STATE = Path("/var/lib/jittersim-outage-proof.json")
+REBOOT_RESULT = Path("/var/lib/jittersim-outage-proof-reboot.json")
 MODULES = (diagnostic_records, diagnostic_export, diagnostic_privacy, journal_policy)
 
 
@@ -19,13 +20,20 @@ def _require_disposable():
     if (os.geteuid() != 0 or not sys.platform.startswith("linux")
             or os.environ.get("JITTERSIM_DISPOSABLE_JOURNAL_PROOF") != "yes"):
         raise RuntimeError("This proof requires root inside an explicitly disposable Linux VM.")
+    # A privileged container may share its enclosing VM's kernel clock.
+    for option, expected in (("--container", 1), ("--vm", 0)):
+        result = subprocess.run(["/usr/bin/systemd-detect-virt", option, "--quiet"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=2, check=False)
+        if result.returncode != expected:
+            raise RuntimeError("An actual disposable VM is required. Containers and host systems are refused.")
     if not Path("/run/systemd/system").is_dir():
         raise RuntimeError("The VM must run systemd and journald.")
 
 
-def _run(arguments):
+def _run(arguments, timeout=10):
     result = subprocess.run(arguments, stdin=subprocess.DEVNULL, capture_output=True,
-                            timeout=10, check=False)
+                            timeout=timeout, check=False)
     if result.returncode or len(result.stdout) > 4096 or len(result.stderr) > 4096:
         raise RuntimeError("A fixed proof command failed.")
     return result.stdout
@@ -74,10 +82,12 @@ def verify(source):
         raise RuntimeError("The previous-boot safe marker did not survive.")
     if len(payload) > diagnostic_export.MAX_BYTES:
         raise RuntimeError("The export size limit was exceeded.")
-    print(json.dumps({"phase": "verified-after-reboot", "source": source,
-                      "previous_boot": state["boot"], "current_boot": boot,
-                      "export_bytes": len(payload), "systemd": state["systemd"],
-                      "modules": state["modules"]}, sort_keys=True))
+    result = {"phase": "verified-after-reboot", "source": source,
+              "previous_boot": state["boot"], "current_boot": boot,
+              "export_bytes": len(payload), "systemd": state["systemd"], "modules": state["modules"]}
+    journal_policy._atomic(REBOOT_RESULT, json.dumps(result).encode())
+    journal_policy._atomic(REBOOT_RESULT.with_suffix(".export.json"), payload)
+    print(json.dumps(result, sort_keys=True))
 
 
 def main():

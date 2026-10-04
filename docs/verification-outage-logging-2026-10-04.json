@@ -78,5 +78,23 @@
     "Verify journal rotation and age cleanup inside that disposable VM.",
     "Review final PR, perform the single authorized push and merge through the agreed route."
   ],
-  "scope": "No VM started, Docker used, Pi or router changed, live deployment, remote push or PR creation."
+  "scope": "No VM started, Docker used, Pi or router changed, live deployment, remote push or PR creation.",
+  "proof_preparation": {
+    "status": "prepared only, no VM or real clock change",
+    "artifact": "test-results/outage-logging/guest-proof-preparation-checks.xml",
+    "passed": 69,
+    "failed": 0,
+    "scripts_sha256": {
+      "tests/integration/linux_outage_journal.py": "db23909e2f39057a10006d81b7975ddf8ba832a2ab3dc87b91bf546b35b477a6",
+      "tests/integration/linux_outage_retention.py": "bc16d6b66ba6708df71a88ec3e600df1568d5e99d57cfa26cf5a83f60443a141"
+    },
+    "guards": "root, Linux, actual VM, no container, disposable permission, separate guest clock permission, same-source completed reboot result",
+    "bounds": {
+      "seconds": 120,
+      "restoration_command_seconds": 5,
+      "journal_files": 64,
+      "archive_copy_bytes": 100663296
+    },
+    "method": "Keep the one-day rotation and seven-day retention settings. Preserve prior evidence then advance only the verified guest clock by two and eight days. Check automatic rotation and cleanup without a manual age vacuum."
+  }
 }
