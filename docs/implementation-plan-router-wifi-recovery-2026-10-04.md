@@ -180,3 +180,28 @@ the deleted audit module. An earlier warm build retained a stale audit file
 and is excluded from release use. The accepted clean wheel hash is recorded
 in the verification JSON. Complete release checks on revised source and live
 Pi acceptance remain pending. Nothing was pushed or deployed.
+
+
+## Release-check checkpoint on 2026-10-05
+
+Read-only Pi checks confirmed active helper, dashboard and gateway services.
+Dashboard and outbound HTTPS returned 200. No live configuration changed.
+
+The final-source Linux broad run recorded 5,370 passes, 31 failures and 110
+skips. Container conditions caused inaccessible worktree Git metadata and
+nonexecutable temporary fixture scripts. Correcting those conditions produced
+360 passes across every affected test file with three child cleanup failures.
+Those three cases passed with a container init process. This is not a fresh
+complete passing run or equivalence to the full release pipeline.
+
+The existing image named py313 actually reports Python 3.11.16. Earlier Linux
+3.13 labels were incorrect. The verification JSON now records that correction.
+Python 3.13 acceptance has not been established by that image.
+
+Forty kernel network checks passed without the competing full suite. Their
+first run had one delay measurement failure at 113.6 ms added round trip time.
+Forwarding smoke passed with Docker's standard container interface. It could
+not run with network-none because that container lacked eth0. Router copying
+passed at desktop and 375px width without competing release load after an
+initial five-second success assertion timeout. No code was changed to weaken
+these checks. Full release checks and physical acceptance still remain open.

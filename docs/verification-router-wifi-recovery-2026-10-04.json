@@ -9,7 +9,7 @@
   "guarded_update_tests_failed": 0,
   "guarded_update_failure": "Resolved after independent revised-source approval and exact admission",
   "linux_validation": {
-    "python": "3.13",
+    "python": "3.11.16",
     "focused_tests_passed": 204,
     "network": "disabled",
     "source_mount": "read-only"
@@ -28,7 +28,7 @@
   "additional_recovery_tests_passed": 105,
   "http_integration_validation": {
     "macos_python_3_12_passed": 25,
-    "linux_python_3_13_passed": 25,
+    "linux_python_3_11_passed": 25,
     "real_http_and_unix_helper_socket": true,
     "sync_and_background_router_write_refusal": true,
     "router_factory_never_called": true,
@@ -50,7 +50,7 @@
     "production_source_changed": false,
     "stale_expectations_updated": 3,
     "macos_python_3_12_passed": 62,
-    "linux_python_3_13_passed": 62,
+    "linux_python_3_11_passed": 62,
     "remaining_known_failures": "11 exact-source admission checks",
     "full_suite_rerun_after_test_only_changes": false
   },
@@ -86,7 +86,7 @@
   },
   "revised_validation": {
     "focused_macos_python_3_12_passed": 283,
-    "focused_linux_python_3_13_passed": 283,
+    "focused_linux_python_3_11_passed": 283,
     "installer_and_recovery_macos_passed": 117,
     "installer_and_recovery_linux_initial": {
       "passed": 114,
@@ -104,5 +104,65 @@
     "lint_and_javascript_syntax": "passed",
     "complete_release_pipeline": "not repeated on revised source",
     "live_pi_acceptance": "pending"
-  }
+  },
+  "linux_interpreter_correction": {
+    "image": "jittersim-py313-runner-local:latest",
+    "observed_python": "3.11.16",
+    "prior_python_3_13_label": "Incorrect image-name assumption",
+    "python_3_13_validation": "Not established"
+  },
+  "final_source_linux_full_run": {
+    "revision": "cd57a56",
+    "python": "3.11.16",
+    "passed": 5370,
+    "failed": 31,
+    "skipped": 110,
+    "seconds": 866.12,
+    "harness_problems": [
+      "worktree Git metadata inaccessible",
+      "temporary executable fixtures lacked exec permission",
+      "no init process for orphan cleanup"
+    ],
+    "affected_file_retry": {
+      "passed": 360,
+      "failed": 3
+    },
+    "init_retry": {
+      "passed": 3,
+      "failed": 0
+    },
+    "full_suite_repeated_with_corrected_harness": false,
+    "complete_ci_equivalence": false
+  },
+  "live_readonly_check_2026_10_05": {
+    "helper_active": true,
+    "dashboard_active": true,
+    "gateway_active": true,
+    "dashboard_http": 200,
+    "outbound_https": 200,
+    "configuration_changed": false
+  },
+  "final_source_kernel_checks": {
+    "initial_passed": 39,
+    "initial_failed": 1,
+    "initial_measurement_added_ms": 113.6,
+    "retry_passed": 40,
+    "retry_failed": 0,
+    "retry_seconds": 79.185,
+    "forwarding_smoke_initial": "Stopped because network-none container had no eth0",
+    "forwarding_smoke_retry": "Passed using standard disposable Docker interface",
+    "live_network_changes": false
+  },
+  "final_source_router_copy_browser": {
+    "initial": "Five-second success assertion timed out while full suite ran",
+    "unloaded_retry": "Passed at desktop and 375px phone width",
+    "source_changes_between_attempts": false
+  },
+  "remaining_release_checks": [
+    "Supported Python version matrix including actual Python 3.9 and 3.13",
+    "Complete full suite in corrected Linux harness",
+    "Remaining CI browser and Linux release jobs",
+    "Locked wheel checks",
+    "Guarded Pi install and physical acceptance"
+  ]
 }
