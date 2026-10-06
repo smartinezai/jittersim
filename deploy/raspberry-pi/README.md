@@ -1282,9 +1282,9 @@ router's own controls. Read-only checks and copying its credentials to the Pi
 remain available. Copying credentials changes the Pi access point and must
 still be tested through management access before turning router Wi-Fi off.
 
-For a separately reviewed setup, the root-owned helper service command can
-explicitly include --allow-router-wifi-changes. This is never enabled by the
-installer or a dashboard request. The dashboard switch stays read only.
+The privileged helper has no option to re-enable router Wi-Fi writes. The
+dashboard switch stays read only. Use the router's own controls for any
+intentional upstream Wi-Fi change.
 
 Additional private operation logging is deferred. This repair adds no logging
 I/O to privileged requests or startup. The original outage cause remains

@@ -164,5 +164,22 @@
     "Remaining CI browser and Linux release jobs",
     "Locked wheel checks",
     "Guarded Pi install and physical acceptance"
-  ]
+  ],
+  "proposed_router_write_escape_hatch_removal": {
+    "date": "2026-10-05",
+    "production_call_sites_found": 0,
+    "systemd_unit_passes_opt_in": false,
+    "installer_adds_opt_in": false,
+    "router_reads_and_credential_copy_preserved": true,
+    "focused_behavior_tests": "passed",
+    "lint_javascript_and_whitespace": "passed",
+    "helper_sha256": "1cbc5dd4eb2e93f6205035f38218fe4ca11b34281a23e2c998ccb6e8b76c4228",
+    "panic_guard_sha256": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "access_sha256": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
+    "source_admission": "approved by independent Luna review",
+    "review_receipt": "docs/review-results-router-recovery-optin-removal-2026-10-05.json",
+    "approved_allowlist_changed": true,
+    "releasable": false,
+    "deployable": false
+  }
 }

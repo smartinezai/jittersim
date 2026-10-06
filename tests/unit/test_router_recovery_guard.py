@@ -1,6 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
+import pytest
+
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.executor import FakeExecutor
 from jittersim.networking.helper import HelperService, _build_parser
@@ -31,7 +33,8 @@ def test_concurrent_requests_cannot_contact_router():
     factory.assert_not_called()
 
 
-def test_startup_opt_in_is_explicit():
+def test_startup_has_no_router_wifi_write_opt_in():
     args = ["--socket", "/tmp/helper.sock", "--uplink", "eth0", "--test-interface", "wlan0"]
-    assert _build_parser().parse_args(args).allow_router_wifi_changes is False
-    assert _build_parser().parse_args(args + ["--allow-router-wifi-changes"]).allow_router_wifi_changes is True
+    assert not hasattr(_build_parser().parse_args(args), "allow_router_wifi_changes")
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(args + ["--allow-router-wifi-changes"])

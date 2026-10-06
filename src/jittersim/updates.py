@@ -985,6 +985,11 @@ PANIC_APPROVED_SOURCES = ({
     "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
     "src/jittersim/networking/helper.py": "e940fc8f8da5149cf18fd25f230c1702110f1c3445362be9209a4d8f382e0499",
     "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
+}, {
+    # See docs/review-results-router-recovery-optin-removal-2026-10-05.json.
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "1cbc5dd4eb2e93f6205035f38218fe4ca11b34281a23e2c998ccb6e8b76c4228",
+    "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
 },)
 
 

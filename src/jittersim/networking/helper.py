@@ -172,10 +172,8 @@ class HelperService:
         panic_guard: Optional[PanicGuard] = None,
         homepage_database: Optional[Path] = None,
         ad_blocking_store: Optional[AdStore] = None,
-        allow_router_wifi_changes: bool = False,
     ) -> None:
         self._applier = applier
-        self._allow_router_wifi_changes = allow_router_wifi_changes is True
         self._homepage_database = homepage_database
         self._ad_blocking_store = ad_blocking_store
         self._active_plan_path = active_plan_path
@@ -1324,7 +1322,7 @@ class HelperService:
         }
 
     def _handle_router_wifi(self, payload: Dict[str, Any], *, read_only: bool = False) -> Dict[str, Any]:
-        if not read_only and not self._allow_router_wifi_changes:
+        if not read_only:
             return {"ok": False, "reason": "router-control-disabled",
                     "error": "Router Wi-Fi switching is disabled. Use the router's own controls."}
         router = None
@@ -2574,7 +2572,6 @@ def run_helper(
     enable_hardware: bool = False,
     router_factory: Optional[Callable[[str, str], TG3442DERouter]] = None,
     homepage_database: Path = Path("/var/lib/jittersim/jittersim.db"),
-    allow_router_wifi_changes: bool = False,
 ) -> None:
     """Run the helper only after an explicit hardware-mode opt-in."""
 
@@ -2597,7 +2594,6 @@ def run_helper(
     service = HelperService(
         applier,
         router_factory=router_factory,
-        allow_router_wifi_changes=allow_router_wifi_changes,
         active_plan_path=active_plan_path,
         access_store=AccessStore(ACCESS_FILE, group_id=grp.getgrnam("jittersim").gr_gid),
         gateway_state_path=gateway_state_path,
@@ -2694,8 +2690,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-interface", required=True)
     parser.add_argument("--timeout-seconds", type=float, default=10.0)
     parser.add_argument("--enable-hardware", action="store_true")
-    parser.add_argument("--allow-router-wifi-changes", action="store_true",
-                        help="Allow router Wi-Fi writes. Disabled by default for recovery safety.")
     parser.add_argument("--homepage-database", type=Path, default=Path("/var/lib/jittersim/jittersim.db"))
     return parser
 
@@ -2714,7 +2708,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
         timeout_seconds=arguments.timeout_seconds,
         enable_hardware=arguments.enable_hardware,
-        allow_router_wifi_changes=arguments.allow_router_wifi_changes,
     )
     return 0
 

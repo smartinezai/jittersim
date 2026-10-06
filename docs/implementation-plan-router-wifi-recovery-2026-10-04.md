@@ -205,3 +205,22 @@ not run with network-none because that container lacked eth0. Router copying
 passed at desktop and 375px width without competing release load after an
 initial five-second success assertion timeout. No code was changed to weaken
 these checks. Full release checks and physical acceptance still remain open.
+
+## Proposed follow-up: remove the router-write escape hatch
+
+On 2026-10-05 a second source review in this task found no production caller for the
+`--allow-router-wifi-changes` helper option. The installed systemd unit does
+not pass it and the installer does not add it. The option was removed from the
+helper constructor, startup parser and service setup. Router writes now stay
+refused for every helper startup while router reads and credential copying
+remain unchanged.
+
+An independent Luna source review approved this exact consumer tuple and the
+receipt is recorded in
+`docs/review-results-router-recovery-optin-removal-2026-10-05.json`. Focused
+helper, HTTP refusal, parser, Ruff, JavaScript syntax and whitespace checks
+pass. The changed helper hash is
+`1cbc5dd4eb2e93f6205035f38218fe4ca11b34281a23e2c998ccb6e8b76c4228`.
+The approved allowlist now includes this exact tuple with the panic and access
+hashes unchanged. Full release gates remain open so this follow-up is not yet
+releasable or deployable.
