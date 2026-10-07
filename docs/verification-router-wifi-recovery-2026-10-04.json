@@ -161,8 +161,8 @@
   "remaining_release_checks": [
     "Supported Python version matrix including actual Python 3.9 and 3.13",
     "Complete full suite in corrected Linux harness",
-    "Remaining CI browser and Linux release jobs",
-    "Locked wheel checks",
+    "Hosted CI browser and Linux release jobs",
+    "Hosted locked-wheel release checks",
     "Guarded Pi install and physical acceptance"
   ],
   "proposed_router_write_escape_hatch_removal": {
@@ -172,6 +172,13 @@
     "installer_adds_opt_in": false,
     "router_reads_and_credential_copy_preserved": true,
     "focused_behavior_tests": "passed",
+    "focused_suite": {
+      "collected": 299,
+      "passed": 298,
+      "skipped": 1,
+      "python": "3.9.6",
+      "unix_socket_binds": "enabled"
+    },
     "lint_javascript_and_whitespace": "passed",
     "helper_sha256": "1cbc5dd4eb2e93f6205035f38218fe4ca11b34281a23e2c998ccb6e8b76c4228",
     "panic_guard_sha256": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
@@ -179,6 +186,12 @@
     "source_admission": "approved by independent Luna review",
     "review_receipt": "docs/review-results-router-recovery-optin-removal-2026-10-05.json",
     "approved_allowlist_changed": true,
+    "clean_wheel": {
+      "filename": "jittersim-0.2.0-py3-none-any.whl",
+      "sha256": "b5f82b908f22709aab7521268d47631a01dd2d97576d0460b88b1ce4e56c0ec9",
+      "source_hashes_match": true,
+      "router_audit_absent": true
+    },
     "releasable": false,
     "deployable": false
   }

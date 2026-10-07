@@ -224,3 +224,11 @@ pass. The changed helper hash is
 The approved allowlist now includes this exact tuple with the panic and access
 hashes unchanged. Full release gates remain open so this follow-up is not yet
 releasable or deployable.
+
+On 2026-10-07 the complete focused recovery and release-source suite passed
+with 298 tests passing and one expected skip under Python 3.9.6 with Unix
+socket binds enabled. A clean `jittersim-0.2.0-py3-none-any.whl` was built
+from this branch with SHA256
+`b5f82b908f22709aab7521268d47631a01dd2d97576d0460b88b1ce4e56c0ec9`.
+The three admitted source hashes match inside the wheel and no router-audit
+material is present. Hosted CI and guarded Pi acceptance remain open.
