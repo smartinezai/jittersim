@@ -7140,7 +7140,8 @@
       element("check-router-password").disabled = busy;
       element("refresh-router-wifi").disabled = !helperConfigured || !adminTokenVerified ||
         !password || routerPasswordRejected || busy;
-      button.disabled = !helperConfigured || !known || busy;
+      button.disabled = true;
+      button.title = "Router Wi-Fi switching is disabled for recovery safety. Use the router controls.";
       button.setAttribute("aria-checked", String(known && routerWifiEnabled));
       button.setAttribute("data-unknown", String(!known));
       button.setAttribute("aria-busy", String(busy));

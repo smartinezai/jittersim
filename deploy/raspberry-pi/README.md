@@ -1272,3 +1272,20 @@ expiry remains the fallback if a process dies during an update.
 Before live deployment verify Ethernet or independent management Wi-Fi.
 Physical Wi-Fi isolation, device reconnection, Pi memory and throughput
 still require acceptance on the actual hardware.
+
+
+### Router Wi-Fi recovery safety
+
+The dashboard shows router Wi-Fi status but its switch is disabled. The helper
+refuses router Wi-Fi changes by default before contacting the router. Use the
+router's own controls. Read-only checks and copying its credentials to the Pi
+remain available. Copying credentials changes the Pi access point and must
+still be tested through management access before turning router Wi-Fi off.
+
+The privileged helper has no option to re-enable router Wi-Fi writes. The
+dashboard switch stays read only. Use the router's own controls for any
+intentional upstream Wi-Fi change.
+
+Additional private operation logging is deferred. This repair adds no logging
+I/O to privileged requests or startup. The original outage cause remains
+unconfirmed. Keep router Wi-Fi on during recovery acceptance.
