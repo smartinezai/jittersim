@@ -1326,6 +1326,9 @@ class HelperService:
         }
 
     def _handle_router_wifi(self, payload: Dict[str, Any], *, read_only: bool = False) -> Dict[str, Any]:
+        if not read_only:
+            return {"ok": False, "reason": "router-control-disabled",
+                    "error": "Router Wi-Fi switching is disabled. Use the router's own controls."}
         router = None
         try:
             admin_password = payload["admin_password"]

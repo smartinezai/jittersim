@@ -164,12 +164,13 @@ def retained(config):
             if (config / name).is_file()}
 
 
-def legacy(config):
+def legacy(config, *, repeated_name=False):
     config.mkdir(exist_ok=True)
     request = config / "legacy-request.conf"
     request.write_text("[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=leaf\n"
                        "[dn]\nCN=old-dashboard.local\n[leaf]\n"
-                       "subjectAltName=DNS:old-dashboard.local,IP:192.168.50.1\n"
+                       "subjectAltName=DNS:old-dashboard.local," +
+                       ("DNS:old-dashboard.local," if repeated_name else "") + "IP:192.168.50.1\n"
                        "extendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n")
     subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
                     "-nodes", "-days", "1", "-config", str(request), "-keyout", str(config / "dashboard.key"),
@@ -177,6 +178,39 @@ def legacy(config):
     (config / "dashboard.key").chmod(0o600)
     (config / "trust.env").write_text("JITTERSIM_LOCAL_NAME=old-dashboard.local\n")
     request.unlink()
+
+
+def test_legacy_repeated_dns_names_preserve_the_exact_owned_identity(tmp_path):
+    legacy(tmp_path, repeated_name=True)
+    files = updates._certificate_live_files(tmp_path)
+    assert updates.verify_certificate_identity(files) == "legacy"
+    before = retained(tmp_path)
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    pointer = updates.keep_certificate_identity(root, tmp_path, transaction("restore"))
+    (tmp_path / "dashboard.crt").unlink()
+    updates.restore_certificate_identity(root, tmp_path, pointer)
+    assert retained(tmp_path) == before
+
+
+def test_legacy_repeated_dns_names_still_require_the_matching_private_key(tmp_path):
+    legacy(tmp_path, repeated_name=True)
+    other = tmp_path / "other"
+    legacy(other)
+    files = updates._certificate_live_files(tmp_path)
+    files["dashboard.key"] = (other / "dashboard.key").read_bytes()
+    with pytest.raises(updates.UpdateError, match="does not match"):
+        updates.verify_certificate_identity(files)
+
+
+def test_repeated_dns_names_are_strict_unless_adopting_a_bounded_legacy_identity():
+    text = "X509v3 Subject Alternative Name:\n    DNS:old-dashboard.local, DNS:old-dashboard.local\n"
+    with pytest.raises(updates.UpdateError, match="names are invalid"):
+        updates._certificate_names(text)
+    assert updates._certificate_names(text, allow_legacy_repeated_names=True) == ("old-dashboard.local",)
+    oversized = "X509v3 Subject Alternative Name:\n    " + ", ".join(["DNS:old-dashboard.local"] * 33) + "\n"
+    with pytest.raises(updates.UpdateError, match="names are invalid"):
+        updates._certificate_names(oversized, allow_legacy_repeated_names=True)
 
 
 def test_retry_uses_the_durable_identity_after_partial_live_restoration(tmp_path):
