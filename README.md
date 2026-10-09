@@ -52,13 +52,14 @@ Open **Updates** and choose **Check for updates**. When a read-only GitHub
 token is saved on the Pi, the Pi downloads the newest release, checks its
 signature and stages it. Choose **Install update** to install it. The previous
 installation and its settings are backed up first, and when the Pi's health
-check fails after installing the backup is restored by itself. The sidebar
+check fails after installing the Pi tries to restore that backup by itself. The sidebar
 shows **Update available** while a release is staged. Checking every day and
 installing automatically are both off until you turn them on.
 
-On the Pi the same is one command: `sudo jittersim update`. It checks GitHub,
-shows the new version and its notes, asks, installs and waits for the health
-check. From the Mac use `jittersim remote update now`. `jittersim version`
+On the Pi the same is one command: `sudo jittersim update` (add `--yes` to skip
+the question or `--offline` to skip GitHub). It checks GitHub, shows the new
+version and its notes, asks, installs and reports success only when the
+install completed and passed the health check. From the Mac use `jittersim remote update now`. `jittersim version`
 prints the version the Pi runs.
 
 The Pi stages and installs only releases signed by a release signing key you
