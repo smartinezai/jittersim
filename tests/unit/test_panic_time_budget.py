@@ -201,6 +201,25 @@ def test_without_contention_panic_keeps_the_usual_waits(tmp_path, clock, monkeyp
     assert service._network_lock.waits[0] == helper_module.PANIC_NETWORK_LOCK_WAIT_SECONDS
 
 
+def test_a_full_network_lock_wait_leaves_real_time_for_the_release(tmp_path, clock, monkeypatch):
+    # Review O-a: the deadline starts before the network lock wait. A wait for the
+    # lock's whole allowance must still leave the work after it more than the floors.
+    service, _ = slow_panic_service(tmp_path, clock, monkeypatch, time_out=False)
+    instant = SlowCommands(clock, time_out=False)
+    instant.clock = type("Frozen", (), {"now": 0.0})()  # commands take no time here
+    monkeypatch.setattr(executor_module.subprocess, "run", instant)
+    service.handle_payload({"action": "normal-access"})
+    assert service._network_lock.waits == [helper_module.PANIC_NETWORK_LOCK_WAIT_SECONDS]
+    after_lock = helper_module.PANIC_DEADLINE_SECONDS - helper_module.PANIC_NETWORK_LOCK_WAIT_SECONDS
+    assert after_lock >= helper_module.PANIC_POST_LOCK_SECONDS >= 6.0
+    # The first Panic stop save may use its whole wait. The household release lock
+    # still gets what is left of the post-lock time, not the 0.5 s floor.
+    (release_wait,) = service._access_manager.lock.waits
+    assert release_wait >= (helper_module.PANIC_POST_LOCK_SECONDS
+                            - panic_guard_module.GUARD_LOCK_WAIT_SECONDS)
+    assert release_wait > helper_module.PANIC_STEP_FLOOR_SECONDS
+
+
 def test_the_client_never_starts_an_attempt_the_helper_cannot_finish(clock):
     attempts = []
 
