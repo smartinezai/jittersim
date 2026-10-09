@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from playwright.sync_api import expect, sync_playwright
+from playwright.sync_api import Error as PlaywrightError, expect, sync_playwright
 
 PROTECTED_MAC = "02:00:00:00:00:01"
 
@@ -77,17 +77,25 @@ def run():
                 expect(page.locator("#private-dashboard")).to_be_visible()
                 # A failed sync is visible with a retry, never shown as working access.
                 def failed(route):
-                    response = route.fetch()
-                    data = response.json()
-                    data["protected_access"] = {"synced": False, "protected": 1, "granted": 0,
-                                                "not_eligible": [], "error": "Helper unreachable."}
-                    route.fulfill(response=response, body=json.dumps(data))
+                    try:
+                        response = route.fetch()
+                        data = response.json()
+                        data["protected_access"] = {
+                            "synced": False, "protected": 1, "granted": 0,
+                            "not_eligible": [], "error": "Helper unreachable."}
+                        route.fulfill(response=response, body=json.dumps(data))
+                    except PlaywrightError:
+                        pass  # A list refresh still in flight when the route is removed.
+                # Every list read reports the failure until the route is removed, so a page
+                # refresh cannot replace the alert before it is checked.
                 page.route("**/api/dashboard-access", failed)
                 page.evaluate("() => loadDashboardAccessList()")
                 expect(listing.get_by_role("alert")).to_contain_text("not confirmed")
-                page.unroute("**/api/dashboard-access", failed)
+                expect(listing.get_by_role("alert")).to_contain_text("may still open the dashboard")
                 listing.get_by_role("button", name="Retry protected access").click()
                 expect(page.locator("#toast-message")).to_contain_text("confirmed")
+                page.unroute("**/api/dashboard-access", failed)
+                page.evaluate("() => loadDashboardAccessList()")
                 expect(listing.get_by_role("alert")).to_have_count(0)
                 page.screenshot(path="test-results/protected-dashboard-access.png")
                 # Removing this device's protection asks first and can keep access.

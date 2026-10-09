@@ -646,10 +646,15 @@
       return data;
     }
 
+    let dashboardAccessListSerial = 0;
+
     async function loadDashboardAccessList() {
       const container = element("dashboard-access-list");
+      // An older read that answers late must not replace a newer list.
+      const serial = ++dashboardAccessListSerial;
       try {
         const data = await request("/api/dashboard-access", "GET");
+        if (serial !== dashboardAccessListSerial) return;
         container.replaceChildren();
         const sync = data.protected_access || {};
         if (sync.synced === false) {
@@ -715,7 +720,7 @@
           row.appendChild(remove);
           container.appendChild(row);
         });
-      } catch (error) { container.textContent = error.message; }
+      } catch (error) { if (serial === dashboardAccessListSerial) container.textContent = error.message; }
     }
 
     element("allow-dashboard-device").addEventListener("click", async () => {

@@ -338,6 +338,29 @@ address, so use the one address on both networks to sign in once. Choose **Admin
 token** and **Allow this device**. This registers the actual requesting
 computer. The dashboard lists saved devices and supports removal.
 
+A protected device (see **Protected devices**) can open the dashboard without
+**Allow this device**. It still needs the admin token. Access has two
+separate reasons: a saved grant from **Allow this device** and protection.
+The Dashboard access list shows which one applies (**saved grant**, **from
+protection** or both). Rules:
+
+- Stopping protection removes only the access that came from protection. A
+  saved grant stays.
+- Removing a saved grant from a protected device keeps access while it is
+  protected (**Remove saved grant**).
+- If the device you are using can open the dashboard only because it is
+  protected, stopping its protection asks first: keep access as a saved grant
+  for this device or remove both. Restoring settings (import or history) that
+  no longer protect it keeps its access as a saved grant and says so.
+- If the Pi helper does not confirm the change, the list says so and offers
+  **Retry protected access**. Until Retry succeeds a device that is no longer
+  protected may still open the dashboard. The dashboard also retries by itself.
+- A changed private Wi-Fi address gets nothing by name or IP. Move the device
+  to its new address under Dashboard access and access follows protection.
+- Protection access is not saved in `/etc/jittersim/dashboard-access.json`.
+  The dashboard grants it again after every restart from the protected list.
+  Up to 256 protected devices plus 64 saved grants are supported.
+
 The first visit shows a certificate warning. After signing in, **Trust this Pi**
 offers the Pi's local certificate as a `.crt` file and as an Apple profile with
 three short steps for a Mac and an iPhone. Once installed, the warning is gone.
@@ -351,7 +374,8 @@ list continues to cover broader profile exemptions. SSH and access to private
 router devices remain restricted.
 
 The limited sign-in page is reachable before registration. Private data,
-downloads and controls require the token plus saved access on Pi Wi-Fi.
+downloads and controls require the token plus saved access or protection on
+Pi Wi-Fi.
 The hardware address is not a password. Anyone holding the admin token may
 register their own device. Changed private Wi-Fi addresses need registration
 again. If current device observations cannot be verified, reconnect and retry.
@@ -624,7 +648,9 @@ Click **Make unaffected** to protect a connected client from every profile,
 random outage, profile website rule and device or service quota. Its traffic
 also stops consuming shared group quotas. Its saved assignments stay in place
 and resume when protection is removed. Global MAC and website access rules
-still apply. Protection does not grant dashboard or SSH access.
+still apply. Protection also lets the device open the dashboard with the
+admin token (see **Dashboard access from Pi Wi-Fi**). It never grants SSH,
+router administration or public internet access.
 
 The **Unaffected by profiles** list keeps protection when a client disconnects
 or changes IP. It supports up to 256 saved Wi-Fi MAC addresses. Use **Add an
@@ -907,7 +933,8 @@ interface still uses HTTP between the Pi and router.
 5. Open **Admin token** in the sidebar, enter the admin token and choose
    **Check token**. On the Pi, run
    `sudo grep JITTERSIM_ADMIN_TOKEN /etc/jittersim/control.env` to read it.
-   From the test Wi-Fi also choose **Allow this device** once. Do not expose
+   From the test Wi-Fi also choose **Allow this device** once unless the
+   device is protected. Do not expose
    the dashboard or SSH to the public internet.
 
 The installer preserves your saved Wi-Fi name and password. Use it when
