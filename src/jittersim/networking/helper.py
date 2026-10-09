@@ -195,8 +195,9 @@ class HelperService:
         self._queue_read_error: Optional[str] = None
         self._service_addresses = ServiceAddressBook(clock=service_address_clock)
         self._list_domains: Dict[str, tuple] = {}
-        # Reentrant: normal access resets under the lock and the gateway
-        # monitor retries a reset while it holds it.
+        # Not reentrant: a plain Lock. Normal access resets under it and the
+        # gateway monitor retries a reset while it holds it, so code that runs
+        # under this lock must never acquire it again or it deadlocks the helper.
         self._network_lock = threading.Lock()
         self._wifi_lock = threading.Lock()
         self._router_lock = threading.Lock()
