@@ -2476,7 +2476,7 @@ def _inspect_retry(root, status, query, budget, admission):
                 or fields["request_kind"] != status.get("request_kind")
                 or type(request.get("rollback")) is not bool
                 or (request.get("version") not in (None, "") and
-                    (not isinstance(request["version"], str) or not LABEL.fullmatch(request["version"])))
+                    (not isinstance(request["version"], str) or not VERSION.fullmatch(request["version"])))
                 or (fields["request_kind"] == "install" and not request.get("version"))
                 or ("attempt" in request and (not isinstance(request["attempt"], str)
                     or not PUBLIC_REQUEST.fullmatch(request["attempt"])))
@@ -3114,7 +3114,7 @@ def new_job():
 
 
 def request_online_check(*, force=False, root=UPDATE_ROOT, config=CONFIG_ROOT, run=run_command,
-                         now=time.time, job_id=new_job):
+                         now=time.time, job_id=new_job, check_only=True):
     """Start one online check in the root fetch unit and return its job at once. Unless FORCE
     is set a check that ended less than ten minutes ago answers instead of a new one."""
     current = now()
@@ -3136,7 +3136,10 @@ def request_online_check(*, force=False, root=UPDATE_ROOT, config=CONFIG_ROOT, r
             return _view(record, current)
         record = {"job": job, "state": "running", "requested_at": int(current),
                   "checked_at": None, "result": None, "message": "Checking GitHub for a release."}
-        atomic_json(root / ONLINE_REQUEST, {"job": job, "requested_at": int(current)})
+        # A check someone asked for only checks. Only the daily check may install by itself
+        # (when Install automatically is on), so a manual check never interrupts the Pi.
+        atomic_json(root / ONLINE_REQUEST, {"job": job, "requested_at": int(current),
+                                            "check_only": check_only is not False})
         atomic_json(root / ONLINE_FILE, record)
         try:
             run(["systemctl", "start", "--no-block", FETCH_UNIT], 10)
@@ -3161,7 +3164,8 @@ def scheduled_online_check(*, root=UPDATE_ROOT, config=CONFIG_ROOT, run=run_comm
         return False
     if isinstance(last, (int, float)) and 0 <= current - last < DAILY_SECONDS:
         return False
-    started = request_online_check(force=True, root=root, config=config, run=run, now=now)
+    started = request_online_check(force=True, root=root, config=config, run=run, now=now,
+                                   check_only=False)
     return started.get("state") == "running"
 
 
@@ -3212,7 +3216,7 @@ def run_fetch_job(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, sourc
         return None
     (root / ONLINE_REQUEST).unlink(missing_ok=True)
     return perform_online_check(job, root=root, code=code, config=config, source=source, run=run,
-                                now=now)
+                                now=now, auto_install=request.get("check_only") is False)
 
 
 # A copied recovery manager must understand these records before they are published.

@@ -211,7 +211,7 @@ def test_a_staged_release_is_not_installed_unless_install_automatically_is_on(on
 
 def test_install_automatically_queues_the_normal_install_with_its_recovery_copy(online):
     updates.set_online_settings({"install_automatically": True}, root=online.pi.root)
-    request(online)
+    request(online, check_only=False)  # the daily check
     record = fetch(online)
     assert record["install_queued"] is True and "install was started" in record["message"]
     queued = json.loads((online.pi.root / "request.json").read_text())
@@ -233,15 +233,35 @@ def test_install_automatically_does_not_install_a_refused_release(online):
 
 def test_install_automatically_tries_a_failed_release_only_once(online):
     updates.set_online_settings({"install_automatically": True}, root=online.pi.root)
-    request(online)
+    request(online, check_only=False)
     fetch(online)
     (online.pi.root / "request.json").unlink()
     online.clock[0] += updates.CACHE_SECONDS + 1
-    request(online)
+    request(online, check_only=False)
     record = fetch(online)
     assert record["install_queued"] is False
     assert "failed before" in record["message"]
     assert not (online.pi.root / "request.json").exists()
+
+
+def test_a_check_someone_asked_for_never_installs_on_its_own(online):
+    # The dashboard button and 'jittersim remote update check/now' ask through the helper.
+    updates.set_online_settings({"install_automatically": True}, root=online.pi.root)
+    request(online)
+    assert updates.read_json(online.pi.root / updates.ONLINE_REQUEST)["check_only"] is True
+    record = fetch(online)
+    assert record["result"] == "staged" and record["install_queued"] is False
+    assert not (online.pi.root / "request.json").exists()
+    assert ["systemctl", "start", "--no-block", "jittersim-update.service"] not in online.run_calls
+
+
+def test_only_the_daily_check_may_install_by_itself(online):
+    updates.set_online_settings({"install_automatically": True, "daily_check": True},
+                                root=online.pi.root)
+    with __import__("unittest.mock").mock.patch.object(updates, "token_is_set", return_value=True):
+        assert updates.scheduled_online_check(root=online.pi.root, config=online.pi.config,
+                                              run=online.run, now=lambda: online.clock[0])
+    assert updates.read_json(online.pi.root / updates.ONLINE_REQUEST)["check_only"] is False
 
 
 def test_the_command_line_check_never_installs_on_its_own(online):
