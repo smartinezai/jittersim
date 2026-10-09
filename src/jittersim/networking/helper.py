@@ -948,7 +948,7 @@ class HelperService:
                 LOGGER.error("household release is incomplete: %s", incomplete)
             else:
                 access_ok = True
-        except (OSError, ValueError, CommandExecutionError):
+        except Exception:  # noqa: BLE001 - any failure is recorded and answered (review O4)
             LOGGER.exception("could not disable household restrictions")
         failed = not reset["ok"] or not access_ok
         saved = self._write_gateway_state(durable=True, panic_recovery_failed=failed)
