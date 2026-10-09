@@ -69,9 +69,10 @@ JITTERSIM_RELEASE_PYTHON="$PWD/.venv/bin/python" scripts/release.sh --dry-run 0.
 
 Dashboard: open **Updates**, choose **Check for updates** and then **Install
 update**. Pi terminal: `sudo jittersim update`. Mac terminal:
-`jittersim remote update now`. Each one checks the signature,
-keeps a recovery copy, checks the Pi's health after installing and restores the
-previous installation by itself when that check fails.
+`jittersim remote update now`. Each one checks the signature, keeps a
+recovery copy and checks the Pi's health after installing. When that check
+fails the Pi tries to restore the previous installation, and the terminal
+commands report a restore only when the Pi confirmed it.
 
 The Pi checks GitHub with a read-only token saved once with
 `sudo jittersim update set-token`. See

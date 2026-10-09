@@ -53,6 +53,7 @@ PI_BROWSER_MODULES=(
   address_move
   address_move_privacy
   general_profile
+  device_apply_start
   saved_profiles
   patterns
   random_value_ranges
@@ -171,7 +172,7 @@ Usage: scripts/local-ci.sh [options] COMMAND [TARGET...] [-- EXTRA ARGUMENTS]
 Commands (each one is one workflow job, or a few):
   lint            ruff as the Lint job does, then advisory checks that only print counts
   unit            the whole pytest suite on one Python (the Python matrix job, one version)
-  browser         tests.browser.journeys and the 27 Pi browser modules
+  browser         tests.browser.journeys and the 28 Pi browser modules
   gui             the GUI baseline job: its pytest files, gui_baseline and a11y_axe
   homepage        the Homepage reference job (needs npm and the network for npm ci)
   kernel          the Linux datapath job (Docker, privileged)

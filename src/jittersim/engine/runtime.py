@@ -190,6 +190,8 @@ class RuntimeScheduler:
     # change or a manual apply starts again at once and a success clears the wait.
     retry_base_seconds = 1.0
     retry_max_seconds = 30.0
+    # Tries to reset the helper after a device-only start ended before giving up.
+    cleanup_attempts = 8
 
     def __init__(
         self,
@@ -780,10 +782,14 @@ class RuntimeScheduler:
                 # A device-only start keeps the Reset for everything outside its scope.
                 device_scope = active_repository.get_device_start_scope()
                 if device_scope is None:
+                    # A saved change marks the state unknown, an outside reset says
+                    # resetting or reset.
+                    scope_ended = runtime_state.observed_state not in ("reset", "resetting")
+                    if scope_ended and self._plan_retry_is_waiting(
+                            now=current_time, configuration_version=configuration_version):
+                        return False
                     self._honor_external_reset(
-                        repository=active_repository, now=current_time,
-                        # A saved change marks the state unknown, an outside reset says reset.
-                        scope_ended=runtime_state.observed_state != "reset",
+                        repository=active_repository, now=current_time, scope_ended=scope_ended,
                     )
                     return False
             self._follow_device_addresses(repository=active_repository, now=current_time)
@@ -1075,14 +1081,35 @@ class RuntimeScheduler:
         # Someone reset the network outside the dashboard, for example with
         # `jittersim reset`. Stop applying, and reset once more in case a
         # scheduled apply raced that reset. A device-only start whose devices
-        # were all deleted ends the same way.
-        self.pause()
+        # were all deleted ends the same way, but its cleanup stays pending:
+        # the scheduler keeps running and retries the reset with growing waits.
+        if not scope_ended:
+            self.pause()
         try:
             self._helper_client.reset()
-        except HelperClientError:
+        except HelperClientError as error:
             LOGGER.warning("could not repeat an external network reset", exc_info=True)
             message = "Network reset requested outside the dashboard; repeating it failed"
+            if scope_ended:
+                message = "Ending a device-only start failed; trying the reset again"
+                with self._lock:
+                    attempts = self._plan_failures
+                if attempts + 1 >= self.cleanup_attempts:
+                    self.pause()
+                    message = "Ending a device-only start failed. Retry Panic"
+                self._note_plan_failure(
+                    error, now=now,
+                    configuration_version=repository.get_runtime_state().configuration_version)
+                try:
+                    repository.update_runtime_state(
+                        observed_state="error", last_action="reset", last_result="failure",
+                        last_error="device-only cleanup failed",
+                    )
+                except StorageError:
+                    LOGGER.warning("could not record the failed cleanup", exc_info=True)
         else:
+            if scope_ended:
+                self.pause()
             message = (
                 "Device-only start ended because its devices were removed"
                 if scope_ended else "Network reset outside the dashboard"
