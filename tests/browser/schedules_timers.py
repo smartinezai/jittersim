@@ -63,7 +63,6 @@ def save_schedule(page):
 
 def check_schedule_form(page, base, width):
     writes = record_writes(page)
-    form = page.locator("#schedule-form")
     submit = page.get_by_role("button", name="Save schedule", exact=True)
     post(page, base, "/api/devices", {
         "id": "bob", "name": "Bob tablet", "ipv4_address": "192.168.50.77", "profile_id": "normal",

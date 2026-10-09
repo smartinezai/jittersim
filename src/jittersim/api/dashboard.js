@@ -5172,7 +5172,8 @@
         groups.forEach((group) => {
           const option = document.createElement("option");
           option.value = group.id;
-          option.textContent = group.name + " (" + group.device_ids.length + " devices)";
+          option.textContent = group.name + " (" + group.device_ids.length +
+            (group.device_ids.length === 1 ? " device)" : " devices)");
           option.selected = group.id === selectedGroup;
           groupSelect.appendChild(option);
         });

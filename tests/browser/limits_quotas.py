@@ -273,7 +273,9 @@ def check_group_data_limit(page, base, width):
     button = "Save group limit"
     expect(page.locator("#group-data-limit-count")).to_have_text("0 group limits")
     expect(page.locator("#group-data-limit-list")).to_have_text("No shared group limits saved.")
-    expect(page.locator("#group-data-limit-group option")).to_have_text(["Family (2 devices)"])
+    expect(page.locator("#group-data-limit-group option")).to_have_text(
+        ["Family (2 devices)", "Solo (1 device)"]
+    )
     check_reset_fields(page, "group-data-limit")
 
     page.locator("#group-data-limit-group").select_option("family")
@@ -705,9 +707,13 @@ def check(page, base, width):
         "id": "bob", "name": "Bob tablet", "ipv4_address": "192.168.50.77", "profile_id": "normal",
     })
     post(page, base, "/api/groups", {"id": "family", "name": "Family", "device_ids": [DEVICE, "bob"]})
+    post(page, base, "/api/devices", {
+        "id": "carol", "name": "Carol phone", "ipv4_address": "192.168.50.78", "profile_id": "normal",
+    })
+    post(page, base, "/api/groups", {"id": "solo", "name": "Solo", "device_ids": ["carol"]})
     page.evaluate("refresh()")
     open_page(page, "schedules")
-    expect(page.locator("#data-limit-device option")).to_have_count(2)
+    expect(page.locator("#data-limit-device option")).to_have_count(3)
     check_data_limit(page, base, width)
     check_group_data_limit(page, base, width)
     check_service_quota(page, base, width)
