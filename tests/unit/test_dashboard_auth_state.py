@@ -41,6 +41,7 @@ def test_token_checks_and_edits_release_all_private_loading_states():
       let samplingStops = 0;
       let result = {ok: false, message: "rejected fixture token"};
       let failure = null;
+      let accessFailure = null;
       function element(id) {
         if (!nodes.has(id)) nodes.set(id, {
           value: "", textContent: "pending", className: "", disabled: false,
@@ -60,7 +61,7 @@ def test_token_checks_and_edits_release_all_private_loading_states():
       function openCredentials() {}
       function stopTrafficSampling() {samplingStops++}
       async function loadAdminTools() {if (failure) throw failure; return result}
-      async function loadDashboardAccess() {return {allowed: true}}
+      async function loadDashboardAccess() {if (accessFailure) throw accessFailure; return {allowed: true}}
       function setDashboardUnlocked() {}
       async function refresh() {
         refreshCalls++;
@@ -112,6 +113,17 @@ def test_token_checks_and_edits_release_all_private_loading_states():
         await checkAdminToken();
         assertLocked();
         assert.equal(refreshCalls, 1);
+        failure = null;
+        accessFailure = Object.assign(new Error("Device verification is busy. Try again."),
+          {status: 409, code: "helper-busy"});
+        element("admin-token").value = "valid fixture token";
+        await checkAdminToken();
+        assert.equal(adminTokenVerified, false);
+        assert.equal(adminTokenRejected, false);
+        assert.equal(adminTokenRefused, false);
+        assert.equal(element("admin-token").value, "valid fixture token");
+        assert.match(element("token-check-status").textContent, /Your token is kept/);
+        assert.equal(element("check-admin-token").disabled, false);
         console.log("CASE-COMPLETE");
       })().catch(error => {console.error(error); process.exitCode = 1});
     """

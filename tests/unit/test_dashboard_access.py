@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
@@ -148,6 +149,78 @@ def test_registration_revalidates_and_removal_is_immediate(tmp_path):
     assert not service.handle_payload(request)["allowed"]
     # Ordinary checks reuse identity for at most a second but always reread permissions.
     assert applier.calls == 4
+
+
+def test_overlapping_status_reads_wait_briefly_and_reuse_only_identity(tmp_path):
+    applier = PeerApplier()
+    store = AccessStore(tmp_path / "access.json")
+    store.add(MAC)
+    service = HelperService(applier, access_store=store)
+    identity_started = threading.Event()
+    release_identity = threading.Event()
+    all_checks_at_lock = threading.Event()
+    attempts_lock = threading.Lock()
+    attempts = 0
+    original_identify = identify_peer
+
+    class TrackingLock:
+        def __init__(self):
+            self.lock = threading.Lock()
+
+        def acquire(self, *args, **kwargs):
+            nonlocal attempts
+            with attempts_lock:
+                attempts += 1
+                if attempts == 4:
+                    all_checks_at_lock.set()
+            return self.lock.acquire(*args, **kwargs)
+
+        def release(self):
+            self.lock.release()
+
+    service._access_lock = TrackingLock()
+
+    def slow_identify(*args, **kwargs):
+        identity_started.set()
+        assert release_identity.wait(timeout=1)
+        return original_identify(*args, **kwargs)
+
+    request = {"action": "dashboard-access", "peer": PEER}
+    start = threading.Barrier(5)
+
+    def check_status():
+        start.wait(timeout=1)
+        return service.handle_payload(request)
+
+    with patch("jittersim.networking.helper.identify_peer", side_effect=slow_identify):
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            checks = [executor.submit(check_status) for _ in range(4)]
+            start.wait(timeout=1)
+            assert identity_started.wait(timeout=1)
+            assert all_checks_at_lock.wait(timeout=1)
+            release_identity.set()
+            results = [check.result(timeout=1) for check in checks]
+
+    assert all(result["ok"] and result["allowed"] for result in results)
+    assert applier.calls == 1
+    assert service.handle_payload({**request, "operation": "remove", "mac_address": MAC})["ok"]
+    assert not service.handle_payload(request)["allowed"]
+
+
+def test_status_read_wait_is_bounded_and_access_writes_remain_serialized(tmp_path):
+    service = HelperService(PeerApplier(), access_store=AccessStore(tmp_path / "access.json"))
+    service._access_lock.acquire()
+    try:
+        with patch("jittersim.networking.helper.ACCESS_STATUS_LOCK_WAIT_SECONDS", 0.01):
+            status = service.handle_payload({"action": "dashboard-access", "peer": PEER})
+            remove = service.handle_payload({
+                "action": "dashboard-access", "operation": "remove",
+                "peer": PEER, "mac_address": MAC,
+            })
+    finally:
+        service._access_lock.release()
+    assert status["reason"] == "helper-busy"
+    assert remove["reason"] == "helper-busy"
 
 
 def test_concurrent_changes_duplicates_limits_and_failed_replace(tmp_path):
