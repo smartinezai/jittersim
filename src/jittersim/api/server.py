@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import select
+import signal
 import socket
 import sqlite3
 import socketserver
@@ -6449,6 +6450,17 @@ def _authorization_matches(
     )
 
 
+class TerminationRequested(KeyboardInterrupt):
+    """The service manager asked the dashboard to stop. It takes the same exit path as Ctrl-C."""
+
+
+def _stop_on_sigterm(signum: int, frame: Any) -> None:
+    # Only the first SIGTERM acts. A repeat while the dashboard is already closing up must not
+    # cut into that cleanup, and systemd follows up with SIGKILL when the cleanup is too slow.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise TerminationRequested()
+
+
 def run_server(
     *,
     database_path: DatabasePath,
@@ -6490,8 +6502,9 @@ def run_server(
     try:
         server.recover_saved_network_state()
         server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    except KeyboardInterrupt as interrupt:
+        LOGGER.info("jittersim dashboard stopping (%s)",
+                    "SIGTERM" if isinstance(interrupt, TerminationRequested) else "interrupt")
     finally:
         scheduler.begin_shutdown()
         unresolved = []
@@ -6534,6 +6547,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Start the dashboard. SIGTERM from the service manager stops it cleanly."""
+
+    # `systemctl stop` sends SIGTERM. Without a handler it ends the process in the middle of a
+    # request, with the scheduler and the database still open.
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        previous = signal.signal(signal.SIGTERM, _stop_on_sigterm)
+    try:
+        return _serve(argv)
+    except TerminationRequested:
+        # SIGTERM arrived before the server was serving. Nothing is left running.
+        return 0
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def _serve(argv: Optional[Sequence[str]] = None) -> int:
     """Parse server options and start the dashboard."""
 
     arguments = _build_parser().parse_args(argv)
