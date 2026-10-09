@@ -894,11 +894,21 @@ def main(argv=None):
     parser.add_argument("--test-interface", default="wlan0")
     args = parser.parse_args(argv)
     configure_logging()
+    gateway_path = ACCESS_RUNTIME.parent / "gateway-state.json"
     try:
-        guard = PanicGuard().provision(ACCESS_RUNTIME.parent / "gateway-state.json")
+        guard = PanicGuard().provision(gateway_path)
         stopped = guard["household_stop_latched"]
     except OSError:
         LOGGER.exception("Panic state was not readable. Household rules remain disabled.")
+        stopped = True
+    # The helper keeps a stop recorded in either file (see HelperService.__init__).
+    # Decide the same way so a guard save that failed after gateway.json never restores.
+    try:
+        from jittersim.networking.helper import gateway_household_stopped
+
+        stopped = gateway_household_stopped(gateway_path) or stopped
+    except Exception:  # noqa: BLE001 - an unknown stop state keeps household rules off
+        LOGGER.exception("Gateway stop state was not readable. Household rules remain disabled.")
         stopped = True
     manager = AccessManager(
         executor=SubprocessExecutor(timeout_seconds=20),
