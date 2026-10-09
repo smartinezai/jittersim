@@ -93,6 +93,12 @@ PANIC_NETWORK_LOCK_WAIT_SECONDS = 10.0
 # for a reset that holds the network lock, then answer helper-busy, so they never
 # keep the operation lock from Apply and Reset for longer than those wait for it.
 GATEWAY_STATUS_LOCK_WAIT_SECONDS = 1.0
+# A Panic client (dashboard or `jittersim normal-access`) asks a busy helper
+# again for this long, once every NORMAL_ACCESS_BUSY_RETRY_INTERVAL seconds.
+# Normal access is idempotent and a busy answer changed nothing.
+NORMAL_ACCESS_TIMEOUT_SECONDS = 60.0
+NORMAL_ACCESS_BUSY_RETRY_SECONDS = 15.0
+NORMAL_ACCESS_BUSY_RETRY_INTERVAL = 0.5
 ACCESS_STATUS_LOCK_WAIT_SECONDS = 0.5
 # Each waiting status read holds one of the MAX_HELPER_CONNECTIONS request slots.
 # At most this many wait at once, so the access lock holder and its waiters never
@@ -2278,8 +2284,18 @@ class HelperClient:
         )
 
     def normal_access(self) -> Dict[str, Any]:
-        client = self._with_timeout(60)
-        return client._request({"action": "normal-access"})
+        started = time.monotonic()
+        deadline = started + NORMAL_ACCESS_TIMEOUT_SECONDS
+        retry_until = started + NORMAL_ACCESS_BUSY_RETRY_SECONDS
+        while True:
+            client = self._with_timeout(max(0.1, deadline - time.monotonic()))
+            try:
+                return client._request({"action": "normal-access"})
+            except HelperClientError as error:
+                if (error.reason != "helper-busy"
+                        or time.monotonic() + NORMAL_ACCESS_BUSY_RETRY_INTERVAL > retry_until):
+                    raise
+            time.sleep(NORMAL_ACCESS_BUSY_RETRY_INTERVAL)
 
     def access_status(self) -> Dict[str, Any]:
         return self._request({"action": "access-status"})
