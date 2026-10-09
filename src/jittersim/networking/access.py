@@ -177,11 +177,7 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
             f"add chain inet {table} {name} "
             f"{{ type {kind} hook {hook} priority {priority}; policy accept; }}"
         )
-    # Keep this port private even while filtering is disabled.
-    lines.append(
-        f'add rule inet {table} input iifname != "{interface}" iifname != "lo" '
-        f"meta l4proto {{ tcp, udp }} th dport {DNS_PORT} drop"
-    )
+    lines.append(_resolver_privacy_rule(topology))
     if not plan.options.enabled:
         return "\n".join(lines) + "\n"
     # Before every drop below. Replies leave through the output hook and the
@@ -304,11 +300,27 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _resolver_privacy_rule(topology: Topology) -> str:
+    # Keep this port private even while filtering is disabled. Unbound may still
+    # answer on it while a release waits for old DNS mappings to clear.
+    return (
+        f'add rule inet jittersim_access input iifname != "{topology.test_interface}" iifname != "lo" '
+        f"meta l4proto {{ tcp, udp }} th dport {DNS_PORT} drop"
+    )
+
+
 def _removal_firewall(topology: Topology) -> str:
-    """Remove every access table and the transition guard."""
+    """Remove every access rule and the transition guard, but keep the resolver port private.
+
+    Each line it adds is also in the open firewall the release tries first, so the
+    fallback cannot fail on a rule of its own.
+    """
 
     return "\n".join(
-        _table("jittersim_access") + ["delete table inet jittersim_access"]
+        _table("jittersim_access")
+        + ["add chain inet jittersim_access input "
+           "{ type filter hook input priority -250; policy accept; }",
+           _resolver_privacy_rule(topology)]
         + _table("jittersim_access", "netdev") + ["delete table netdev jittersim_access"]
     ) + "\n" + transition_firewall(topology, clear=True)
 

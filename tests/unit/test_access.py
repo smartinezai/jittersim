@@ -25,6 +25,7 @@ from jittersim.networking.access import (
     DNS_CLEANUP_ATTEMPTS,
     DNS_CLEANUP_BUDGET_SECONDS,
     AccessManager,
+    _removal_firewall,
     read_access,
     render_access_firewall,
     render_dns,
@@ -602,9 +603,27 @@ class HouseholdReleaseTests(unittest.TestCase):
         removal = self.release_nft()[-1]
         self.assertIn("delete table inet jittersim_access\n", removal)
         self.assertIn("delete table netdev jittersim_access\n", removal)
+        # O6: the private resolver port stays closed to everything but the test
+        # Wi-Fi and loopback, and the table that holds that rule is the last one.
+        privacy = ('add rule inet jittersim_access input iifname != "wlan0" iifname != "lo" '
+                   "meta l4proto { tcp, udp } th dport 5335 drop")
+        self.assertIn(privacy, removal)
+        lines = removal.splitlines()
+        self.assertNotIn("delete table inet jittersim_access", lines[lines.index(privacy):])
         self.assertIn("delete table inet jittersim_access_transition", removal)
         self.assertFalse(self.manager.applied.options.enabled)
         self.assertFalse(read_access(self.directory / "policy.json").options.enabled)
+
+    def test_the_removal_fallback_adds_nothing_the_open_firewall_lacks(self):
+        # O6: the fallback must not fail on a rule of its own. Each add in it is
+        # also in the open (disabled) firewall that the release tries first.
+        opened = set(render_access_firewall(AccessPlan(options=AccessOptions(enabled=False)),
+                                            self.manager.topology).splitlines())
+        added = [line for line in _removal_firewall(self.manager.topology).splitlines()
+                 if line.startswith("add ") and "jittersim_access_transition" not in line]
+        self.assertTrue(added)
+        self.assertLessEqual(set(added), opened)
+        self.assertEqual(sum(line.startswith("add rule") for line in added), 1)
 
     def test_when_nothing_loads_the_guard_clear_is_still_tried_and_nothing_rolls_back(self):
         def access_tables(command):
