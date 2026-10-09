@@ -69,6 +69,7 @@ jobs:
       - run: python -m tests.browser.address_move
       - run: python -m tests.browser.address_move_privacy
       - run: python -m tests.browser.general_profile
+      - run: python -m tests.browser.device_apply_start
       - run: python -m tests.browser.saved_profiles
       - run: python -m tests.browser.schedules_timers
       - run: python -m tests.browser.limits_quotas

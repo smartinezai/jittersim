@@ -30,7 +30,9 @@ class TwoClientHelper(PlanRecordingHelper):
         return [air, {**air, **PHONE, "hostname": "Phone"}]
 
 
-class DeviceApplyStartTests(unittest.TestCase):
+class DeviceApplyFixture(unittest.TestCase):
+    """A dashboard with two connected clients, two profiles and one saved device."""
+
     def setUp(self) -> None:
         self.repository = ConfigRepository(":memory:")
         self.repository.save_profile(Profile(id="low", name="daily climb manual",
@@ -69,6 +71,8 @@ class DeviceApplyStartTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         return scheduler
 
+
+class DeviceApplyStartTests(DeviceApplyFixture):
     # The reported failure and the approved repair.
 
     def test_reset_with_everyone_saved_then_device_apply_starts_only_that_device(self) -> None:
@@ -194,8 +198,9 @@ class DeviceApplyStartTests(unittest.TestCase):
         self.assertIn("did not start", result["error"])
         self.assertEqual(self.repository.get_device(AIR_ID).profile_id, "slow-test")
         self.assertIsNone(self.repository.get_device_start_scope())
+        # The helper is reset after the failed start, so the network is a clean Reset.
         state = self.repository.get_runtime_state()
-        self.assertEqual((state.last_action, state.observed_state), ("reset", "error"))
+        self.assertEqual((state.last_action, state.observed_state), ("reset", "reset"))
 
     # Reset, Panic and ordering.
 

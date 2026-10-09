@@ -144,6 +144,9 @@ class WorkflowStore:
         ]
 
     def history_item(self, identifier):
+        if not -(2**63) <= identifier < 2**63:
+            # SQLite binds 64-bit integers only. No saved version can have such an id.
+            raise ValueError("settings version no longer exists")
         row = self.db.execute(
             "SELECT settings_json FROM settings_history WHERE id = ?", (identifier,)
         ).fetchone()
