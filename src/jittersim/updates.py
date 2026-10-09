@@ -3963,8 +3963,6 @@ def apply_update(
         def restart_services(prepare_name=False):
             """Run the systemctl steps of install.sh for the units installed now."""
             panic_safety.inspect(code)
-            if not (code / "src/jittersim/journal_policy.py").is_file():
-                configure_outage_journal(code, config, manager, run)
             name_ready = prepare_name_service() if prepare_name else True
             try:
                 wifi = query(
@@ -4131,6 +4129,17 @@ def apply_update(
                 time.sleep(min(1, max(0, until - time.monotonic())))
             return False
 
+        def wait_restarted_healthy():
+            """Check health, then drop journal settings the restarted code lacks.
+
+            Removing them restarts journald and may take 10 seconds, so it never
+            runs while the services, and with them Panic, are stopped.
+            """
+            healthy = wait_healthy()
+            if not (code / "src/jittersim/journal_policy.py").is_file():
+                configure_outage_journal(code, config, manager, run)
+            return healthy
+
         if request.get("command_pending"):
             try:
                 if command_still_running(request["command_pending"], budget):
@@ -4166,7 +4175,7 @@ def apply_update(
                     # Its old source is still live. Never restore an unrelated backup.
                     budget.recover()
                     restart_services()
-                    if not wait_healthy():
+                    if not wait_restarted_healthy():
                         raise UpdateError("previous services could not restart before retry")
                     request.pop("restart_only", None)
                     atomic_json(root / "request.json", request)
@@ -4234,7 +4243,7 @@ def apply_update(
             if request.get("rollback"):
                 progress("rolling-back", "Restoring the previous installation and settings.")
                 restore()
-                if not wait_healthy():
+                if not wait_restarted_healthy():
                     raise UpdateError("recovery health check failed")
                 cleanup_generations(root, budget)
                 recovered = True
@@ -4373,10 +4382,10 @@ def apply_update(
                     if not writers_stopped(names, query, budget):
                         raise UpdateError("the settings writers did not stop before recovery")
                     restore()
-                    recovered = wait_healthy()
+                    recovered = wait_restarted_healthy()
                 elif stopped:
                     restart_services()
-                    recovered = wait_healthy()
+                    recovered = wait_restarted_healthy()
                 else:
                     recovered = True
                 if recovered and (needs_recovery or stopped):

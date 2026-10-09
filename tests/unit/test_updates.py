@@ -706,6 +706,32 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse([item for item in text if "mdnsname" in item])
         self.assertFalse([item for item in text if "avahi" in item])
 
+    def test_a_rollback_removes_outage_journal_settings_only_after_the_health_check(self):
+        # The restored code predates journal_policy.py. Removing its settings
+        # restarts journald and may take 10 seconds, so it must not lengthen the
+        # window in which the services and Panic are stopped.
+        self.install()
+        utility = str(self.manager.with_name("jittersim-outage-journal.py"))
+        request_update("", rollback=True, root=self.root, code=self.code, run=lambda *a: None)
+        commands, run = self.recorder()
+
+        def health():
+            commands.append(["health-check"])
+            return True
+
+        self.apply(run, health)
+        self.assertFalse((self.code / "src/jittersim/journal_policy.py").exists())
+        removals = [index for index, command in enumerate(commands)
+                    if utility in command and "remove" in command]
+        self.assertEqual(len(removals), 1, commands)
+        restarts = [index for index, command in enumerate(commands)
+                    if command[:2] == ["systemctl", "restart"]]
+        checks = [index for index, command in enumerate(commands) if command == ["health-check"]]
+        self.assertTrue(restarts and checks)
+        self.assertGreater(removals[0], max(restarts))
+        self.assertGreater(removals[0], min(index for index in checks if index > max(restarts)))
+        self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
+
     def test_the_watcher_restarts_and_a_running_test_wifi_is_left_alone(self):
         commands = self.install()
         calls = self.systemctl(commands)
