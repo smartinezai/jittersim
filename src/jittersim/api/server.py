@@ -1098,7 +1098,10 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             for connection in readable + writable:
                 if connection is self.socket:
                     continue
-                pending = self._pending_connections[connection]
+                pending = self._pending_connections.get(connection)
+                if pending is None:
+                    # Replaced by a newer connection during this round.
+                    continue
                 try:
                     if pending.handshake:
                         connection.do_handshake()
@@ -1143,9 +1146,14 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
 
     def _accept_connection(self) -> None:
         connection, address = self.socket.accept()
-        if len(self._pending_connections) >= MAX_PENDING_DASHBOARD_CONNECTIONS:
-            connection.close()
-            return
+        while len(self._pending_connections) >= MAX_PENDING_DASHBOARD_CONNECTIONS:
+            # A waiting connection has not said what it wants yet, so the Panic
+            # reserve cannot protect it here. Refusing newcomers would let a few
+            # silent clients lock Panic out until they expire. Instead the newest
+            # connection replaces the oldest one that still has sent nothing: a
+            # real client sends its request at once, and an attacker must open
+            # connections faster than that to keep one out. The queue stays bounded.
+            self._close_pending(next(iter(self._pending_connections)))
         try:
             connection.setblocking(False)
             if self._tls_context is not None:
