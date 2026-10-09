@@ -573,6 +573,9 @@ class HelperService:
                 return {"ok": True, "devices": store.remove(payload.get("mac_address"))}
             if operation == "local-list":
                 return {"ok": True, "devices": store.list_devices()}
+            if operation == "protected-sync":
+                # The dashboard replaces the whole protection-derived set from saved protection.
+                return {"ok": True, **store.sync_protected(payload.get("devices"))}
             if operation not in (
                 "status",
                 "register-self",
@@ -671,7 +674,8 @@ class HelperService:
                     device["mac_address"] == identity["mac_address"] and is_active(device)
                     for device in devices
                 )
-            result = {"ok": True, **identity, "allowed": allowed}
+            result = {"ok": True, **identity, "allowed": allowed,
+                      **store.access_details(devices, identity)}
             if operation in ("move-address", "move-address-owned"):
                 result["moved"] = moved
             if operation in ("list", "remove", "undo-move", "undo-move-owned"):
@@ -1905,6 +1909,11 @@ class HelperClient:
                               "peer": peer, "mac_address": mac_address, "name": name,
                               "move_id": move_id, "expected_mac": expected_mac,
                               "move_access": move_access})
+
+    def dashboard_access_protected_sync(self, devices: Sequence[Dict[str, str]]) -> Dict[str, Any]:
+        """Replace the helper's protection-derived grants with the saved protected list."""
+        return self._request({"action": "dashboard-access", "operation": "protected-sync",
+                              "devices": list(devices)})
 
     def _check_plan_support(self, plan: NetworkPlan) -> None:
         if plan.general_profile is not None:

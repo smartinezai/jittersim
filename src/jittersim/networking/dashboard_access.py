@@ -1,4 +1,10 @@
-"""Bounded saved dashboard permissions and verified local device identity."""
+"""Bounded saved dashboard permissions and verified local device identity.
+
+Two reasons can grant a verified device access. A manual grant is saved in the
+root-owned file. A protection grant is derived from the dashboard's protected
+list and is only held in memory: it is trusted after the dashboard replaced the
+whole set in this helper process, so a restart or rollback can only narrow it.
+"""
 
 import json
 import os
@@ -15,6 +21,9 @@ from typing import Any, Dict, List, Optional
 ACCESS_FILE = Path("/etc/jittersim/dashboard-access.json")
 MAX_ACCESS_DEVICES = 64
 MAX_ACCESS_BYTES = 32 * 1024
+# The protected list allows 256 devices. Every one of them can also be granted.
+MAX_PROTECTED_ACCESS_DEVICES = 256
+MAX_EFFECTIVE_ACCESS_DEVICES = MAX_ACCESS_DEVICES + MAX_PROTECTED_ACCESS_DEVICES
 _MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 
 
@@ -56,8 +65,87 @@ class AccessStore:
         self.path = path
         self.group_id = os.getegid() if group_id is None else group_id
         self._lock = threading.RLock()
+        # None until the dashboard sends the protected set in this process lifetime.
+        self._protected: Optional[Dict[str, Dict[str, Any]]] = None
+
+    @property
+    def protected_synced(self) -> bool:
+        return self._protected is not None
+
+    def sync_protected(self, devices: Any) -> Dict[str, Any]:
+        """Replace the whole protection-derived set. Repeating it is harmless."""
+        if not isinstance(devices, list):
+            raise AccessError("Protected devices must be sent as one list.")
+        if len(devices) > MAX_PROTECTED_ACCESS_DEVICES:
+            raise AccessError(
+                "Dashboard access from protection is limited to 256 devices."
+            )
+        names: Dict[str, str] = {}
+        for item in devices:
+            if not isinstance(item, dict) or "mac_address" not in item or set(item) - {
+                "mac_address", "name"
+            }:
+                raise AccessError("Each protected device needs only its address and name.")
+            mac = normalize_mac(item["mac_address"])
+            if mac in names:
+                raise AccessError("A protected device is listed twice.")
+            names[mac] = validate_label(item.get("name", ""))
+        with self._lock:
+            previous = self._protected or {}
+            now = int(time.time())
+            self._protected = {
+                mac: {
+                    "mac_address": mac,
+                    "name": name,
+                    "added_at": previous.get(mac, {}).get("added_at", now),
+                }
+                for mac, name in names.items()
+            }
+        return {"protected_synced": True, "protected_count": len(names)}
+
+    def access_details(
+        self, devices: List[Dict[str, Any]], identity: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Name the reasons that grant this verified device access."""
+        mac = identity.get("mac_address")
+        grants = []
+        active = [
+            device for device in devices if device["mac_address"] == mac and is_active(device)
+        ]
+        if mac and any(device.get("manual", True) for device in active):
+            grants.append("manual")
+        if mac and any(device.get("protected") for device in active):
+            grants.append("protection")
+        return {"grants": grants, "protected_synced": self.protected_synced}
+
+    def _effective(self, manual: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The union of saved grants and protection grants, one active entry per address."""
+        protected = self._protected or {}
+        if not protected:
+            return manual
+        active = {device["mac_address"] for device in manual if is_active(device)}
+        devices = [
+            dict(device, protected=True)
+            if is_active(device) and device["mac_address"] in protected
+            else device
+            for device in manual
+        ]
+        devices.extend(
+            dict(entry, manual=False, protected=True)
+            for mac, entry in protected.items()
+            if mac not in active
+        )
+        return devices
 
     def list_devices(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return self._effective(self._read_saved())
+
+    def saved_devices(self) -> List[Dict[str, Any]]:
+        """Only the saved grants, exactly as the root-owned file holds them."""
+        return self._read_saved()
+
+    def _read_saved(self) -> List[Dict[str, Any]]:
         with self._lock:
             try:
                 descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -137,7 +225,7 @@ class AccessStore:
     def initialize(self) -> None:
         """Create an empty file once and preserve a validated existing list."""
         with self._lock:
-            self.list_devices()
+            self._read_saved()
             if not self.path.exists():
                 self._save([])
 
@@ -145,9 +233,9 @@ class AccessStore:
         mac = normalize_mac(mac_address)
         name = validate_label(name)
         with self._lock:
-            devices = self.list_devices()
+            devices = self._read_saved()
             if any(device["mac_address"] == mac and is_active(device) for device in devices):
-                return devices
+                return self._effective(devices)
             # Registering a replaced address again supersedes its old entry.
             devices = [device for device in devices if device["mac_address"] != mac]
             if len(devices) >= MAX_ACCESS_DEVICES:
@@ -156,7 +244,7 @@ class AccessStore:
                 )
             devices.append({"mac_address": mac, "name": name, "added_at": int(time.time())})
             self._save(devices)
-            return devices
+            return self._effective(devices)
 
     def move(
         self, old_address: str, new_address: str, *, move_id: Optional[str] = None
@@ -168,7 +256,8 @@ class AccessStore:
         if not isinstance(move_id, str) or not re.fullmatch(r"[0-9a-f]{32}", move_id):
             raise AccessError("Move ownership identifier is invalid.")
         with self._lock:
-            devices = self.list_devices()
+            # Only a saved grant moves. A protection grant follows the protected list.
+            devices = self._read_saved()
             entry = next((item for item in devices if item["mac_address"] == old), None)
             if entry is None or not is_active(entry) or old == new:
                 raise AccessError("That device is not on the allowed list.")
@@ -196,13 +285,13 @@ class AccessStore:
                 {"mac_address": new, "name": entry["name"], "added_at": now, "owner_id": move_id}
             )
             self._save(devices)
-            return devices
+            return self._effective(devices)
 
     def undo_move(self, old_address: str, *, move_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Reactivate a replaced entry and drop the address that took its place."""
         old = normalize_mac(old_address)
         with self._lock:
-            devices = self.list_devices()
+            devices = self._read_saved()
             entry = next((item for item in devices if item["mac_address"] == old), None)
             if entry is None or is_active(entry):
                 raise AccessError("There is no move to undo for that device.")
@@ -236,16 +325,17 @@ class AccessStore:
                 if item["mac_address"] != new
             ]
             self._save(devices)
-            return devices
+            return self._effective(devices)
 
     def remove(self, mac_address: str) -> List[Dict[str, Any]]:
         mac = normalize_mac(mac_address)
         with self._lock:
-            devices = self.list_devices()
+            # Removing a saved grant leaves a protection grant in place.
+            devices = self._read_saved()
             remaining = [device for device in devices if device["mac_address"] != mac]
             if remaining != devices:
                 self._save(remaining)
-            return remaining
+            return self._effective(remaining)
 
     def _save(self, devices: List[Dict[str, Any]]) -> None:
         temporary = None

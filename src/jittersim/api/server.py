@@ -135,6 +135,12 @@ from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
 from jittersim.engine.website import describe_timed_out_names, without_dns
 from jittersim.networking.applier import MAX_PROTECTED_MACS, _validate_access_point_settings
+from jittersim.networking.dashboard_access import (
+    MAX_EFFECTIVE_ACCESS_DEVICES,
+    AccessError as DashboardAccessError,
+    normalize_mac as normalize_access_mac,
+    validate_label as validate_access_label,
+)
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
     WIFI_DETAILS_MISSING_MESSAGE,
@@ -154,6 +160,11 @@ from jittersim.api.wifi_operations import WifiOperations, WifiOutcome, valid_req
 from jittersim.engine.timeline import overlapping_schedules
 
 LOGGER = logging.getLogger(__name__)
+# A failed protection sync is retried by the next dashboard request at most this often.
+PROTECTED_ACCESS_RETRY_SECONDS = 10.0
+# A restarted helper is reconciled at once, but never more than once a second.
+PROTECTED_ACCESS_RESTART_RETRY_SECONDS = 1.0
+PROTECTED_ACCESS_SYNC_ATTEMPTS = 3
 WIFI_COPY_BUSY_MESSAGE = "The router is busy right now. Try again in a moment."
 MAX_JSON_BODY_BYTES = 64 * 1024
 # One block or profile call may carry this many names.
@@ -244,6 +255,7 @@ WRITE_PATHS = frozenset(
         "/api/dashboard-access/remove",
         "/api/dashboard-access/move",
         "/api/dashboard-access/move-undo",
+        "/api/dashboard-access/sync-protected",
     )
 )
 # A signed release sent over HTTPS when the Mac cannot use SSH (see handle_release_upload).
@@ -971,6 +983,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         self.name_status_path = name_status_path
         self.helper_client = helper_client
         self.scheduler = scheduler
+        # Protection-derived dashboard access: the last confirmed sync with the root helper.
+        self._protected_access_lock = threading.Lock()
+        self._protected_access_state: Dict[str, Any] = {
+            "synced": None, "protected": 0, "granted": 0, "not_eligible": [], "error": None,
+        }
+        self._protected_access_key: Optional[tuple] = None
+        self._protected_access_attempted = float("-inf")
         self.router_operations = RouterOperations(
             self._router_execute, str(admin_token) + "\0" + str(getattr(helper_client, "socket_path", "local")),
         )
@@ -1203,11 +1222,246 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     "can_register": False, "mac_address": None}
         if self.helper_client is None:
             raise HelperClientError("Device verification needs the Pi networking helper.")
+        result = self._checked_access(operation, peer, values)
+        if self._protected_access_due(result):
+            # The helper restarted or an earlier sync failed: reconcile, then answer again.
+            state = self.sync_protected_access(blocking=False)
+            if state.get("synced") and operation in ("status", "list"):
+                result = self._checked_access(operation, peer, values)
+        return result
+
+    def _checked_access(self, operation: str, peer: str, values: Dict[str, Any]) -> Dict[str, Any]:
         result = self.helper_client.dashboard_access(operation, peer=peer, **values)
         if (type(result.get("allowed")) is not bool or type(result.get("can_register")) is not bool
                 or result.get("network") not in ("test", "management")):
             raise HelperClientError("Device verification returned an invalid response.")
         return result
+
+    def _protected_access_due(self, result: Dict[str, Any]) -> bool:
+        if getattr(self.helper_client, "dashboard_access_protected_sync", None) is None:
+            return False
+        waited = time.monotonic() - self._protected_access_attempted
+        if result.get("protected_synced") is False:
+            return waited >= PROTECTED_ACCESS_RESTART_RETRY_SECONDS
+        return (self._protected_access_state.get("synced") is False
+                and waited >= PROTECTED_ACCESS_RETRY_SECONDS)
+
+    def protected_access_status(self) -> Dict[str, Any]:
+        """The last protection sync outcome, safe to show to a signed-in owner."""
+        state = self._protected_access_state
+        return {**state, "not_eligible": [dict(item) for item in state["not_eligible"]]}
+
+    def _protected_access_targets(self) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+        targets: List[Dict[str, str]] = []
+        not_eligible: List[Dict[str, str]] = []
+        for device in self.repository.list_unaffected_devices():
+            try:
+                mac = normalize_access_mac(device.mac_address)
+            except DashboardAccessError:
+                # Listed, never dropped: the owner sees which protected device cannot sign in.
+                not_eligible.append({"mac_address": device.mac_address,
+                                     "reason": "This address cannot identify one Wi-Fi device."})
+                continue
+            try:
+                name = validate_access_label(device.display_name)
+            except DashboardAccessError:
+                name = ""
+            targets.append({"mac_address": mac, "name": name})
+        return targets, not_eligible
+
+    def sync_protected_access(self, *, blocking: bool = True) -> Dict[str, Any]:
+        """Replace the helper's protection grants with saved protection. Safe to repeat.
+
+        Syncs run one at a time and each reads the protected list inside the lock, so an
+        older request can never overwrite the result of a newer change.
+        """
+        sync = getattr(self.helper_client, "dashboard_access_protected_sync", None)
+        if sync is None or not self._protected_access_lock.acquire(blocking=blocking):
+            return self.protected_access_status()
+        try:
+            self._protected_access_attempted = time.monotonic()
+            result = None
+            error = "Saved protection could not be read."
+            targets: Optional[List[Dict[str, str]]] = None
+            not_eligible: List[Dict[str, str]] = []
+            try:
+                targets, not_eligible = self._protected_access_targets()
+            except (StorageError, sqlite3.Error):
+                LOGGER.warning("saved protection could not be read for dashboard access")
+            for attempt in range(PROTECTED_ACCESS_SYNC_ATTEMPTS if targets is not None else 0):
+                try:
+                    result = sync(targets)
+                    break
+                except HelperClientError as failure:
+                    error = str(failure)
+                    if failure.reason != "helper-busy" or attempt + 1 == PROTECTED_ACCESS_SYNC_ATTEMPTS:
+                        break
+                    time.sleep(0.05 * (attempt + 1))
+            synced = (
+                targets is not None and isinstance(result, dict)
+                and result.get("protected_synced") is True
+                and result.get("protected_count") == len(targets)
+            )
+            if result is not None and not synced:
+                error = "The Pi helper did not confirm every protected device."
+            state = {
+                "synced": synced,
+                "protected": len(targets or ()) + len(not_eligible),
+                "granted": len(targets) if synced else 0,
+                "not_eligible": not_eligible,
+                "error": None if synced else error,
+            }
+            self._protected_access_state = state
+            self._protected_access_key = (
+                tuple((item["mac_address"], item["name"]) for item in targets) if synced else None
+            )
+            if synced:
+                LOGGER.info("dashboard access confirmed for %d protected devices", len(targets))
+            else:
+                LOGGER.warning("dashboard access for protected devices is not confirmed")
+            return self.protected_access_status()
+        finally:
+            self._protected_access_lock.release()
+
+    def reconcile_protected_access(self) -> Dict[str, Any]:
+        """Sync only when saved protection differs from the last confirmed sync."""
+        if getattr(self.helper_client, "dashboard_access_protected_sync", None) is None:
+            return self.protected_access_status()
+        try:
+            targets, _ = self._protected_access_targets()
+        except (StorageError, sqlite3.Error):
+            return self.sync_protected_access()
+        key = tuple((item["mac_address"], item["name"]) for item in targets)
+        if self._protected_access_state.get("synced") and key == self._protected_access_key:
+            return self.protected_access_status()
+        return self.sync_protected_access()
+
+    def recover_protected_access(self) -> Dict[str, Any]:
+        """The upgrade and boot step: grant every saved protected device again."""
+        state = self.sync_protected_access()
+        if state.get("synced") is False:
+            LOGGER.warning("protected devices' dashboard access will be retried")
+        return state
+
+    def _with_protected_access(self, response: Tuple[int, str, bytes]) -> Tuple[int, str, bytes]:
+        """Run the access half of a protection change and report its exact outcome."""
+        status, content_type, body = response
+        state = self.sync_protected_access()
+        if state.get("synced") is None:
+            return response
+        try:
+            data = json.loads(body)
+        except ValueError:
+            return response
+        if not isinstance(data, dict):
+            return response
+        data["dashboard_access"] = state
+        if not state["synced"]:
+            note = ("Protection is saved but dashboard access for protected devices is not "
+                    "confirmed. A device that is no longer protected may still open the "
+                    "dashboard until Retry succeeds. Retry under Dashboard access.")
+            data["warning"] = (str(data["warning"]) + " " + note) if data.get("warning") else note
+        return status, content_type, _json_bytes(data)
+
+    def _only_protection_route(self, peer: str, mac: str) -> Optional[Dict[str, Any]]:
+        """The requester's verified identity when its access comes only from protecting mac."""
+        identity = self.dashboard_access(peer)
+        if (identity.get("network") == "test" and identity.get("mac_address") == mac
+                and identity.get("grants") == ["protection"]):
+            return identity
+        return None
+
+    def _keep_access_as_saved_grant(self, peer: str, mac: str) -> bool:
+        name = next((item.display_name for item in self.repository.list_unaffected_devices()
+                     if item.mac_address == mac), "")
+        try:
+            name = validate_access_label(name)
+        except DashboardAccessError:
+            name = ""
+        data = self.dashboard_access(peer, "register-self", name=name)
+        return data.get("mac_address") == mac and data.get("allowed") is True
+
+    def remove_protection_for_peer(self, payload: Any, peer: str) -> Tuple[int, str, bytes]:
+        """Never silently remove the requester's only verified control route."""
+        path = "/api/unaffected-devices/delete"
+        if not isinstance(payload, dict):
+            return self.write_response_for(path, payload)
+        payload = dict(payload)
+        choice = payload.pop("dashboard_access", None)
+        if choice not in (None, "keep", "remove"):
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "Choose keep or remove for this device's dashboard access."})
+        try:
+            mac = normalize_exempt_mac(payload.get("mac_address"))
+        except (TypeError, ValueError):
+            return self.write_response_for(path, payload)
+        own = self._only_protection_route(peer, mac)
+        if own is not None and choice is None:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({
+                "error": "This is the device you are using and it opens the dashboard only "
+                         "because it is protected. Choose whether it keeps dashboard access "
+                         "as a separate saved grant.",
+                "access_choice_required": True,
+            })
+        kept = False
+        if own is not None and choice == "keep":
+            try:
+                kept = self._keep_access_as_saved_grant(peer, mac)
+            except HelperClientError as error:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                    {"error": "Nothing changed. Dashboard access could not be saved for this "
+                              "device: " + str(error)})
+            if not kept:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                    {"error": "Nothing changed. The verified connection changed. Try again."})
+        response = self.write_response_for(path, payload)
+        if kept:
+            response = self._note_access(response, "This device kept dashboard access as a "
+                                                   "separate saved grant.")
+        return response
+
+    def import_for_peer(self, payload: Any, peer: str) -> Tuple[int, str, bytes]:
+        """Import settings and keep the requester's access when protection was its only route."""
+        return self._replace_settings_for_peer("/api/import", payload, peer)
+
+    def history_restore_for_peer(self, payload: Any, peer: str) -> Tuple[int, str, bytes]:
+        """Restore a saved version and keep the requester's only access route the same way."""
+        return self._replace_settings_for_peer("/api/history/restore", payload, peer)
+
+    def _replace_settings_for_peer(
+        self, path: str, payload: Any, peer: str
+    ) -> Tuple[int, str, bytes]:
+        identity = self.dashboard_access(peer)
+        if not (identity.get("network") == "test" and isinstance(identity.get("mac_address"), str)
+                and identity.get("grants") == ["protection"]):
+            identity = None
+        response = self.write_response_for(path, payload)
+        if identity is None or response[0] != HTTPStatus.OK:
+            return response
+        mac = identity["mac_address"]
+        if any(item.mac_address == mac for item in self.repository.list_unaffected_devices()):
+            return response
+        try:
+            kept = self._keep_access_as_saved_grant(peer, mac)
+        except HelperClientError:
+            kept = False
+        self.reconcile_protected_access()
+        return self._note_access(response, (
+            "This device kept dashboard access as a separate saved grant because the restored "
+            "settings no longer protect it." if kept else
+            "The restored settings no longer protect this device and its dashboard access could "
+            "not be kept. Use Allow this device or the management network."))
+
+    def _note_access(self, response: Tuple[int, str, bytes], message: str) -> Tuple[int, str, bytes]:
+        status, content_type, body = response
+        try:
+            data = json.loads(body)
+        except ValueError:
+            return response
+        if not isinstance(data, dict):
+            return response
+        data["dashboard_access"] = {**self.protected_access_status(), "message": message}
+        return status, content_type, _json_bytes(data)
 
     def _station_devices(self) -> list:
         """Return the helper's current client list or nothing when it cannot be read."""
@@ -3657,8 +3911,10 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             return "unknown"
         try:
             devices = reader("local-list")["devices"]
-            if not isinstance(devices, list) or len(devices) > 64:
+            if not isinstance(devices, list) or len(devices) > MAX_EFFECTIVE_ACCESS_DEVICES:
                 return "unknown"
+            # Move ownership lives only on saved grants. Protection grants follow protection.
+            devices = [item for item in devices if item.get("manual", True)]
             old = next((item for item in devices if item["mac_address"] == record.old_mac), None)
             new = next((item for item in devices if item["mac_address"] == record.new_mac), None)
         except (HelperClientError, KeyError, TypeError):
@@ -3747,8 +4003,10 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     "device that is not connected."
                 )
             entries = self.helper_client.dashboard_access("local-list")["devices"]
-            if not isinstance(entries, list) or len(entries) > 64:
+            if not isinstance(entries, list) or len(entries) > MAX_EFFECTIVE_ACCESS_DEVICES:
                 raise HelperClientError("Saved device access could not be verified.")
+            # Only a saved grant moves with the helper. Protection moves in the database.
+            entries = [item for item in entries if isinstance(item, dict) and item.get("manual", True)]
             access = not identity.get("allowed") and any(
                 item.get("mac_address") == old and "replaced_by" not in item for item in entries
             )
@@ -3794,10 +4052,17 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             )
             result = json.loads(body)
             if result.get("saved") is True:
+                allowed = bool(data.get("allowed"))
+                if not allowed and (result.get("dashboard_access") or {}).get("synced"):
+                    # Protection moved here and its grant was confirmed. Ask again.
+                    try:
+                        allowed = bool(self.dashboard_access(peer).get("allowed"))
+                    except HelperClientError:
+                        allowed = False
                 return (
                     status,
                     content_type,
-                    _json_bytes({**result, "allowed": bool(data.get("allowed"))}),
+                    _json_bytes({**result, "allowed": allowed}),
                 )
             current = self.repository.get_address_move(old)
             if current != record:
@@ -3842,7 +4107,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             devices = reader("local-list").get("devices", [])
         except (HelperClientError, AttributeError, TypeError):
             return []
-        return [item for item in devices if isinstance(item, dict) and "replaced_by" not in item]
+        return [item for item in devices if isinstance(item, dict) and "replaced_by" not in item
+                and item.get("manual", True)]
 
     @staticmethod
     def _address_move_summary(move: AddressMove) -> dict:
@@ -4043,7 +4309,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             }
             if not move_protection:
                 return HTTPStatus.OK, "application/json", _json_bytes(fields)
-            return self._address_saved_response(fields)
+            return self._with_protected_access(self._address_saved_response(fields))
 
     def _address_saved_response(self, fields: dict):
         try:
@@ -4178,7 +4444,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             }
             if not record.moved_protection:
                 return HTTPStatus.OK, "application/json", _json_bytes(fields)
-            return self._address_saved_response(fields)
+            return self._with_protected_access(self._address_saved_response(fields))
 
     def _ad_blocking_payload(self) -> dict:
         service = {
@@ -4325,13 +4591,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     self._validate_saved_plan()
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
-            return self._address_saved_response(
+            # Traffic protection first, then the dashboard access that follows from it.
+            return self._with_protected_access(self._address_saved_response(
                 {
                     "devices": [
                         asdict(device) for device in self.repository.list_unaffected_devices()
                     ]
                 }
-            )
+            ))
 
     def _save_connected_group(self, payload: dict, *, existing: bool):
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
@@ -5065,6 +5332,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             self._sync_ad_blocking()
         except (HelperClientError, StorageError):
             LOGGER.warning("saved ad-blocking choices could not be confirmed during dashboard startup")
+        # Grants dashboard access to every saved protected device (also the upgrade step).
+        self.recover_protected_access()
         if not self._sync_gateway_persistence():
             return
         try:
@@ -5212,6 +5481,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             elif path in ("/api/dashboard-access/status", "/api/dashboard-access"):
                 data = self.server.dashboard_access(
                     self.client_address[0], "status" if path.endswith("/status") else "list")
+                if not path.endswith("/status"):
+                    data = {**data, "protected_access": self.server.protected_access_status()}
                 status, content_type, body = HTTPStatus.OK, "application/json", _json_bytes(data)
             else:
                 status, content_type, body = self.server.response_for(path, query=parsed_path.query)
@@ -5320,7 +5591,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         host = self.headers.get("Host", "")
         if (path.startswith(("/api/router/", "/api/homepage/")) or path in ("/api/access-point/reset-name",
                     "/api/dashboard-access/register-self", "/api/dashboard-access/remove",
-                    "/api/dashboard-access/move", "/api/dashboard-access/move-undo")) and (
+                    "/api/dashboard-access/move", "/api/dashboard-access/move-undo",
+                    "/api/dashboard-access/sync-protected")) and (
             self.headers.get("Sec-Fetch-Site") == "cross-site"
             or (origin is not None and origin not in ("http://" + host, "https://" + host))
         ):
@@ -5354,6 +5626,21 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 else:
                     status, content_type, body = self.server.move_device_address_for_peer(
                         old, self.client_address[0])
+            elif path == "/api/dashboard-access/sync-protected":
+                if payload:
+                    raise RequestError("Retrying protected access takes no settings.")
+                state = self.server.sync_protected_access()
+                status = HTTPStatus.OK if state.get("synced") else HTTPStatus.SERVICE_UNAVAILABLE
+                content_type, body = "application/json", _json_bytes(state)
+            elif path == "/api/unaffected-devices/delete":
+                status, content_type, body = self.server.remove_protection_for_peer(
+                    payload, self.client_address[0])
+            elif path == "/api/import":
+                status, content_type, body = self.server.import_for_peer(
+                    payload, self.client_address[0])
+            elif path == "/api/history/restore":
+                status, content_type, body = self.server.history_restore_for_peer(
+                    payload, self.client_address[0])
             elif path.startswith("/api/dashboard-access/"):
                 register = path.endswith("/register-self")
                 if set(payload) - ({"name"} if register else {"mac_address"}):
@@ -5382,6 +5669,13 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.INTERNAL_SERVER_ERROR
             content_type = "application/json"
             body = _json_bytes({"error": "request could not be processed"})
+        if path not in ACTION_PATHS and path not in PRIORITY_WRITE_PATHS:
+            # Any other write that changed saved protection (a restore, a group action) is
+            # reconciled here. Unchanged protection costs one read and no helper call.
+            try:
+                self.server.reconcile_protected_access()
+            except Exception:
+                LOGGER.exception("protected devices' dashboard access could not be reconciled")
         try:
             if path not in ("/api/router/status", "/api/router/operation") and status != HTTPStatus.ACCEPTED:
                 self.server.repository.record_action(action=path, status_code=int(status))
