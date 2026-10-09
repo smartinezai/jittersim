@@ -72,18 +72,49 @@ HELPER_OUT_OF_DATE_MESSAGE = (
 WIFI_DETAILS_MISSING_MESSAGE = "The router did not return a Wi-Fi name or password."
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_HELPER_CONNECTIONS = 8
+# Connections whose request line has not arrived yet wait in their own pool, so
+# incomplete input never holds one of the MAX_HELPER_CONNECTIONS operation slots.
+MAX_PENDING_HELPER_INPUT = 16
+# One more operation slot that only Panic (a complete normal-access request or
+# its emergency device check) may use when the others are taken.
+PANIC_RESERVED_SLOTS = 1
 # Apply and reset wait this long for a read to finish before they answer helper-busy.
 # Reads never wait so a dashboard poll cannot make Panic fail. Normal access is the
 # Panic action and waits like Reset. Access apply carries Block globally, Unblock,
 # Apply access rules and the device quick action so a poll must not refuse it either.
 WRITE_ACTIONS = ("apply", "apply-experiment", "reset", "recover-reset", "normal-access", "access-apply", "ad-blocking-configure")
 WRITE_LOCK_WAIT_SECONDS = 3.0
+# Normal access (Panic) does not take the request operation lock: a read such as a
+# five second DNS sample may hold that. It serializes on the network lock instead
+# and waits longer there than any other request, because an access change can
+# hold it for several seconds. The dashboard gives Panic 60 seconds in total.
+PANIC_NETWORK_LOCK_WAIT_SECONDS = 10.0
+# Gateway reads run while the request holds the operation lock. They wait this long
+# for a reset that holds the network lock, then answer helper-busy, so they never
+# keep the operation lock from Apply and Reset for longer than those wait for it.
+GATEWAY_STATUS_LOCK_WAIT_SECONDS = 1.0
+# A Panic client (dashboard or `jittersim normal-access`) asks a busy helper
+# again for this long, once every NORMAL_ACCESS_BUSY_RETRY_INTERVAL seconds.
+# Normal access is idempotent and a busy answer changed nothing.
+NORMAL_ACCESS_TIMEOUT_SECONDS = 60.0
+# Panic and Reset wait this long for the ad-blocking settings lock before they
+# report that the ad-blocking bypass could not be confirmed. An ad-blocking change
+# holds it while nft clears its routing, which can take a few seconds.
+AD_PAUSE_PANIC_WAIT_SECONDS = 8.0
+# Panic's own device check reuses a Wi-Fi station confirmation of the same device
+# at the same address for this long (review T5 of PR 91). See
+# HelperService._handle_emergency_verification.
+EMERGENCY_STATION_CONFIRMATION_SECONDS = 30.0
+NORMAL_ACCESS_BUSY_RETRY_SECONDS = 15.0
+NORMAL_ACCESS_BUSY_RETRY_INTERVAL = 0.5
 ACCESS_STATUS_LOCK_WAIT_SECONDS = 0.5
 # Each waiting status read holds one of the MAX_HELPER_CONNECTIONS request slots.
 # At most this many wait at once, so the access lock holder and its waiters never
 # take more than half the slots and Panic (normal-access) and Reset always find one.
 # Further status reads answer helper-busy at once, as before the short wait existed.
 ACCESS_STATUS_MAX_WAITERS = 3
+RELEASE_ACTIONS = ("update-status", "update-install", "update-rollback", "update-online-check",
+                   "update-online-status", "update-online-settings")
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
 ROUTER_ACTIONS = (
     "router-sync-ap",
@@ -195,8 +226,9 @@ class HelperService:
         self._queue_read_error: Optional[str] = None
         self._service_addresses = ServiceAddressBook(clock=service_address_clock)
         self._list_domains: Dict[str, tuple] = {}
-        # Reentrant: normal access resets under the lock and the gateway
-        # monitor retries a reset while it holds it.
+        # Not reentrant: a plain Lock. Normal access resets under it and the
+        # gateway monitor retries a reset while it holds it, so code that runs
+        # under this lock must never acquire it again or it deadlocks the helper.
         self._network_lock = threading.Lock()
         self._wifi_lock = threading.Lock()
         self._router_lock = threading.Lock()
@@ -204,6 +236,10 @@ class HelperService:
         self._access_lock = threading.Lock()
         self._access_status_waiters = threading.BoundedSemaphore(ACCESS_STATUS_MAX_WAITERS)
         self._peer_cache: Dict[str, Any] = {}
+        # Address -> (time, MAC) of the last ordinary verification that confirmed an
+        # allowed device as a Wi-Fi station. Read by Panic's emergency check only.
+        self._station_confirmations: Dict[str, Tuple[float, str]] = {}
+        self._station_confirmations_lock = threading.Lock()
         self._gateway_state_path = gateway_state_path
         self._access_manager = access_manager
         self._persistence_enabled = False
@@ -279,7 +315,7 @@ class HelperService:
                 return {"ok": True, "control_revision": self._control_revision,
                         "recovery_required": self._panic_recovery_failed}
         if action == "normal-access":
-            if not self._network_lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS):
+            if not self._network_lock.acquire(timeout=PANIC_NETWORK_LOCK_WAIT_SECONDS):
                 return {"ok": False, "error": "Pi networking is busy. Try again later.",
                         "reason": "helper-busy"}
             try:
@@ -476,6 +512,10 @@ class HelperService:
                     self._network_lock.release()
         if action == "dashboard-access":
             operation = payload.get("operation", "status")
+            if operation == "emergency-status":
+                # Panic and Reset: never wait for the access lock that an ordinary
+                # verification may hold for seconds.
+                return self._handle_emergency_verification(payload)
             if operation == "status":
                 # Allow a short burst of dashboard refreshes to take turns while
                 # keeping access changes serialized with each authorization check.
@@ -516,8 +556,13 @@ class HelperService:
             finally:
                 self._network_lock.release()
         if action == "gateway-status":
-            with self._network_lock:
+            if not self._network_lock.acquire(timeout=GATEWAY_STATUS_LOCK_WAIT_SECONDS):
+                return {"ok": False, "error": "Pi networking is busy. Try again later.",
+                        "reason": "helper-busy"}
+            try:
                 return {"ok": True, "action": action, **self._gateway_status()}
+            finally:
+                self._network_lock.release()
         if action == "gateway-persistence":
             return self._handle_gateway_persistence(payload)
         if action == "service-addresses":
@@ -559,6 +604,59 @@ class HelperService:
         if action == "router-wifi-credentials":
             return self._handle_router_wifi_credentials(payload)
         return {"ok": False, "error": "unknown action"}
+
+    def _remember_station_confirmation(self, peer: str, mac: str, now: float) -> None:
+        with self._station_confirmations_lock:
+            fresh = {key: value for key, value in self._station_confirmations.items()
+                     if now - value[0] < EMERGENCY_STATION_CONFIRMATION_SECONDS}
+            if peer in fresh or len(fresh) < MAX_CONNECTED_CLIENTS:
+                fresh[peer] = (now, mac)
+            self._station_confirmations = fresh
+
+    def _handle_emergency_verification(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Check the device that presses Panic or Reset without the access lock.
+
+        The dashboard has already checked the bearer token. This keeps the
+        saved-device check and never fails open:
+
+        - The route and the kernel neighbour entry of the address are read fresh
+          (`ip route`, `ip neigh`: fast commands), as in the ordinary check.
+        - The slow part of the ordinary check is the Wi-Fi station list (`iw
+          station dump`, up to five seconds). When an ordinary verification
+          confirmed this same address and MAC as an allowed station within
+          EMERGENCY_STATION_CONFIRMATION_SECONDS, that confirmation stands in for
+          it. Otherwise the station list is read fresh, which is bounded by its
+          command timeout.
+        - The saved device list is read fresh. A device removed since is refused.
+        """
+
+        store = self._access_store
+        if store is None:
+            return {"ok": False, "error": "Saved dashboard access is not configured."}
+        try:
+            peer = str(IPv4Address(payload.get("peer")))
+            now = time.monotonic()
+            with self._station_confirmations_lock:
+                confirmed = self._station_confirmations.get(peer)
+            if confirmed is not None and now - confirmed[0] >= EMERGENCY_STATION_CONFIRMATION_SECONDS:
+                confirmed = None
+            applier = (_ConfirmedStationApplier(self._applier, confirmed[1])
+                       if confirmed is not None else self._applier)
+            identity = identify_peer(applier, peer, require_reachable=False)
+            allowed = identity["network"] == "management" or (
+                identity["mac_address"] is not None
+                and any(device["mac_address"] == identity["mac_address"] and is_active(device)
+                        for device in store.list_devices())
+            )
+            return {"ok": True, **identity, "can_register": False, "allowed": allowed}
+        except AccessError as error:
+            return {"ok": False, "error": str(error)}
+        except (ValueError, TypeError, OSError, CommandExecutionError):
+            return {
+                "ok": False,
+                "error": "Dashboard access could not be verified or saved. "
+                "Check the Pi access file and reconnect directly to its Wi-Fi.",
+            }
 
     def _handle_dashboard_access(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         store = self._access_store
@@ -674,6 +772,8 @@ class HelperService:
                     device["mac_address"] == identity["mac_address"] and is_active(device)
                     for device in devices
                 )
+            if allowed and identity["network"] == "test" and identity["mac_address"]:
+                self._remember_station_confirmation(peer, identity["mac_address"], now)
             result = {"ok": True, **identity, "allowed": allowed,
                       **store.access_details(devices, identity)}
             if operation in ("move-address", "move-address-owned"):
@@ -914,7 +1014,10 @@ class HelperService:
         enabled = payload.get("enabled")
         if not isinstance(enabled, bool):
             return {"ok": False, "error": "gateway persistence must be true or false"}
-        with self._network_lock:
+        if not self._network_lock.acquire(timeout=GATEWAY_STATUS_LOCK_WAIT_SECONDS):
+            return {"ok": False, "error": "Pi networking is busy. Try again later.",
+                    "reason": "helper-busy"}
+        try:
             changed = self._persistence_enabled != enabled
             self._persistence_enabled = enabled
             self._persistence_mode_initialized = True
@@ -927,6 +1030,35 @@ class HelperService:
                 self._stop_for_gateway_outage()
             self._write_gateway_state()
             return {"ok": True, "action": "gateway-persistence", **self._gateway_status()}
+        finally:
+            self._network_lock.release()
+
+    def refresh_access_addresses(self) -> None:
+        """Follow new DHCP addresses of devices with household DNS rules.
+
+        The refresh changes household rules, so it takes turns with Panic, Apply
+        and access changes on the network lock. It skips a round when that lock
+        is busy and never runs after a household stop. The client scan runs
+        before the lock is taken so the lock is held only for the change itself.
+        """
+
+        access = self._access_manager
+        if access is None:
+            return
+        access.check_health()
+        if access.applied is None or not access.applied.has_dns_rules or self._household_stop_latched:
+            return
+        clients = self._handle_clients()
+        if not clients.get("ok"):
+            return
+        if not self._network_lock.acquire(blocking=False):
+            return
+        try:
+            if self._household_stop_latched:
+                return
+            access.refresh_addresses(clients["devices"])
+        finally:
+            self._network_lock.release()
 
     def monitor_gateway_once(self) -> None:
         """Update bounded gateway state and perform any required transition."""
@@ -1488,7 +1620,7 @@ class HelperService:
         blocking_failed = False
         if pause_ad_blocking and self._ad_blocking_store is not None:
             try:
-                self._ad_blocking_store.pause()
+                self._ad_blocking_store.pause(wait=AD_PAUSE_PANIC_WAIT_SECONDS)
             except (OSError, ValueError, CommandExecutionError):
                 blocking_failed = True
         self._active_plan = None
@@ -1602,6 +1734,65 @@ class HelperService:
             self._network_lock.release()
 
 
+def _decoded_request(line: bytes) -> Any:
+    try:
+        return json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return None
+
+
+def _uses_panic_reserve(payload: Any) -> bool:
+    """Only Panic may use the kept operation slot."""
+
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("action") == "normal-access" or (
+        payload.get("action") == "dashboard-access" and payload.get("operation") == "emergency-status"
+    )
+
+
+class _ConfirmedStationApplier:
+    """An applier whose Wi-Fi station list is one recently confirmed station.
+
+    identify_peer still reads the route and the neighbour entry fresh, and accepts
+    the address only when its current MAC is exactly the confirmed one.
+    """
+
+    def __init__(self, applier, mac: str) -> None:
+        self._applier = applier
+        self._mac = mac
+
+    def __getattr__(self, name):
+        return getattr(self._applier, name)
+
+    def list_connected_stations(self) -> str:
+        return f"Station {self._mac} (on {self._applier.test_interface})\n"
+
+
+class _Admission:
+    """The pool slot one helper connection holds. Released once, when its worker exits."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.input_slot = None
+        self.slot = None
+        self.preread: Optional[bytes] = None
+
+    def take(self, slot) -> None:
+        with self._lock:
+            self.slot = slot
+            held, self.input_slot = self.input_slot, None
+        if held is not None:
+            held.release()
+
+    def release(self) -> None:
+        with self._lock:
+            held = [value for value in (self.input_slot, self.slot) if value is not None]
+            self.input_slot = self.slot = None
+        for slot in held:
+            slot.release()
+
+
 class HelperRequestHandler(socketserver.StreamRequestHandler):
     """Read one newline-delimited JSON request from a Unix socket client."""
 
@@ -1619,7 +1810,11 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             return
 
     def _handle_request(self) -> None:
-        line = self.rfile.readline(MAX_MESSAGE_BYTES + 1)
+        admission = getattr(self.server, "current_admission", lambda: None)()
+        if admission is not None and admission.preread is not None:
+            line = admission.preread
+        else:
+            line = self.rfile.readline(MAX_MESSAGE_BYTES + 1)
         if hasattr(self, "request"):
             # Response transport gets its own bounded allowance after input.
             self.request.settimeout(3)
@@ -1634,6 +1829,11 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "request must be valid JSON"})
             return
         action = payload.get("action") if isinstance(payload, dict) else None
+        # The request is complete. Only now does it take an operation slot.
+        if admission is not None and not self.server.admit_operation(admission, payload):
+            self._send_response({"ok": False, "error": "The networking helper is busy. Try again later.",
+                                 "reason": "helper-busy"})
+            return
         if self.server.policy_only:
             if action not in ("homepage-snapshot", "homepage-confirm"):
                 self._send_response({"ok": False, "error": "action unavailable"})
@@ -1644,15 +1844,23 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "use the policy socket"})
             return
         # Capability flags are fixed for this process and read no live network state.
-        if action in ("ping", "capabilities", "control-revision", "dashboard-access", "update-retry") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
+        # Normal access serializes on the service's network lock. See
+        # PANIC_NETWORK_LOCK_WAIT_SECONDS.
+        if action in ("ping", "capabilities", "control-revision", "dashboard-access", "update-retry",
+                      "normal-access") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
             self._send_response(self.server.service.handle_payload(payload))
             return
         # Apply and reset wait a moment for a read so a poll never refuses Panic.
         # Reads of live network state answer helper-busy at once.
         # Signed staging only changes release files. It must not hold network
         # ownership while verifying an archive or copying it from the dashboard.
+        # Release status, install requests and the online check start systemd
+        # units and read release files. They change no network state, so they
+        # take their own lock and never hold the one Apply and Reset wait for
+        # (review U1 of PR 110).
         lock = (self.server.release_stage_lock if action in (
                     "update-stage-upload", "update-stage-identified-upload")
+                else self.server.release_lock if action in RELEASE_ACTIONS
                 else self.server.operation_lock)
         if action in WRITE_ACTIONS:
             acquired = lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS)
@@ -1687,7 +1895,13 @@ class UnixHelperServer(SafeServerErrors, socketserver.ThreadingMixIn, socketserv
         self.service = service
         self.operation_lock = threading.Lock()
         self.release_stage_lock = threading.Lock()
+        self.release_lock = threading.Lock()
+        # Incomplete input, operations and the Panic reserve are separate pools. A
+        # worker thread holds exactly one of them at any time until it exits.
+        self._input_slots = threading.BoundedSemaphore(2 if policy_only else MAX_PENDING_HELPER_INPUT)
         self._request_slots = threading.BoundedSemaphore(2 if policy_only else MAX_HELPER_CONNECTIONS)
+        self._panic_slots = None if policy_only else threading.BoundedSemaphore(PANIC_RESERVED_SLOTS)
+        self._admissions = threading.local()
         self._request_workers = RequestWorkers("jittersim-helper-request", daemon=policy_only)
         self._prepare_socket_path()
         try:
@@ -1699,39 +1913,90 @@ class UnixHelperServer(SafeServerErrors, socketserver.ThreadingMixIn, socketserv
 
     def process_request(self, request, client_address) -> None:
         self._request_workers.reap()
-        if not self._request_slots.acquire(blocking=False):
+        admission = _Admission()
+        if self._input_slots.acquire(blocking=False):
+            admission.input_slot = self._input_slots
+        else:
+            # Every input slot waits for a slow client. Read this request for a
+            # moment here: a complete Panic request still gets the kept slot.
+            line = None
             try:
-                self._drain_rejected_request(request)
-                request.settimeout(1)
-                request.sendall(b'{"ok":false,"error":"The networking helper is busy. Try again later.",'
-                                b'"reason":"helper-busy"}\n')
+                line = self._drain_rejected_request(request)
             except OSError:
                 pass
-            finally:
-                self.shutdown_request(request)
-            return
+            if (line is not None and self._panic_slots is not None
+                    and _uses_panic_reserve(_decoded_request(line))
+                    and self._panic_slots.acquire(blocking=False)):
+                admission.slot, admission.preread = self._panic_slots, line
+            else:
+                try:
+                    request.settimeout(1)
+                    request.sendall(b'{"ok":false,"error":"The networking helper is busy. Try again later.",'
+                                    b'"reason":"helper-busy"}\n')
+                except OSError:
+                    pass
+                finally:
+                    self.shutdown_request(request)
+                return
         try:
             self._request_workers.start(
-                lambda: self.process_request_thread(request, client_address),
-                abandon=lambda: self.shutdown_request(request), release=self._request_slots.release,
+                lambda: self._serve_admitted(admission, request, client_address),
+                abandon=lambda: self.shutdown_request(request), release=admission.release,
             )
         except Exception:
             LOGGER.exception("helper worker startup failed")
 
+    def _serve_admitted(self, admission, request, client_address) -> None:
+        self._admissions.current = admission
+        try:
+            self.process_request_thread(request, client_address)
+        finally:
+            self._admissions.current = None
+
+    def current_admission(self):
+        """The slots of the request this worker thread serves, if any."""
+
+        return getattr(self._admissions, "current", None)
+
+    def admit_operation(self, admission, payload) -> bool:
+        """Move a complete request from the input pool to an operation slot."""
+
+        if admission.slot is not None:
+            return True
+        if self._request_slots.acquire(blocking=False):
+            slot = self._request_slots
+        elif (self._panic_slots is not None and _uses_panic_reserve(payload)
+              and self._panic_slots.acquire(blocking=False)):
+            slot = self._panic_slots
+        else:
+            # Refused: keep the input slot until this worker exits, so a busy
+            # answer that is still being written stays counted.
+            return False
+        admission.take(slot)
+        return True
+
     @staticmethod
-    def _drain_rejected_request(request) -> None:
-        # Closing with unread input can discard the busy response on Linux.
+    def _drain_rejected_request(request) -> Optional[bytes]:
+        """Read one request line for at most 0.25 s. Return it when it is complete.
+
+        Closing with unread input can also discard the busy response on Linux.
+        """
         deadline = time.monotonic() + 0.25
         remaining = MAX_MESSAGE_BYTES + 1
+        received = b""
         while remaining:
             wait = deadline - time.monotonic()
             if wait <= 0:
-                return
+                return None
             request.settimeout(wait)
             chunk = request.recv(min(4096, remaining))
-            if not chunk or b"\n" in chunk:
-                return
+            if not chunk:
+                return None
+            received += chunk
+            if b"\n" in chunk:
+                return received.split(b"\n", 1)[0] + b"\n"
             remaining -= len(chunk)
+        return None
 
     def service_actions(self) -> None:
         if self._request_workers.startup_uncertain:
@@ -2125,8 +2390,18 @@ class HelperClient:
         )
 
     def normal_access(self) -> Dict[str, Any]:
-        client = self._with_timeout(60)
-        return client._request({"action": "normal-access"})
+        started = time.monotonic()
+        deadline = started + NORMAL_ACCESS_TIMEOUT_SECONDS
+        retry_until = started + NORMAL_ACCESS_BUSY_RETRY_SECONDS
+        while True:
+            client = self._with_timeout(max(0.1, deadline - time.monotonic()))
+            try:
+                return client._request({"action": "normal-access"})
+            except HelperClientError as error:
+                if (error.reason != "helper-busy"
+                        or time.monotonic() + NORMAL_ACCESS_BUSY_RETRY_INTERVAL > retry_until):
+                    raise
+            time.sleep(NORMAL_ACCESS_BUSY_RETRY_INTERVAL)
 
     def access_status(self) -> Dict[str, Any]:
         return self._request({"action": "access-status"})
@@ -2654,11 +2929,7 @@ def run_helper(
     def maintain_access():
         while not stopped.wait(15):
             try:
-                access.check_health()
-                if access.applied is not None and access.applied.has_dns_rules:
-                    clients = service._handle_clients()
-                    if clients.get("ok"):
-                        access.refresh_addresses(clients["devices"])
+                service.refresh_access_addresses()
             except Exception:
                 LOGGER.exception("could not refresh access device addresses")
 

@@ -8,6 +8,7 @@ import os
 import secrets
 import stat
 import sys
+import time
 from pathlib import Path
 
 PANIC_GUARD_FORMAT = 2
@@ -197,6 +198,24 @@ def verify_fresh_installer_lock(update_root, descriptor, *, owner_uid=0):
         os.close(parent)
 
 
+# A concurrent writer (access-boot provisioning or the installer) holds the guard
+# lock only for one fsynced save. Panic's save waits this long for it instead of
+# failing at once (gap audit 2026-10-09, finding 8).
+GUARD_LOCK_WAIT_SECONDS = 2.0
+
+
+def _bounded_exclusive_lock(descriptor):
+    deadline = time.monotonic() + GUARD_LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+
+
 class PanicGuard:
     def __init__(self, path=PANIC_GUARD_PATH, *, owner_uid=0):
         self.path = Path(path)
@@ -271,7 +290,7 @@ class PanicGuard:
                 or stat.S_IMODE(metadata.st_mode) != 0o600
             ):
                 raise PanicGuardError("Panic stop lock is not root-private")
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _bounded_exclusive_lock(lock)
             if initialize_only:
                 try:
                     existing = self.read()

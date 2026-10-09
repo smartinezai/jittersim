@@ -2571,39 +2571,35 @@ class QueueReadAndWriteTests(unittest.TestCase):
         )
         self.assert_profile_apply_waits_for_queue_read(plan)
 
-    def test_normal_access_that_arrives_during_a_slow_queue_read_waits_and_runs(self) -> None:
-        # Panic runs Normal access. It must wait for a read like Reset does and
-        # never answer busy after a fraction of a millisecond.
+    def test_normal_access_that_arrives_during_a_slow_queue_read_runs_at_once(self) -> None:
+        # Panic runs Normal access. A read holds the request operation lock, but
+        # Normal access does not take that lock (gap audit 2026-10-09, finding 1):
+        # it serializes on the network lock, which reads do not hold.
         access = FakeAccessManager()
         self.service._access_manager = access
         reader, reader_thread = self.hold_a_read()
         writer, writer_thread = self.in_thread(self.client().normal_access)
 
-        time.sleep(0.3)
-        self.assertEqual(writer, {})
-        self.executor.release.set()
         writer_thread.join(5)
+        self.assertEqual(reader, {})
+        self.executor.release.set()
         reader_thread.join(5)
 
         self.assertEqual(writer["result"]["ok"], True)
         self.assertTrue(writer["result"]["access_disabled"])
-        self.assertGreater(writer["seconds"], 0.25)
         self.assertIn("result", reader)
         self.assertEqual(access.disabled, 1)
         self.assertIsNone(self.service._active_plan)
 
-    def test_normal_access_waits_only_a_bounded_time_for_a_hung_read(self) -> None:
+    def test_normal_access_is_not_held_by_a_hung_read(self) -> None:
         self.service._access_manager = FakeAccessManager()
-        with mock.patch("jittersim.networking.helper.WRITE_LOCK_WAIT_SECONDS", 0.4):
-            reader, reader_thread = self.hold_a_read()
-            refused, thread = self.in_thread(self.client().normal_access)
-            thread.join(5)
-
-            self.assertEqual(refused["error"].reason, "helper-busy")
-            self.assertGreater(refused["seconds"], 0.35)
-            self.executor.release.set()
-            reader_thread.join(5)
-            self.assertTrue(self.client().normal_access()["access_disabled"])
+        reader, reader_thread = self.hold_a_read()
+        answer, thread = self.in_thread(self.client().normal_access)
+        thread.join(5)
+        self.assertTrue(answer["result"]["access_disabled"])
+        self.assertLess(answer["seconds"], 2.0)
+        self.executor.release.set()
+        reader_thread.join(5)
 
     def test_normal_access_also_waits_for_the_network_lock_of_a_direct_call(self) -> None:
         self.service._access_manager = FakeAccessManager()
@@ -2616,7 +2612,7 @@ class QueueReadAndWriteTests(unittest.TestCase):
         self.assertTrue(answer["ok"])
         self.assertGreater(time.monotonic() - started, 0.25)
 
-        with mock.patch("jittersim.networking.helper.WRITE_LOCK_WAIT_SECONDS", 0.2):
+        with mock.patch("jittersim.networking.helper.PANIC_NETWORK_LOCK_WAIT_SECONDS", 0.2):
             self.assertTrue(self.service._network_lock.acquire(blocking=False))
             try:
                 answer = self.service.handle_payload({"action": "normal-access"})
