@@ -327,7 +327,7 @@ class Lab:
         run("ip", "-n", PI, "link", "set", "wlan0", "up")
         run_in(PI, "nft", "-f", "-", stdin=NM_SHARED_TABLE)
         # The installer's own files for NetworkManager's shared dnsmasq (the
-        # dashboard name record and, since the outage lab, dhcp-authoritative).
+        # dashboard name record and dhcp-authoritative, PR 105).
         # pi_authoritative=False reproduces a Pi installed before that change.
         from jittersim import localname
 

@@ -7,7 +7,7 @@ source gap audit. No real Pi or router was contacted.
 
 Code: `tests/kernel/outage_lab.py` (topology and probes), `tests/kernel/test_outage_lab.py`
 (16 scenarios), `tests/kernel/Dockerfile.outage-lab`, `tests/kernel/run-outage-lab.sh`,
-`tests/kernel/README.md`. Base: main `12f4613`. Lab run: 16 tests, 498 s, OK with 3
+`tests/kernel/README.md`. Base: main `12f4613`, merged with main `3a86f97` before the PR (no change to the code under test except the DHCP file). Lab run: 16 tests, 498 s, OK with 3
 expected failures (documented defects in Panic-gated files).
 
 ## Topology
@@ -51,8 +51,8 @@ container, image `jittersim-lab-outage`).
 | H5 | proposed ifb + `ct state invalid drop` | Clean | 0 damaged or un-NATed frames; impairment still effective (ping loss 4 %, slower upload) |
 | H5 | Pi-local frames (ARP, DHCP client, DNS forwarder, mDNS) in every layout | Never damaged or duplicated | only fw-marked forwarded traffic reaches the netem bands |
 | 1 | Clean Pi-only mode | Pass | 3.1 s from join to browsing (fresh DHCP). Router WAN fault: browsing fails (DNS cached, HTTP fails) and returns 0.03 s after the fault clears |
-| 2a | Roam router -> Pi with the router lease, NM shared dnsmasq as installed before this PR | **No browsing for 14.1 s** | the client's INIT-REBOOT DHCPREQUEST for 192.168.0.150 is silently ignored five times; only dhclient's 10 s `reboot` timeout moves it to DISCOVER |
-| 2b | Same roam with `dhcp-authoritative` (this PR) | Pass | 3.2 s: immediate `DHCPNAK ... wrong network`, then DISCOVER |
+| 2a | Roam router -> Pi with the router lease, NM shared dnsmasq as installed before PR 105 | **No browsing for 14.1 s** | the client's INIT-REBOOT DHCPREQUEST for 192.168.0.150 is silently ignored five times; only dhclient's 10 s `reboot` timeout moves it to DISCOVER |
+| 2b | Same roam with `dhcp-authoritative` (main since PR 105) | Pass | 3.2 s: immediate `DHCPNAK ... wrong network`, then DISCOVER |
 | 2c | Roam back Pi -> router (rollback), router authoritative | Pass | 3.2 s (router NAKs the 192.168.50.x lease) |
 | 2d | Same, router not authoritative | **No browsing for 15.3 s** | matches "router Wi-Fi back on did not immediately restore browsing" if the real router ignores foreign INIT-REBOOT requests (unknown) |
 | 2e | Client that does not re-run DHCP after the roam (router lease 120 s) | **No browsing for 109 s** | recovers only when its stale lease runs out; real router leases are hours, so such a device stays broken for hours |
@@ -64,12 +64,12 @@ container, image `jittersim-lab-outage`).
 | 5 | Background address refresh while another client streams | **Every Wi-Fi client pauses** for the resolver restart | gap 0.15 s with an instant restart, 1.65 s with a 1.5 s restart (a Pi is slower). A ruled device on a new lease is cut off completely until the refresh runs (up to 15 s) |
 | 6 | Connection tracking | Measured | 6 entries per page load (DNS + TCP), 2 per uncached lookup plain, 3 with the filtered resolver. Table full (emulated cap of 300 Wi-Fi flows, 350 UDP flows from one device): **every client's new connections fail for 31 s** (the UDP unreplied timeout). Unbound RSS 13 MiB, NM dnsmasq 4 MiB |
 | 7 | What the router sees from the Pi (no impairment) | Clean | no DHCP server replies, no IPv6 router advertisements, no LLDP, no foreign source MACs or IPs on eth0 in any phase. Broadcast/multicast 0.49 /s with JitterSim's restricted Avahi (IGMP, MLD, router solicitations, DHCP client) vs 1.62 /s with stock Avahi (mDNS announcements). The Pi does not answer DHCP or DNS from the household LAN. Shaping one device (200 ms RTT) left the other client at 0.08 ms and the household device at 0.05 ms, 0 % loss |
-| 8 | Copy router Wi-Fi (fake TG3442DE API), cutover, rollback timer | Pass | preview and sync each log in and log out once (2 logins, 2 logouts); one AP down/up; routes and JitterSim tables unchanged; a household device on the router radio saw no outage; cutover 6.0 s with this PR's DHCP fix; rollback to the router 1.3 s |
+| 8 | Copy router Wi-Fi (fake TG3442DE API), cutover, rollback timer | Pass | preview and sync each log in and log out once (2 logins, 2 logouts); one AP down/up; routes and JitterSim tables unchanged; a household device on the router radio saw no outage; cutover 6.0 s with the authoritative DHCP file; rollback to the router 1.3 s |
 
 ## Which scenarios reproduce a "no browsing" state
 
 - Stale lease after the copied-name roam: 14-15 s per roam in each direction when
-  the DHCP server ignores the foreign request (Pi before this PR, router unknown),
+  the DHCP server ignores the foreign request (Pi before PR 105, router unknown),
   hours for a device that does not re-run DHCP.
 - Filtered DNS failures (3c, 3d) and Panic with a wedged hostapd (4a): until Panic
   succeeds, which can be never while hostapd stays wedged.
@@ -87,22 +87,21 @@ container, image `jittersim-lab-outage`).
    `topology.uplink_interface`; `renderer.py:128` always states `corrupt`). netem
    flips a bit anywhere from the MAC header on, after NAT. Result: forged source
    MACs, unknown destinations, broken ethertypes and IP headers on the household
-   LAN (H5 rows). Not fixed here: the Pi datapath fixer implements it. Measured
+   LAN (H5 rows). `docs/pi-only-datapath-audit-2026-10-09.md` reached the same
+   result with a single-flow probe. Not fixed here: the Pi datapath fixer implements it. Measured
    safe designs: (a) no upload corruption on eth0 (corrupt 0 % is clean), or
    (b) upload netem on an ifb from wlan0 ingress **plus** `iifname "wlan0" ct state
    invalid drop`, because (b) alone leaks un-NATed 192.168.50.x packets.
-2. **NM shared-mode dnsmasq is not authoritative** (fixed here): NetworkManager
-   never passes `--dhcp-authoritative` (nm-dnsmasq-manager.c), so a roaming
-   client's request for its router lease is ignored until the client gives up.
-   `src/jittersim/localname.py:35-36,223` now writes `jittersim-dhcp.conf`
-   (`dhcp-authoritative`) next to the dashboard name record in
-   `/etc/NetworkManager/dnsmasq-shared.d`, through the same `install_config` that
-   the installer and the dashboard update run. Only the Pi serves
-   192.168.50.0/24 and dnsmasq binds only 192.168.50.1 (scenario 7 confirms it
-   never answers on eth0), so this cannot affect the router LAN. Test first:
-   `tests/unit/test_local_name.py::...answer_foreign_leases_at_once`; lab 2a/2b.
-   The installer reports the change and asks for `sudo nmcli connection up
-   jittersim-ap`; until then the running dnsmasq keeps the old behaviour.
+2. **NM shared-mode dnsmasq is not authoritative** (already fixed on main by PR 105,
+   commit `60a08c6`, in parallel with this lab): NetworkManager never passes
+   `--dhcp-authoritative` (nm-dnsmasq-manager.c), so a roaming client's request
+   for its router lease is ignored until the client gives up. `localname.install_config`
+   now writes `jittersim-shared-dhcp.conf` (`src/jittersim/localname.py:30,235`).
+   The lab builds the Pi's `dnsmasq-shared.d` with that same function and confirms
+   the effect end to end: 14.1 s without the file (2a), 3.2 s with it (2b), and the
+   Pi still never answers DHCP on eth0 (scenario 7). It applies after the installer
+   or update rewrites the file and the test Wi-Fi restarts
+   (`sudo nmcli connection up jittersim-ap`).
 3. **Panic's household release can leave the test Wi-Fi closed** (gap audit 2,
    `src/jittersim/networking/access.py:557` guard, `:462` admission, `:564-579`
    rollback; gated). Reproduced with a wedged hostapd: strict expected failure
