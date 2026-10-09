@@ -79,6 +79,11 @@ MAX_HELPER_CONNECTIONS = 8
 WRITE_ACTIONS = ("apply", "apply-experiment", "reset", "recover-reset", "normal-access", "access-apply", "ad-blocking-configure")
 WRITE_LOCK_WAIT_SECONDS = 3.0
 ACCESS_STATUS_LOCK_WAIT_SECONDS = 0.5
+# Each waiting status read holds one of the MAX_HELPER_CONNECTIONS request slots.
+# At most this many wait at once, so the access lock holder and its waiters never
+# take more than half the slots and Panic (normal-access) and Reset always find one.
+# Further status reads answer helper-busy at once, as before the short wait existed.
+ACCESS_STATUS_MAX_WAITERS = 3
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
 ROUTER_ACTIONS = (
     "router-sync-ap",
@@ -197,6 +202,7 @@ class HelperService:
         self._router_lock = threading.Lock()
         self._access_store = access_store
         self._access_lock = threading.Lock()
+        self._access_status_waiters = threading.BoundedSemaphore(ACCESS_STATUS_MAX_WAITERS)
         self._peer_cache: Dict[str, Any] = {}
         self._gateway_state_path = gateway_state_path
         self._access_manager = access_manager
@@ -464,7 +470,13 @@ class HelperService:
             if operation == "status":
                 # Allow a short burst of dashboard refreshes to take turns while
                 # keeping access changes serialized with each authorization check.
-                acquired = self._access_lock.acquire(timeout=ACCESS_STATUS_LOCK_WAIT_SECONDS)
+                # Only a few may wait so waiters cannot fill the helper request slots.
+                acquired = self._access_lock.acquire(blocking=False)
+                if not acquired and self._access_status_waiters.acquire(blocking=False):
+                    try:
+                        acquired = self._access_lock.acquire(timeout=ACCESS_STATUS_LOCK_WAIT_SECONDS)
+                    finally:
+                        self._access_status_waiters.release()
             else:
                 acquired = self._access_lock.acquire(blocking=False)
             if not acquired:

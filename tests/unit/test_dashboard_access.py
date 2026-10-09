@@ -169,10 +169,12 @@ def test_overlapping_status_reads_wait_briefly_and_reuse_only_identity(tmp_path)
 
         def acquire(self, *args, **kwargs):
             nonlocal attempts
-            with attempts_lock:
-                attempts += 1
-                if attempts == 4:
-                    all_checks_at_lock.set()
+            # The holder takes the lock at once; the three others wait with a timeout.
+            if "timeout" in kwargs:
+                with attempts_lock:
+                    attempts += 1
+                    if attempts == 3:
+                        all_checks_at_lock.set()
             return self.lock.acquire(*args, **kwargs)
 
         def release(self):
