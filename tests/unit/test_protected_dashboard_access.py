@@ -546,6 +546,76 @@ class ProtectedAccessServerTests(unittest.TestCase):
         return self.server.history_restore_for_peer(
             {"id": identifier, "current_version": preview["current_version"]}, PEER)
 
+    def drop_protection(self, path):
+        if path == "/api/import":
+            settings = json.loads(self.server.response_for("/api/export")[2])
+            settings["everyone_else"]["unaffected_devices"] = []
+            return self.server.import_for_peer(settings, PEER)
+        first = min(item["id"] for item in
+                    json.loads(self.server.response_for("/api/history")[2])["versions"])
+        return self.history_restore(first)
+
+    def check_failed_apply_keeps_the_grant(self, path):
+        self.protect()
+        self.assertEqual(self.server.dashboard_access(PEER)["grants"], ["protection"])
+        self.helper.fail_action = "apply"
+        try:
+            status, _, body = self.drop_protection(path)
+        finally:
+            self.helper.fail_action = ""
+        # The replacement was saved but its live apply failed.
+        self.assertEqual(status, 502, body)
+        self.assertEqual(self.repository.list_unaffected_devices(), ())
+        self.assertIn("kept dashboard access", json.loads(body)["dashboard_access"]["message"])
+        identity = self.server.dashboard_access(PEER)
+        self.assertTrue(identity["allowed"])
+        self.assertEqual(identity["grants"], ["manual"])
+
+    def test_a_failed_live_apply_after_an_import_keeps_the_saved_grant(self):
+        self.check_failed_apply_keeps_the_grant("/api/import")
+
+    def test_a_failed_live_apply_after_a_history_restore_keeps_the_saved_grant(self):
+        self.check_failed_apply_keeps_the_grant("/api/history/restore")
+
+    def test_full_saved_grants_refuse_the_replacement_and_change_nothing(self):
+        for index in range(MAX_ACCESS_DEVICES):
+            self.store.add(mac(0x30000 + index), "Saved %d" % index)
+        self.protect()
+        for path in ("/api/import", "/api/history/restore"):
+            with self.subTest(path=path):
+                before = self.repository.saved_settings()
+                version = self.repository.get_runtime_state().configuration_version
+                plans = len(self.helper.plans)
+                status, _, body = self.drop_protection(path)
+                self.assertIn(status, (409, 503), body)
+                self.assertIn("Nothing changed", json.loads(body)["error"])
+                self.assertEqual(self.repository.saved_settings(), before)
+                self.assertEqual(
+                    self.repository.get_runtime_state().configuration_version, version)
+                self.assertEqual(len(self.helper.plans), plans)
+                identity = self.server.dashboard_access(PEER)
+                self.assertTrue(identity["allowed"])
+                self.assertEqual(identity["grants"], ["protection"])
+
+    def test_a_restore_refused_after_the_grant_puts_access_back_as_it_was(self):
+        first = min(item["id"] for item in
+                    json.loads(self.server.response_for("/api/history")[2])["versions"])
+        self.protect()
+        stale = self.repository.get_runtime_state().configuration_version - 1
+        status, _, body = self.server.history_restore_for_peer(
+            {"id": first, "current_version": stale}, PEER)
+        self.assertEqual(status, 409, body)
+        self.assertEqual(len(self.repository.list_unaffected_devices()), 1)
+        self.assertEqual(self.helper.operations.count("register-self"), 1)
+        self.assertEqual(self.server.dashboard_access(PEER)["grants"], ["protection"])
+
+    def test_an_invalid_import_is_refused_before_any_grant_is_saved(self):
+        self.protect()
+        status, _, body = self.server.import_for_peer({"profiles": "nope"}, PEER)
+        self.assertEqual(status, 400, body)
+        self.assertNotIn("manual", self.server.dashboard_access(PEER)["grants"])
+        self.assertEqual(len(self.repository.list_unaffected_devices()), 1)
+
     def test_a_history_restore_that_drops_the_requesters_protection_keeps_its_access(self):
         # The first saved version predates protection.
         first = min(item["id"] for item in json.loads(self.server.response_for("/api/history")[2])["versions"])
@@ -791,6 +861,60 @@ class ProtectedAccessHttpTests(unittest.TestCase):
         self.assertIn("kept dashboard access", json.loads(body)["dashboard_access"]["message"])
         status, body = self.send("GET", "/api/dashboard-access/status")
         self.assertEqual(json.loads(body)["grants"], ["manual"])
+
+    # G6: preserve the requester's only route before the replacement is committed.
+
+    def drop_protection_over_http(self, path):
+        if path == "/api/import":
+            status, body = self.send("GET", "/api/export")
+            settings = json.loads(body)
+            settings["everyone_else"]["unaffected_devices"] = []
+            return self.send("POST", "/api/import", settings)
+        status, body = self.send("GET", "/api/history")
+        first = min(item["id"] for item in json.loads(body)["versions"])
+        status, body = self.send("POST", "/api/history/preview", {"id": first})
+        version = json.loads(body)["current_version"]
+        return self.send("POST", "/api/history/restore", {"id": first, "current_version": version})
+
+    def check_failed_apply_over_http_keeps_the_grant(self, path):
+        self.repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))
+        status, body = self.send("GET", "/api/dashboard-access/status")
+        self.assertEqual(json.loads(body)["grants"], ["protection"])
+        self.server.helper_client.fail_action = "apply"
+        try:
+            status, body = self.drop_protection_over_http(path)
+        finally:
+            self.server.helper_client.fail_action = ""
+        self.assertEqual(status, 502, body)
+        self.assertEqual(self.repository.list_unaffected_devices(), ())
+        self.assertIn("kept dashboard access", json.loads(body)["dashboard_access"]["message"])
+        status, body = self.send("GET", "/api/dashboard-access/status")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["grants"], ["manual"])
+
+    def test_a_failed_live_apply_after_an_import_over_http_keeps_the_saved_grant(self):
+        self.check_failed_apply_over_http_keeps_the_grant("/api/import")
+
+    def test_a_failed_live_apply_after_a_restore_over_http_keeps_the_saved_grant(self):
+        self.check_failed_apply_over_http_keeps_the_grant("/api/history/restore")
+
+    def test_full_saved_grants_over_http_refuse_the_replacement_unchanged(self):
+        for index in range(MAX_ACCESS_DEVICES):
+            self.store.add(mac(0x30000 + index), "Saved %d" % index)
+        self.repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))
+        for path in ("/api/import", "/api/history/restore"):
+            with self.subTest(path=path):
+                before = self.repository.saved_settings()
+                version = self.repository.get_runtime_state().configuration_version
+                status, body = self.drop_protection_over_http(path)
+                self.assertIn(status, (409, 503), body)
+                self.assertIn("Nothing changed", json.loads(body)["error"])
+                self.assertEqual(self.repository.saved_settings(), before)
+                self.assertEqual(
+                    self.repository.get_runtime_state().configuration_version, version)
+                status, body = self.send("GET", "/api/dashboard-access/status")
+                self.assertEqual(status, 200, body)
+                self.assertEqual(json.loads(body)["grants"], ["protection"])
 
     def test_unprotecting_this_device_over_http_asks_first(self):
         self.repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))
