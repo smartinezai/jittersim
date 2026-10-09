@@ -110,6 +110,12 @@
 
     setupSidebarActionHelp();
 
+    // Move focus to the main content without adding #content to the address, which the page navigation owns.
+    document.querySelector(".skip-link").addEventListener("click", (event) => {
+      event.preventDefault();
+      document.getElementById("content").focus();
+    });
+
     function optionalNumber(id) {
       const value = element(id).value.trim();
       return value === "" ? null : Number(value);
@@ -7558,7 +7564,15 @@
       headings.concat([""]).forEach((heading) => {
         const cell = document.createElement("th");
         cell.scope = "col";
-        cell.textContent = heading;
+        if (heading) {
+          cell.textContent = heading;
+        } else {
+          // The last column holds row buttons. Give it a name for screen readers without showing it.
+          const hidden = document.createElement("span");
+          hidden.className = "visually-hidden";
+          hidden.textContent = "Actions";
+          cell.appendChild(hidden);
+        }
         headRow.appendChild(cell);
       });
       const head = document.createElement("thead");

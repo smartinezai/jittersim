@@ -177,3 +177,13 @@ def test_the_update_card_is_mounted_on_updates_and_only_that_page_polls_it():
     assert "workflowCard('release-controls', 'Updates and recovery', 'updates'" in script
     assert 'if (page === "updates") jobs.push(pollReleaseProgress);' in DASHBOARD_HTML
     assert "pollReleaseProgress" not in re.search(r'if \(page === "router"\)[^\n]*', DASHBOARD_HTML).group(0)
+
+
+def test_a_skip_link_is_the_first_stop_and_leads_to_focusable_main_content():
+    assert re.search(r'<body[^>]*>\s*<a class="skip-link" href="#content">Skip to main content</a>', HTML)
+    assert re.search(r'<main[^>]*id="content"[^>]*tabindex="-1"', HTML)
+
+
+def test_named_regions_do_not_share_a_name():
+    names = re.findall(r'<(?:section|pre)[^>]*aria-label="([^"]+)"', HTML)
+    assert len(names) == len(set(names)), sorted({n for n in names if names.count(n) > 1})
