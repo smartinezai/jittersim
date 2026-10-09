@@ -1,5 +1,8 @@
+
     /* Design tokens. Every colour below is a role, not a shade: change the value here and the whole page follows. */
     :root {
+      color-scheme: dark;
+      font-family: var(--font-sans);
       --accent: #5aa9ff;
       --accent-pending: #9ccbff;
       --accent-soft: #9ccbff;
@@ -46,8 +49,8 @@
       --bg-nav-hover: #121b28;
       --bg-page: #090d14;
       --bg-pill: #111925;
-      --bg-primary: #2a6cb8;
-      --bg-primary-hover: #337ccd;
+      --bg-primary: #205fa8;
+      --bg-primary-hover: #2769b6;
       --bg-raised: #121b29;
       --bg-selected: #1a2a44;
       --bg-sidebar: #0c121b;
@@ -82,11 +85,29 @@
       --warn-border: #9a7230;
       --warn-border-2: #d8a95a;
       --warn-text: #f2c46d;
-    }
-
-    :root {
-      color-scheme: dark;
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+        --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        --fs-2xs: 0.6875rem;
+        --fs-xs: 0.75rem;
+        --fs-sm: 0.8125rem;
+        --fs-md: 0.9375rem;
+        --fs-lg: 1.125rem;
+        --fs-xl: 1.3125rem;
+        --sp-1: 0.25rem;
+        --sp-2: 0.5rem;
+        --sp-3: 0.75rem;
+        --sp-4: 1rem;
+        --sp-5: 1.5rem;
+        --sp-6: 2rem;
+        --radius: 0.6rem;
+        --radius-sm: 0.45rem;
+        --radius-lg: 0.9rem;
+        --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.035) inset, 0 0.6rem 1.6rem rgba(2, 6, 14, 0.28);
+        --shadow-pop: 0 0.9rem 2.2rem rgba(2, 6, 14, 0.5);
+        --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+        --dur: 160ms;
+        --ring: 0 0 0 3px rgba(90, 169, 255, 0.28);
+        --card-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0) 3.5rem);
       background: var(--bg-page);
       color: var(--tx-bright);
     }
