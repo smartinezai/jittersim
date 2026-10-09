@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from ipaddress import IPv4Address
 from typing import Dict, Iterable, List, Pattern, Tuple
 
+from publicsuffixlist import PublicSuffixList
+
 from .models import normalize_domain
 from .service_catalogue import SERVICE_CATALOGUE
 
@@ -26,6 +28,7 @@ _GROUPED_KINDS = frozenset({"app", "system", "iot"})
 _FALLBACK_CATALOGUE_CATEGORY = "Online service"
 
 # Two-part public suffixes under which the registrable domain has three labels.
+_PSL = PublicSuffixList(only_icann=True)
 _SECOND_LEVEL = frozenset({
     "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp",
     "co.in", "com.br", "com.mx", "co.za", "com.tr", "com.cn", "com.hk", "com.sg",
@@ -403,7 +406,8 @@ def registrable_domain(domain: str) -> str:
         return ".".join(labels)
     if ".".join(labels[-2:]) in _SECOND_LEVEL:
         return ".".join(labels[-3:])
-    return ".".join(labels[-2:])
+    # SPIKE: the bundled ICANN part of the Public Suffix List decides everything else.
+    return _PSL.privatesuffix(normalized) or normalized
 
 
 def label_domain(domain: str) -> DomainLabel:
