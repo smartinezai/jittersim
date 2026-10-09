@@ -198,13 +198,14 @@ def test_export_has_a_strict_output_budget_and_reports_boot_gaps(tmp_path):
     assert len(json.loads(raw)["entries"]) < 6000
 
 
-def _child(output, pause=False):
-    return lambda command, **kwargs: subprocess_for_test(output, pause)
+def _child(output, pause=False, repeat=1):
+    return lambda command, **kwargs: subprocess_for_test(output, pause, repeat)
 
 
-def subprocess_for_test(output, pause):
+def subprocess_for_test(output, pause, repeat=1):
+    # Linux refuses one argument over 128 KiB. Repeat inside the child instead of sending a large literal.
     import subprocess
-    return subprocess.Popen([sys.executable, "-c", "import sys,time;sys.stdout.write(" + repr(output) + ");sys.stdout.flush();" + ("time.sleep(10)" if pause else "")],
+    return subprocess.Popen([sys.executable, "-c", "import sys,time;sys.stdout.write(" + repr(output) + "*" + str(repeat) + ");sys.stdout.flush();" + ("time.sleep(10)" if pause else "")],
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
 
@@ -236,7 +237,7 @@ def test_reader_never_accepts_more_than_the_entry_limit():
     line = json.dumps(entry()) + "\n"
     values = []
     result = export._journal(-1, time.monotonic() + 2, lambda e: values.append(e) or True,
-                             popen=_child(line * (export.MAX_ENTRIES + 10)))
+                             popen=_child(line, repeat=export.MAX_ENTRIES + 10))
     assert len(values) == export.MAX_ENTRIES
     assert result["status"] == "entry-limit"
 
