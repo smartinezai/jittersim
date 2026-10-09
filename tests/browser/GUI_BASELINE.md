@@ -58,6 +58,36 @@ browser runners. It uploads available artifacts even on failure and retains
 them for seven days. Review screenshots plus the accessibility JSON before
 accepting a baseline for the combined release.
 
+## Static budget (ratchet)
+
+`tests/unit/test_gui_budget.py` keeps the dashboard from growing. It counts the
+assembled page (`jittersim.api.server.DASHBOARD_HTML`) and compares the numbers
+with `tests/browser/baselines/gui-stats.json`: page, CSS and script bytes and
+lines, ids, distinct colours, font sizes, spacing values, radii, `!important`,
+`:root` rules, `aria-live` attributes, `aria-live` flip sites, inline handler
+and style attributes and `window.confirm` calls. The file also holds what each
+number counts. The test needs neither a browser nor Pillow and runs with
+`.[dev]` only. It also fails when the page names an address outside the Pi that
+is not on the allowlist in the test.
+
+Size and spread numbers may grow by 2 percent over the recorded value. The
+safety and accessibility counts (`!important`, `:root` rules, `aria-live`,
+inline attributes, `window.confirm`) may not grow at all. The CSS counts come
+from `source_statistics` above, so a number means the same in both places.
+
+```sh
+python -m tests.browser.gui_stats                          # show every number against its limit
+python -m tests.browser.gui_stats --update                 # lock in numbers that went down
+python -m tests.browser.gui_stats --update --allow-growth  # raise a number on purpose
+```
+
+A change that lowers a number should run `--update` so the gain cannot be lost.
+A change that must raise a number runs `--update --allow-growth` and says why in
+its PR. The JSON keeps one number per line, so a merge conflict only touches the
+numbers in dispute: keep either side and run `--update` again. Other numbers
+that move with the page, such as request counts, axe findings and screenshots,
+stay in the retained run artifacts because they vary per run.
+
 ## Clean Linux container check
 
 Wait for the release coordinator's Docker lock. Keep other containers running.
