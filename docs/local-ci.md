@@ -14,7 +14,7 @@ so. Read the "Not covered" section before you trust a green run.
 
 ```sh
 git fetch --all --prune
-scripts/local-ci.sh lint            # about half a minute after the first run
+scripts/local-ci.sh lint            # gating ruff plus advisory checks
 scripts/local-ci.sh unit            # the whole pytest suite
 scripts/local-ci.sh browser         # journeys and the 27 Pi browser modules
 scripts/local-ci.sh all             # everything below, one after the other
@@ -36,7 +36,7 @@ downloads Chromium once into Playwright's cache.
 
 | Command | What it runs | Workflow job |
 | --- | --- | --- |
-| `scripts/local-ci.sh lint` | `ruff check --select E9,F63,F7,F82,F811 src tests` | Lint |
+| `scripts/local-ci.sh lint` | `ruff check --select E9,F63,F7,F82,F811 src tests`, then the advisory checks below | Lint |
 | `scripts/local-ci.sh unit` | `python -m pytest` on the whole suite, on one Python | Python 3.9, 3.11, 3.13 |
 | `scripts/local-ci.sh browser` | `tests.browser.journeys` and the 27 modules of the Pi browser job | Browser journeys, Pi browser journeys |
 | `scripts/local-ci.sh gui` | the three GUI pytest files, `gui_baseline` and `a11y_axe` | GUI baseline |
@@ -94,6 +94,25 @@ did not run. Local results for commit X: ...".
 
 A summary whose scope line says `subset` is not a full run. Do not present it as
 one.
+
+## Advisory checks
+
+`lint` runs these after the gating ruff step. They print a count and never fail the run:
+
+| Step | Command | What the count is |
+| --- | --- | --- |
+| `advisory-ruff-full` | `ruff check --statistics --exit-zero --select E,F,I,S,B,UP,SIM,RUF src tests` | findings with the wider rule set (the `S` rules are the bandit rules) |
+| `advisory-shellcheck` | `shellcheck -x -f gcc` on every tracked shell script (found by the first line) | warnings, errors and notes |
+| `advisory-actionlint` | `actionlint -oneline .github/workflows/*.yml` | findings |
+| `advisory-zizmor` | `zizmor --offline --no-progress .github/workflows` | findings (zizmor's own summary line, with suppressed ones) |
+| `advisory-pip-audit` | `pip-audit --require-hashes --disable-pip -r <lock>` for the three files in `deploy/raspberry-pi/release-locks/` | known vulnerabilities |
+
+The narrow ruff set above stays the gate. Raise a gate only in its own pull request after the
+backlog is fixed. A missing tool is installed once with `brew install` (shellcheck, actionlint,
+zizmor) or with pip into `.venv-local-ci-tools` (pip-audit, which needs Python 3.10 or newer).
+A tool that cannot be installed or run shows as `UNAVAILABLE`, which is not a failure. Pass
+`--no-install` to forbid installs and `--no-advisory` to skip the checks. pip-audit asks the
+network (OSV and PyPI) about the pinned packages and sends nothing else.
 
 ## Failed tests
 
