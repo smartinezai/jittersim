@@ -97,6 +97,10 @@ GATEWAY_STATUS_LOCK_WAIT_SECONDS = 1.0
 # again for this long, once every NORMAL_ACCESS_BUSY_RETRY_INTERVAL seconds.
 # Normal access is idempotent and a busy answer changed nothing.
 NORMAL_ACCESS_TIMEOUT_SECONDS = 60.0
+# Panic and Reset wait this long for the ad-blocking settings lock before they
+# report that the ad-blocking bypass could not be confirmed. An ad-blocking change
+# holds it while nft clears its routing, which can take a few seconds.
+AD_PAUSE_PANIC_WAIT_SECONDS = 8.0
 NORMAL_ACCESS_BUSY_RETRY_SECONDS = 15.0
 NORMAL_ACCESS_BUSY_RETRY_INTERVAL = 0.5
 ACCESS_STATUS_LOCK_WAIT_SECONDS = 0.5
@@ -1543,7 +1547,7 @@ class HelperService:
         blocking_failed = False
         if pause_ad_blocking and self._ad_blocking_store is not None:
             try:
-                self._ad_blocking_store.pause()
+                self._ad_blocking_store.pause(wait=AD_PAUSE_PANIC_WAIT_SECONDS)
             except (OSError, ValueError, CommandExecutionError):
                 blocking_failed = True
         self._active_plan = None

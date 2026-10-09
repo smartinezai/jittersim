@@ -179,9 +179,9 @@ class AdStore:
         self.panic_guard = panic_guard or PanicGuard()
 
     @contextmanager
-    def lock(self):
+    def lock(self, wait=3.0):
         with self.lock_path.open("a") as lock:
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + wait
             while True:
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -287,8 +287,9 @@ class AdStore:
                     self._intent(True)
         return self.status()
 
-    def pause(self):
-        with self.lock():
+    def pause(self, *, wait=3.0):
+        """Stop ad blocking. Panic passes a longer `wait` for the settings lock."""
+        with self.lock(wait):
             self._intent(False)
             try:
                 state = self.read()
