@@ -16,6 +16,15 @@ test. It is for experiments, not a replacement for your home router.
 - See connected devices, traffic measurements and the effect of a test.
 - Choose whether active profiles resume after a router outage.
 
+## Screenshots
+
+<div align="center">
+  <img src="docs/screenshots/experience-overview-desktop.png" alt="Desktop dashboard with a test phone connected" width="68%" />
+  <img src="docs/screenshots/experience-overview-phone.png" alt="The dashboard on a phone-sized screen" width="27%" />
+</div>
+
+*Sample data only; no real phone or home network is shown.*
+
 ## Get started on a Raspberry Pi
 
 Use Raspberry Pi OS with NetworkManager 1.50 or newer, Ethernet connected to
