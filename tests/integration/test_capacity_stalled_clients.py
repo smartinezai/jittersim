@@ -263,8 +263,19 @@ def test_panic_gets_through_while_silent_connections_fill_the_pending_queue(monk
 def stall_helper(path, count):
     sockets = []
     for _ in range(count):
-        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        connection.connect(str(path))
+        # A busy machine can fill the small listen queue before the helper accepts.
+        # Such a refused connect never reached the helper, so it is simply repeated.
+        deadline = time.monotonic() + 5
+        while True:
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                connection.connect(str(path))
+                break
+            except ConnectionRefusedError:
+                connection.close()
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.02)
         connection.sendall(b"{")
         sockets.append(connection)
     return sockets
