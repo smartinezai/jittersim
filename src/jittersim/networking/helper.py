@@ -113,6 +113,8 @@ ACCESS_STATUS_LOCK_WAIT_SECONDS = 0.5
 # take more than half the slots and Panic (normal-access) and Reset always find one.
 # Further status reads answer helper-busy at once, as before the short wait existed.
 ACCESS_STATUS_MAX_WAITERS = 3
+RELEASE_ACTIONS = ("update-status", "update-install", "update-rollback", "update-online-check",
+                   "update-online-status", "update-online-settings")
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
 ROUTER_ACTIONS = (
     "router-sync-ap",
@@ -1848,8 +1850,13 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
         # Reads of live network state answer helper-busy at once.
         # Signed staging only changes release files. It must not hold network
         # ownership while verifying an archive or copying it from the dashboard.
+        # Release status, install requests and the online check start systemd
+        # units and read release files. They change no network state, so they
+        # take their own lock and never hold the one Apply and Reset wait for
+        # (review U1 of PR 110).
         lock = (self.server.release_stage_lock if action in (
                     "update-stage-upload", "update-stage-identified-upload")
+                else self.server.release_lock if action in RELEASE_ACTIONS
                 else self.server.operation_lock)
         if action in WRITE_ACTIONS:
             acquired = lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS)
@@ -1884,6 +1891,7 @@ class UnixHelperServer(SafeServerErrors, socketserver.ThreadingMixIn, socketserv
         self.service = service
         self.operation_lock = threading.Lock()
         self.release_stage_lock = threading.Lock()
+        self.release_lock = threading.Lock()
         # Incomplete input, operations and the Panic reserve are separate pools. A
         # worker thread holds exactly one of them at any time until it exits.
         self._input_slots = threading.BoundedSemaphore(2 if policy_only else MAX_PENDING_HELPER_INPUT)
