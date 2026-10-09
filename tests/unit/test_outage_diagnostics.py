@@ -351,3 +351,71 @@ raise SystemExit(main(['diagnostics', 'export']))
     assert result.returncode == 1
     assert result.stdout == b""
     assert result.stderr == b"Diagnostic export requires Linux. Run this command on the Pi.\n"
+
+
+def _scheduler_events(fail=False, panic_during_apply=False):
+    from jittersim.config.models import Device, Profile
+    from jittersim.config.storage import ConfigRepository
+    from jittersim.engine.runtime import RuntimeScheduler
+    from jittersim.networking.helper import HelperClientError
+    from tests.unit.test_runtime import RecordingHelper
+    repository = ConfigRepository(":memory:")
+    try:
+        repository.save_profile(Profile("normal", "Normal"))
+        repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        helper = RecordingHelper()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        scheduler._paused = False
+        emitted = []
+        original = helper.apply
+
+        def apply(*, plan):
+            if panic_during_apply:
+                scheduler.halt()
+            if fail:
+                raise HelperClientError("fake-password fake-token")
+            return original(plan=plan)
+
+        helper.apply = apply
+        with patch.object(records, "_emit", side_effect=lambda event: emitted.append(event)):
+            scheduler.tick(repository=repository, now=0)
+        return emitted
+    finally:
+        repository.close()
+
+
+@pytest.mark.parametrize("fail,panic,outcome", [(False, False, "succeeded"), (True, False, "failed"),
+                                                (False, True, "cancelled")])
+def test_scheduled_apply_records_one_start_and_one_safe_outcome(fail, panic, outcome, caplog):
+    emitted = _scheduler_events(fail=fail, panic_during_apply=panic)
+    assert [e["phase"] for e in emitted] == ["start", "outcome"]
+    assert {e["action"] for e in emitted} == {"schedule"} and {e["source"] for e in emitted} == {"scheduler"}
+    assert emitted[0]["operation"] == emitted[1]["operation"]
+    assert emitted[1]["outcome"] == outcome
+    assert "fake-password" not in json.dumps(emitted)
+
+
+def test_router_write_and_copy_are_recorded_but_read_only_checks_are_not():
+    from jittersim.api.router_operations import RouterOperations
+    emitted = []
+    release = threading.Event()
+
+    def execute(path, payload):
+        release.wait(2)
+        return 200, "application/json", json.dumps({"result": {"enabled": False}}).encode()
+
+    operations = RouterOperations(execute, "fixture")
+    with patch.object(records, "_emit", side_effect=lambda event: emitted.append(event)):
+        try:
+            release.set()
+            for path in ("/api/router/status", "/api/router/wifi", "/api/router/sync-ap"):
+                operations.start(path, {"admin_password": "fake-router-password"})
+                deadline = time.monotonic() + 2
+                while operations.status("fake-router-password")["busy"] and time.monotonic() < deadline:
+                    time.sleep(0.005)
+        finally:
+            operations.close()
+    assert [(e["action"], e["phase"]) for e in emitted] == [
+        ("router-wifi", "start"), ("router-wifi", "outcome"), ("router-copy", "start"), ("router-copy", "outcome")]
+    assert {e["source"] for e in emitted} == {"router"}
+    assert "fake-router-password" not in json.dumps(emitted)
