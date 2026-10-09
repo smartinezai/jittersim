@@ -4593,12 +4593,14 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         response["live_applied"] = status == HTTPStatus.OK
         if status == HTTPStatus.OK:
             others = len(self.repository.get_device_start_scope() or ()) - 1
-            name = device.name
+            started = (
+                f" Started for {device.name} only." if others <= 0 else
+                f" Started for {device.name} too, beside {others} "
+                f"{'device' if others == 1 else 'devices'} already started on their own."
+            )
             response["message"] = (
-                fields["message"] + f" Started for {name} only"
-                + (f" and {others} other device{'s' if others != 1 else ''} started the same way"
-                   if others > 0 else "")
-                + ". Everyone and other saved settings stay paused. Start resumes all saved settings."
+                fields["message"] + started
+                + " Everyone and other saved settings stay paused. Start resumes all saved settings."
             )
         else:
             response["error"] = (

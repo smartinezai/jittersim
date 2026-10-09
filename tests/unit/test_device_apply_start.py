@@ -107,7 +107,9 @@ class DeviceApplyStartTests(unittest.TestCase):
         self.reset()
 
         self.assertEqual(self.apply_to()[0], 200)
-        self.assertEqual(self.apply_to(PHONE, "low")[0], 200)
+        status, result = self.apply_to(PHONE, "low")
+        self.assertEqual(status, 200, result)
+        self.assertIn("too, beside 1 device already started on their own", result["message"])
 
         plan = self.helper.applied_plan
         self.assertEqual(sorted(self.running_ids()), [AIR_ID, PHONE_ID])
