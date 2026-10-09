@@ -1629,23 +1629,43 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         identity = self.dashboard_access(peer)
         if not (identity.get("network") == "test" and isinstance(identity.get("mac_address"), str)
                 and identity.get("grants") == ["protection"]):
-            identity = None
-        response = self.write_response_for(path, payload)
-        if identity is None or response[0] != HTTPStatus.OK:
-            return response
+            return self.write_response_for(path, payload)
         mac = identity["mac_address"]
-        if any(item.mac_address == mac for item in self.repository.list_unaffected_devices()):
+        granted: List[bool] = []
+
+        def keep_route_first(settings: SavedSettings) -> Optional[Tuple[int, str, bytes]]:
+            # Runs after validation and before the replacement is saved: the requester's only
+            # control route becomes a saved grant first, or nothing changes at all.
+            if any(item.mac_address == mac for item in settings.unaffected_devices):
+                return None
+            try:
+                kept = self._keep_access_as_saved_grant(peer, mac)
+            except HelperClientError as error:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                    {"error": "Nothing changed. These settings no longer protect this device "
+                              "and its dashboard access could not be saved: " + str(error)})
+            if not kept:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                    {"error": "Nothing changed. These settings no longer protect this device "
+                              "and its dashboard access could not be saved. Try again."})
+            granted.append(True)
+            return None
+
+        response = self.write_response_for(path, payload, before_replace=keep_route_first)
+        if not granted:
             return response
-        try:
-            kept = self._keep_access_as_saved_grant(peer, mac)
-        except HelperClientError:
-            kept = False
+        if any(item.mac_address == mac for item in self.repository.list_unaffected_devices()):
+            # The replacement was refused after the grant was saved: put access back as it was.
+            try:
+                self.dashboard_access(peer, "remove", mac_address=mac)
+            except HelperClientError:
+                LOGGER.warning("could not remove a saved grant for a refused settings change")
+            return response
+        # The grant stays even when the live apply of the saved replacement failed.
         self.reconcile_protected_access()
-        return self._note_access(response, (
-            "This device kept dashboard access as a separate saved grant because the restored "
-            "settings no longer protect it." if kept else
-            "The restored settings no longer protect this device and its dashboard access could "
-            "not be kept. Use Allow this device or the management network."))
+        return self._note_access(response, "This device kept dashboard access as a separate "
+                                           "saved grant because the restored settings no longer "
+                                           "protect it.")
 
     def _note_access(self, response: Tuple[int, str, bytes], message: str) -> Tuple[int, str, bytes]:
         status, content_type, body = response
@@ -2401,17 +2421,21 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(diagnostics)
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
-    def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+    def write_response_for(self, path: str, payload: Dict[str, Any], *,
+                           before_replace=None) -> Tuple[int, str, bytes]:
+        """Handle one write. before_replace(settings) runs on a validated import or restore
+        just before it is saved and may refuse it by returning a response."""
         if path in RESET_REQUEST_PATHS:
             # A device Apply that arrives while this runs, or waits behind it, starts nothing.
             self.note_reset_request()
             try:
-                return self._tracked_write_response_for(path, payload)
+                return self._tracked_write_response_for(path, payload, before_replace)
             finally:
                 self.note_reset_finished()
-        return self._tracked_write_response_for(path, payload)
+        return self._tracked_write_response_for(path, payload, before_replace)
 
-    def _tracked_write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+    def _tracked_write_response_for(self, path: str, payload: Dict[str, Any],
+                                    before_replace=None) -> Tuple[int, str, bytes]:
         if path == "/api/profiles/ranges":
             return self._write_response_for(path, payload)
         control_intent = None
@@ -2444,7 +2468,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 )
                 if access_response is not None:
                     return access_response
-                workflow = write_workflow(self, path, payload, _settings_from_payload)
+                workflow = write_workflow(self, path, payload, _settings_from_payload,
+                                          before_replace=before_replace)
                 if workflow is not None:
                     return workflow
                 if device_apply:
@@ -2452,12 +2477,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         payload, control_intent=control_intent, resets_at_entry=resets_at_entry)
                 return (self._write_response_for(path, payload, control_intent=control_intent)
                         if path == "/api/apply" or live_global or live_general or live_ads
-                        else self._write_response_for(path, payload))
+                        else self._write_response_for(path, payload, before_replace=before_replace))
             finally:
                 if self.repository.get_runtime_state().configuration_version != before:
                     WorkflowStore(self.repository).checkpoint(path.removeprefix("/api/").replace("/", " "))
 
-    def _write_response_for(self, path: str, payload: Dict[str, Any], *, control_intent=None) -> Tuple[int, str, bytes]:
+    def _write_response_for(self, path: str, payload: Dict[str, Any], *, control_intent=None,
+                            before_replace=None) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
 
         if path == "/api/profiles/ranges":
@@ -2535,6 +2561,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 )
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid settings import", error)
+            refused = before_replace(settings) if before_replace is not None else None
+            if refused is not None:
+                return refused
             self.repository.replace_settings(
                 self._with_counter_baselines(settings),
                 observation_addresses=self.newly_protected_station_addresses(settings),
