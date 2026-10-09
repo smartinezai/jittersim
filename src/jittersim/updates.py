@@ -2015,6 +2015,30 @@ def stage_upload(upload_id=None, *, spool=UPLOAD_SPOOL, lock=None, root=UPDATE_R
         return stage_release(archive, signature=signature, root=root, code=code, config=config)
 
 
+MAX_NOTES = 16 * 1024
+
+
+def staged_notes(root=UPDATE_ROOT):
+    """The release notes inside the staged archive (deploy/RELEASE-NOTES.md), which the same
+    signature as the code covers, as text cut at 16 KB. None when there are none. The file is
+    opened without following links and must be a regular file."""
+
+    path = root / "staged" / "deploy" / "RELEASE-NOTES.md"
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            raw = handle.read(MAX_NOTES)
+    except OSError:
+        return None
+    text = raw.decode("utf-8", errors="replace").strip()
+    return text or None
+
+
 def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, query=None, retry_probe=True):
     installed = read_json(code / ".jittersim-release.json")
     staged = _record(root / "staged" / ".jittersim-release.json")
@@ -2058,6 +2082,8 @@ def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, query
         **_operation_fields(status),
         "retry": retry,
         "retry_unavailable_reason": retry_reason,
+        # Only for a release a trusted key signed and that may be installed now.
+        "notes": staged_notes(root) if staged and reason is None else None,
     }
 
 
