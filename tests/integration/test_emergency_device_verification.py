@@ -145,3 +145,72 @@ def test_without_a_recent_verification_the_emergency_check_runs_a_bounded_full_c
         assert status == 200, body
         assert 1.0 <= elapsed < 4.5
         assert service._panic_stop_latched is True
+
+
+def test_panic_from_a_protection_only_device_resyncs_through_the_panic_reserve(tmp_path, monkeypatch):
+    # N1: after a helper restart the emergency check of a protection-only device
+    # needs a protection resync. With the eight operation slots busy and the
+    # input pool stalled, only the Panic reserve is free, and the resync must get it.
+    from jittersim.config.exemptions import UnaffectedDevice
+    from jittersim.networking import helper as helper_module
+    from jittersim.networking.dashboard_access import AccessStore
+    from jittersim.networking.helper import MAX_HELPER_CONNECTIONS, HelperClient
+    from jittersim.networking.helper import HelperClientError
+    from tests.integration.test_capacity_stalled_clients import stall_helper
+
+    release, entered = threading.Event(), threading.Semaphore(0)
+    original = HelperService.handle_payload
+
+    def held(self, payload):
+        if isinstance(payload, dict) and payload.get("action") == "ping":
+            entered.release()
+            release.wait(30)
+        return original(self, payload)
+
+    def ping():
+        # A busy machine can fill the small listen queue: a refused connect never
+        # reached the helper and is simply repeated.
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not release.is_set():
+            try:
+                HelperClient(socket_path=socket_path, timeout_seconds=40).ping()
+                return
+            except HelperClientError:
+                time.sleep(0.05)
+
+    created = []
+    with dashboard(tmp_path, service_class=panic_service(tmp_path, created)) as (request, store, _):
+        service = created[0]
+        server = request.server
+        server.repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))
+        assert server.sync_protected_access()["synced"] is True
+        # The root helper restarts and forgets the protection grants.
+        service._access_store = AccessStore(store.path)
+        socket_path = server.helper_client.socket_path
+        monkeypatch.setattr(HelperService, "handle_payload", held)
+        workers = [threading.Thread(target=ping, daemon=True)
+                   for _ in range(MAX_HELPER_CONNECTIONS)]
+        for worker in workers:
+            worker.start()
+        stalled = []
+        try:
+            for _ in workers:
+                assert entered.acquire(timeout=30)
+            stalled = stall_helper(socket_path, helper_module.MAX_PENDING_HELPER_INPUT)
+            # The page retries a 503. The single kept slot is freed when the worker of
+            # the previous call exits, which a loaded machine can delay past the next
+            # call, so a few retries are allowed. Without the fix every one is refused.
+            for _ in range(5):
+                status, body = request("/api/normal-access", "POST", {})
+                if status != 503:
+                    break
+                time.sleep(0.2)
+        finally:
+            for connection in stalled:
+                connection.close()
+            release.set()
+            for worker in workers:
+                worker.join(10)
+        assert status == 200, body
+        assert service._panic_stop_latched is True
+        assert service._access_store.protected_synced is True

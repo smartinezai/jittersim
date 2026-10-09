@@ -505,6 +505,10 @@ class HelperService:
                 # Panic and Reset: never wait for the access lock that an ordinary
                 # verification may hold for seconds.
                 return self._handle_emergency_verification(payload)
+            if operation == "emergency-protected-sync":
+                # The protection resync that Panic's check needs after a helper restart
+                # (review N1): the kept slot, no access lock, a bounded store wait.
+                return self._handle_emergency_protected_sync(payload)
             if operation == "status":
                 # Allow a short burst of dashboard refreshes to take turns while
                 # keeping access changes serialized with each authorization check.
@@ -667,6 +671,30 @@ class HelperService:
                 "error": "Dashboard access could not be verified or saved. "
                 "Check the Pi access file and reconnect directly to its Wi-Fi.",
             }
+
+    def _handle_emergency_protected_sync(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Replace the protection grants for Panic's device check, like protected-sync.
+
+        It uses the Panic reserve and does not wait for the access lock, which an
+        ordinary verification can hold for seconds. The store lock, which a grant
+        write holds through fsync, is waited for at most
+        EMERGENCY_ACCESS_STORE_WAIT_SECONDS; then the answer is helper-busy (retried).
+        The dashboard runs its protection syncs one at a time and reads saved
+        protection inside that order, so this cannot replace a newer set.
+        """
+
+        store = self._access_store
+        if store is None:
+            return {"ok": False, "error": "Saved dashboard access is not configured."}
+        if not store._lock.acquire(timeout=EMERGENCY_ACCESS_STORE_WAIT_SECONDS):
+            return {"ok": False, "error": "Device verification is busy. Try again.",
+                    "reason": "helper-busy"}
+        try:
+            return {"ok": True, **store.sync_protected(payload.get("devices"))}
+        except AccessError as error:
+            return {"ok": False, "error": str(error)}
+        finally:
+            store._lock.release()
 
     def _handle_dashboard_access(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         store = self._access_store
@@ -1782,7 +1810,8 @@ def _uses_panic_reserve(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
     return payload.get("action") == "normal-access" or (
-        payload.get("action") == "dashboard-access" and payload.get("operation") == "emergency-status"
+        payload.get("action") == "dashboard-access"
+        and payload.get("operation") in ("emergency-status", "emergency-protected-sync")
     )
 
 
@@ -2213,6 +2242,12 @@ class HelperClient:
     def dashboard_access_protected_sync(self, devices: Sequence[Dict[str, str]]) -> Dict[str, Any]:
         """Replace the helper's protection-derived grants with the saved protected list."""
         return self._request({"action": "dashboard-access", "operation": "protected-sync",
+                              "devices": list(devices)})
+
+    def dashboard_access_emergency_protected_sync(
+            self, devices: Sequence[Dict[str, str]]) -> Dict[str, Any]:
+        """The same replacement for Panic's device check: it may use the Panic reserve."""
+        return self._request({"action": "dashboard-access", "operation": "emergency-protected-sync",
                               "devices": list(devices)})
 
     def _check_plan_support(self, plan: NetworkPlan) -> None:

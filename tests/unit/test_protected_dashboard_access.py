@@ -284,6 +284,73 @@ def test_the_emergency_check_answers_from_one_snapshot_of_grants_and_sync_state(
     assert status(service, "emergency-status")["allowed"] is True
 
 
+def test_panics_protection_sync_skips_the_access_lock_and_waits_boundedly_for_the_store(tmp_path):
+    # N1: the resync used by Panic's device check uses the Panic reserve, never waits
+    # for the access lock and waits a bounded time for a stalled grant write.
+    import time
+
+    from jittersim.networking.helper import (
+        EMERGENCY_ACCESS_STORE_WAIT_SECONDS,
+        _uses_panic_reserve,
+    )
+
+    payload = {"action": "dashboard-access", "operation": "emergency-protected-sync",
+               "devices": protected(MAC)}
+    assert _uses_panic_reserve(payload) is True
+    assert _uses_panic_reserve({**payload, "operation": "protected-sync"}) is False
+    service, store, _ = make_service(tmp_path)
+    service._access_lock.acquire()
+    try:
+        result = service.handle_payload(payload)
+    finally:
+        service._access_lock.release()
+    assert result["ok"] is True and result["protected_count"] == 1
+    assert status(service, "emergency-status")["allowed"] is True
+    held, done = threading.Event(), threading.Event()
+
+    def stalled_write():
+        with store._lock:
+            held.set()
+            done.wait(10)
+
+    writer = threading.Thread(target=stalled_write)
+    writer.start()
+    try:
+        assert held.wait(5)
+        started = time.monotonic()
+        busy = service.handle_payload({**payload, "devices": []})
+        assert time.monotonic() - started < EMERGENCY_ACCESS_STORE_WAIT_SECONDS + 1
+    finally:
+        done.set()
+        writer.join(5)
+    assert busy == {"ok": False, "error": "Device verification is busy. Try again.",
+                    "reason": "helper-busy"}
+    assert store.list_devices()[0]["mac_address"] == MAC  # unchanged
+    invalid = service.handle_payload({**payload, "devices": "all"})
+    assert invalid["ok"] is False and store.protected_synced is True
+
+
+def test_an_older_helper_without_the_emergency_sync_gets_the_ordinary_one(tmp_path):
+    service, store, _ = make_service(tmp_path)
+    repository = ConfigRepository(":memory:")
+    server = ControlServer(("127.0.0.1", 0), repository)
+    try:
+        helper = BridgeHelper(service)
+
+        def unknown(devices):
+            raise HelperClientError("Unknown dashboard access action.")
+
+        helper.dashboard_access_emergency_protected_sync = unknown
+        server.helper_client = helper
+        repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))
+        result = server.dashboard_access(PEER, "emergency-status")
+        assert result["allowed"] is True and store.protected_synced is True
+        assert len(helper.sync_payloads) == 1
+    finally:
+        server.server_close()
+        repository.close()
+
+
 def test_the_client_sends_only_addresses_and_names(tmp_path):
     sent = []
 
