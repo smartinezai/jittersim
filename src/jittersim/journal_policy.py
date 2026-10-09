@@ -1,6 +1,7 @@
 """Optional, project-owned journal defaults. No networking or package changes."""
 
 import argparse
+import grp
 import hashlib
 import json
 import os
@@ -44,6 +45,20 @@ def _read(path, limit=MAX_CONFIG):
         os.close(descriptor)
 
 
+def _staff_gid():
+    try:
+        return grp.getgrnam("staff").gr_gid
+    except (KeyError, OSError):
+        return None
+
+
+def _trusted_directory(info):
+    """Owned, never world-writable. Debian lets only its root-equivalent staff group write /usr/local."""
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o002:
+        return False
+    return not info.st_mode & 0o020 or info.st_gid == _staff_gid()
+
+
 def _directory(path):
     missing = []
     current = path
@@ -51,8 +66,7 @@ def _directory(path):
         if current.is_symlink():
             raise PolicyError("unsafe-directory")
         if current.exists():
-            info = current.lstat()
-            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            if not _trusted_directory(current.lstat()):
                 raise PolicyError("unsafe-directory")
             break
         missing.append(current)
@@ -279,7 +293,12 @@ def main(argv=None):
     try:
         check_runtime()
         result = (install if args.action == "install" else remove)(config=args.config_root)
-    except (PolicyError, OSError, subprocess.SubprocessError, ValueError):
+    except PolicyError as error:
+        # Reason codes are fixed words in this file. No path or system text is printed.
+        print("Outage journal: optional setup is unavailable (" + str(error) + "). "
+              "Administrator overrides and retained logs are kept.")
+        return 1
+    except (OSError, subprocess.SubprocessError, ValueError):
         print("Outage journal: optional setup is unavailable. Administrator overrides and retained logs are kept.")
         return 1
     print("Outage journal: " + result + ".")

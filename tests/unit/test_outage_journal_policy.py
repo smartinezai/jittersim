@@ -224,3 +224,54 @@ def test_repeat_removal_does_not_restart_the_journal_again(layout):
     assert policy.remove(config=options["config"], vendor=options["vendor"],
                          activate=options["activate"], roots=options["roots"]) == "unchanged"
     assert len(calls) == count
+
+
+def test_debian_staff_group_local_directory_can_hold_the_owned_directories(layout, tmp_path):
+    """Debian makes /usr/local/lib root:staff 2775. That must not block first installation."""
+    options, _ = layout
+    local = tmp_path / "local-lib"
+    local.mkdir()
+    local.chmod(0o2775)
+    options["vendor"] = local / "systemd" / "journald.conf.d"
+    with patch.object(policy, "_staff_gid", return_value=local.stat().st_gid):
+        assert policy.install(**options) == "configured"
+    assert options["vendor"].is_dir()
+    assert not options["vendor"].stat().st_mode & 0o022
+
+
+def test_group_writable_directories_of_other_groups_and_world_writable_ones_are_refused(tmp_path):
+    other = tmp_path / "other-group"
+    other.mkdir()
+    other.chmod(0o775)
+    with patch.object(policy, "_staff_gid", return_value=other.stat().st_gid + 1):
+        with pytest.raises(policy.PolicyError, match="unsafe-directory"):
+            policy._directory(other / "new")
+    world = tmp_path / "world"
+    world.mkdir()
+    world.chmod(0o777)
+    with patch.object(policy, "_staff_gid", return_value=world.stat().st_gid):
+        with pytest.raises(policy.PolicyError, match="unsafe-directory"):
+            policy._directory(world / "new")
+    with patch.object(policy, "_staff_gid", return_value=None):
+        with pytest.raises(policy.PolicyError, match="unsafe-directory"):
+            policy._directory(other / "new")
+    assert not (other / "new").exists() and not (world / "new").exists()
+
+
+def test_refusal_prints_only_the_fixed_reason_code(capsys):
+    with patch.object(policy.os, "geteuid", return_value=0), patch.object(policy, "check_runtime"), \
+         patch.object(policy, "install", side_effect=policy.PolicyError("administrator-policy")):
+        assert policy.main(["install"]) == 1
+    output = capsys.readouterr().out
+    assert "administrator-policy" in output
+    assert "Administrator overrides and retained logs are kept." in output
+
+
+def test_unexpected_failure_text_never_reaches_the_installer_output(capsys):
+    for failure in (OSError("fake-secret /etc/private"), ValueError("fake-secret")):
+        with patch.object(policy.os, "geteuid", return_value=0), patch.object(policy, "check_runtime"), \
+             patch.object(policy, "install", side_effect=failure):
+            assert policy.main(["install"]) == 1
+        output = capsys.readouterr().out
+        assert "fake-secret" not in output and "/etc/private" not in output
+        assert "optional setup is unavailable" in output
