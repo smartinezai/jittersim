@@ -45,6 +45,11 @@ A device-only start is "stopped except these devices":
   or that records a failure other than a scheduled one. That covers writes from
   an older dashboard. At startup, rows paired with a completed plain Reset are
   discarded before recovery.
+- The trigger only sees writes made after it exists. A database that has the
+  scope table but not yet the trigger may hold rows that an older dashboard left
+  behind a Reset, with the state later marked unknown by a save. On that first
+  upgrade every scope row is discarded. The network stays a Reset, so restart
+  recovery resets it before anything starts.
 - Deleting a scoped device removes its row. When the last row goes, the still
   running scheduler resets the helper on its next tick. A failed reset stays
   pending: the scheduler keeps retrying with growing waits, up to 8 tries, and
@@ -54,8 +59,8 @@ Rollback compatibility: an older dashboard ignores the new table and sees a
 normal Reset. On restart it resets the network again and its scheduler never
 resumes saved settings. A rollback therefore stops the device-only start and
 never resumes Everyone or other devices. When this version comes back after an
-older dashboard ran, the trigger and the startup check keep stale rows from
-starting again.
+older dashboard ran, the trigger, the first-upgrade discard and the startup
+check keep stale rows from starting again.
 
 The table is runtime state, not a setting. The settings export does not carry
 it, but a full database backup copies it like any other table. An import
@@ -98,13 +103,20 @@ The plan builders take an explicit `device_scope`. With a scope:
   saved. A start refused before the helper ran puts the previous scope back.
 - Failure at the helper: the assignment stays saved, the scope ends and the
   helper is reset at once. It records a clean Reset. If that reset fails, the
-  dashboard records `error` and retries only the reset, with bounded waits,
-  whether or not the scheduler runs. No other saved setting resumes.
+  dashboard records `error` with the marker `device-only cleanup failed`. It
+  retries only the reset, with bounded waits, whether or not the scheduler runs.
+  No other saved setting resumes.
+- The marker alone means the cleanup is still owed. A settings save in between
+  marks the state unknown but does not cancel it. Each retry captures the Panic
+  generation first and records its result through the Panic fence, so a newer
+  Panic result is never overwritten. Shutdown waits for a running retry, up to
+  the shutdown time limit.
 - If the Pi does not answer whether Panic or an outage latched a stop, Apply is
   refused before saving.
 - Restart recovery checks the scope before the last result. A scope applies the
   device-only plan again, even after a scheduled failure. A pending cleanup
-  resets again. Otherwise the earlier rules apply.
+  resets again at once. If that fails, the marker stays and the bounded retries
+  start. Otherwise the earlier rules apply.
 
 ## Dashboard
 
