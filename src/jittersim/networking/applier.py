@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from ipaddress import IPv4Address
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt_mac
 from jittersim.config.models import ValidationError
@@ -83,6 +83,8 @@ class NetworkApplier:
         # Cleared for this process once the ifb path failed, so later applies
         # go straight to the fallback instead of failing and resetting again.
         self._upload_device_usable = True
+        # The uplink root was checked once for queues of an older release.
+        self._uplink_checked = False
         self._last_commands: Sequence[Command] = ()
 
     def apply(
@@ -174,23 +176,46 @@ class NetworkApplier:
     def _remove_upload_redirect(self) -> int:
         """Remove the test interface's intake and the ifb device when present."""
 
+        removed, errors = self._remove_upload_redirect_steps()
+        if errors:
+            raise errors[0]
+        return removed
+
+    def _remove_upload_redirect_steps(self) -> Tuple[int, List[CommandExecutionError]]:
+        """Try both removals even when one fails, so neither path outlives the other."""
+
         removed = 0
-        if self._ingress_present():
-            self._run_checked(Command(
+        errors: List[CommandExecutionError] = []
+        steps = (
+            (self._ingress_present, Command(
                 executable="tc",
                 arguments=("qdisc", "del", "dev", self._topology.test_interface,
                            "handle", INGRESS_HANDLE, "ingress"),
                 purpose=f"remove the upload intake from {self._topology.test_interface}",
-            ))
-            removed += 1
-        if self._link_exists(UPLOAD_DEVICE):
-            self._run_checked(Command(
+            )),
+            (lambda: self._link_exists(UPLOAD_DEVICE), Command(
                 executable="ip",
                 arguments=("link", "del", "dev", UPLOAD_DEVICE),
                 purpose=f"remove {UPLOAD_DEVICE}",
-            ))
-            removed += 1
-        return removed
+            )),
+        )
+        for present, command in steps:
+            try:
+                if present():
+                    self._run_checked(command)
+                    removed += 1
+            except CommandExecutionError as error:
+                errors.append(error)
+        return removed, errors
+
+    def _uplink_has_damaging_queue(self) -> bool:
+        result = self._executor.run(Command(
+            executable="tc",
+            arguments=("qdisc", "show", "dev", self._topology.uplink_interface),
+            purpose=f"look for damaging queues on {self._topology.uplink_interface}",
+            ignore_failure=True,
+        ))
+        return bool(re.search(r"\b(?:corrupt|duplicate|reorder) [0-9.]*[1-9]", result.stdout))
 
     def _apply(
         self,
@@ -212,6 +237,19 @@ class NetworkApplier:
                 and self._installed_upload_device == upload_device
                 and (upload_device is None or self._ingress_present())
             )
+            uplink = self._topology.uplink_interface
+            if project_roots[uplink] and not self._uplink_checked:
+                # An older release queued damaged or copied frames on the
+                # uplink. A queue changed in place would still release them, so
+                # remove it once and rebuild it with the safe settings.
+                if self._uplink_has_damaging_queue():
+                    self._run_checked(Command(
+                        executable="tc",
+                        arguments=("qdisc", "del", "dev", uplink, "root", "handle", ROOT_HANDLE),
+                        purpose=f"remove an older damaging root queue from {uplink}",
+                    ))
+                    roots_present = False
+                self._uplink_checked = True
             if not plan.queues:
                 # prio needs at least two bands, so remove the project roots.
                 # The nft script replaces the tables in one transaction, so their
@@ -221,10 +259,16 @@ class NetworkApplier:
                         command.arguments[3], for_apply=False
                     ):
                         self._run_checked(command)
+            commands = None
+            if roots_present and self._installed_plan is not None:
+                commands = render_live_queue_changes(
+                    previous=self._installed_plan, plan=plan, topology=self._topology,
+                    upload_device=upload_device,
+                )
             if upload_device is None:
                 self._remove_upload_redirect()
-            elif not roots_present and self._ingress_present():
-                # A full apply rebuilds the intake with the plan's classes.
+            elif commands is None and self._ingress_present():
+                # A full apply adds the intake again with the plan's classes.
                 self._run_checked(Command(
                     executable="tc",
                     arguments=("qdisc", "del", "dev", self._topology.test_interface,
@@ -238,12 +282,6 @@ class NetworkApplier:
                 cause=error,
                 cleanup_attempted=False,
             ) from error
-        commands = None
-        if roots_present and self._installed_plan is not None:
-            commands = render_live_queue_changes(
-                previous=self._installed_plan, plan=plan, topology=self._topology,
-                upload_device=upload_device,
-            )
         counters_preserved = commands is not None
         wanted_addresses = {
             rule.list_id: set((service_addresses or {}).get(rule.list_id, ()))
@@ -335,18 +373,32 @@ class NetworkApplier:
         self._installed_plan = None
         self._installed_service_addresses = {}
         self._installed_upload_device = None
+        # Every step is tried even after a failure, so one stuck object never
+        # leaves the others (the Wi-Fi intake, the ifb device) in place. The
+        # first failure is raised at the end.
         commands = render_reset_commands(topology=self._topology)
-        project_roots = {
-            interface: self._root_queue(interface, for_apply=False)
-            for interface in (self._topology.uplink_interface, self._topology.test_interface)
-        }
+        errors: List[CommandExecutionError] = []
+        project_roots = {}
+        for interface in (self._topology.uplink_interface, self._topology.test_interface):
+            try:
+                project_roots[interface] = self._root_queue(interface, for_apply=False)
+            except CommandExecutionError as error:
+                errors.append(error)
+                project_roots[interface] = False
         commands_run = 0
         for command in commands:
             if command.executable == "tc" and not project_roots[command.arguments[3]]:
                 continue
-            self._run_checked(command)
-            commands_run += 1
-        return commands_run + self._remove_upload_redirect()
+            try:
+                self._run_checked(command)
+                commands_run += 1
+            except CommandExecutionError as error:
+                errors.append(error)
+        removed, redirect_errors = self._remove_upload_redirect_steps()
+        errors.extend(redirect_errors)
+        if errors:
+            raise errors[0]
+        return commands_run + removed
 
     def _root_queue(self, interface: str, *, for_apply: bool) -> bool:
         result = self._executor.run(

@@ -447,3 +447,131 @@ class NetworkApplierTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StatefulRedirectExecutor(FakeExecutor):
+    """Remember the project roots, the Wi-Fi intake and the ifb device like the kernel.
+
+    Adding an intake that exists fails like tc's "Exclusivity flag on".
+    """
+
+    def __init__(self, *, fail_purpose=None, uplink_text=""):
+        super().__init__()
+        self.roots = set()
+        self.ingress = False
+        self.ifb = False
+        self.fail_purpose = fail_purpose
+        self.uplink_text = uplink_text
+
+    def run(self, command):
+        self.commands.append(command)
+        arguments = command.arguments
+        if self.fail_purpose and self.fail_purpose in command.purpose:
+            raise CommandExecutionError(f"simulated failure: {command.purpose}")
+        if command.executable == "ip":
+            if arguments[:3] == ("-j", "link", "show"):
+                return CommandResult(return_code=0 if self.ifb else 1, stdout="[{}]" if self.ifb else "")
+            if arguments[:2] == ("link", "add"):
+                self.ifb = True
+            elif arguments[:2] == ("link", "del"):
+                self.ifb = False
+                self.roots.discard("jittersim-ifb")
+            return CommandResult(return_code=0)
+        if command.executable != "tc":
+            return CommandResult(return_code=0)
+        if arguments[:3] == ("-j", "qdisc", "show"):
+            interface = arguments[4]
+            if arguments[-1] == "ingress":
+                return CommandResult(return_code=0, stdout=json.dumps(
+                    [{"kind": "ingress", "handle": "ffff:"}] if self.ingress else []))
+            if interface in self.roots:
+                return CommandResult(return_code=0, stdout=json.dumps([{"handle": "10:", "kind": "prio"}]))
+            return CommandResult(return_code=0, stdout=json.dumps([{"handle": "0:", "kind": "fq_codel"}]))
+        if arguments[:2] == ("qdisc", "show"):
+            return CommandResult(return_code=0, stdout=self.uplink_text)
+        if arguments[:2] == ("qdisc", "add") and arguments[-1] == "ingress":
+            if self.ingress:
+                return CommandResult(return_code=2, stderr="Error: Exclusivity flag on, cannot modify.")
+            self.ingress = True
+        elif arguments[:2] == ("qdisc", "del") and arguments[-1] == "ingress":
+            self.ingress = False
+        elif arguments[:2] in (("qdisc", "replace"), ("qdisc", "add")) and "root" in arguments:
+            self.roots.add(arguments[3])
+        elif arguments[:2] == ("qdisc", "del") and "root" in arguments:
+            self.roots.discard(arguments[3])
+        return CommandResult(return_code=0)
+
+
+def corrupting_plan(*addresses):
+    profile = Profile(id="bad", name="Bad", upload=Impairment(delay_ms=10, corrupt_percent=6))
+    return compile_plan(
+        devices=tuple(Device(f"d{index}", f"D{index}", address, "bad")
+                      for index, address in enumerate(addresses)),
+        profiles={"bad": profile},
+    )
+
+
+class UpstreamSafeTransitionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.topology = Topology(uplink_interface="eth0", test_interface="wlan0")
+
+    def test_a_full_rebuild_replaces_the_intake_and_keeps_corruption(self) -> None:
+        executor = StatefulRedirectExecutor()
+        applier = NetworkApplier(executor=executor, topology=self.topology)
+
+        self.assertTrue(applier.apply(plan=corrupting_plan("192.168.50.10")).upload_corruption_applied)
+        # A new device changes the classification, so the plan is rebuilt in full.
+        for _ in range(3):
+            report = applier.apply(plan=corrupting_plan("192.168.50.10", "192.168.50.11"))
+            self.assertTrue(report.upload_corruption_applied)
+            report = applier.apply(plan=corrupting_plan("192.168.50.10"))
+            self.assertTrue(report.upload_corruption_applied)
+        self.assertTrue(executor.ingress and executor.ifb)
+
+    def test_an_older_damaging_uplink_queue_is_removed_once_before_reuse(self) -> None:
+        executor = StatefulRedirectExecutor(
+            uplink_text="qdisc netem 41: parent 10:2 limit 1000 delay 20ms corrupt 6% duplicate 7%\n")
+        executor.roots = {"eth0", "wlan0"}
+        applier = NetworkApplier(executor=executor, topology=self.topology)
+
+        applier.apply(plan=make_plan())
+        applier.apply(plan=make_plan())
+
+        removed = [command.argv for command in executor.commands
+                   if command.argv[:4] == ("tc", "qdisc", "del", "dev") and "eth0" in command.argv
+                   and "root" in command.argv]
+        self.assertEqual(removed, [("tc", "qdisc", "del", "dev", "eth0", "root", "handle", "10:")])
+
+    def test_a_safe_uplink_queue_is_kept(self) -> None:
+        executor = StatefulRedirectExecutor(
+            uplink_text="qdisc netem 41: parent 10:2 limit 1000 delay 20ms\n")
+        executor.roots = {"eth0", "wlan0"}
+        NetworkApplier(executor=executor, topology=self.topology).apply(plan=make_plan())
+
+        self.assertFalse(any(command.argv[:3] == ("tc", "qdisc", "del") and "root" in command.argv
+                             for command in executor.commands))
+
+    def test_reset_tries_every_step_after_a_failure(self) -> None:
+        executor = StatefulRedirectExecutor(fail_purpose="project-owned nftables table")
+        applier = NetworkApplier(executor=executor, topology=self.topology)
+        executor.fail_purpose = None
+        applier.apply(plan=corrupting_plan("192.168.50.10"))
+        executor.fail_purpose = "project-owned nftables table"
+
+        with self.assertRaises(CommandExecutionError):
+            applier.reset()
+
+        self.assertFalse(executor.ingress, "the Wi-Fi intake outlived a failed step")
+        self.assertFalse(executor.ifb, "the ifb device outlived a failed step")
+        self.assertEqual(executor.roots, set())
+
+    def test_the_ifb_device_is_removed_when_the_intake_cannot_be(self) -> None:
+        executor = StatefulRedirectExecutor()
+        applier = NetworkApplier(executor=executor, topology=self.topology)
+        applier.apply(plan=corrupting_plan("192.168.50.10"))
+        executor.fail_purpose = "remove the upload intake"
+
+        with self.assertRaises(CommandExecutionError):
+            applier.reset()
+
+        self.assertFalse(executor.ifb)
