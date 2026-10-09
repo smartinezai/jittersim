@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import html
 import hmac
+import http.client
 import ipaddress
 import io
 import json
@@ -23,7 +24,7 @@ import threading
 import time
 import uuid
 from contextlib import nullcontext
-from dataclasses import MISSING, asdict, dataclass, replace
+from dataclasses import MISSING, asdict, dataclass, field, replace
 from dataclasses import fields as dataclass_fields
 from datetime import datetime
 from http import HTTPStatus
@@ -164,6 +165,12 @@ TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 REQUEST_INPUT_TIMEOUT_SECONDS = 10.0
 MAX_PENDING_CONNECTION_LIFETIME_SECONDS = 30.0
 MAX_PENDING_DASHBOARD_CONNECTIONS = 16
+# While every ordinary worker is busy, a waiting connection is read here until its
+# request is complete. Only a whole, authorized Panic request may then take a
+# reserved worker. This bounds what one waiting connection may buffer.
+MAX_WAITING_REQUEST_BYTES = 16 * 1024
+# Replacing waiting connections is logged at most this often, with a count.
+EVICTION_WARNING_INTERVAL_SECONDS = 60.0
 # Requests handled at the same time. A request over the limit gets a clear 503.
 MAX_DASHBOARD_WORKERS = 16
 # Extra threads kept for Panic alone, so it still gets in when every ordinary slot is busy.
@@ -915,6 +922,10 @@ class _PendingConnection:
     handshake: bool
     expires_at: float
     want_write: bool = False
+    # The client has sent something (TLS handshake or request bytes).
+    progressed: bool = False
+    # Request bytes read while every ordinary worker was busy.
+    buffer: bytearray = field(default_factory=bytearray)
 
 
 _RESET_REQUESTS_LOCK = threading.Lock()
@@ -1006,6 +1017,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         self._active_workers = 0
         self._request_workers = RequestWorkers("jittersim-request", self._uncertain_worker_start)
         self._reserved_requests: Set[socket.socket] = set()
+        self._evictions_unreported = 0
+        self._eviction_warned_at = float("-inf")
         self.homepage_store = None
         self.homepage_server = None
         self.homepage_worker = None
@@ -1083,15 +1096,18 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         with self._workers_lock:
             return request in self._reserved_requests
 
-    def _refuse_request(self, request: socket.socket) -> None:
+    def _refuse_request(self, request: socket.socket, *, busy_body: bool = False) -> None:
         """Tell a client over the limit to retry instead of leaving it hanging."""
 
         # The accept loop must never wait for a client, so nothing here blocks.
+        body = _json_bytes({"error": "the dashboard is busy, try again"}) if busy_body else b""
+        kind = b"Content-Type: application/json\r\n" if busy_body else b""
         try:
             request.setblocking(False)
             request.send(
-                b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n"
-                b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+                b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n" + kind
+                + b"Content-Length: " + str(len(body)).encode("ascii")
+                + b"\r\nConnection: close\r\n\r\n" + body
             )
             # Read what the client already sent so closing does not reset the reply.
             request.recv(65536)
@@ -1114,26 +1130,31 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             writers = [connection for connection, pending
                        in self._pending_connections.items() if pending.want_write]
             readable, writable, _ = select.select(readers, writers, [], 0.05)
-            if self.socket in readable:
-                attempted = True
-                self._accept_connection()
+            # Waiting connections that are ready go first. A newcomer accepted
+            # before them could otherwise replace one whose request had arrived.
             for connection in readable + writable:
                 if connection is self.socket:
                     continue
                 pending = self._pending_connections.get(connection)
                 if pending is None:
-                    # Replaced by a newer connection during this round.
                     continue
+                pending.progressed = True
                 try:
                     if pending.handshake:
                         connection.do_handshake()
                         pending.handshake = False
                         pending.deadline = min(
                             pending.expires_at, time.monotonic() + REQUEST_INPUT_TIMEOUT_SECONDS)
-                    prefix = connection.recv(1)
-                    if not prefix:
-                        self._close_pending(connection)
-                        continue
+                    if not pending.buffer and self.active_workers < MAX_DASHBOARD_WORKERS:
+                        prefix = connection.recv(1)
+                        if not prefix:
+                            self._close_pending(connection)
+                            continue
+                    else:
+                        waiting = self._read_waiting_request(connection, pending)
+                        if waiting is None:
+                            continue
+                        prefix = waiting
                     remaining = pending.deadline - time.monotonic()
                     if remaining <= 0:
                         self._close_pending(connection)
@@ -1148,6 +1169,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     pending.want_write = False
                 except OSError:
                     self._close_pending(connection)
+            if self.socket in readable:
+                attempted = True
+                self._accept_connection()
         raise OSError("dashboard is stopping")
 
     def tls_context_for(self, local_address: str, peer_address: str) -> Optional[ssl.SSLContext]:
@@ -1166,16 +1190,127 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     continue
         return self._tls_context
 
+    def _read_waiting_request(self, connection: socket.socket,
+                              pending: _PendingConnection) -> Optional[bytes]:
+        """Read a waiting request while every ordinary worker is busy.
+
+        Return the bytes to dispatch, or None while the request must keep waiting
+        or after it was answered and closed here.
+        """
+        ended = False
+        try:
+            while len(pending.buffer) <= MAX_WAITING_REQUEST_BYTES:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    ended = True
+                    break
+                pending.buffer.extend(chunk)
+        except (ssl.SSLWantReadError, BlockingIOError):
+            pass
+        if self.active_workers < MAX_DASHBOARD_WORKERS and pending.buffer:
+            # An ordinary worker came free: carry on as usual with what was read.
+            return bytes(pending.buffer)
+        verdict = self._waiting_request_verdict(bytes(pending.buffer))
+        if verdict is True:
+            return bytes(pending.buffer)
+        if verdict is False or len(pending.buffer) > MAX_WAITING_REQUEST_BYTES:
+            self._pending_connections.pop(connection, None)
+            self._refuse_request(connection, busy_body=True)
+        elif ended:
+            self._close_pending(connection)
+        return None
+
+    def _waiting_request_verdict(self, data: bytes) -> Optional[bool]:
+        """Tell whether waiting input is a whole, authorized Panic request.
+
+        None means the request is not complete yet. Only True may take a worker
+        kept for Panic, so a stalled or unauthenticated client never holds one.
+        """
+        end = data.find(b"\r\n\r\n")
+        if end < 0:
+            return None
+        request_line, _, header_block = data[:end].partition(b"\r\n")
+        parts = request_line.split()
+        if len(parts) != 3 or parts[0] != b"POST":
+            return False
+        try:
+            path = urlsplit(parts[1].decode("ascii")).path
+            headers = http.client.parse_headers(io.BytesIO(header_block + b"\r\n\r\n"))
+        except (UnicodeDecodeError, ValueError, http.client.HTTPException):
+            return False
+        if path not in PRIORITY_WRITE_PATHS or headers.get("Transfer-Encoding") is not None:
+            return False
+        if not self.is_authorized(headers.get("Authorization")):
+            return False
+        try:
+            length = int(headers.get("Content-Length", "0"))
+        except ValueError:
+            return False
+        if length < 0 or length > MAX_WAITING_REQUEST_BYTES:
+            return False
+        return True if len(data) - (end + 4) >= length else None
+
+    def _eviction_victim(self) -> Optional[socket.socket]:
+        """Choose which waiting connection a newcomer replaces, if any.
+
+        The peer with the most waiting connections gives one up, so a single host
+        cannot push out everyone else. Within that peer a connection that has sent
+        nothing goes before one that has (a TLS handshake under way, for example),
+        oldest first. A connection with input ready to read is never chosen.
+        """
+        entries = list(self._pending_connections.items())
+        try:
+            ready = set(select.select([connection for connection, _ in entries], [], [], 0)[0])
+        except (OSError, ValueError):
+            ready = set()
+        for connection, _ in entries:
+            try:
+                if isinstance(connection, ssl.SSLSocket) and connection.pending():
+                    ready.add(connection)
+            except (OSError, ValueError):
+                pass
+
+        def peer(pending: _PendingConnection) -> str:
+            address = pending.address
+            return str(address[0] if isinstance(address, tuple) else address)
+
+        counts: Dict[str, int] = {}
+        for _, pending in entries:
+            counts[peer(pending)] = counts.get(peer(pending), 0) + 1
+        # Peers by how many they hold. Ties keep the order of each peer's oldest entry.
+        for name in sorted(counts, key=lambda name: -counts[name]):
+            candidates = [(connection, pending) for connection, pending in entries
+                          if peer(pending) == name and connection not in ready]
+            if candidates:
+                silent = [connection for connection, pending in candidates if not pending.progressed]
+                return silent[0] if silent else candidates[0][0]
+        return None
+
+    def _note_eviction(self) -> None:
+        self._evictions_unreported += 1
+        now = time.monotonic()
+        if now - self._eviction_warned_at >= EVICTION_WARNING_INTERVAL_SECONDS:
+            LOGGER.warning(
+                "dashboard replaced %d waiting dashboard connection(s) because the queue of %d was full",
+                self._evictions_unreported, MAX_PENDING_DASHBOARD_CONNECTIONS)
+            self._evictions_unreported = 0
+            self._eviction_warned_at = now
+
     def _accept_connection(self) -> None:
         connection, address = self.socket.accept()
         while len(self._pending_connections) >= MAX_PENDING_DASHBOARD_CONNECTIONS:
             # A waiting connection has not said what it wants yet, so the Panic
             # reserve cannot protect it here. Refusing newcomers would let a few
             # silent clients lock Panic out until they expire. Instead the newest
-            # connection replaces the oldest one that still has sent nothing: a
-            # real client sends its request at once, and an attacker must open
-            # connections faster than that to keep one out. The queue stays bounded.
-            self._close_pending(next(iter(self._pending_connections)))
+            # connection replaces a waiting one (see _eviction_victim), and the
+            # queue stays bounded.
+            victim = self._eviction_victim()
+            if victim is None:
+                # Every waiting connection has input ready. They are read next.
+                connection.close()
+                return
+            self._close_pending(victim)
+            self._note_eviction()
         try:
             connection.setblocking(False)
             if self._tls_context is not None:
@@ -5921,16 +6056,16 @@ def _from_known_fields(model: Any, value: Any, label: str = "") -> Any:
     where = f"{label}: " if label else ""
     if not isinstance(value, dict):
         raise ValueError(f"{where}must be an object")
-    known = [field.name for field in dataclass_fields(model) if field.init]
+    known = [spec.name for spec in dataclass_fields(model) if spec.init]
     unknown = [key for key in value if key not in known]
     if unknown:
         shown = ", ".join(json.dumps(key if len(key) <= 40 else key[:40] + "...") for key in unknown[:3])
         raise ValueError(
             f"{where}unknown field {shown}{' and others' if len(unknown) > 3 else ''}"
             f" (known fields: {', '.join(known)})")
-    for field in dataclass_fields(model):
-        if field.init and field.default is MISSING and field.default_factory is MISSING and field.name not in value:
-            raise KeyError(f"{label}.{field.name}" if label else field.name)
+    for spec in dataclass_fields(model):
+        if spec.init and spec.default is MISSING and spec.default_factory is MISSING and spec.name not in value:
+            raise KeyError(f"{label}.{spec.name}" if label else spec.name)
     return model(**value)
 
 
