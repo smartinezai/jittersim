@@ -46,6 +46,13 @@ DASHBOARD_PORT = 8080
 # (an address refresh or the boot restoration) and then reports busy. The
 # dashboard gives the whole helper Panic request 60 seconds.
 RELEASE_LOCK_WAIT_SECONDS = 20.0
+# A release clears old DNS connection state at most this many times, and all
+# attempts together get at most this long. Each conntrack call is bounded by
+# its own timeout as well, so the cleanup cannot hold Panic for longer.
+DNS_CLEANUP_ATTEMPTS = 2
+DNS_CLEANUP_BUDGET_SECONDS = 3.0
+DNS_CLEANUP_RETRY_DELAY_SECONDS = 0.2
+CONNTRACK_TIMEOUT_SECONDS = 2.0
 
 
 def atomic_write(path: Path, content: str, mode: int = 0o640) -> None:
@@ -373,6 +380,9 @@ class AccessManager:
         # restriction (for example the Wi-Fi join limits). Panic reports this as
         # incomplete recovery so the owner retries.
         self.release_incomplete = False
+        # True while old DNS mappings to the resolver port may remain after a
+        # release. A retried release then clears them before it stops the resolver.
+        self._dns_flows_pending = False
 
     @contextmanager
     def _locked(self, timeout=None):
@@ -508,17 +518,53 @@ class AccessManager:
         # Existing NAT decisions outlive nft rule replacement. Drop only test
         # clients' DNS mappings so reused sockets pick up the new policy too.
         for protocol in ("udp", "tcp"):
-            result = self.executor.run(
-                Command(
-                    executable="conntrack",
-                    arguments=("-D", "-s", "192.168.50.0/24", "-p", protocol, "--dport", "53"),
-                    ignore_failure=True,
-                    timeout_seconds=2,
-                    purpose="refresh test-network DNS routes",
-                )
+            self._clear_dns_protocol(protocol, CONNTRACK_TIMEOUT_SECONDS)
+
+    def _clear_dns_protocol(self, protocol, timeout):
+        result = self.executor.run(
+            Command(
+                executable="conntrack",
+                arguments=("-D", "-s", "192.168.50.0/24", "-p", protocol, "--dport", "53"),
+                ignore_failure=True,
+                timeout_seconds=timeout,
+                purpose="refresh test-network DNS routes",
             )
-            if result.return_code and "0 flow entries have been deleted" not in result.stderr:
-                raise CommandExecutionError("could not refresh DNS connection state")
+        )
+        if result.return_code and "0 flow entries have been deleted" not in result.stderr:
+            raise CommandExecutionError("could not refresh DNS connection state")
+
+    def _clear_old_dns_flows(self):
+        """Clear old DNS mappings for a release. Return whether all were cleared.
+
+        A failed protocol is tried again, at most DNS_CLEANUP_ATTEMPTS times in
+        all and within DNS_CLEANUP_BUDGET_SECONDS, so Panic is never held long.
+        """
+
+        deadline = time.monotonic() + DNS_CLEANUP_BUDGET_SECONDS
+        pending = ["udp", "tcp"]
+        for attempt in range(DNS_CLEANUP_ATTEMPTS):
+            if attempt:
+                if time.monotonic() + DNS_CLEANUP_RETRY_DELAY_SECONDS >= deadline:
+                    break
+                time.sleep(DNS_CLEANUP_RETRY_DELAY_SECONDS)
+            failed = []
+            for protocol in pending:
+                remaining = deadline - time.monotonic()
+                try:
+                    if remaining <= 0:
+                        raise CommandExecutionError("the DNS cleanup ran out of time")
+                    self._clear_dns_protocol(protocol, min(CONNTRACK_TIMEOUT_SECONDS, remaining))
+                except Exception as error:  # noqa: BLE001 - the release must go on
+                    LOGGER.warning("household release: clearing old %s DNS state failed: %s",
+                                   protocol, error)
+                    failed.append(protocol)
+            pending = failed
+            if not pending:
+                return True
+        return False
+
+    def _restart_dns(self):
+        self._run("systemctl", "restart", "jittersim-dns.service")
 
     def _probe(self, plan):
         try:
@@ -599,11 +645,14 @@ class AccessManager:
         stop the later ones. The permissive firewall goes in first and the
         transition guard is always cleared. Wi-Fi admission, the resolver and DNS
         connection state never bring back the restrictive rules. A Wi-Fi join limit
-        that could not be cleared is reported and sets ``release_incomplete`` so
-        Panic asks for a retry.
+        or old DNS connections that could not be cleared are reported and set
+        ``release_incomplete`` so Panic asks for a retry.
         """
 
         failures, warnings = [], []
+        # Unknown earlier rules may have sent DNS to the resolver.
+        previous = self.applied
+        redirected = previous is None or previous.has_dns_rules or self._dns_flows_pending
         try:
             transition = (self.ad_blocking_store.access_transition()
                           if self.ad_blocking_store is not None else nullcontext())
@@ -637,13 +686,23 @@ class AccessManager:
                         self._admission, plan)
             if opened:
                 # Before this the old table may still send DNS to the resolver.
-                # The unused resolver and old DNS mappings (which expire within a
-                # minute) are only logged: they never keep anything closed.
+                # Old DNS mappings outlive the new table and can still point at
+                # the resolver port, so the resolver stops only after they are
+                # cleared. Until then it answers everyone without household rules.
+                # Nothing here keeps anything closed.
                 logged = []
-                self._relax(logged, "stopping the unused resolver", self._stop_dns)
-                self._relax(logged, "rewriting the resolver configuration",
-                            lambda: atomic_write(self.directory / "unbound.conf", render_dns(plan)))
-                self._relax(logged, "clearing old DNS connection state", self._clear_dns_connections)
+                written = self._relax(
+                    logged, "rewriting the resolver configuration",
+                    lambda: atomic_write(self.directory / "unbound.conf", render_dns(plan)))
+                if self._clear_old_dns_flows() or not redirected:
+                    self._dns_flows_pending = False
+                    self._relax(logged, "stopping the unused resolver", self._stop_dns)
+                else:
+                    self._dns_flows_pending = True
+                    warnings.append(("old DNS connections could not be cleared", None))
+                    if written:
+                        self._relax(warnings, "the resolver could not drop the household rules",
+                                    self._restart_dns)
                 for description, error in logged:
                     LOGGER.warning("household release: %s failed: %s", description, error)
             if not failures:
@@ -731,6 +790,8 @@ class AccessManager:
                 self._nft(transition_firewall(self.topology))
             try:
                 self._install(plan)
+                # The install cleared the old DNS mappings too.
+                self._dns_flows_pending = False
                 content = json.dumps(plan.payload(), sort_keys=True) + "\n"
                 atomic_write(self.directory / "policy.json", content)
                 atomic_write(self.runtime_path, content)
