@@ -1078,6 +1078,46 @@ def configure_dashboard_name(source, config):
             raise UpdateError("the dashboard name service could not be prepared") from error
 
 
+def configure_outage_journal(code, config, manager, run):
+    """Keep optional journal setup outside application and trust recovery."""
+    source = code / "src/jittersim/journal_policy.py"
+    utility = manager.with_name("jittersim-outage-journal.py")
+    try:
+        if source.is_file():
+            raw = owned_source_bytes(code, "src/jittersim/journal_policy.py", maximum=64 * 1024)
+            if utility.is_symlink():
+                return False
+            descriptor, temporary = tempfile.mkstemp(prefix=".outage-journal-", dir=utility.parent)
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                Path(temporary).chmod(0o644)
+                os.replace(temporary, utility)
+                _fsync_folder(utility.parent)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+            action = "install"
+        else:
+            action = "remove"
+        if not utility.exists() or utility.is_symlink():
+            return False
+        info = utility.stat()
+        if info.st_uid != os.geteuid() or info.st_mode & 0o022 or not stat.S_ISREG(info.st_mode):
+            return False
+        run([PYTHON, "-I", str(utility), action, "--config-root",
+             str(config.with_name(config.name + "-outage-journal"))], 10)
+        return True
+    except (OSError, ValueError):
+        return False
+    except UpdateError as error:
+        # Unknown or running privileged commands retain the update's existing gate.
+        if type(error) is not UpdateError:
+            raise
+        return False
+
+
 def _panic_candidate(source):
     if not 1 <= len(PANIC_APPROVED_SOURCES) <= 32:
         raise UpdateError("the candidate needs reviewed Panic protection")
@@ -3913,6 +3953,8 @@ def apply_update(
         def restart_services(prepare_name=False):
             """Run the systemctl steps of install.sh for the units installed now."""
             panic_safety.inspect(code)
+            if not (code / "src/jittersim/journal_policy.py").is_file():
+                configure_outage_journal(code, config, manager, run)
             name_ready = prepare_name_service() if prepare_name else True
             try:
                 wifi = query(
@@ -4279,6 +4321,7 @@ def apply_update(
             restart_services(prepare_name=True)
             if not wait_healthy():
                 raise UpdateError("updated services failed their health check")
+            configure_outage_journal(code, config, manager, run)
             _raise_floor(root, record["sequence"])
             compatible_manager(code / "src/jittersim/updates.py")
             install_manager(code / "src/jittersim/updates.py", manager)

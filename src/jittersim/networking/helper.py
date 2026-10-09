@@ -20,6 +20,9 @@ from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+from jittersim.diagnostic_privacy import SafeServerErrors, configure_logging
+from jittersim.diagnostic_records import recorded_payload
+
 from jittersim.config.exemptions import normalize_exempt_mac
 from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.access import AccessPlan, access_from_payload
@@ -238,6 +241,7 @@ class HelperService:
             lambda address, password: TG3442DERouter(address=address, password=password)
         )
 
+    @recorded_payload
     def handle_payload(self, payload: Any) -> Dict[str, Any]:
         """Handle one decoded request without exposing command execution details."""
 
@@ -1638,7 +1642,7 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
         self.wfile.write(self._encode_response(payload))
 
 
-class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+class UnixHelperServer(SafeServerErrors, socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     """Serve the helper protocol through a filesystem-protected Unix socket."""
 
     def __init__(self, socket_path: Path, service: HelperService, *, policy_only: bool = False) -> None:
@@ -2695,7 +2699,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """Parse helper options and start the explicit hardware process."""
 
     arguments = _build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    configure_logging(level=logging.INFO)
     run_helper(
         socket_path=arguments.socket,
         homepage_database=arguments.homepage_database,
