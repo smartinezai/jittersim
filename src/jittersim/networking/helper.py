@@ -20,6 +20,9 @@ from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+from jittersim.diagnostic_privacy import SafeServerErrors, configure_logging
+from jittersim.diagnostic_records import recorded_payload
+
 from jittersim.config.exemptions import normalize_exempt_mac
 from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.access import AccessPlan, access_from_payload
@@ -75,6 +78,12 @@ MAX_HELPER_CONNECTIONS = 8
 # Apply access rules and the device quick action so a poll must not refuse it either.
 WRITE_ACTIONS = ("apply", "apply-experiment", "reset", "recover-reset", "normal-access", "access-apply", "ad-blocking-configure")
 WRITE_LOCK_WAIT_SECONDS = 3.0
+ACCESS_STATUS_LOCK_WAIT_SECONDS = 0.5
+# Each waiting status read holds one of the MAX_HELPER_CONNECTIONS request slots.
+# At most this many wait at once, so the access lock holder and its waiters never
+# take more than half the slots and Panic (normal-access) and Reset always find one.
+# Further status reads answer helper-busy at once, as before the short wait existed.
+ACCESS_STATUS_MAX_WAITERS = 3
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
 ROUTER_ACTIONS = (
     "router-sync-ap",
@@ -193,6 +202,7 @@ class HelperService:
         self._router_lock = threading.Lock()
         self._access_store = access_store
         self._access_lock = threading.Lock()
+        self._access_status_waiters = threading.BoundedSemaphore(ACCESS_STATUS_MAX_WAITERS)
         self._peer_cache: Dict[str, Any] = {}
         self._gateway_state_path = gateway_state_path
         self._access_manager = access_manager
@@ -238,6 +248,7 @@ class HelperService:
             lambda address, password: TG3442DERouter(address=address, password=password)
         )
 
+    @recorded_payload
     def handle_payload(self, payload: Any) -> Dict[str, Any]:
         """Handle one decoded request without exposing command execution details."""
 
@@ -455,7 +466,20 @@ class HelperService:
                 if acquired:
                     self._network_lock.release()
         if action == "dashboard-access":
-            if not self._access_lock.acquire(blocking=False):
+            operation = payload.get("operation", "status")
+            if operation == "status":
+                # Allow a short burst of dashboard refreshes to take turns while
+                # keeping access changes serialized with each authorization check.
+                # Only a few may wait so waiters cannot fill the helper request slots.
+                acquired = self._access_lock.acquire(blocking=False)
+                if not acquired and self._access_status_waiters.acquire(blocking=False):
+                    try:
+                        acquired = self._access_lock.acquire(timeout=ACCESS_STATUS_LOCK_WAIT_SECONDS)
+                    finally:
+                        self._access_status_waiters.release()
+            else:
+                acquired = self._access_lock.acquire(blocking=False)
+            if not acquired:
                 return {"ok": False, "error": "Device verification is busy. Try again.",
                         "reason": "helper-busy"}
             try:
@@ -1645,7 +1669,7 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
         self.wfile.write(self._encode_response(payload))
 
 
-class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+class UnixHelperServer(SafeServerErrors, socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     """Serve the helper protocol through a filesystem-protected Unix socket."""
 
     def __init__(self, socket_path: Path, service: HelperService, *, policy_only: bool = False) -> None:
@@ -2707,7 +2731,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """Parse helper options and start the explicit hardware process."""
 
     arguments = _build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    configure_logging(level=logging.INFO)
     run_helper(
         socket_path=arguments.socket,
         homepage_database=arguments.homepage_database,

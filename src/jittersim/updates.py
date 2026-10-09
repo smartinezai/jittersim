@@ -990,6 +990,13 @@ PANIC_APPROVED_SOURCES = ({
     "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
     "src/jittersim/networking/helper.py": "1cbc5dd4eb2e93f6205035f38218fe4ca11b34281a23e2c998ccb6e8b76c4228",
     "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
+}, {
+    # See docs/review-results-panic-consumers-outage-logging-2026-10-09.json. Persistent outage
+    # logging and the bounded dashboard status wait. The diagnostic modules that the helper
+    # dispatch calls are pinned by tests/unit/test_panic_dispatch_dependencies.py.
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "252ccaffac176fc0f97dad552d28edb9d8119f291958d8a45876c6b3ca1be166",
+    "src/jittersim/networking/access.py": "ddc801a896afa2b977c12662bdb34388680502350b8b5b16099cbc3978725ddd",
 },)
 
 
@@ -1086,6 +1093,46 @@ def configure_dashboard_name(source, config):
             modules.mdnsname.configure_avahi(interfaces=runtime_interfaces(config))
         except (OSError, ValueError, modules.mdnsname.ConfigureError) as error:
             raise UpdateError("the dashboard name service could not be prepared") from error
+
+
+def configure_outage_journal(code, config, manager, run):
+    """Keep optional journal setup outside application and trust recovery."""
+    source = code / "src/jittersim/journal_policy.py"
+    utility = manager.with_name("jittersim-outage-journal.py")
+    try:
+        if source.is_file():
+            raw = owned_source_bytes(code, "src/jittersim/journal_policy.py", maximum=64 * 1024)
+            if utility.is_symlink():
+                return False
+            descriptor, temporary = tempfile.mkstemp(prefix=".outage-journal-", dir=utility.parent)
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                Path(temporary).chmod(0o644)
+                os.replace(temporary, utility)
+                _fsync_folder(utility.parent)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+            action = "install"
+        else:
+            action = "remove"
+        if not utility.exists() or utility.is_symlink():
+            return False
+        info = utility.stat()
+        if info.st_uid != os.geteuid() or info.st_mode & 0o022 or not stat.S_ISREG(info.st_mode):
+            return False
+        run([PYTHON, "-I", str(utility), action, "--config-root",
+             str(config.with_name(config.name + "-outage-journal"))], 10)
+        return True
+    except (OSError, ValueError):
+        return False
+    except UpdateError as error:
+        # Unknown or running privileged commands retain the update's existing gate.
+        if type(error) is not UpdateError:
+            raise
+        return False
 
 
 def _panic_candidate(source):
@@ -4089,6 +4136,17 @@ def apply_update(
                 time.sleep(min(1, max(0, until - time.monotonic())))
             return False
 
+        def wait_restarted_healthy():
+            """Check health, then drop journal settings the restarted code lacks.
+
+            Removing them restarts journald and may take 10 seconds, so it never
+            runs while the services, and with them Panic, are stopped.
+            """
+            healthy = wait_healthy()
+            if not (code / "src/jittersim/journal_policy.py").is_file():
+                configure_outage_journal(code, config, manager, run)
+            return healthy
+
         if request.get("command_pending"):
             try:
                 if command_still_running(request["command_pending"], budget):
@@ -4124,7 +4182,7 @@ def apply_update(
                     # Its old source is still live. Never restore an unrelated backup.
                     budget.recover()
                     restart_services()
-                    if not wait_healthy():
+                    if not wait_restarted_healthy():
                         raise UpdateError("previous services could not restart before retry")
                     request.pop("restart_only", None)
                     atomic_json(root / "request.json", request)
@@ -4192,7 +4250,7 @@ def apply_update(
             if request.get("rollback"):
                 progress("rolling-back", "Restoring the previous installation and settings.")
                 restore()
-                if not wait_healthy():
+                if not wait_restarted_healthy():
                     raise UpdateError("recovery health check failed")
                 cleanup_generations(root, budget)
                 recovered = True
@@ -4289,6 +4347,7 @@ def apply_update(
             restart_services(prepare_name=True)
             if not wait_healthy():
                 raise UpdateError("updated services failed their health check")
+            configure_outage_journal(code, config, manager, run)
             _raise_floor(root, record["sequence"])
             compatible_manager(code / "src/jittersim/updates.py")
             install_manager(code / "src/jittersim/updates.py", manager)
@@ -4330,10 +4389,10 @@ def apply_update(
                     if not writers_stopped(names, query, budget):
                         raise UpdateError("the settings writers did not stop before recovery")
                     restore()
-                    recovered = wait_healthy()
+                    recovered = wait_restarted_healthy()
                 elif stopped:
                     restart_services()
-                    recovered = wait_healthy()
+                    recovered = wait_restarted_healthy()
                 else:
                     recovered = True
                 if recovered and (needs_recovery or stopped):

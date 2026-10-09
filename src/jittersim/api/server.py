@@ -29,6 +29,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
 from pathlib import Path
 from typing import Any, Collection, Dict, List, Optional, Sequence, Set, Tuple
+
+from jittersim.diagnostic_privacy import SafeServerErrors, configure_logging
+from jittersim.diagnostic_records import recorded
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim import release_uploads, updates
@@ -910,7 +913,7 @@ class _PendingConnection:
     want_write: bool = False
 
 
-class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
+class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
     """Serve configuration and plan data from one repository.
 
     Each request runs on its own daemon thread so one slow request (an apply or a
@@ -3106,7 +3109,10 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     def _record_wifi_outcome(self) -> None:
         outcome = self.wifi_operations.completed_action()
         if outcome:
-            self.repository.record_action(action=outcome[0], status_code=outcome[1])
+            try:
+                self.repository.record_action(action=outcome[0], status_code=outcome[1])
+            except StorageError:
+                LOGGER.warning("could not save completed operation history")
 
     def _start_wifi_change(self, kind, work, payload):
         """Legacy callers keep synchronous responses. The dashboard opts into exact outcomes."""
@@ -3208,7 +3214,10 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     def _record_router_outcome(self) -> None:
         outcome = self.router_operations.completed_action()
         if outcome:
-            self.repository.record_action(action=outcome[0], status_code=outcome[1])
+            try:
+                self.repository.record_action(action=outcome[0], status_code=outcome[1])
+            except StorageError:
+                LOGGER.warning("could not save completed operation history")
 
     def _handle_router_request(self, path, payload):
         self._record_router_outcome()
@@ -5040,6 +5049,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         with operation:
             return self._apply_configuration_locked(explicit_apply=explicit_apply, control_intent=control_intent)
 
+    @recorded("apply", "dashboard")
     def _apply_configuration_locked(
         self, connected_snapshot=None, *, sample_usage=True, explicit_apply: bool = False, control_intent=None
     ) -> Tuple[int, str, bytes]:
@@ -5251,6 +5261,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         with operation:
             return self._reset_network_locked(automatic_recovery=automatic_recovery)
 
+    @recorded("reset", "dashboard")
     def _reset_network_locked(self, *, automatic_recovery=False) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
             return (
@@ -5468,8 +5479,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             else:
                 status, content_type, body = self.server.response_for(path, query=parsed_path.query)
         except HelperClientError as error:
-            status, content_type, body = (HTTPStatus.SERVICE_UNAVAILABLE, "application/json",
-                                          _json_bytes({"error": str(error)}))
+            if path == "/api/dashboard-access/status" and error.reason == "helper-busy":
+                status, content_type, body = (
+                    HTTPStatus.CONFLICT,
+                    "application/json",
+                    _json_bytes({"error": str(error), "code": "helper-busy"}),
+                )
+            else:
+                status, content_type, body = (HTTPStatus.SERVICE_UNAVAILABLE, "application/json",
+                                              _json_bytes({"error": str(error)}))
         except (PlanError, StorageError):
             LOGGER.exception("could not build control-plane response for %s", path)
             status = HTTPStatus.INTERNAL_SERVER_ERROR
@@ -6638,10 +6656,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """Parse server options and start the dashboard."""
 
     arguments = _build_parser().parse_args(argv)
-    logging.basicConfig(
-        level=getattr(logging, arguments.log_level),
-        format="%(levelname)s %(name)s: %(message)s",
-    )
+    configure_logging(level=getattr(logging, arguments.log_level))
     run_server(
         database_path=arguments.database,
         host=arguments.host,

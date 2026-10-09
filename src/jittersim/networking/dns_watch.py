@@ -25,6 +25,8 @@ from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from jittersim.diagnostic_privacy import configure_logging
+
 from .helper import HelperClient, HelperClientError
 
 LOGGER = logging.getLogger(__name__)
@@ -414,7 +416,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--helper-socket", type=Path, default=Path("/run/jittersim/helper.sock"))
     parser.add_argument("--plan", type=Path, default=Path("/run/jittersim/active-plan.json"))
     arguments = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO)
+    configure_logging(level=logging.INFO)
     stop = threading.Event()
     for name in (signal.SIGTERM, signal.SIGINT):
         signal.signal(name, lambda *_: stop.set())

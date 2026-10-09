@@ -12,7 +12,12 @@ from pathlib import Path
 from jittersim.api.server import WRITE_PATHS, ControlServer
 from jittersim.config.storage import ConfigRepository
 from jittersim.networking.dashboard_access import AccessStore
-from jittersim.networking.helper import HelperClient, HelperService, UnixHelperServer
+from jittersim.networking.helper import (
+    HelperClient,
+    HelperClientError,
+    HelperService,
+    UnixHelperServer,
+)
 from tests.unit.test_dashboard_access import MAC, PEER, PeerApplier
 
 
@@ -128,6 +133,24 @@ def test_ambiguous_and_unavailable_observations_fail_closed(tmp_path):
         applier.route = {}
         assert request("/api/dashboard-access/register-self", "POST", {})[0] == 503
         assert request("/api/backup")[0] != 200
+
+
+def test_temporary_status_contention_is_not_an_authentication_failure(tmp_path):
+    class BusyHelper:
+        def dashboard_access(self, operation, *, peer, **values):
+            raise HelperClientError("Device verification is busy. Try again.", reason="helper-busy")
+
+    def configure(server):
+        server.helper_client = BusyHelper()
+
+    with dashboard(tmp_path, configure=configure) as (request, _, _):
+        assert request("/api/dashboard-access/status", token="wrong")[0] == 401
+        status, body = request("/api/dashboard-access/status")
+        assert status == 409
+        assert json.loads(body) == {
+            "error": "Device verification is busy. Try again.",
+            "code": "helper-busy",
+        }
 
 
 def test_moving_to_a_new_address_needs_the_token_and_the_connection_identity(tmp_path):

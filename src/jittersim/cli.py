@@ -177,6 +177,7 @@ def _build_operations_parser() -> argparse.ArgumentParser:
     diagnostics = commands.add_parser(
         "diagnostics", help="show a bounded service and access summary"
     )
+    diagnostics.add_argument("diagnostics_command", nargs="?", choices=("export",))
     _add_local_options(diagnostics)
     logs = commands.add_parser("logs", help="show bounded logs for a JitterSim service")
     logs.add_argument("service", choices=tuple(LOG_SERVICES))
@@ -803,6 +804,21 @@ def _run_operations(raw_arguments: Sequence[str]) -> int:
             return _persistence_status(arguments)
         return _set_persistence_mode(arguments)
     if arguments.operation == "diagnostics":
+        if arguments.diagnostics_command == "export":
+            from jittersim.diagnostic_export import UnsupportedHostError, build_export
+            try:
+                raw = build_export(arguments.database.absolute())
+            except UnsupportedHostError:
+                print("Diagnostic export requires Linux. Run this command on the Pi.", file=sys.stderr)
+                return 1
+            except PermissionError:
+                print("Run sudo jittersim diagnostics export.", file=sys.stderr)
+                return 1
+            except (OSError, ValueError, RuntimeError):
+                print("Diagnostic export could not be read safely.", file=sys.stderr)
+                return 1
+            sys.stdout.write(raw.decode("utf-8"))
+            return 0
         return _diagnostics(arguments)
     return _show_logs(arguments)
 
