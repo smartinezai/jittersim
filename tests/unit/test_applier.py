@@ -48,6 +48,22 @@ class RootQueueExecutor(FakeExecutor):
         return super().run(command)
 
 
+class MissingInterfaceExecutor(RootQueueExecutor):
+    """The test Wi-Fi interface is gone (Wi-Fi disabled, firmware crash, unplugged)."""
+
+    def __init__(self, *, stderr='Cannot find device "wlan0"\n'):
+        super().__init__()
+        self.stderr = stderr
+
+    def run(self, command):
+        if command.arguments[:3] == ("-j", "qdisc", "show") and "wlan0" in command.arguments:
+            self.commands.append(command)
+            if command.ignore_failure:
+                return CommandResult(return_code=1, stderr=self.stderr)
+            raise CommandExecutionError("tc failed", return_code=1, stderr=self.stderr)
+        return super().run(command)
+
+
 class GatewayProbeExecutor(FakeExecutor):
     def __init__(self, *, gateway="192.168.0.1", ping_return_code=0) -> None:
         super().__init__()
@@ -238,6 +254,21 @@ class NetworkApplierTests(unittest.TestCase):
         self.assertEqual(
             [command.executable for command in executor.commands[2:]], ["nft", "nft", "tc", "tc"]
         )
+
+    def test_reset_succeeds_when_the_test_wifi_interface_is_missing(self) -> None:
+        # 4 October: Normal access failed "while inspecting the absent wlan0 root
+        # queue". A missing interface has no project queue to remove.
+        executor = MissingInterfaceExecutor()
+        NetworkApplier(executor=executor, topology=self.topology).reset()
+
+        removed = [command.arguments[3] for command in executor.commands
+                   if command.arguments[:2] == ("qdisc", "del")]
+        self.assertEqual(removed, ["eth0"])
+
+    def test_reset_still_fails_on_other_root_queue_errors(self) -> None:
+        executor = MissingInterfaceExecutor(stderr="RTNETLINK answers: Operation not permitted\n")
+        with self.assertRaises(CommandExecutionError):
+            NetworkApplier(executor=executor, topology=self.topology).reset()
 
     def test_reset_leaves_a_foreign_root_queue_alone(self) -> None:
         executor = RootQueueExecutor(handle="20:", kind="htb")

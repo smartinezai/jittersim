@@ -31,6 +31,9 @@ traffic labels, durable outage evidence, deliberate scheduling after recovery
 and an automatic spare-Pi acceptance run. Keep each new feature bounded and
 write its implementation plan before changing code.
 
+The researched proposals of 9 October 2026 (thirty items with size, household
+risk and helper impact) are in [feature proposals](feature-proposals-2026-10-09.md).
+
 The dashboard remains dark. The archived interface prototype is optional and
 is not a description of the delivered interface.
 
