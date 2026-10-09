@@ -329,11 +329,19 @@ class HelperService:
                 self._write_gateway_state(durable=True)
                 reset = self._handle_reset()
                 access_ok = False
+                incomplete = None
                 try:
                     if self._access_manager is None:
                         raise ValueError("persistent access controls are unavailable")
                     self._access_manager.disable()
-                    access_ok = True
+                    # The network is open, but a restriction such as the Wi-Fi
+                    # join limits may remain. That is not a confirmed recovery.
+                    if getattr(self._access_manager, "release_incomplete", False) is True:
+                        incomplete = (getattr(self._access_manager, "error", None)
+                                      or "Some household restrictions could not be cleared.")
+                        LOGGER.error("household release is incomplete: %s", incomplete)
+                    else:
+                        access_ok = True
                 except (OSError, ValueError, CommandExecutionError):
                     LOGGER.exception("could not disable household restrictions")
                 failed = not reset["ok"] or not access_ok
@@ -351,7 +359,10 @@ class HelperService:
                 return {"ok": False, "error": "normal access recovery state could not be saved",
                         "experiments_stopped": reset["ok"], "access_disabled": access_ok}
             if not reset["ok"] or not access_ok:
-                return {"ok": False, "error": "normal access was not fully restored",
+                error = "normal access was not fully restored"
+                if incomplete:
+                    error += ". " + incomplete + " Retry Panic."
+                return {"ok": False, "error": error,
                         "experiments_stopped": reset["ok"], "access_disabled": access_ok}
             return {"ok": True, "action": action, "experiments_stopped": True, "access_disabled": True}
         if action in ("access-status", "access-apply"):

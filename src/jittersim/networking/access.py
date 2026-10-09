@@ -369,6 +369,10 @@ class AccessManager:
         # True after a change failed in the DNS step. The helper words its answer
         # from this.
         self.dns_failed = False
+        # True after a release that opened the network but could not undo every
+        # restriction (for example the Wi-Fi join limits). Panic reports this as
+        # incomplete recovery so the owner retries.
+        self.release_incomplete = False
 
     @contextmanager
     def _locked(self, timeout=None):
@@ -594,8 +598,9 @@ class AccessManager:
         Every step only relaxes, so none is rolled back and a failed step does not
         stop the later ones. The permissive firewall goes in first and the
         transition guard is always cleared. Wi-Fi admission, the resolver and DNS
-        connection state are best effort: they are logged and reported, and they
-        never bring back the restrictive rules.
+        connection state never bring back the restrictive rules. A Wi-Fi join limit
+        that could not be cleared is reported and sets ``release_incomplete`` so
+        Panic asks for a retry.
         """
 
         failures, warnings = [], []
@@ -663,9 +668,13 @@ class AccessManager:
             for description, error in failures:
                 LOGGER.error("household release failed at %s: %s", description, error)
             self.error = "Household rules could not be fully turned off. Try Panic again."
+            self.release_incomplete = True
             raise failures[0][1]
         self.generation = self._generation()
         self.health_error = None
+        # Nothing restrictive comes back, but a warning means a restriction may
+        # still be in force, so the release is not confirmed.
+        self.release_incomplete = bool(warnings)
         self.error = (
             "Household rules are off, but " + "; ".join(text for text, _ in warnings) + "."
             if warnings else None
@@ -674,6 +683,7 @@ class AccessManager:
 
     def _apply_locked(self, plan: Optional[AccessPlan], *, force=False, guard=True):
         self.dns_failed = False
+        self.release_incomplete = False
         if (
             not force
             and self.applied == plan

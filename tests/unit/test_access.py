@@ -341,13 +341,18 @@ class AccessRecoveryTests(unittest.TestCase):
                     return CommandResult(return_code=0, stdout="FAIL\n")
                 return original(command)
 
-            # PR 103: a refused admission change is a warning on a release. Panic
-            # succeeds and the status names the join limits.
+            # A refused admission change never stops the release, but excluded
+            # devices still cannot join, so the release is incomplete (G1).
             with patch.object(self.executor, "run", run), self.assertLogs(level="WARNING"):
                 self.manager.disable()
-        # Internet is open again. Only the join limit is reported as not cleared.
-        self.assert_released_and_open()
-        self.assertIn("join", self.manager.status()["error"])
+            # Internet is open again. The join limit is reported as not cleared.
+            self.assert_released_and_open()
+            self.assertIn("join", self.manager.status()["error"])
+            self.assertTrue(self.manager.release_incomplete)
+            # A retried Panic that clears the join limits completes the recovery.
+            self.manager.disable()
+        self.assertFalse(self.manager.release_incomplete)
+        self.assertIsNone(self.manager.status()["error"])
 
     def test_a_release_ignores_a_failed_dns_connection_refresh(self):
         self.manager.apply(self.plan)
