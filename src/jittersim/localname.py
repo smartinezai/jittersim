@@ -27,6 +27,13 @@ CONFIG_DIR = Path("/etc/jittersim")
 CONFIG_FILE = CONFIG_DIR / "trust.env"
 SHARED_DNS_DIR = Path("/etc/NetworkManager/dnsmasq-shared.d")
 SHARED_DNS_FILE = "jittersim-dashboard-name.conf"
+# Only the Pi hands out 192.168.50.0/24, so its DHCP server may answer a request
+# for an address from another network (a device that roamed from the router's
+# Wi-Fi to the copied name) with an immediate DHCPNAK. NetworkManager's
+# shared-mode dnsmasq ignores such a request by default and the device waits out
+# its own timeout first (15 s with ISC dhclient in tests/kernel/test_outage_lab.py).
+SHARED_DHCP_FILE = "jittersim-dhcp.conf"
+SHARED_DHCP_CONFIG = "dhcp-authoritative\n"
 CONFIG_KEY = "JITTERSIM_DASHBOARD_NAME"
 # The key an earlier build of this feature used. It is still read when valid.
 EARLIER_CONFIG_KEY = "JITTERSIM_LOCAL_NAME"
@@ -198,9 +205,9 @@ def install_config(
 ) -> Tuple[str, bool]:
     """Keep the name setting and publish it to the shared test Wi-Fi resolver.
 
-    Returns the name and whether the resolver record changed. The resolver
-    reads its record when the test Wi-Fi starts, so a change needs a restart of
-    that connection.
+    Also makes the shared DHCP server authoritative (SHARED_DHCP_FILE). Returns
+    the name and whether either file changed. The resolver reads both when the
+    test Wi-Fi starts, so a change needs a restart of that connection.
     """
     config_file = config_dir / "trust.env"
     if not os.path.lexists(config_file):
@@ -213,6 +220,7 @@ def install_config(
     dns_dir.mkdir(parents=True, exist_ok=True)
     changed = _write(dns_dir / SHARED_DNS_FILE,
                      render_shared_dnsmasq(name, compatibility_names(config_file)), 0o644, group)
+    changed = _write(dns_dir / SHARED_DHCP_FILE, SHARED_DHCP_CONFIG, 0o644, group) or changed
     return name, changed
 
 
