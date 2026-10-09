@@ -59,8 +59,25 @@ esac
 manifest=$(printf '{"format": 1, "commit": "%s", "version": "%s", "sequence": %s}' \
     "$commit" "$version" "$sequence")
 printf 'Release version: %s\n' "$version" >&2
-git archive --format=tar.gz --add-virtual-file="deploy/RELEASE:$manifest
+# A release carries its own CHANGELOG.md section as deploy/RELEASE-NOTES.md so the Pi can
+# show notes that the same signature covers. At most 16 KB. Development builds carry none.
+notes=
+if [ "$version" = "$number" ]; then
+    notes=$(git show "$commit:CHANGELOG.md" 2>/dev/null | awk -v head="## v$number" '
+        index($0, head) == 1 && (length($0) == length(head) || substr($0, length(head) + 1, 1) == " ") {
+            found = 1; print; next
+        }
+        found && /^## / { exit }
+        found { print }' | head -c 16384) || notes=
+fi
+if [ -n "$notes" ]; then
+    git archive --format=tar.gz --add-virtual-file="deploy/RELEASE:$manifest
+" --add-virtual-file="deploy/RELEASE-NOTES.md:$notes
 " --output="$archive" "$commit" pyproject.toml README.md src deploy
+else
+    git archive --format=tar.gz --add-virtual-file="deploy/RELEASE:$manifest
+" --output="$archive" "$commit" pyproject.toml README.md src deploy
+fi
 if [ -n "$key" ]; then
     sh "$(dirname -- "$0")/sign-release.sh" --key "$key" "$archive" >&2
 fi
