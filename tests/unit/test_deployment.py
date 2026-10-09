@@ -56,6 +56,19 @@ class DeploymentFirewallTests(unittest.TestCase):
         self.assertIn("jittersim-access-boot.service", ordered_after("jittersim-helper.service"))
         self.assertNotIn("jittersim-helper.service", ordered_after("jittersim-access-boot.service"))
 
+    def test_a_hung_boot_restoration_cannot_keep_the_helper_and_panic_from_starting(self) -> None:
+        # The helper is ordered after the one-shot access-boot, whose start timeout is
+        # unlimited by default. A bounded timeout lets systemd stop it and start the
+        # helper, which then applies its own startup decision. After= is only ordering
+        # (no Requires=), so a failed or timed-out access-boot does not block the helper.
+        unit = (REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-access-boot.service").read_text()
+        timeouts = [line.split("=", 1)[1] for line in unit.splitlines() if line.startswith("TimeoutStartSec=")]
+        self.assertEqual(len(timeouts), 1)
+        self.assertTrue(timeouts[0].isdigit() and 0 < int(timeouts[0]) <= 120, timeouts)
+        helper = (REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-helper.service").read_text()
+        self.assertNotIn("Requires=jittersim-access-boot", helper)
+        self.assertNotIn("BindsTo=jittersim-access-boot", helper)
+
     def test_dns_watcher_runs_unprivileged_with_only_packet_capture(self) -> None:
         service = (
             REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-service-watch.service"
