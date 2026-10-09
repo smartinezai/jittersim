@@ -429,6 +429,18 @@ def test_deadline_decision_survives_parent_cleanup(tmp_path, shell, outcome):
     assert not (tmp_path / "deadline").exists()
 
 
+def default_interrupt():
+    """Make Ctrl-C reach the script as it does in a terminal.
+
+    A process started as a shell background job (`pytest &`, `nohup pytest &`) has
+    SIGINT ignored, and every child inherits that. A shell that starts with SIGINT
+    ignored can neither trap nor reset it, so the script would never see the Ctrl-C
+    that this test sends. The child therefore starts with the default disposition.
+    """
+
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
 @pytest.mark.parametrize("shell", SHELLS)
 def test_ctrl_c_also_stops_a_running_call(fakes, tmp_path, shell):
     """Background calls ignore Ctrl-C: the script stops them itself."""
@@ -439,7 +451,8 @@ def test_ctrl_c_also_stops_a_running_call(fakes, tmp_path, shell):
            "FAKE_HANG": "probe", "FAKE_PID_FILE": str(pid_file)}
     process = subprocess.Popen([shell, str(SCRIPT), "--key", str(fakes["key"])], env=env,
                                cwd=str(ROOT), stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, start_new_session=True)
+                               stderr=subprocess.DEVNULL, start_new_session=True,
+                               preexec_fn=default_interrupt)
     try:
         deadline = time.monotonic() + 30
         while not pid_file.exists() or not pid_file.read_text():
