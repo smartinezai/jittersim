@@ -1008,8 +1008,19 @@ def _remote_update_parser() -> argparse.ArgumentParser:
 
 NOW_WAIT_SECONDS = 900.0
 CHECK_WAIT_SECONDS = 420.0
-FINAL_PHASES = {"failed": "The update failed", "rolled-back": "The update failed and the Pi "
-                "restored the previous installation"}
+ACTIVE_PHASES = ("queued", "preparing", "stopping", "backing-up", "installing", "checking",
+                 "rolling-back")
+
+
+class _Report:
+    """Progress text for people. With --json nothing is printed until the one final answer."""
+
+    def __init__(self, quiet: bool) -> None:
+        self.quiet = quiet
+
+    def line(self, text: str) -> None:
+        if not self.quiet:
+            _out(text)
 
 
 def _online_check(client: DashboardClient) -> Dict[str, Any]:
@@ -1030,28 +1041,56 @@ def _online_check(client: DashboardClient) -> Dict[str, Any]:
     return view
 
 
-def _install_and_wait(client: DashboardClient, staged: str, wait: float) -> int:
-    client.post("/api/updates/install", {"version": staged, "confirm": True},
-                timeout=ACTION_TIMEOUT_SECONDS)
-    _out(f"Install of release {printable(staged)} queued.")
+def _follow(client: DashboardClient, request_id: Optional[str], staged: str, wait: float,
+            report: _Report) -> Dict[str, Any]:
+    """Follow one install until it ends. Success only when that request reached `complete` and
+    the Pi runs STAGED. A restore is claimed only when the Pi reports `rolled-back`."""
+
     deadline = time.monotonic() + max(0.0, wait)
-    while wait > 0:
+    last = None
+    while True:
         time.sleep(5)
         try:
             now = client.get("/api/updates")
         except RemoteError:
-            # The dashboard restarts during the install.
-            now = {}
-        if now.get("installed") == staged and now.get("phase") not in ("failed", "rolled-back"):
-            _out(f"The Pi now runs release {printable(staged)}.")
-            return 0
-        if now.get("phase") in FINAL_PHASES and now.get("installed") != staged:
-            raise RemoteError(f"{FINAL_PHASES[now['phase']]}: "
-                              f"{printable(now.get('message') or 'no details')}")
+            now = {}  # The dashboard restarts during the install.
+        phase = now.get("phase")
+        if now and phase != last:
+            report.line(f"Pi: {printable(phase or 'unknown')}. {printable(now.get('message') or '')}".rstrip())
+            last = phase
+        ours = request_id is None or now.get("request_id") == request_id
+        if now and now.get("request_id") and not ours:
+            raise RemoteError("Another update replaced this one on the Pi. Check with: "
+                              "jittersim remote update status")
+        if ours and phase == "complete":
+            if now.get("installed") == staged:
+                return {"result": "installed", "installed": staged, "request_id": request_id}
+            raise RemoteError(f"The update finished but the Pi runs {printable(now.get('installed'))}, "
+                              f"not {printable(staged)}.")
+        if ours and phase == "rolled-back":
+            raise RemoteError(f"Release {printable(staged)} failed on the Pi and the Pi confirmed that "
+                              f"the previous installation ({printable(now.get('installed') or 'unknown')}) "
+                              "was restored.")
+        if ours and phase == "failed":
+            raise RemoteError("The update failed and recovery is not confirmed: "
+                              f"{printable(now.get('message') or 'no details')}. Check the Pi.")
         if time.monotonic() >= deadline:
-            raise RemoteError(f"The Pi does not run release {printable(staged)} yet. "
+            raise RemoteError(f"The update of {printable(staged)} has not finished yet. "
                               "Check again with: jittersim remote update status")
-    return 0
+
+
+def _install_and_wait(client: DashboardClient, staged: str, wait: float,
+                      report: _Report) -> Dict[str, Any]:
+    queued = _require(client.post("/api/updates/install", {"version": staged, "confirm": True},
+                                  timeout=ACTION_TIMEOUT_SECONDS), dict)
+    report.line(f"Install of release {printable(staged)} queued.")
+    request_id = queued.get("request_id")
+    request_id = request_id if isinstance(request_id, str) else None
+    if wait <= 0:
+        return {"result": "queued", "request_id": request_id, "version": staged}
+    result = _follow(client, request_id, staged, wait, report)
+    report.line(f"The Pi now runs release {printable(staged)} and passed its health check.")
+    return result
 
 
 def _release_lines(data: Dict[str, Any]) -> None:
@@ -1066,6 +1105,9 @@ def _release_lines(data: Dict[str, Any]) -> None:
 
 @register("remote update", _remote_update_parser)
 def _remote_update(arguments: argparse.Namespace) -> int:
+    if arguments.action == "now" and arguments.json and not arguments.yes:
+        _err("'now --json' cannot ask a question. Add --yes.")
+        return 2
     client = _client(arguments)
     if arguments.action == "status":
         data = client.get("/api/updates")
@@ -1087,39 +1129,77 @@ def _remote_update(arguments: argparse.Namespace) -> int:
             _out(f"The Pi checked the signature and staged release {printable(staged)}.")
             _out("Install it with: jittersim remote update install --wait 600")
         return 0
+    report = _Report(arguments.json)
+    wait = arguments.wait
+    if arguments.action == "now":
+        wait = NOW_WAIT_SECONDS if wait is None else wait
+        status = client.get("/api/updates")
+        if status.get("phase") in ACTIVE_PHASES:
+            # Already installing, for example after the daily check. Follow it, do not ask.
+            version = status.get("request_version") or status.get("available")
+            report.line(f"An update to {printable(version or 'a new release')} is already running "
+                        "on the Pi. Following it.")
+            result = _follow(client, status.get("request_id"), version, wait, report)
+            return _finish(arguments, report, result, f"The Pi now runs release {printable(version)}.")
     if arguments.action in ("check", "now"):
         view = _online_check(client)
-        if arguments.json and arguments.action == "check":
-            _print_json({"check": view, "release": client.get("/api/updates")})
-            return 0 if view.get("result") != "failed" else 1
-        _out(printable(view.get("message") or "The Pi gave no answer to the online check."))
-        if view.get("result") == "failed" and arguments.action == "check":
-            return 1
-    status = client.get("/api/updates")
+        if view.get("result") == "failed":
+            raise RemoteError("The Pi could not check GitHub: "
+                              f"{printable(view.get('message') or 'no details')}. Nothing was installed.")
+        if arguments.action == "check":
+            release = client.get("/api/updates")
+            if arguments.json:
+                _print_json({"check": view, "release": release})
+            else:
+                _out(printable(view.get("message") or ""))
+                _release_lines(release)
+            return 0
+        report.line(printable(view.get("message") or ""))
+        status = client.get("/api/updates")
+        if view.get("install_queued") is True or status.get("phase") in ACTIVE_PHASES:
+            # Install automatically is on and the Pi already started the install.
+            version = status.get("request_version") or status.get("available")
+            report.line("Install automatically is on, so the Pi already started installing "
+                        f"{printable(version or 'the release')}. Following it.")
+            result = _follow(client, status.get("request_id"), version, wait, report)
+            return _finish(arguments, report, result, "")
+    else:
+        status = client.get("/api/updates")
     staged = status.get("available")
-    if arguments.action == "check":
-        _release_lines(status)
-        return 0
     if arguments.action == "now" and (not staged or staged == status.get("installed")):
-        _out(f"Up to date. The Pi runs {printable(status.get('installed') or 'an unknown release')}.")
-        return 0
+        return _finish(arguments, report, {"result": "no-newer-release",
+                                           "installed": status.get("installed")},
+                       f"No newer release. The Pi runs {printable(status.get('installed') or 'an unknown release')}.")
     if not isinstance(staged, str) or not staged:
         raise RemoteError("No release is staged on the Pi. Upload one first.")
     if status.get("installable") is False:
         raise RemoteError(
             printable(status.get("reason") or "The staged release cannot be installed."))
-    wait = arguments.wait
     if arguments.action == "now":
-        _out(f"Release on the Pi: {printable(status.get('installed') or 'unknown')}")
-        _out(f"New release: {printable(staged)}, signed by {printable(status.get('signed_by') or 'unknown')}")
+        if (status.get("phase") in ("failed", "rolled-back") and status.get("request_kind") == "install"
+                and status.get("request_version") == staged and arguments.yes):
+            raise RemoteError(f"Release {printable(staged)} failed on the Pi before. Run without "
+                              "--yes to try it once more.")
+        report.line(f"Release on the Pi: {printable(status.get('installed') or 'unknown')}")
+        report.line(f"New release: {printable(staged)}, signed by "
+                    f"{printable(status.get('signed_by') or 'unknown')}")
         if isinstance(status.get("notes"), str):
             for line in status["notes"].splitlines()[:60]:
-                _out("  " + line)
+                report.line("  " + line)
         if not arguments.yes and not _ask(f"Install {staged} on the Pi now?"):
             _out("Cancelled. Nothing was installed.")
             return 0
-        wait = NOW_WAIT_SECONDS if wait is None else wait
-    return _install_and_wait(client, staged, wait or 0.0)
+    result = _install_and_wait(client, staged, wait or 0.0, report)
+    return _finish(arguments, report, result, "")
+
+
+def _finish(arguments: argparse.Namespace, report: _Report, result: Dict[str, Any],
+            text: str) -> int:
+    if arguments.json:
+        _print_json(result)
+    elif text:
+        report.line(text)
+    return 0
 
 
 def _ask(question: str) -> bool:
