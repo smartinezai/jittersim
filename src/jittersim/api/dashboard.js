@@ -1095,6 +1095,10 @@
     const clearConnectedDrafts = new Set();
 
     let observedDomainsByDevice = {};
+    // The names a service or time limit was saved with, by form. The Pi keeps them for that limit after
+    // their observations expire, so the picker has to keep offering them or an edit would drop them.
+    let savedQuotaDomains = {};
+    privateDataLockHooks.push(() => { savedQuotaDomains = {}; });
 
     let observedNames = new Set();
 
@@ -4700,7 +4704,13 @@
 
     function populateQuotaDomains(prefix, selectedDomains) {
       const select = element(prefix + "-domains");
-      const domains = observedDomainsByDevice[element(prefix + "-device").value] || [];
+      const device = element(prefix + "-device").value;
+      const observed = observedDomainsByDevice[device] || [];
+      if (selectedDomains) savedQuotaDomains[prefix] = { device: device, domains: selectedDomains };
+      // A limit being edited keeps the names it was saved with while its device is chosen.
+      const saved = savedQuotaDomains[prefix] && savedQuotaDomains[prefix].device === device
+        ? savedQuotaDomains[prefix].domains : [];
+      const domains = observed.concat(saved.filter((domain) => !observed.includes(domain)));
       select.replaceChildren();
       if (!domains.length) {
         const option = document.createElement("option");
@@ -4712,8 +4722,8 @@
       domains.forEach((domain) => {
         const option = document.createElement("option");
         option.value = domain;
-        option.textContent = domain;
-        option.selected = (selectedDomains || []).includes(domain);
+        option.textContent = observed.includes(domain) ? domain : domain + " (saved, not seen lately)";
+        option.selected = saved.includes(domain);
         select.appendChild(option);
       });
     }
@@ -6802,7 +6812,13 @@
     element("time-quota-reset-mode").addEventListener("change", () => syncQuotaReset("time-quota"));
 
     ["data-limit", "group-data-limit", "service-quota", "time-quota"].forEach((prefix) => {
-      element(prefix + "-form").addEventListener("reset", () => window.setTimeout(() => syncQuotaReset(prefix), 0));
+      element(prefix + "-form").addEventListener("reset", () => window.setTimeout(() => {
+        syncQuotaReset(prefix);
+        if (savedQuotaDomains[prefix]) {
+          delete savedQuotaDomains[prefix];
+          populateQuotaDomains(prefix);
+        }
+      }, 0));
     });
 
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
@@ -7057,6 +7073,7 @@
         const domains = Array.from(element("service-quota-domains").selectedOptions)
           .map((option) => option.value);
         if (!domains.length) throw new Error("Select at least one observed domain.");
+        const device = element("service-quota-device").value;
         const result = await request("/api/service-quotas", "POST", {
           id: element("service-quota-id").value,
           name: element("service-quota-name").value,
@@ -7068,6 +7085,7 @@
           enabled: element("service-quota-enabled").checked,
           ...quotaSchedulePayload("service-quota")
         });
+        savedQuotaDomains["service-quota"] = { device: device, domains: domains };
         refreshAfterSuccess(
           result.live_applied ? "Service limit saved and applied." : "Service limit saved.",
         );
@@ -7082,6 +7100,7 @@
         const domains = Array.from(element("time-quota-domains").selectedOptions)
           .map((option) => option.value);
         if (!domains.length) throw new Error("Select at least one observed domain.");
+        const device = element("time-quota-device").value;
         const result = await request("/api/time-quotas", "POST", {
           id: element("time-quota-id").value,
           name: element("time-quota-name").value,
@@ -7093,6 +7112,7 @@
           enabled: element("time-quota-enabled").checked,
           ...quotaSchedulePayload("time-quota")
         });
+        savedQuotaDomains["time-quota"] = { device: device, domains: domains };
         refreshAfterSuccess(
           result.live_applied ? "Time limit saved and applied." : "Time limit saved. Start its timer from the saved row.",
         );

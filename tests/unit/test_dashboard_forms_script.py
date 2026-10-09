@@ -696,6 +696,7 @@ def test_the_time_limit_timer_actions_post_to_start_and_stop_and_say_what_happen
 def test_the_domain_picker_offers_the_names_seen_for_the_chosen_device():
     setup = """
       let observedDomainsByDevice = {alice: ["a.example", "b.example", "c.example"], bob: []};
+      let savedQuotaDomains = {};
       function options(prefix, device, selected) {
         element(prefix + "-device").value = device;
         populateQuotaDomains(prefix, selected);
@@ -718,11 +719,47 @@ def test_the_domain_picker_offers_the_names_seen_for_the_chosen_device():
     )
     assert result["all"] == [["a.example", "a.example", False, False], ["b.example", "b.example", False, False],
                              ["c.example", "c.example", False, False]]
-    assert [option[2] for option in result["kept"]] == [False, True, False]
+    # The Pi keeps the names a limit was saved with after their observations expire, so an edit
+    # must offer them selected or saving it would drop them.
+    assert [(option[0], option[2]) for option in result["kept"]] == [
+        ("a.example", False), ("b.example", True), ("c.example", False), ("gone.example", True)]
+    assert result["kept"][3][1] == "gone.example (saved, not seen lately)"
+    assert result["kept"][1][1] == "b.example"
     empty = [["", "No observed domains for this device", False, True]]
     assert result["nothing"] == empty and result["unknown"] == empty
     assert result["service"] == [False, False, True]
     assert result["time"] == [True, False, False]
+
+
+def test_a_refresh_keeps_the_names_a_limit_was_saved_with_for_its_own_device_only():
+    setup = """
+      let observedDomainsByDevice = {alice: ["a.example"], bob: ["a.example", "other.example"]};
+      let savedQuotaDomains = {};
+      function shown(prefix, device) {
+        if (device) element(prefix + "-device").value = device;
+        populateQuotaDomains(prefix);
+        return element(prefix + "-domains").children.map((option) => [option.value, option.selected === true]);
+      }
+    """
+    expression = """(() => {
+      element("service-quota-device").value = "alice";
+      populateQuotaDomains("service-quota", ["gone.example", "a.example"]);
+      return {
+        edit: element("service-quota-domains").children.map((option) => [option.value, option.selected === true]),
+        refreshed: shown("service-quota"),
+        another: shown("service-quota", "bob"),
+        back: shown("service-quota", "alice"),
+        timeForm: shown("time-quota", "alice"),
+        forgotten: (delete savedQuotaDomains["service-quota"], shown("service-quota")),
+      };
+    })()"""
+    result = run(["populateQuotaDomains"], expression, setup=setup)
+    both = [["a.example", True], ["gone.example", True]]
+    assert result["edit"] == both and result["refreshed"] == both and result["back"] == both
+    assert result["another"] == [["a.example", False], ["other.example", False]]
+    # The other form has its own limit and keeps nothing of this one.
+    assert result["timeForm"] == [["a.example", False]]
+    assert result["forgotten"] == [["a.example", False]]
 
 
 def edit_setup():
@@ -781,6 +818,7 @@ def test_edit_fills_a_group_limit_form_in_the_unit_it_was_saved_in():
 def test_edit_fills_a_service_limit_form_with_its_weight_and_chosen_names():
     setup = edit_setup() + """
       let observedDomainsByDevice = {alice: ["a.example", "b.example"]};
+      let savedQuotaDomains = {};
     """
     expression = """(() => {
       element("service-quota-device").value = "alice";
@@ -804,6 +842,7 @@ def test_edit_fills_a_service_limit_form_with_its_weight_and_chosen_names():
 def test_edit_fills_a_time_limit_form_in_hours_or_minutes():
     setup = edit_setup() + """
       let observedDomainsByDevice = {alice: ["a.example"]};
+      let savedQuotaDomains = {};
     """
     expression = """(() => {
       element("time-quota-device").value = "alice";

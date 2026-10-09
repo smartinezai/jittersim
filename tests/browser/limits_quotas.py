@@ -388,6 +388,69 @@ def pick_domains(page, prefix, domains):
     page.locator(f"#{prefix}-domains").select_option(domains)
 
 
+def hide_observed(page, domain):
+    """Make the page read one website name as no longer observed, as it is once the Pi expires it."""
+
+    def handler(route):
+        if route.request.method != "GET":
+            route.continue_()
+            return
+        response = route.fetch()
+        body = response.json()
+        for device in body.get("devices", []):
+            device["domains"] = [item for item in device.get("domains", []) if item["domain"] != domain]
+        route.fulfill(response=response, json=body)
+
+    page.route("**/api/observations", handler)
+    return handler
+
+
+def chosen_domains(page, prefix):
+    return page.evaluate(
+        f"Array.from(document.getElementById('{prefix}-domains').selectedOptions).map(o => o.value)"
+    )
+
+
+def check_saved_names_survive(page, base, prefix, list_id, button, path, change):
+    """Editing a limit must not drop a website name that is no longer observed.
+
+    The Pi keeps the names a limit was saved with after their observations expire. The picker
+    lists them too, keeps them chosen through a refresh and puts them in the save.
+    """
+
+    name = "gateway.icloud.com"
+    option = page.locator(f"#{prefix}-domains option[value='{name}']")
+    handler = hide_observed(page, name)
+    page.evaluate("refresh()")
+    assert name not in page.evaluate(f"observedDomainsByDevice['{DEVICE}']")
+    row_button(page, list_id, "Edit").click()
+    expect(option).to_have_count(1)
+    expect(option).to_contain_text("saved, not seen lately")
+    assert name in chosen_domains(page, prefix)
+    # A refresh builds the list again. The name is still there and still chosen.
+    page.evaluate("refresh()")
+    assert name in chosen_domains(page, prefix)
+    field, value = change
+    page.locator(field).fill(value)
+    page.evaluate("refresh()")
+    assert name in chosen_domains(page, prefix)
+    with page.expect_request(posted(path)) as sent:
+        save(page, button)
+    assert name in sent.value.post_data_json["domains"], sent.value.post_data_json
+    expect(page.locator("#message")).to_contain_text("saved")
+    page.wait_for_function("() => !dashboardRefresh")
+    assert name in get(page, base, path)[path.rsplit("/", 1)[-1].replace("-", "_")][0]["domains"]
+    expect(page.locator(f"#{prefix}-form .form-error")).to_have_count(0)
+    assert name in chosen_domains(page, prefix)
+    # Discard unfinished edits forgets the name with the rest of the form.
+    page.locator(field).fill(value + "0")
+    discard_all_drafts(page)
+    expect(option).to_have_count(0)
+    page.unroute("**/api/observations", handler)
+    page.evaluate("refresh()")
+    clear_toast(page)
+
+
 def check_service_quota(page, base, width):
     writes = record_writes(page)
     open_card(page, "Service data limit")
@@ -526,6 +589,10 @@ def check_service_quota(page, base, width):
     assert sent.value.post_data_json["weight_percent"] == 100
     expect(page.locator("#service-quota-form .form-error")).to_have_count(0)
     clear_toast(page)
+    check_saved_names_survive(
+        page, base, "service-quota", "service-quota-list", "Save service limit", "/api/service-quotas",
+        ("#service-quota-weight", "2"),
+    )
     reset = row_button(page, "service-quota-list", "Reset usage")
     reset.focus()
     with page.expect_request(posted("/api/service-quotas/reset")) as sent:
@@ -678,6 +745,10 @@ def check_time_quota(page, base, width):
     assert sent.value.post_data_json["limit_seconds"] == 3 * 3600
     expect(page.locator("#time-quota-form .form-error")).to_have_count(0)
     clear_toast(page)
+    check_saved_names_survive(
+        page, base, "time-quota", "time-quota-list", "Save time limit", "/api/time-quotas",
+        ("#time-quota-amount", "4"),
+    )
     start = row_button(page, "time-quota-list", "Start timer")
     start.focus()
     with page.expect_request(posted("/api/time-quotas/start")) as sent:
