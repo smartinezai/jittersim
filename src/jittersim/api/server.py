@@ -3024,7 +3024,25 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             return status, "application/json", _json_bytes(data)
         if path == "/api/router/sync-ap":
             return self._router_execute(path, {**payload, "background": False})
+        if path == "/api/router/check":
+            return self._router_check_now(path, payload)
         return self._router_response_for(path, payload)
+
+    def _router_check_now(self, path, payload):
+        """A password check that is not a background operation spends the same router budget.
+
+        Every check signs in to the router, so a direct API call may not repeat one early.
+        """
+        refused = self.router_operations.begin_check()
+        if refused is not None:
+            return refused[0], "application/json", _json_bytes(refused[1])
+        status = HTTPStatus.BAD_GATEWAY
+        try:
+            response = self._router_response_for(path, payload)
+            status = response[0]
+            return response
+        finally:
+            self.router_operations.end_check(status == HTTPStatus.OK)
 
     def _router_response_for(self, path, payload):
         if path == "/api/router/status":

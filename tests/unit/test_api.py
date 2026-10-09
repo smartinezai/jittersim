@@ -2407,6 +2407,38 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body), {"result": {"ok": True, "action": "router-check"}})
         self.assertNotIn("router-secret", body.decode())
 
+    def _router_wait_is_over(self) -> None:
+        """Let the next router password check through, as if the wait after the last one ended."""
+        self.server.router_operations._next_read = 0.0
+
+    def test_router_check_is_refused_for_the_wait_after_any_earlier_check(self) -> None:
+        for fail in (False, True):
+            with self.subTest(failed_first_check=fail):
+                self._router_wait_is_over()
+                calls = []
+
+                class CountingHelper(FakeHelper):
+                    def check_router_password(self, *, admin_password):
+                        calls.append(admin_password)
+                        if fail:
+                            raise HelperClientError("Router login failed.")
+                        return {"ok": True, "action": "router-check"}
+
+                self.server.helper_client = CountingHelper()
+                first, _, _ = self.server.write_response_for(
+                    "/api/router/check", {"admin_password": "router-secret"})
+                self.assertEqual(first, 502 if fail else 200)
+                for payload in ({"admin_password": "router-secret"}, {"admin_password": "other-secret"},
+                                {"admin_password": "router-secret", "background": False}):
+                    status, content_type, body = self.server.write_response_for("/api/router/check", payload)
+                    data = json.loads(body)
+                    self.assertEqual((status, content_type), (429, "application/json"))
+                    self.assertTrue(1 <= data["retry_after"] <= (30 if fail else 15))
+                    self.assertNotIn("secret", body.decode())
+                self.assertEqual(calls, ["router-secret"])
+                # The budget behind the refusal is the one every router login shares.
+                self.assertEqual(self.server.router_operations.begin_check()[0], 429)
+
     def test_router_check_endpoint_needs_a_helper_and_a_password(self) -> None:
         self.server.helper_client = None
         status, _, body = self.server.write_response_for(
@@ -2443,6 +2475,7 @@ class ControlServerTests(unittest.TestCase):
                         raise HelperClientError(message)
 
                 self.server.helper_client = FailedHelper()
+                self._router_wait_is_over()
                 with self.assertLogs("jittersim.api.server", level="WARNING") as logs:
                     status, _, body = self.server.write_response_for(
                         "/api/router/check", {"admin_password": "router-secret"}
@@ -2619,6 +2652,7 @@ class ControlServerTests(unittest.TestCase):
                     raise error
 
             self.server.helper_client = Failing()
+            self._router_wait_is_over()
             status, _, body = self.server.write_response_for(
                 "/api/router/check", {"admin_password": "router-secret"})
             self.assertEqual(status, 502)

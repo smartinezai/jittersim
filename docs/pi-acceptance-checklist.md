@@ -92,8 +92,8 @@ Release tried: ________________  Date: ________________
 ### Router
 
 - [ ] **Router password check**
-  - Do: open the **Router password** panel. Enter a wrong password once and choose **Check password**. Then enter the right one.
-  - Expect: the wrong one is rejected and is not sent again until you edit it. The right one is accepted and the router switch shows On or Off with the time of the last check.
+  - Do: open the **Router password** panel. Enter a wrong password once and choose **Check password**. Then enter the right one and choose **Check password** again when the button stops counting down.
+  - Expect: the wrong one is rejected and is not sent again until you edit it. The Pi then spaces router sign-ins apart: after a wrong password the button waits 30 seconds (15 seconds after a right one) and the page says so. Pressing it early, in another tab or after a reload gets the same wait and the router is not contacted. The right one is accepted and the router switch shows On or Off with the time of the last check.
   - **Warning:** a wrong password only once. The router locks its login after a few tries.
 - [ ] **Router password memory**
   - Do: tick **Remember for 24 hours** under the router password. Reload the page.

@@ -6,9 +6,11 @@ The fixture's fake router accepts any router password and answers with the Wi-Fi
 
 import json
 import os
+import re
 import selectors
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
@@ -22,6 +24,7 @@ WIFI_PASSWORD = "browser-wifi-password"
 SYNC_PATH = "/api/router/sync-ap"
 PREVIEW_PATH = "/api/router/preview-ap"
 CREDENTIALS_PATH = "/api/router/wifi-credentials"
+CHECK_PATH = "/api/router/check"
 
 
 def sign_in(page):
@@ -148,6 +151,27 @@ def api_calls(requests, path):
     return [item for item in requests if item["url"].endswith(path)]
 
 
+def check_again_is_refused_with_a_wait(page, requests, responses):
+    """A second Check password right after the first is answered with a wait by the Pi."""
+
+    sidebar_control(page, "#open-router-credentials").click()
+    check = page.locator("#check-router-password")
+    before = len(api_calls(requests, CHECK_PATH))
+    check.click()
+    expect(check).to_have_text(re.compile(r"^Wait \d+ s$"))
+    expect(check).to_be_disabled()
+    expect(page.locator("#credential-router-status")).to_contain_text("Wait")
+    expect(page.locator("#credential-router-status")).to_contain_text("before checking the router password again")
+    # The earlier success still stands: a refusal says nothing about the password.
+    expect(page.locator("#router-credential-state")).to_have_text("Accepted")
+    assert len(api_calls(requests, CHECK_PATH)) == before + 1
+    refused = [item for item in responses if item["url"].endswith(CHECK_PATH) and item["status"] == 429]
+    assert len(refused) == 1, refused
+    assert 1 <= json.loads(refused[0]["body"])["retry_after"] <= 15
+    assert ROUTER_PASSWORD not in refused[0]["body"]
+    page.locator("#close-credentials").click()
+
+
 def check_confirmation(dialog, accept):
     assert f"{WIFI_NAME} using WPA2 (2.4 GHz)" in dialog.message
     for warning in (
@@ -231,6 +255,7 @@ def run_width(browser, base, width, height):
     page.locator("#close-credentials").click()
 
     enter_router_password(page)
+    check_again_is_refused_with_a_wait(page, requests, responses)
     expect(button).to_be_enabled()
     expect(page.locator("#router-wifi-toggle")).to_be_disabled()
     expect(page.locator("#router-wifi-label")).to_contain_text("read only")
@@ -354,7 +379,8 @@ def run_width(browser, base, width, height):
     context.close()
 
 
-def run():
+@contextmanager
+def fixture_server():
     process = subprocess.Popen(
         [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True
     )
@@ -364,20 +390,26 @@ def run():
             if not selector.select(timeout=15):
                 raise RuntimeError("Router copy dashboard fixture did not start")
             port = int(process.stdout.readline().strip())
-        Path("test-results").mkdir(exist_ok=True)
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(
-                executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE")
-            )
-            try:
-                for width, height in ((1920, 1000), (375, 844)):
-                    run_width(browser, f"http://127.0.0.1:{port}", width, height)
-                print("Router Wi-Fi import acceptance passed at desktop and 375px widths.")
-            finally:
-                browser.close()
+        yield port
     finally:
         process.terminate()
         process.wait(timeout=10)
+
+
+def run():
+    Path("test-results").mkdir(exist_ok=True)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE")
+        )
+        try:
+            for width, height in ((1920, 1000), (375, 844)):
+                # The Pi spaces router password checks apart, so each width gets its own Pi.
+                with fixture_server() as port:
+                    run_width(browser, f"http://127.0.0.1:{port}", width, height)
+            print("Router Wi-Fi import acceptance passed at desktop and 375px widths.")
+        finally:
+            browser.close()
 
 
 if __name__ == "__main__":
