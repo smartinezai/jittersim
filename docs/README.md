@@ -4,7 +4,7 @@ This page lists every file in `docs/` and the guides that live elsewhere in the
 repository. It groups them by status so you can tell what to trust. The
 overview's detailed feature content now lives in user-guide.md. The rest of
 this index was checked at `add7c87` on 2026-10-09; its README entries were
-updated against main at `bbff22a` on 2026-10-09.
+updated against main at `4a89f34` on 2026-10-09.
 
 ## What the status words mean
 
