@@ -72,6 +72,12 @@ HELPER_OUT_OF_DATE_MESSAGE = (
 WIFI_DETAILS_MISSING_MESSAGE = "The router did not return a Wi-Fi name or password."
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_HELPER_CONNECTIONS = 8
+# Connections whose request line has not arrived yet wait in their own pool, so
+# incomplete input never holds one of the MAX_HELPER_CONNECTIONS operation slots.
+MAX_PENDING_HELPER_INPUT = 16
+# One more operation slot that only Panic (a complete normal-access request or
+# its emergency device check) may use when the others are taken.
+PANIC_RESERVED_SLOTS = 1
 # Apply and reset wait this long for a read to finish before they answer helper-busy.
 # Reads never wait so a dashboard poll cannot make Panic fail. Normal access is the
 # Panic action and waits like Reset. Access apply carries Block globally, Unblock,
@@ -1645,6 +1651,47 @@ class HelperService:
             self._network_lock.release()
 
 
+def _decoded_request(line: bytes) -> Any:
+    try:
+        return json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return None
+
+
+def _uses_panic_reserve(payload: Any) -> bool:
+    """Only Panic may use the kept operation slot."""
+
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("action") == "normal-access" or (
+        payload.get("action") == "dashboard-access" and payload.get("operation") == "emergency-status"
+    )
+
+
+class _Admission:
+    """The pool slot one helper connection holds. Released once, when its worker exits."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.input_slot = None
+        self.slot = None
+        self.preread: Optional[bytes] = None
+
+    def take(self, slot) -> None:
+        with self._lock:
+            self.slot = slot
+            held, self.input_slot = self.input_slot, None
+        if held is not None:
+            held.release()
+
+    def release(self) -> None:
+        with self._lock:
+            held = [value for value in (self.input_slot, self.slot) if value is not None]
+            self.input_slot = self.slot = None
+        for slot in held:
+            slot.release()
+
+
 class HelperRequestHandler(socketserver.StreamRequestHandler):
     """Read one newline-delimited JSON request from a Unix socket client."""
 
@@ -1662,7 +1709,11 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             return
 
     def _handle_request(self) -> None:
-        line = self.rfile.readline(MAX_MESSAGE_BYTES + 1)
+        admission = getattr(self.server, "current_admission", lambda: None)()
+        if admission is not None and admission.preread is not None:
+            line = admission.preread
+        else:
+            line = self.rfile.readline(MAX_MESSAGE_BYTES + 1)
         if hasattr(self, "request"):
             # Response transport gets its own bounded allowance after input.
             self.request.settimeout(3)
@@ -1677,6 +1728,11 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "request must be valid JSON"})
             return
         action = payload.get("action") if isinstance(payload, dict) else None
+        # The request is complete. Only now does it take an operation slot.
+        if admission is not None and not self.server.admit_operation(admission, payload):
+            self._send_response({"ok": False, "error": "The networking helper is busy. Try again later.",
+                                 "reason": "helper-busy"})
+            return
         if self.server.policy_only:
             if action not in ("homepage-snapshot", "homepage-confirm"):
                 self._send_response({"ok": False, "error": "action unavailable"})
@@ -1733,7 +1789,12 @@ class UnixHelperServer(SafeServerErrors, socketserver.ThreadingMixIn, socketserv
         self.service = service
         self.operation_lock = threading.Lock()
         self.release_stage_lock = threading.Lock()
+        # Incomplete input, operations and the Panic reserve are separate pools. A
+        # worker thread holds exactly one of them at any time until it exits.
+        self._input_slots = threading.BoundedSemaphore(2 if policy_only else MAX_PENDING_HELPER_INPUT)
         self._request_slots = threading.BoundedSemaphore(2 if policy_only else MAX_HELPER_CONNECTIONS)
+        self._panic_slots = None if policy_only else threading.BoundedSemaphore(PANIC_RESERVED_SLOTS)
+        self._admissions = threading.local()
         self._request_workers = RequestWorkers("jittersim-helper-request", daemon=policy_only)
         self._prepare_socket_path()
         try:
@@ -1745,39 +1806,90 @@ class UnixHelperServer(SafeServerErrors, socketserver.ThreadingMixIn, socketserv
 
     def process_request(self, request, client_address) -> None:
         self._request_workers.reap()
-        if not self._request_slots.acquire(blocking=False):
+        admission = _Admission()
+        if self._input_slots.acquire(blocking=False):
+            admission.input_slot = self._input_slots
+        else:
+            # Every input slot waits for a slow client. Read this request for a
+            # moment here: a complete Panic request still gets the kept slot.
+            line = None
             try:
-                self._drain_rejected_request(request)
-                request.settimeout(1)
-                request.sendall(b'{"ok":false,"error":"The networking helper is busy. Try again later.",'
-                                b'"reason":"helper-busy"}\n')
+                line = self._drain_rejected_request(request)
             except OSError:
                 pass
-            finally:
-                self.shutdown_request(request)
-            return
+            if (line is not None and self._panic_slots is not None
+                    and _uses_panic_reserve(_decoded_request(line))
+                    and self._panic_slots.acquire(blocking=False)):
+                admission.slot, admission.preread = self._panic_slots, line
+            else:
+                try:
+                    request.settimeout(1)
+                    request.sendall(b'{"ok":false,"error":"The networking helper is busy. Try again later.",'
+                                    b'"reason":"helper-busy"}\n')
+                except OSError:
+                    pass
+                finally:
+                    self.shutdown_request(request)
+                return
         try:
             self._request_workers.start(
-                lambda: self.process_request_thread(request, client_address),
-                abandon=lambda: self.shutdown_request(request), release=self._request_slots.release,
+                lambda: self._serve_admitted(admission, request, client_address),
+                abandon=lambda: self.shutdown_request(request), release=admission.release,
             )
         except Exception:
             LOGGER.exception("helper worker startup failed")
 
+    def _serve_admitted(self, admission, request, client_address) -> None:
+        self._admissions.current = admission
+        try:
+            self.process_request_thread(request, client_address)
+        finally:
+            self._admissions.current = None
+
+    def current_admission(self):
+        """The slots of the request this worker thread serves, if any."""
+
+        return getattr(self._admissions, "current", None)
+
+    def admit_operation(self, admission, payload) -> bool:
+        """Move a complete request from the input pool to an operation slot."""
+
+        if admission.slot is not None:
+            return True
+        if self._request_slots.acquire(blocking=False):
+            slot = self._request_slots
+        elif (self._panic_slots is not None and _uses_panic_reserve(payload)
+              and self._panic_slots.acquire(blocking=False)):
+            slot = self._panic_slots
+        else:
+            # Refused: keep the input slot until this worker exits, so a busy
+            # answer that is still being written stays counted.
+            return False
+        admission.take(slot)
+        return True
+
     @staticmethod
-    def _drain_rejected_request(request) -> None:
-        # Closing with unread input can discard the busy response on Linux.
+    def _drain_rejected_request(request) -> Optional[bytes]:
+        """Read one request line for at most 0.25 s. Return it when it is complete.
+
+        Closing with unread input can also discard the busy response on Linux.
+        """
         deadline = time.monotonic() + 0.25
         remaining = MAX_MESSAGE_BYTES + 1
+        received = b""
         while remaining:
             wait = deadline - time.monotonic()
             if wait <= 0:
-                return
+                return None
             request.settimeout(wait)
             chunk = request.recv(min(4096, remaining))
-            if not chunk or b"\n" in chunk:
-                return
+            if not chunk:
+                return None
+            received += chunk
+            if b"\n" in chunk:
+                return received.split(b"\n", 1)[0] + b"\n"
             remaining -= len(chunk)
+        return None
 
     def service_actions(self) -> None:
         if self._request_workers.startup_uncertain:
