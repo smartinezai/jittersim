@@ -4140,10 +4140,12 @@ def apply_update(
             """Check health, then drop journal settings the restarted code lacks.
 
             Removing them restarts journald and may take 10 seconds, so it never
-            runs while the services, and with them Panic, are stopped.
+            runs while the services, and with them Panic, are stopped or unhealthy.
+            After a failed check the removal stays pending: the kept recovery
+            request runs it once a later attempt finds the services healthy.
             """
             healthy = wait_healthy()
-            if not (code / "src/jittersim/journal_policy.py").is_file():
+            if healthy and not (code / "src/jittersim/journal_policy.py").is_file():
                 configure_outage_journal(code, config, manager, run)
             return healthy
 
