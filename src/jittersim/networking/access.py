@@ -42,6 +42,10 @@ DNS_PORT = 5335
 # blocked device must still be able to learn why. The experiment table has the
 # same exception further down the input hook.
 DASHBOARD_PORT = 8080
+# Panic's household release waits at most this long for another access change
+# (an address refresh or the boot restoration) and then reports busy. The
+# dashboard gives the whole helper Panic request 60 seconds.
+RELEASE_LOCK_WAIT_SECONDS = 20.0
 
 
 def atomic_write(path: Path, content: str, mode: int = 0o640) -> None:
@@ -358,16 +362,40 @@ class AccessManager:
         self.dns_failed = False
 
     @contextmanager
-    def transaction(self):
-        with self.lock:
+    def _locked(self, timeout=None):
+        """Hold the thread lock and the boot file lock, waiting at most `timeout` seconds."""
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        if not self.lock.acquire(timeout=-1 if timeout is None else timeout):
+            raise ValueError("Household rules are busy with another change. Try again.")
+        try:
             self.directory.mkdir(mode=0o750, parents=True, exist_ok=True)
             # Boot restoration and the live helper must not change policy together.
             with (self.directory / "lock").open("a") as stream:
-                fcntl.flock(stream, fcntl.LOCK_EX)
+                if deadline is None:
+                    fcntl.flock(stream, fcntl.LOCK_EX)
+                else:
+                    while True:
+                        try:
+                            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            if time.monotonic() >= deadline:
+                                raise ValueError(
+                                    "Household rules are busy with another change. Try again."
+                                ) from None
+                            time.sleep(0.05)
                 try:
                     yield
                 finally:
                     fcntl.flock(stream, fcntl.LOCK_UN)
+        finally:
+            self.lock.release()
+
+    @contextmanager
+    def transaction(self):
+        with self._locked():
+            yield
 
     def _generation(self):
         try:
@@ -461,6 +489,9 @@ class AccessManager:
             self._stop_dns()
         self._admission(plan)
         self._nft(render_access_firewall(plan, self.topology))
+        self._clear_dns_connections()
+
+    def _clear_dns_connections(self):
         # Existing NAT decisions outlive nft rule replacement. Drop only test
         # clients' DNS mappings so reused sockets pick up the new policy too.
         for protocol in ("udp", "tcp"):
@@ -502,89 +533,200 @@ class AccessManager:
                     else "Filtered DNS is unavailable. Device blocks remain active."
                 )
 
-    def disable(self):
-        with self.lock:
+    def disable(self, *, bounded=True):
+        # Panic calls this while it holds the helper's network lock. A slow address
+        # refresh or boot restoration must not hold Panic for longer than
+        # RELEASE_LOCK_WAIT_SECONDS. Boot restoration waits as before.
+        wait = RELEASE_LOCK_WAIT_SECONDS if bounded else None
+        deadline = None if wait is None else time.monotonic() + wait
+        if not self.lock.acquire(timeout=-1 if wait is None else wait):
+            raise ValueError("Household rules are busy with another change. Try again.")
+        try:
             try:
                 plan = self.applied or read_access(self.directory / "policy.json")
             except (ValueError, OSError):
                 plan = AccessPlan()
             return self.apply(
-                replace(plan, options=replace(plan.options, enabled=False)), force=True
+                replace(plan, options=replace(plan.options, enabled=False)),
+                force=True,
+                wait=None if deadline is None else max(0.0, deadline - time.monotonic()),
             )
+        finally:
+            self.lock.release()
 
-    def apply(self, plan: AccessPlan, *, force=False):
-        with self.transaction():
-            self.dns_failed = False
-            if (
-                not force
-                and self.applied == plan
-                and self.error is None
-                and self.health_error is None
-                and self.generation == self._generation()
-            ):
-                return self.status()
-            self.runtime_path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
-            if plan is None:
-                self._nft(transition_firewall(self.topology))
-            try:
-                old = read_access(self.directory / "policy.json")
-            except (ValueError, OSError):
-                # A checked replacement can repair damaged state. If it fails there
-                # is no safe previous policy to reopen the network with.
-                old = None
-                if plan is None:
-                    self.error = "Saved access rules could not be read. The test network is closed."
-                    raise
-            if plan is None:
-                plan = old
-            if (
-                plan.options.enabled
-                and plan.options.reject_wifi_joins
-                and not self.admission_supported()
-            ):
-                raise ValueError("Wi-Fi admission is unavailable with the current access point")
-            candidate = self.directory / "candidate.conf"
-            atomic_write(candidate, render_dns(plan))
-            try:
-                if plan.has_dns_rules:
-                    self._run("unbound-checkconf", str(candidate))
-                self._nft(render_access_firewall(plan, self.topology), check=True)
-            finally:
-                candidate.unlink(missing_ok=True)
+    def apply(self, plan: AccessPlan, *, force=False, wait=None):
+        """Replace the policy. `wait` bounds the wait for another change, in seconds."""
+
+        with self._locked(wait):
+            return self._apply_locked(plan, force=force)
+
+    def _relax(self, problems, description, step, *arguments):
+        """Run one release step. A failure is recorded and the release goes on.
+
+        Any exception counts: on the Panic path an unexpected error in one step
+        must not skip clearing the transition guard.
+        """
+
+        try:
+            step(*arguments)
+            return True
+        except Exception as error:  # noqa: BLE001 - see above
+            problems.append((description, error))
+            return False
+
+    def _release(self, plan: AccessPlan):
+        """Turn household rules off without ever closing the test network.
+
+        Every step only relaxes, so none is rolled back and a failed step does not
+        stop the later ones. The permissive firewall goes in first and the
+        transition guard is always cleared. Wi-Fi admission, the resolver and DNS
+        connection state are best effort: they are logged and reported, and they
+        never bring back the restrictive rules.
+        """
+
+        failures, warnings = [], []
+        try:
             transition = (self.ad_blocking_store.access_transition()
                           if self.ad_blocking_store is not None else nullcontext())
-            with transition:
-                self._nft(transition_firewall(self.topology))
+            transition.__enter__()
+            entered = True
+        except Exception:  # noqa: BLE001 - the release must go on
+            # Panic already paused ad blocking. A busy settings lock must not keep
+            # household rules on.
+            LOGGER.warning("ad blocking was not paused for the household release", exc_info=True)
+            entered = False
+        try:
+            opened = self._relax(failures, "the open access firewall",
+                                 lambda: self._nft(render_access_firewall(plan, self.topology)))
+            if opened:
+                # Nothing is redirected to the resolver or to a MAC rule any more.
+                self.applied = plan
+            self._relax(failures, "clearing the transition guard",
+                        lambda: self._nft(transition_firewall(self.topology, clear=True)))
+            self._relax(warnings, "Wi-Fi admission lists could not be cleared",
+                        self._admission, plan)
+            if opened:
+                # Before this the old table may still send DNS to the resolver.
+                self._relax(warnings, "the unused resolver was not stopped", self._stop_dns)
+                self._relax(warnings, "the resolver configuration was not rewritten",
+                            lambda: atomic_write(self.directory / "unbound.conf", render_dns(plan)))
+                self._relax(warnings, "old DNS connection state was not cleared",
+                            self._clear_dns_connections)
+            if not failures:
+                content = json.dumps(plan.payload(), sort_keys=True) + "\n"
+
+                def persist():
+                    self.runtime_path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+                    atomic_write(self.directory / "policy.json", content)
+                    atomic_write(self.runtime_path, content)
+
+                self._relax(failures, "saving that household rules are off", persist)
+        finally:
+            if entered:
                 try:
-                    self._install(plan)
-                    content = json.dumps(plan.payload(), sort_keys=True) + "\n"
+                    transition.__exit__(None, None, None)
+                except Exception:  # noqa: BLE001 - the network is already open
+                    LOGGER.warning("ad blocking did not record the household release",
+                                   exc_info=True)
+        for description, error in warnings:
+            LOGGER.warning("household release: %s: %s", description, error)
+        if failures:
+            for description, error in failures:
+                LOGGER.error("household release failed at %s: %s", description, error)
+            self.error = "Household rules could not be fully turned off. Try Panic again."
+            raise failures[0][1]
+        self.generation = self._generation()
+        self.health_error = None
+        self.error = (
+            "Household rules are off, but " + "; ".join(text for text, _ in warnings) + "."
+            if warnings else None
+        )
+        return self.status()
+
+    def _apply_locked(self, plan: Optional[AccessPlan], *, force=False):
+        self.dns_failed = False
+        if (
+            not force
+            and self.applied == plan
+            and self.error is None
+            and self.health_error is None
+            and self.generation == self._generation()
+        ):
+            return self.status()
+        if plan is not None and not plan.options.enabled:
+            return self._release(plan)
+        self.runtime_path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+        if plan is None:
+            self._nft(transition_firewall(self.topology))
+        try:
+            old = read_access(self.directory / "policy.json")
+        except (ValueError, OSError):
+            # A checked replacement can repair damaged state. If it fails there
+            # is no safe previous policy to reopen the network with.
+            old = None
+            if plan is None:
+                self.error = "Saved access rules could not be read. The test network is closed."
+                raise
+        if plan is None:
+            plan = old
+            if not plan.options.enabled:
+                return self._release(plan)
+        if (
+            plan.options.enabled
+            and plan.options.reject_wifi_joins
+            and not self.admission_supported()
+        ):
+            raise ValueError("Wi-Fi admission is unavailable with the current access point")
+        candidate = self.directory / "candidate.conf"
+        atomic_write(candidate, render_dns(plan))
+        try:
+            if plan.has_dns_rules:
+                self._run("unbound-checkconf", str(candidate))
+            self._nft(render_access_firewall(plan, self.topology), check=True)
+        finally:
+            candidate.unlink(missing_ok=True)
+        transition = (self.ad_blocking_store.access_transition()
+                      if self.ad_blocking_store is not None else nullcontext())
+        with transition:
+            self._nft(transition_firewall(self.topology))
+            try:
+                self._install(plan)
+                content = json.dumps(plan.payload(), sort_keys=True) + "\n"
+                atomic_write(self.directory / "policy.json", content)
+                atomic_write(self.runtime_path, content)
+                self._nft(transition_firewall(self.topology, clear=True))
+            except Exception:
+                self.error = "Access update failed. Previous rules were restored."
+                if old is not None and not old.options.enabled:
+                    # Going back to no household rules only relaxes. Use the
+                    # release so a second failure cannot leave the guard closed.
+                    try:
+                        self._release(old)
+                        self.error = "Access update failed. Household rules stay off."
+                    except Exception:
+                        LOGGER.exception("household release after a failed update failed")
+                    raise
+                try:
+                    if old is None:
+                        raise ValueError("no readable previous access policy")
+                    self._install(old)
+                    content = json.dumps(old.payload(), sort_keys=True) + "\n"
                     atomic_write(self.directory / "policy.json", content)
                     atomic_write(self.runtime_path, content)
                     self._nft(transition_firewall(self.topology, clear=True))
+                    self.applied = old
                 except Exception:
-                    self.error = "Access update failed. Previous rules were restored."
-                    try:
-                        if old is None:
-                            raise ValueError("no readable previous access policy")
-                        self._install(old)
-                        content = json.dumps(old.payload(), sort_keys=True) + "\n"
-                        atomic_write(self.directory / "policy.json", content)
-                        atomic_write(self.runtime_path, content)
-                        self._nft(transition_firewall(self.topology, clear=True))
-                        self.applied = old
-                    except Exception:
-                        self.error = (
-                            "Access recovery failed. "
-                            "The test network is closed until recovery succeeds."
-                        )
-                        LOGGER.exception("persistent access recovery failed")
-                    raise
-                self.applied = plan
-                self.generation = self._generation()
-                self.error = None
-                self.health_error = None
-                return self.status()
-
+                    self.error = (
+                        "Access recovery failed. "
+                        "The test network is closed until recovery succeeds."
+                    )
+                    LOGGER.exception("persistent access recovery failed")
+                raise
+            self.applied = plan
+            self.generation = self._generation()
+            self.error = None
+            self.health_error = None
+            return self.status()
 
     def restore(self):
         return self.apply(None, force=True)
@@ -644,7 +786,7 @@ def main(argv=None):
         ),
     )
     if stopped:
-        manager.disable()
+        manager.disable(bounded=False)
     else:
         manager.restore()
     return 0

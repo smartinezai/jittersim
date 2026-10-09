@@ -349,3 +349,163 @@ class AccessRecoveryTests(unittest.TestCase):
             )
             self.manager.apply(replace(plan, options=AccessOptions(enabled=False)))
             self.assertEqual((self.directory / "deny.macs").read_text().strip(), "")
+
+
+class HouseholdReleaseTests(unittest.TestCase):
+    """Panic's household release must never leave the test Wi-Fi closed."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.executor = AccessExecutor(self.directory)
+        self.manager = AccessManager(
+            executor=self.executor,
+            topology=Topology("eth0", "wlan0"),
+            directory=self.directory,
+            runtime_path=self.directory / "runtime.json",
+        )
+        admission = patch.object(self.manager, "admission_supported", return_value=True)
+        admission.start()
+        self.addCleanup(admission.stop)
+        self.restrictive = AccessPlan(
+            blocks=(SiteBlock("global", "Global", ("example.com",)),),
+            options=AccessOptions(reject_wifi_joins=True),
+            mac=MacPolicy("denylist", (), ("02:00:00:00:00:01",)),
+        )
+        self.manager.apply(self.restrictive)
+        self.mark = len(self.executor.commands)
+
+    def failing(self, predicate, result=None):
+        original = self.executor.run
+
+        def run(command):
+            if predicate(command):
+                self.executor.commands.append(command)
+                if result is not None:
+                    return result
+                raise CommandExecutionError("simulated timeout")
+            return original(command)
+
+        return patch.object(self.executor, "run", run)
+
+    def release_nft(self):
+        return [c.stdin for c in self.executor.commands[self.mark:] if c.executable == "nft"]
+
+    def assert_open(self):
+        nft = self.release_nft()
+        access = [s for s in nft if "jittersim_access " in s or "inet jittersim_access\n" in s]
+        self.assertTrue(access, "the permissive access table was never installed")
+        self.assertNotIn("ether saddr", access[-1])
+        self.assertNotIn("redirect", access[-1])
+        guard = [s for s in nft if "jittersim_access_transition" in s]
+        self.assertTrue(guard, "the transition guard was never cleared")
+        self.assertIn("delete table inet jittersim_access_transition", guard[-1])
+        # The restrictive rules are never reinstalled after the release started.
+        self.assertFalse(any("ether saddr" in s for s in nft))
+
+    def test_a_timing_out_hostapd_still_opens_the_test_network(self):
+        with self.failing(lambda c: c.executable == "hostapd_cli"), \
+                self.assertLogs("jittersim.networking.access", level="WARNING"):
+            status = self.manager.disable()
+        self.assert_open()
+        self.assertFalse(status["enabled"])
+        self.assertFalse(self.manager.applied.options.enabled)
+        self.assertFalse(read_access(self.directory / "policy.json").options.enabled)
+        self.assertIn("admission", status["error"])
+
+    def test_a_failing_conntrack_is_only_a_warning(self):
+        from jittersim.networking.commands import CommandResult
+
+        with self.failing(lambda c: c.executable == "conntrack",
+                          CommandResult(return_code=1, stderr="conntrack v1.4: module missing")), \
+                self.assertLogs("jittersim.networking.access", level="WARNING"):
+            self.manager.disable()
+        self.assert_open()
+        self.assertFalse(self.manager.applied.options.enabled)
+
+    def test_a_failing_permissive_firewall_still_clears_the_guard_and_never_rolls_back(self):
+        def permissive(command):
+            return (command.executable == "nft" and "jittersim_access_transition" not in command.stdin
+                    and "--check" not in command.arguments)
+
+        with self.failing(permissive), self.assertLogs("jittersim.networking.access", level="ERROR"), \
+                self.assertRaises(CommandExecutionError):
+            self.manager.disable()
+        nft = self.release_nft()
+        guard = [s for s in nft if "jittersim_access_transition" in s]
+        self.assertIn("delete table inet jittersim_access_transition", guard[-1])
+        self.assertFalse(any("ether saddr" in s for s in nft))
+        self.assertEqual(self.commands_after("hostapd_cli")[0].arguments[-2:], ("macaddr_acl", "0"))
+
+    def commands_after(self, executable):
+        return [c for c in self.executor.commands[self.mark:] if c.executable == executable]
+
+    def test_a_busy_ad_blocking_lock_does_not_block_the_release(self):
+        class BusyAds:
+            def access_transition(self):
+                raise ValueError("Ad-blocking settings are busy. Try again.")
+
+        self.manager.ad_blocking_store = BusyAds()
+        with self.assertLogs("jittersim.networking.access", level="WARNING"):
+            self.manager.disable()
+        self.assert_open()
+
+    def test_panic_never_waits_unbounded_for_the_access_lock(self):
+        import threading
+        import time
+
+        from jittersim.networking import access as access_module
+
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            with self.manager.lock:
+                held.set()
+                release.wait(10)
+
+        thread = threading.Thread(target=holder)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(release.set)
+        held.wait(5)
+        started = time.monotonic()
+        with patch.object(access_module, "RELEASE_LOCK_WAIT_SECONDS", 0.3, create=True), \
+                self.assertRaisesRegex(ValueError, "busy"):
+            self.manager.disable()
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_panic_never_waits_unbounded_for_the_boot_file_lock(self):
+        import fcntl
+        import time
+
+        from jittersim.networking import access as access_module
+
+        import threading
+
+        outcome = []
+
+        def release():
+            try:
+                self.manager.disable()
+                outcome.append(None)
+            except ValueError as error:
+                outcome.append(error)
+
+        with (self.directory / "lock").open("a") as other:
+            fcntl.flock(other, fcntl.LOCK_EX)
+            started = time.monotonic()
+            with patch.object(access_module, "RELEASE_LOCK_WAIT_SECONDS", 0.3, create=True):
+                thread = threading.Thread(target=release, daemon=True)
+                thread.start()
+                thread.join(5)
+                stuck = thread.is_alive()
+            if stuck:
+                fcntl.flock(other, fcntl.LOCK_UN)
+                thread.join(10)
+            self.assertFalse(stuck, "Panic waited unbounded on the boot restoration lock")
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertRegex(str(outcome[0]), "busy")
+        # Once the other writer is gone the release works.
+        self.manager.disable()
+        self.assert_open()
