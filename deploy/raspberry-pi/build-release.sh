@@ -56,6 +56,13 @@ case $sequence in
         exit 1
         ;;
 esac
+# The same limit as check-release-manifest.sh and MAX_SEQUENCE in updates.py: a larger number
+# builds and signs, then the Pi refuses the release. The length test comes first so the numeric
+# test never sees a number that is too large for the shell.
+if [ "${#sequence}" -gt 16 ] || [ "$sequence" -ge 9007199254740992 ]; then
+    echo 'build-release.sh: the release sequence must be below 9007199254740992 (2 to the power of 53)' >&2
+    exit 1
+fi
 manifest=$(printf '{"format": 1, "commit": "%s", "version": "%s", "sequence": %s}' \
     "$commit" "$version" "$sequence")
 printf 'Release version: %s\n' "$version" >&2
