@@ -105,6 +105,9 @@ AD_PAUSE_PANIC_WAIT_SECONDS = 8.0
 # at the same address for this long (review T5 of PR 91). See
 # HelperService._handle_emergency_verification.
 EMERGENCY_STATION_CONFIRMATION_SECONDS = 30.0
+# Panic's device check waits at most this long for a saved-grant write (which holds
+# the access store lock through fsync), then answers helper-busy (review G7).
+EMERGENCY_ACCESS_STORE_WAIT_SECONDS = 0.5
 NORMAL_ACCESS_BUSY_RETRY_SECONDS = 15.0
 NORMAL_ACCESS_BUSY_RETRY_INTERVAL = 0.5
 ACCESS_STATUS_LOCK_WAIT_SECONDS = 0.5
@@ -639,6 +642,8 @@ class HelperService:
           it. Otherwise the station list is read fresh, which is bounded by its
           command timeout.
         - The saved device list is read fresh. A device removed since is refused.
+          A stalled grant write makes the answer helper-busy after
+          EMERGENCY_ACCESS_STORE_WAIT_SECONDS instead of an unbounded wait.
         """
 
         store = self._access_store
@@ -654,11 +659,22 @@ class HelperService:
             applier = (_ConfirmedStationApplier(self._applier, confirmed[1])
                        if confirmed is not None else self._applier)
             identity = identify_peer(applier, peer, require_reachable=False)
-            allowed = identity["network"] == "management" or (
-                identity["mac_address"] is not None
-                and any(device["mac_address"] == identity["mac_address"] and is_active(device)
-                        for device in store.list_devices())
-            )
+            allowed = identity["network"] == "management"
+            if not allowed and identity["mac_address"] is not None:
+                # A grant write holds the store lock through fsync, which can stall.
+                # Wait a bounded time for it; without the current list there is no
+                # decision, so the answer is helper-busy (retried), never a grant.
+                # The lock is the store's own reentrant lock: list_devices takes it
+                # again in this thread, and the reviewed module stays unchanged.
+                if not store._lock.acquire(timeout=EMERGENCY_ACCESS_STORE_WAIT_SECONDS):
+                    return {"ok": False, "error": "Device verification is busy. Try again.",
+                            "reason": "helper-busy"}
+                try:
+                    devices = store.list_devices()
+                finally:
+                    store._lock.release()
+                allowed = any(device["mac_address"] == identity["mac_address"]
+                              and is_active(device) for device in devices)
             # protected_synced lets the dashboard tell a restarted helper, which has not
             # received the protection grants yet, from a final refusal.
             return {"ok": True, **identity, "can_register": False, "allowed": allowed,
