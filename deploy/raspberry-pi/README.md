@@ -60,7 +60,7 @@ Only local dashboard traffic avoids profiles and client blocks. Ordinary
 internet traffic still follows the assigned profile. The access list is kept
 in root-owned `/etc/jittersim/dashboard-access.json` and survives reboot and
 upgrades. Include it in private configuration backups. The SQLite dashboard
-download does not contain it. See the [dashboard access guide](../../README.md#dashboard-access-from-pi-wi-fi)
+download does not contain it. See the [dashboard access guide](../../docs/user-guide.md#dashboard-access-from-pi-wi-fi)
 for the Mac command and Pi recovery commands.
 
 ## Install or update
