@@ -11,7 +11,7 @@ Current main is `5e0fed2ccb2414373643f20db1df59aa2de25306`. Its complete source 
 | Homepage bounce | Reviewed live HTTPS pairing and controlled extension support are implemented | Verify real test-device identity, normal extension trust and physical recovery. DNS cannot redirect page paths. |
 | Real phone acceptance | Outstanding | Use safe recovery and actual affected/protected clients. Verify shared limits, privacy and reconnection. |
 | Chrome dashboard access | Source includes trust and reconnect assistance | Establish the actual browser failure. Earlier permission and VPN guesses are unproven. |
-| Router Wi-Fi controls | Deliberate checks and guarded legacy writes are implemented | Unknown router forms use the router settings page. The physical outage cause is unproven. |
+| Router Wi-Fi controls | Deliberate read-only checks and the copy to the Pi are implemented. Router Wi-Fi writes are refused since PR 87 | Turn router Wi-Fi on or off with the router's own button or page. The physical outage cause is unproven. |
 | Remote CLI and official deployment | Delivered to main | Bootstrap signed-update support, trust the release key and verify recovery. Current Pi requires sudo authentication. |
 | Integration | Delivered to main after every configured local counterpart passed | Verify the installed release separately. |
 | Remembered credential renewal | Delivered to main | Verify real installed-browser behavior separately from fixture coverage. |

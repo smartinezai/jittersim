@@ -2,15 +2,34 @@
 
 This directory contains the versioned deployment pieces for the Pi appliance.
 
-Install the helper and dashboard from the same release. The sidebar's Router
-Wi-Fi switch needs the helper's read-only status action. Choose **Check router
-Wi-Fi** to request a fresh status. Opening the dashboard or remembering the
-password does not start automatic router checks. Slow router changes run in
+Install the helper and dashboard from the same release. The sidebar's read-only
+Router Wi-Fi status needs the helper's read-only status action. Choose **Check
+router Wi-Fi** to request a fresh status. Opening the dashboard or remembering
+the password does not start automatic router checks. Slow router checks run in
 the background and the page reads their existing results. An older helper
 shows unavailable status. No router password is
 saved on the Pi by these checks.
 The installer keeps credentials out of the repository and generates them on
 the Pi the first time it runs.
+
+## Recovery quick reference
+
+Find the symptom, then follow the linked steps. SSH to the Pi works from
+Ethernet, from the router's network and at a local terminal. It never works from
+the test Wi-Fi.
+
+| Symptom | Go to |
+| --- | --- |
+| The dashboard does not open | [Dashboard unreachable](../../docs/runbooks/dashboard-unreachable.md) |
+| Test devices have no internet, or profiles will not stop | `sudo jittersim normal-access` (see [Recover over SSH](#recover-over-ssh)) |
+| The Pi Wi-Fi carries the router's copied name | `sudo jittersim wifi reset` (see [Recover over SSH](#recover-over-ssh)) |
+| A dashboard action reports `network helper apply failed` | [Troubleshoot a failed apply](#troubleshoot-a-failed-apply) |
+| An update failed, hangs or the new release misbehaves | [Update rollback and recovery copy](../../docs/runbooks/update-rollback-and-recovery-copy.md) |
+| The router's Wi-Fi is off or the router stopped working | [Router outage and Pi-only rollback](../../docs/runbooks/router-outage-pi-only-rollback.md) |
+| A release signing key is lost, stolen or must be replaced | [Key rotation and trusted keys](../../docs/runbooks/key-rotation-and-trusted-keys.md) |
+| The SD card or the settings database is damaged | [Restore and reimage](../../docs/runbooks/restore-and-reimage.md) |
+| Chrome cannot open the dashboard but Safari can | [Troubleshoot Chrome not opening the dashboard](#troubleshoot-chrome-not-opening-the-dashboard) |
+| You need evidence for an outage | [Outage evidence](#outage-evidence) |
 
 ## Security boundary
 
@@ -55,6 +74,7 @@ Keep it outside `/opt/jittersim`, `/etc` and the appliance's data or runtime
 folders. A checkout or archive extracted by the login user does not meet this
 requirement. Do not copy credentials into the source tree.
 
+The `jittersim` user must exist before you install (see [Service user](#service-user)).
 For a first installation, verify the official signed archive and its matching
 signature against the trusted release key before extracting it. Replace the
 archive path below with that verified file. Use a new source folder. If the
@@ -91,6 +111,35 @@ private backup of `/opt/jittersim`, `/etc/jittersim`, `/var/lib/jittersim`,
 the current service definitions and NetworkManager connections before changing
 releases. A software rollback must restore those service definitions and their
 previous enabled state as well as code and settings.
+
+### Service user
+
+The installer needs a user named `jittersim`. If there is none it stops before
+it changes anything and prints `the jittersim service user must be created by
+Raspberry Pi Imager`. Create the user in Raspberry Pi Imager's OS customisation
+when you write the SD card: set the user name to `jittersim`, set a password and
+add your SSH public key.
+
+This one account does several jobs. It is the SSH login that
+`deploy-from-mac.sh` uses by default (`jittersim@...`) and the only login that
+passwordless staging allows, with the archive path
+`/home/jittersim/incoming/jittersim-release.tar.gz`. The dashboard, browser
+proxy and service watcher run as this user. It owns `/var/lib/jittersim`, and
+its group `jittersim` can read `/etc/jittersim` and reach the helper socket.
+
+The installer checks only that the user exists. If a Pi already runs without
+it, create the user before you install:
+
+```sh
+sudo adduser jittersim
+sudo adduser jittersim sudo
+getent passwd jittersim
+```
+
+`adduser` also creates the group `jittersim`, which the installer and the
+services use. These commands are the usual Debian way to create a login that
+may use `sudo`. The repository does not run or test them. A user made with
+`adduser --system` has no login shell and cannot be the SSH login.
 
 ### Private database backup
 
@@ -141,7 +190,9 @@ sudo /path/to/jittersim/deploy/raspberry-pi/install.sh /path/to/jittersim
 The installer creates the `jittersim-ap` Wi-Fi connection with DHCP, IPv4
 sharing and address `192.168.50.1/24`. DHCP gives out
 `192.168.50.100`–`192.168.50.199` so managed clients can use stable manual
-addresses outside that range. This requires NetworkManager 1.50 or newer.
+addresses outside that range. Leases last five minutes
+(`ipv4.shared-dhcp-lease-time 300`) and the test Wi-Fi's DHCP server is
+authoritative. This requires NetworkManager 1.50 or newer.
 Before installing packages or changing services, the installer checks the
 NetworkManager version, Ethernet route, AP interface and subnet overlap. It
 also checks that Wi-Fi is enabled and does not replace an active Wi-Fi
@@ -272,9 +323,9 @@ new authority and trust it again on every device.
 
 Open **Admin token** in the sidebar and choose **Check token** to load the
 dashboard: `sudo grep JITTERSIM_ADMIN_TOKEN /etc/jittersim/control.env` shows
-the token. The token is kept in the page only, or for 24 hours when you tick
-**Remember**. Changing the token in `control.env` and restarting the dashboard
-locks every open page.
+the token. The token is kept in the page only, or for 24 hours, 7 days or 30
+days when you tick **Remember** and choose how long. Changing the token in
+`control.env` and restarting the dashboard locks every open page.
 
 ### Client isolation
 
@@ -282,8 +333,8 @@ The access point isolates its clients: devices on the test Wi-Fi can reach the
 internet through the Pi, but not each other. A visitor's phone can't see your
 laptop's shared folders or other devices on the test Wi-Fi. Casting and screen
 sharing between test Wi-Fi devices stop working too. New installs call the
-test Wi-Fi `JitterSim`. Existing installs keep their name. You can change it in
-the dashboard.
+test Wi-Fi `TestNet` (`JITTERSIM_AP_SSID` in `ap.env`, written by `install.sh`).
+Existing installs keep their name. You can change it in the dashboard.
 
 Isolation starts when the test Wi-Fi next restarts. The installer doesn't
 restart a running test Wi-Fi, so after updating, reboot the Pi or run the
@@ -312,11 +363,12 @@ returns to the normal schedule or profile when it expires.
 After a service restart, JitterSim restores the last applied plan or completes
 the last reset. A saved change that the running scheduler did not need to apply
 clears that record so JitterSim is then not running after a restart until you
-choose Start with saved settings or Reset network. A fresh installation with no
+choose Start or Reset network. A fresh installation with no
 prior action leaves the network unchanged.
 
-The **General profile** control applies one saved profile to every unprotected
-test Wi-Fi client, including later arrivals. Its speed limit is shared by
+The **Everyone** card on the Devices page (called the general profile in the
+terminal commands) applies one saved profile to every unprotected test Wi-Fi
+client, including later arrivals. Its speed limit is shared by
 affected clients only. Protected clients use separate normal queues and do
 not consume that allowance. Stopping it resumes current saved device rules.
 Panic or Reset pauses all profiles while preserving the selection.
@@ -346,8 +398,9 @@ cannot skip them. It never captures protected traffic as a fallback.
 Check the features on the Pi after an update:
 
 1. Open Traffic discovery and scan. Device names appear instead of bare
-   addresses. Add a phone to **Unaffected by profiles** then scan again. The
-   phone's lookups disappear and its row says `Traffic is not monitored`.
+   addresses. Choose **Protect** beside a phone on the Devices page then scan
+   again. The phone's lookups disappear and its row says `Traffic is not
+   monitored`.
 2. Open a group such as ImmoScout24 or Netflix. **Block all** then **Unblock
    all** change every name in one step.
 3. Give a phone a profile with 10% loss and a 2 Mbit/s cap. Open Diagnostics
@@ -392,8 +445,8 @@ DHCP and ordinary forwarding belong to NetworkManager, so they do not depend
 on the dashboard or helper process staying up. Leave global website blocks,
 MAC allowlists and the everyone-else profile off during this trial because
 those controls affect clients without a device record. With an everyone-else
-profile, every household device that isn't saved or on the Unaffected devices
-list gets that profile.
+profile, every household device that isn't saved or on the **Protected
+devices** list gets that profile.
 
 This remains a routed, isolated test network. Wi-Fi clients cannot reach
 private addresses behind the Ethernet router. Wired clients cannot normally
@@ -450,8 +503,8 @@ records the remaining network-design decision.
    the setting inside Firefox. For Safari or Chrome, macOS offers **Secure Web
    Proxy (HTTPS)** under System Settings → Network → Wi-Fi → Details → Proxies.
    That system setting can also affect other apps that honor it.
-4. Choose **Start with saved settings** in the dashboard or **Re-apply saved
-   settings** if JitterSim already runs. Try the selected service and an
+4. Choose **Start** in the dashboard. It also applies the saved settings
+   again if JitterSim already runs. Try the selected service and an
    unrelated HTTPS site in that browser. Use a simple profile with a visible
    delay for the first check. A shared destination address is safe because the
    proxy classifies each tunnel by its requested hostname. To check the proxy
@@ -489,8 +542,8 @@ It needs no proxy or setting on the client. Create one in the dashboard under
 **Schedules and limits** in the **Service lists** card. Use a simple profile with a visible delay for the first
 check.
 
-1. Choose **Start with saved settings** in the dashboard. Connect a test client
-   that is not in **Unaffected by profiles** and open a listed service and then
+1. Choose **Start** in the dashboard. Connect a test client
+   that is not in **Protected devices** and open a listed service and then
    an unrelated site. Only the listed service should show the profile's delay.
 2. Check the set the Pi keeps for the list. The set name is `svc_` followed by
    the list's queue number (the first list in a plan with no devices is
@@ -504,7 +557,7 @@ check.
    The set should hold addresses for the listed hostnames within a minute of
    applying. The `service-list` rules show packet and byte counters for both
    directions.
-3. Compare with an unaffected client. Its traffic to the same service should
+3. Compare with a protected client. Its traffic to the same service should
    stay normal.
 
 The `jittersim-service-watch` service reads the DNS answers that leave the Pi
@@ -648,7 +701,7 @@ JitterSim's effects and household restrictions. Saved lists remain available.
 A running dashboard notices the reset and stops scheduled changes. Use
 `sudo jittersim reset` to keep household restrictions active while stopping
 experiments. The older `jittersim-reset` command has the same limited scope.
-Choose **Start with saved settings** to resume experiments. Re-enable
+Choose **Start** to resume experiments. Re-enable
 household access rules separately when ready.
 
 `sudo jittersim status` shows the last recorded network action and whether the
@@ -670,19 +723,21 @@ restore the name to `TestNet`, keep the current password and restart test
 Wi-Fi. They require the helper service but work with the dashboard stopped.
 Saved profiles and household access rules are preserved.
 
-Router and Wi-Fi has the same **Reset Wi-Fi name** action. It cannot be reached
-from the test network. Keep the router Wi-Fi on and a working management route
-before copying its name to the Pi. If your computer has already joined the
-copied Pi network, reconnect to the router before trying dashboard recovery.
+Router and Wi-Fi has the same **Reset Wi-Fi name** action. On the test Wi-Fi it
+works only from a computer that has signed in and was allowed with **Allow this
+device**, and the restart disconnects that computer too. Keep the router Wi-Fi
+on and a working management route before copying its name to the Pi. If your
+computer has already joined the copied Pi network, reconnect to the router
+before trying dashboard recovery.
 
-Installation and every Wi-Fi change require WPA3 with AES and protected Wi-Fi
-management messages. Updating a running
-Pi saves those security settings without restarting active Wi-Fi. Follow the
-installer's planned restart instructions to activate them. Runtime changes
-activate the new settings and verify WPA3 authentication with required protection
-on the active radio before reporting success. Clients need WPA3 support.
-A failed name reset restores the previous security rather than silently allowing
-weaker authentication.
+A fresh installation and manual Wi-Fi changes use WPA3 with AES and protected
+Wi-Fi management messages. Clients need WPA3 support. Updating a running Pi
+keeps its existing security type and does not restart active Wi-Fi. Follow the
+installer's planned restart instructions to activate saved changes. Router
+copies match the router's mode and name resets keep the current mode, as
+described above. Runtime changes verify authentication and protection on the
+active radio before reporting success. A failed name reset restores the
+previous settings.
 
 If name recovery fails, the helper makes one attempt to restore the previous
 name and security settings. It reports whether restoration also failed.
@@ -743,8 +798,14 @@ sudo jittersim update rollback
 
 `update check` reports releases already staged on the Pi, who signed them and
 whether they can be installed. It does not query the private repository
-online. Install and rollback ask for confirmation and briefly interrupt the
+online. `sudo jittersim update check --online` does: it asks GitHub for the
+newest release and stages it when a trusted key signed it and it is newer. It
+needs the read-only token that `sudo jittersim update set-token` saves (the
+token is read from standard input and never printed). `clear-token` removes it.
+Install and rollback ask for confirmation and briefly interrupt the
 dashboard and test network. Keep Ethernet or SSH available for recovery.
+`sudo jittersim update retry --yes --wait` retries one failed update when
+`update check` says a retry is available.
 `sudo jittersim update stage`, `trust-key`, `untrust-key`, `list-keys` and
 `enable-passwordless-staging` manage [signed releases](#signed-releases). Run
 `sudo jittersim --help` or `sudo jittersim update --help` for command help.
@@ -810,13 +871,16 @@ redirect cannot safely intercept HTTPS or router traffic.
 
 ## Vodafone router note
 
-For a Vodafone TG3442DE, the dashboard can read the primary Wi-Fi settings and
-turn the primary Wi-Fi radios on or off. Enter the router admin password in the
-dashboard for one action at a time. The password is not saved. Keep the Pi
-connected by Ethernet before changing router Wi-Fi. If a router firmware update
-changes its local web interface, use the direct router link or the manual
-access-point form. HTTPS protects the browser-to-Pi connection. The router's
-local web interface still uses HTTP between the Pi and the router.
+For a Vodafone TG3442DE, the dashboard can read the primary Wi-Fi status and
+copy the router's Wi-Fi name, password and security to the Pi. It cannot turn
+the router's Wi-Fi on or off: the helper refuses router Wi-Fi changes before it
+contacts the router. Use the router's own button or settings page for that
+(see [Router Wi-Fi recovery safety](#router-wi-fi-recovery-safety)). Enter the
+router admin password in the dashboard for each check. The Pi does not save it.
+Keep the Pi connected by Ethernet while you copy router Wi-Fi. If a router
+firmware update changes its local web interface, use the direct router link or
+the manual access-point form. HTTPS protects the browser-to-Pi connection. The
+router's local web interface still uses HTTP between the Pi and the router.
 
 The dashboard shows the Pi's Ethernet connection label and default gateway.
 That label is local to the Pi and is not the router's Wi-Fi name. The router
@@ -829,7 +893,7 @@ JitterSim database.
 ## Approved release updates
 
 Install this version once using the normal installer to add the update service.
-After that, the Updates page can check the installed version, install a signed staged
+After that, the **Updates** page can check the installed version, install a signed staged
 release and restore the previous installation. Optional online checks may use
 a separately configured private GitHub token. Signing keys on the Pi are public
 trust keys. The private release key stays on the signing machine. See
@@ -872,12 +936,12 @@ sudo jittersim update stage /tmp/jittersim-release.tar.gz
 
 Staging checks the signature before it reads anything inside the archive. It
 also rejects a release that is not newer than the installed one, unsafe archive
-paths, links, more than 5000 files and excessive compressed or expanded size.
+paths, links, 5000 or more files and excessive compressed or expanded size.
 `--sha256 CHECKSUM` and `--version LABEL` add two more checks. Only root can
 write the staged files. The dashboard can select only that staged release and
 cannot submit a URL, path or shell command.
 
-On the Updates page choose Check for updates then Install update. The operation
+On the Updates page press **Check for updates** then **Install update**. The operation
 runs the release steps of `install.sh`. It first runs the release's network
 preflight and kernel egress-hook check. If either fails nothing changes. It
 then stops the dashboard, helper and browser proxy. It backs up the
@@ -906,7 +970,7 @@ sudo systemctl status jittersim-update.service
 sudo journalctl -u jittersim-update.service -n 80 --no-pager
 ```
 
-Restore previous installation uses the selected complete recovery copy.
+**Restore previous installation** uses the selected complete recovery copy.
 Ordinary profiles, protection settings, saved device access and usage may return
 to that earlier point. Later ordinary edits can be lost. Current signing trust,
 update token, checks against older releases, certificate authority and Panic state have separate
@@ -967,8 +1031,8 @@ HTTPS installation waits up to 900 seconds in total, including status reads.
    command with the update service's own copy of `updates.py`. The script never
    reads, stores or passes a password.
 4. With `--stage-only` it prints the exact command to install the staged
-   release. You can also choose **Check for updates** and then **Install staged
-   release** on Router and Wi-Fi. By default the same session runs
+   release. You can also choose **Check for updates** and then **Install
+   update** on the Updates page. By default the same session runs
    `sudo jittersim update install --yes --wait` (`sudo jittersim update
    install --yes` and a wait for the update service on a Pi from before signed
    releases). Then it reads `jittersim update check` and prints the release the
@@ -980,7 +1044,7 @@ stops the deploy before anything is copied and says what to run.
 
 The release has a semantic version with its source commit in the manifest.
 The Pi records it in `/opt/jittersim/.jittersim-release.json`.
-Router and Wi-Fi shows it and so does
+The Updates page and the sidebar show it and so does
 `jittersim status` on the Mac.
 
 A Pi without the update service (a release from before staged updates) needs
@@ -992,7 +1056,7 @@ sudo terminal. With `--stage-only` it prints the installer command. Use it
 as well for OS package or Wi-Fi changes. The source folder stays under `/root`
 for checking. An existing folder is refused rather than overwritten.
 
-Every ssh and scp call has a ten second connection timeout, notices a dead
+Every ssh and scp call has an eight second connection timeout, notices a dead
 connection within 45 seconds and uses only the given key. All of them except
 the `sudo` step run in `BatchMode` so they never ask anything and each has a
 time limit (one minute for a check, ten minutes for the copy, five minutes for
@@ -1027,7 +1091,7 @@ install code as root. The admin token and the SSH login are not.
   release comes back only with the local rollback (`sudo jittersim update
   rollback` or **Restore previous installation**), which restores the recovery
   copy and never stages an archive.
-- Install staged release (dashboard, `jittersim update install`) checks again
+- Install update (dashboard, `jittersim update install`) checks again
   that the staged release was signed by a key that is still trusted and is
   still newer. A release staged without a signature cannot be installed.
 
@@ -1196,8 +1260,8 @@ copy. Then restart `jittersim-access-boot.service` and the helper and dashboard.
 Start `jittersim-ap.service` too if the test Wi-Fi is not up. Do not remove the
 temporary firewall guard merely to hide a failed restoration.
 
-Settings exports use version 2 so an older reader cannot silently discard the
-new site rules. Restoring a release without access-control support is refused
+Settings exports use version 3 so an older reader cannot silently discard the
+new site rules. Import still reads versions 1, 2 and 3. Restoring a release without access-control support is refused
 while household controls are enabled. Explicitly disable them first if the
 loss of protection is intended. Keep the database and applied access-policy
 backup from the same recovery point.
@@ -1280,7 +1344,7 @@ still require acceptance on the actual hardware.
 ### Router Wi-Fi recovery safety
 
 The dashboard shows router Wi-Fi status but its switch is disabled. The helper
-refuses router Wi-Fi changes by default before contacting the router. Use the
+refuses router Wi-Fi changes before contacting the router. Use the
 router's own controls. Read-only checks and copying its credentials to the Pi
 remain available. Copying credentials changes the Pi access point and must
 still be tested through management access before turning router Wi-Fi off.

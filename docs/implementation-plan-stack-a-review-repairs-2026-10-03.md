@@ -24,7 +24,7 @@ checks locally against the exact combined head rather than halting verification.
 
 ## Sources and ownership
 
-| Work | Exact source head | Owning worktree under `/Users/samantha.martinez/Github repos/jittersim.worktrees` |
+| Work | Exact source head | Owning worktree under `<home>/Github repos/jittersim.worktrees` |
 | --- | --- | --- |
 | PR 46, Mac CLI | `7899f5a630cf4437090fcc967daf29ea72d92068` | `claude-cli-deadline` |
 | PR 52, signed updates | `4330aa21c590b354da31754545b295737ec06da1` | `claude-signed-fixes` |
