@@ -626,7 +626,7 @@ class HouseholdReleaseTests(unittest.TestCase):
 
     def test_a_busy_ad_blocking_lock_does_not_block_the_release(self):
         class BusyAds:
-            def access_transition(self):
+            def access_transition(self, **_):
                 raise ValueError("Ad-blocking settings are busy. Try again.")
 
         self.manager.ad_blocking_store = BusyAds()
