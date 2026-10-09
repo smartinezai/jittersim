@@ -399,6 +399,17 @@ if [ "$adoption_finished" = completed ]; then
 fi
 "$INSTALL_DIR/.venv/bin/python" -m jittersim.localca check-health --config-dir "$CONFIG_DIR" >&2
 
+# Diagnostics are optional and start only after the new services pass health checks.
+# Keep the small policy utility outside the application so an older release can
+# restore the previous journal storage behavior without deleting retained logs.
+if install -m 0644 -o root -g root \
+    "$INSTALL_DIR/src/jittersim/journal_policy.py" /usr/local/lib/jittersim-outage-journal.py \
+    && python3 -I /usr/local/lib/jittersim-outage-journal.py install; then
+    echo "Outage journal setup checked." >&2
+else
+    echo "Warning: optional outage journal setup was skipped. Apply and recovery remain available." >&2
+fi
+
 echo "Installed JitterSim $("$INSTALL_DIR/.venv/bin/python" -c 'import jittersim; print(jittersim.__version__)')" >&2
 echo "JitterSim installed. Read the generated credentials locally from:" >&2
 echo "  $CONFIG_DIR/control.env" >&2
