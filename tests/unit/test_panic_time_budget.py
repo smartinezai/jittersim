@@ -22,6 +22,7 @@ from jittersim.api import server as server_module
 from jittersim.api.server import ControlRequestHandler, ControlServer
 from jittersim.config.storage import ConfigRepository
 from jittersim.networking import helper as helper_module
+from jittersim.networking import adblocking as adblocking_module
 from jittersim.networking import executor as executor_module
 from jittersim.networking.access import AccessManager
 from jittersim.networking.adblocking import AdRouting
@@ -128,6 +129,8 @@ class SlowAdStore:
         try:
             yield
         finally:
+            # Like AdStore: the end waits at least TRANSITION_END_WAIT_SECONDS (review O-c).
+            wait = max(wait, adblocking_module.TRANSITION_END_WAIT_SECONDS)
             self.waits.append(("transition end", wait))
             self.clock.now += wait
             self.routing.clear()

@@ -40,13 +40,13 @@ point back to this section. `tests/unit/test_panic_time_budget.py` checks them w
 a fake clock on which every wait lasts its whole allowance.
 
 - Browser: `PANIC_REQUEST_TIMEOUT_MS` in `api/dashboard.js` is 50 s per Panic attempt.
-- Dashboard route (`api/server.py`): at most 44 s. That is the device check, the helper
+- Dashboard route (`api/server.py`): at most 45 s. That is the device check, the helper
   client and the database allowance.
   - Device check: every helper call shares `EMERGENCY_CHECK_BUDGET_SECONDS` (8 s). This
     covers the emergency check, one protection resync and the fallback for an older
     helper. With nothing left the answer is 503, which the page retries. It never
     grants access.
-  - Helper client (`HelperClient.normal_access`): `NORMAL_ACCESS_TIMEOUT_SECONDS` (31 s).
+  - Helper client (`HelperClient.normal_access`): `NORMAL_ACCESS_TIMEOUT_SECONDS` (32 s).
     It asks a busy helper again only during the first `NORMAL_ACCESS_BUSY_RETRY_SECONDS`
     (5 s). Every attempt therefore starts with at least `PANIC_ANSWER_SECONDS` plus one
     second left.
@@ -63,12 +63,14 @@ a fake clock on which every wait lasts its whole allowance.
   - the ad-blocking pause, at most 8 s, and it leaves `PANIC_RELEASE_RESERVE_SECONDS`
     (4 s) for the household release;
   - the household release lock, at most `RELEASE_LOCK_WAIT_SECONDS` (10 s);
-  - the release's ad-blocking transition, at most 1 s on each side.
+  - the release's ad-blocking transition, at most 1 s on entry. Its end waits up to
+    `TRANSITION_END_WAIT_SECONDS` (3 s) even after the deadline: it only clears the
+    suspension, and giving up would leave ad blocking bypassed for good.
 
   Commands (`networking/deadlines.py`) get the same deadline as their timeout.
   Nothing that opens the network or records the result is skipped once the deadline
   has passed. Each such step is still tried with `PANIC_STEP_FLOOR_SECONDS` (0.5 s).
-  Stacked, the worst case is 22 s, below `PANIC_ANSWER_SECONDS` (25 s). A step that
+  Stacked, the worst case is 25 s, below `PANIC_ANSWER_SECONDS` (26 s). A step that
   ran short is reported as incomplete recovery and the owner retries Panic. The
   release never brings restrictions back. Stopping the unused filtered resolver
   after a release is only queued (`systemctl stop --no-block`), so it does not

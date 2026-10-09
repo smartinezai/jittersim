@@ -104,7 +104,7 @@ PANIC_POST_LOCK_SECONDS = 6.0
 PANIC_NETWORK_LOCK_WAIT_SECONDS = PANIC_DEADLINE_SECONDS - PANIC_POST_LOCK_SECONDS
 PANIC_STEP_FLOOR_SECONDS = 0.5
 PANIC_RELEASE_RESERVE_SECONDS = 4.0
-PANIC_ANSWER_SECONDS = 25.0
+PANIC_ANSWER_SECONDS = 26.0
 # Gateway reads run while the request holds the operation lock. They wait this long
 # for a reset that holds the network lock, then answer helper-busy, so they never
 # keep the operation lock from Apply and Reset for longer than those wait for it.
