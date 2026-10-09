@@ -22,6 +22,17 @@ class DeploymentFirewallTests(unittest.TestCase):
         self.assertIn("fc00::/7", firewall)
         self.assertIn("fe80::/10", firewall)
 
+    def test_test_wifi_cannot_forward_to_link_local_or_carrier_grade_nat(self) -> None:
+        # Some ISP modems and their management pages sit in these ranges.
+        firewall = (
+            REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-control-firewall.nft"
+        ).read_text()
+        forward = firewall[firewall.index("chain forward"):]
+        private = forward[:forward.index('comment "deny test Wi-Fi access to private upstream networks"')]
+        for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                        "169.254.0.0/16", "100.64.0.0/10"):
+            self.assertIn(network, private)
+
     def test_pi_service_uses_tls_and_installer_protects_the_private_key(self) -> None:
         service = (
             REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-dashboard.service"
