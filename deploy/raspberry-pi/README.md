@@ -1317,6 +1317,17 @@ directory can otherwise enable persistence again. When logging was already
 persistent, only the owned policy files and link are removed. Administrator
 changes are preserved. The policy utility also supports older-release rollback.
 
+Setup stops and prints one fixed reason word when it cannot be sure it is safe.
+`administrator-policy` means a journald file already sets storage or limits.
+Distribution defaults count too. Raspberry Pi OS may ship a volatile storage
+default. In that case set the limits yourself or ask for a decision. Nothing
+is overwritten. `unsafe-directory` or `unsafe-configuration` means an owner or
+permission check failed. `low-space` means the card is too full. An interrupted
+setup leaves `/etc/jittersim-outage-journal` behind and later runs refuse to
+guess. Delete that folder and the link under
+`/usr/local/lib/systemd/journald.conf.d` to try again. Debian's staff group may
+write `/usr/local`. That is accepted. Any other group or world write is not.
+
 This feature improves future evidence. It cannot recover logs already lost or
 identify the cause of the Vodafone outages. Deployment and a real disposable-VM
 reboot proof are still required before treating this local change as verified
