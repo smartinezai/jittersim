@@ -268,3 +268,42 @@ def test_the_browser_waits_longer_than_the_dashboard_needs_for_panic():
     assert server_bound + server_module.PANIC_DATABASE_ALLOWANCE_SECONDS <= browser
     assert (helper_module.PANIC_ANSWER_SECONDS + helper_module.NORMAL_ACCESS_BUSY_RETRY_SECONDS + 1
             <= helper_module.NORMAL_ACCESS_TIMEOUT_SECONDS)
+
+
+def test_panic_bookkeeping_waits_fit_the_database_allowance():
+    # N3: each repository step of Panic waits a bounded time for a backup to end,
+    # and the steps together stay inside the allowance that the browser timeout has.
+    from jittersim.api import access as access_module
+
+    worst = (access_module.PANIC_REPOSITORY_WAIT_SECONDS * access_module.PANIC_REPOSITORY_STEPS
+             + access_module.PANIC_RESULT_WAIT_SECONDS)
+    assert worst <= server_module.PANIC_DATABASE_ALLOWANCE_SECONDS
+    assert server_module.EMERGENCY_REPOSITORY_WAIT_SECONDS < server_module.EMERGENCY_CHECK_BUDGET_SECONDS
+
+
+def test_a_held_repository_lock_is_waited_for_only_boundedly(tmp_path):
+    from jittersim.config.storage import RepositoryBusy
+
+    repository = ConfigRepository(tmp_path / "config.db")
+    held, stop = threading.Event(), threading.Event()
+
+    def backup():
+        with repository._lock:
+            held.set()
+            stop.wait(10)
+
+    thread = threading.Thread(target=backup)
+    thread.start()
+    try:
+        assert held.wait(5)
+        started = time.monotonic()
+        with pytest.raises(RepositoryBusy):
+            with repository.locked_within(0.2):
+                pass
+        assert time.monotonic() - started < 2
+    finally:
+        stop.set()
+        thread.join(5)
+    with repository.locked_within(0.2):
+        assert repository.get_runtime_state() is not None
+    repository.close()
