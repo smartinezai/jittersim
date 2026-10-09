@@ -312,6 +312,9 @@ def source(tmp_path):
     (root / "pyproject.toml").write_text('[project]\nname = "jittersim"\nversion = "0.2.1"\n')
     (root / "README.md").write_text("Test package\n")
     shutil.copy(ROOT / "CHANGELOG.md", root / "CHANGELOG.md")
+    with open(root / "CHANGELOG.md", "a") as changelog:
+        if "## Unreleased" not in (ROOT / "CHANGELOG.md").read_text():
+            changelog.write("\n## Unreleased\n\n- Hand-written entry.\n")
     (root / "docs/releases").mkdir(parents=True)
     (root / "docs/releases/registry.json").write_text(json.dumps(
         {"format": 1, "sequence_floor": None, "reservations": []}))
@@ -348,13 +351,16 @@ def test_release_script_dry_run_builds_signed_release_without_touching_github(re
     with tarfile.open(package) as bundle:
         notes = bundle.extractfile("deploy/RELEASE-NOTES.md").read().decode()
     assert notes.startswith("## v0.3.0 - ") and "Dry run release notes" in notes
+    # The hand-written Unreleased entries came along, above the generated notes.
+    assert notes.index("- ") < notes.index("Dry run release notes")
     receipt = release.verify_local(manifest["commit"], state / "evidence" / release.LOCAL_RECORD,
                                    str(key) + ".pub", release.DEFAULT_LOCAL_CHECKS)
     assert receipt["runner"].endswith("(fake checks)")
     clone = state / "source"
     assert git(clone, "log", "-1", "--format=%s") == "Start 0.3.1 development"
     assert git(clone, "show", manifest["commit"] + ":pyproject.toml").endswith('version = "0.3.0"')
-    assert "## v0.3.0 - " in git(clone, "show", manifest["commit"] + ":CHANGELOG.md")
+    changelog = git(clone, "show", manifest["commit"] + ":CHANGELOG.md")
+    assert "## v0.3.0 - " in changelog and "## Unreleased" not in changelog
     # Nothing left this Mac: the checkout, its origin and GitHub are unchanged.
     assert git(source, "rev-parse", "HEAD") == head and not git(source, "tag", "--list")
     assert not git(tmp_path / "origin.git", "tag", "--list")
