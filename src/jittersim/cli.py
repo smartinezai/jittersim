@@ -144,8 +144,23 @@ def _build_operations_parser() -> argparse.ArgumentParser:
     )
     _add_local_options(set_chance)
 
-    updates = commands.add_parser("update", help="check and manage signed staged releases")
+    updates = commands.add_parser(
+        "update", help="check, install and manage signed releases",
+        description="'sudo jittersim update' checks GitHub for a newer signed release, shows "
+        "its notes, installs it after you confirm and waits for the health check. A failed "
+        "install restores the previous installation by itself.",
+    )
     update_commands = updates.add_subparsers(dest="update_command", required=True)
+    now = update_commands.add_parser(
+        "now", help="check online, show the notes, install and wait (root; the default)",
+        description="Check GitHub for a newer signed release (when a token is saved), show what "
+        "it is, install it after confirmation and wait until the Pi is healthy again. A failed "
+        "health check restores the previous installation automatically.",
+    )
+    now.add_argument("--yes", action="store_true", help="install without an interactive prompt")
+    now.add_argument("--offline", action="store_true",
+                     help="do not ask GitHub; install a release already staged on this Pi")
+    _add_local_options(now)
     for name in ("check", "install", "rollback", "retry"):
         command = update_commands.add_parser(name)
         if name != "check":
@@ -561,7 +576,96 @@ def _wait_for_update(*, request_id=None, recovering=False) -> int:
     return 0 if final.get("phase") == "complete" else 1
 
 
+def _printable_lines(text: str):
+    from jittersim.remote_client import printable
+
+    return [printable(line) for line in text.splitlines()]
+
+
+def _staged_notes(status) -> Optional[str]:
+    """Notes of the staged release: from the status when the manager reports them, else read
+    as root from the staged signed archive."""
+    notes = status.get("notes")
+    if isinstance(notes, str) and notes.strip():
+        return notes
+    from jittersim import updates
+    from jittersim.release_info import release_notes
+
+    return release_notes(updates.UPDATE_ROOT / "staged")
+
+
+def _update_now(arguments) -> int:
+    """`sudo jittersim update`: check, show, confirm, install and wait in one step."""
+    if os.geteuid() != 0:
+        print("Run it as root: sudo jittersim update", file=sys.stderr)
+        return 1
+    from jittersim import updates
+
+    if arguments.offline:
+        print("Not asking GitHub (--offline). Looking at the release staged on this Pi.")
+    elif updates.token_is_set(updates.CONFIG_ROOT):
+        print("Checking GitHub for a newer signed release.", flush=True)
+        result = updates.perform_online_check(
+            updates.new_job(), root=updates.UPDATE_ROOT, code=updates.CODE_ROOT,
+            config=updates.CONFIG_ROOT, source=updates.default_source(), auto_install=False,
+        )
+        print(result.get("message") or "The online check gave no answer.")
+    else:
+        print("No GitHub token is saved, so only a release already staged on this Pi is "
+              "offered. Save one with 'sudo jittersim update set-token'.")
+    try:
+        status = _release_status(arguments)
+    except HelperClientError as error:
+        print(f"Release status unavailable: {error}", file=sys.stderr)
+        return 1
+    installed = status.get("installed") or "unknown"
+    version = status.get("available")
+    if status.get("retry"):
+        print("An earlier update stopped before it finished. Run "
+              "'sudo jittersim update retry --yes --wait' first.", file=sys.stderr)
+        return 1
+    if not version or version == installed:
+        print(f"Up to date. Installed: {installed}")
+        return 0
+    if not status.get("installable"):
+        print(f"Release {version} is staged but cannot be installed: "
+              f"{status.get('reason') or 'stage a signed release'}", file=sys.stderr)
+        return 1
+    print(f"Installed: {installed}")
+    print(f"New release: {version}, signed by {status.get('signed_by') or 'unknown'}")
+    notes = _staged_notes(status)
+    if notes:
+        print("Release notes:")
+        for line in _printable_lines(notes)[:60]:
+            print("  " + line)
+    copy = "a recovery copy exists" if status.get("rollback_available") else "none yet"
+    print(f"Recovery: the installation and settings are backed up first ({copy} before this "
+          "update). If the Pi is not healthy afterwards the backup is restored automatically.")
+    if not _confirm(f"Install {version} now? The dashboard and test network pause briefly.",
+                    arguments.yes):
+        print("Cancelled. Nothing was installed.")
+        return 0
+    try:
+        queued = HelperClient(
+            socket_path=arguments.helper_socket, timeout_seconds=arguments.timeout_seconds,
+        ).install_release(version=version)
+    except HelperClientError as error:
+        print(f"Install request failed: {error}", file=sys.stderr)
+        return 1
+    request_id = queued.get("request_id") if isinstance(queued, dict) else None
+    result = _wait_for_update(request_id=request_id if isinstance(request_id, str) else None)
+    if result == 0:
+        print(f"Done. The Pi runs {version}.")
+    else:
+        print("The update did not finish as planned. When the health check failed the previous "
+              "installation was restored. Details: 'sudo jittersim update check' and "
+              "'sudo jittersim logs update'.", file=sys.stderr)
+    return result
+
+
 def _update_command(arguments) -> int:
+    if arguments.update_command == "now":
+        return _update_now(arguments)
     if arguments.update_command in ("install", "retry") and arguments.wait and os.geteuid() != 0:
         print(f"--wait needs root: run 'sudo jittersim update {arguments.update_command} --yes --wait'.",
               file=sys.stderr)
@@ -592,8 +696,8 @@ def _update_command(arguments) -> int:
         elif status.get("retry_unavailable_reason"):
             print(f"Retry unavailable: {status['retry_unavailable_reason']}")
         print(
-            "This checks signed releases staged on the Pi. "
-            "It does not check the private repository online."
+            "This shows the signed release staged on the Pi. Add --online to ask GitHub for a "
+            "newer one, or run 'sudo jittersim update' to check and install in one step."
         )
         return 0
     if arguments.update_command == "retry":
@@ -844,6 +948,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         arguments = _build_control_parser(command).parse_args(raw_arguments[1:])
         return (_reset(arguments, all_restrictions=command == "normal-access")
                 if command != "status" else _status(arguments))
+    if raw_arguments in (["version"], ["--version"]):
+        from jittersim.release_info import current_label
+
+        print(f"JitterSim {current_label()}")
+        return 0
+    if raw_arguments == ["update"]:
+        raw_arguments = ["update", "now"]
     if raw_arguments[:2] == ["update", "check"] and "--online" in raw_arguments[2:]:
         from jittersim.updates import main as manager_main
 
@@ -871,7 +982,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.epilog = (
             "Headless commands on the Pi: access status, access apply, access dns-failure, "
             "persistence show, persistence set on/off, diagnostics, logs, "
-            "update check, update install, update rollback, dashboard-name, update stage, update trust-key "
+            "update (check online and install), update check, update install, update rollback, "
+            "dashboard-name, update stage, update trust-key, version "
             "and wifi reset. "
             "Commands for your Mac through the Pi's HTTPS dashboard: connect, status, "
             "profiles list/apply-all/stop-all, traffic, wifi show and impact. "

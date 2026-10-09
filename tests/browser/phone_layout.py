@@ -8,6 +8,7 @@ measured so that a run documents the layout.
 """
 
 import os
+import re
 import selectors
 import subprocess
 import sys
@@ -322,6 +323,13 @@ def check_router_switch(page, what):
     page.locator("#check-router-password").click()
     expect(page.locator("#router-credential-state")).to_contain_text("Accepted")
     page.locator("#close-credentials").click()
+    sidebar_control(page, "#refresh-router-wifi").click()
+    # The password check a moment ago used the router budget, so the Pi does not ask the router
+    # again yet and the page says how long to wait.
+    expect(page.locator("#message")).to_contain_text("choose Check router Wi-Fi again")
+    wait = int(re.search(r"Wait (\d+) second", page.locator("#message").text_content()).group(1))
+    assert 1 <= wait <= 15, wait
+    page.wait_for_timeout((wait + 1) * 1000)
     sidebar_control(page, "#refresh-router-wifi").click()
     close_controls(page)
     switch = page.locator("#router-wifi-toggle")

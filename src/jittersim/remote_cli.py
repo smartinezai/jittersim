@@ -346,6 +346,7 @@ def _status(arguments: argparse.Namespace) -> int:
             "runtimeState": observed,
             "running": running,
             "lastAction": state.get("last_action"),
+            "deviceOnly": state.get("device_only"),
             "generalState": general,
             "profiles": profiles,
             "clients": clients,
@@ -359,6 +360,7 @@ def _status(arguments: argparse.Namespace) -> int:
         running,
         {
             "lastAction": state.get("last_action"),
+            "deviceOnly": state.get("device_only"),
             "helperConfigured": health.get("helper_configured") is not False,
         },
     )
@@ -987,16 +989,69 @@ def _remote_update_parser() -> argparse.ArgumentParser:
         "staged one. 'upload' sends a release archive and its .sig file (build them with "
         "deploy/raspberry-pi/build-release.sh REF OUTPUT KEY): the Pi stages it only when a key "
         "it trusts signed it and it is newer than what it ran before. 'install' installs the "
-        "staged release, and with --wait waits until the Pi runs it.",
+        "staged release, and with --wait waits until the Pi runs it. 'check' asks the Pi to look "
+        "for a newer signed release on GitHub with its own read-only token. 'now' checks, shows "
+        "the release, asks and installs it, then waits until the Pi runs it (a failed health "
+        "check restores the previous installation on the Pi by itself).",
     )
-    parser.add_argument("action", choices=("status", "upload", "install"))
+    parser.add_argument("action", choices=("status", "check", "now", "upload", "install"))
     parser.add_argument("--archive", type=Path, default=DEFAULT_ARCHIVE,
                         help=f"upload: the release archive (default: {DEFAULT_ARCHIVE})")
     parser.add_argument("--signature", type=Path,
                         help="upload: its signature (default: the archive name plus .sig)")
-    parser.add_argument("--wait", type=float, default=0.0, metavar="SECONDS",
-                        help="install: wait up to this long until the Pi runs the release")
+    parser.add_argument("--wait", type=float, default=None, metavar="SECONDS",
+                        help="install: wait up to this long until the Pi runs the release "
+                        f"(now: default {NOW_WAIT_SECONDS:.0f})")
+    parser.add_argument("--yes", action="store_true", help="now: install without asking")
     return parser
+
+
+NOW_WAIT_SECONDS = 900.0
+CHECK_WAIT_SECONDS = 420.0
+FINAL_PHASES = {"failed": "The update failed", "rolled-back": "The update failed and the Pi "
+                "restored the previous installation"}
+
+
+def _online_check(client: DashboardClient) -> Dict[str, Any]:
+    """Ask the Pi to check GitHub and wait for the answer. The Pi uses its own token."""
+
+    view = _require(client.post("/api/updates/check-online", {"force": True},
+                                timeout=ACTION_TIMEOUT_SECONDS), dict)
+    job = view.get("job")
+    deadline = time.monotonic() + CHECK_WAIT_SECONDS
+    while view.get("state") == "running":
+        if not isinstance(job, str) or not re.fullmatch(r"[0-9a-f]{16}", job):
+            raise RemoteError(UNDERSTOOD_MESSAGE)
+        if time.monotonic() >= deadline:
+            raise RemoteError("The Pi's online check did not finish. Check again later with: "
+                              "jittersim remote update status")
+        time.sleep(2)
+        view = _require(client.get("/api/updates/check-online/" + job), dict)
+    return view
+
+
+def _install_and_wait(client: DashboardClient, staged: str, wait: float) -> int:
+    client.post("/api/updates/install", {"version": staged, "confirm": True},
+                timeout=ACTION_TIMEOUT_SECONDS)
+    _out(f"Install of release {printable(staged)} queued.")
+    deadline = time.monotonic() + max(0.0, wait)
+    while wait > 0:
+        time.sleep(5)
+        try:
+            now = client.get("/api/updates")
+        except RemoteError:
+            # The dashboard restarts during the install.
+            now = {}
+        if now.get("installed") == staged and now.get("phase") not in ("failed", "rolled-back"):
+            _out(f"The Pi now runs release {printable(staged)}.")
+            return 0
+        if now.get("phase") in FINAL_PHASES and now.get("installed") != staged:
+            raise RemoteError(f"{FINAL_PHASES[now['phase']]}: "
+                              f"{printable(now.get('message') or 'no details')}")
+        if time.monotonic() >= deadline:
+            raise RemoteError(f"The Pi does not run release {printable(staged)} yet. "
+                              "Check again with: jittersim remote update status")
+    return 0
 
 
 def _release_lines(data: Dict[str, Any]) -> None:
@@ -1032,30 +1087,47 @@ def _remote_update(arguments: argparse.Namespace) -> int:
             _out(f"The Pi checked the signature and staged release {printable(staged)}.")
             _out("Install it with: jittersim remote update install --wait 600")
         return 0
+    if arguments.action in ("check", "now"):
+        view = _online_check(client)
+        if arguments.json and arguments.action == "check":
+            _print_json({"check": view, "release": client.get("/api/updates")})
+            return 0 if view.get("result") != "failed" else 1
+        _out(printable(view.get("message") or "The Pi gave no answer to the online check."))
+        if view.get("result") == "failed" and arguments.action == "check":
+            return 1
     status = client.get("/api/updates")
     staged = status.get("available")
+    if arguments.action == "check":
+        _release_lines(status)
+        return 0
+    if arguments.action == "now" and (not staged or staged == status.get("installed")):
+        _out(f"Up to date. The Pi runs {printable(status.get('installed') or 'an unknown release')}.")
+        return 0
     if not isinstance(staged, str) or not staged:
         raise RemoteError("No release is staged on the Pi. Upload one first.")
     if status.get("installable") is False:
         raise RemoteError(
             printable(status.get("reason") or "The staged release cannot be installed."))
-    client.post("/api/updates/install", {"version": staged, "confirm": True},
-                timeout=ACTION_TIMEOUT_SECONDS)
-    _out(f"Install of release {printable(staged)} queued.")
-    deadline = time.monotonic() + max(0.0, arguments.wait)
-    while arguments.wait > 0:
-        time.sleep(5)
-        try:
-            now = client.get("/api/updates")
-        except RemoteError:
-            now = {}
-        if now.get("installed") == staged:
-            _out(f"The Pi now runs release {printable(staged)}.")
+    wait = arguments.wait
+    if arguments.action == "now":
+        _out(f"Release on the Pi: {printable(status.get('installed') or 'unknown')}")
+        _out(f"New release: {printable(staged)}, signed by {printable(status.get('signed_by') or 'unknown')}")
+        if isinstance(status.get("notes"), str):
+            for line in status["notes"].splitlines()[:60]:
+                _out("  " + line)
+        if not arguments.yes and not _ask(f"Install {staged} on the Pi now?"):
+            _out("Cancelled. Nothing was installed.")
             return 0
-        if time.monotonic() >= deadline:
-            raise RemoteError(f"The Pi does not run release {printable(staged)} yet. "
-                              "Check again with: jittersim remote update status")
-    return 0
+        wait = NOW_WAIT_SECONDS if wait is None else wait
+    return _install_and_wait(client, staged, wait or 0.0)
+
+
+def _ask(question: str) -> bool:
+    try:
+        answer = input(printable(question) + " Type yes to continue: ")
+    except EOFError:
+        return False
+    return answer.strip().lower() == "yes"
 
 
 # --- end: remote update

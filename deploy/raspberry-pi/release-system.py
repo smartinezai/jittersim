@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import platform
 import re
 import signal
 import stat
@@ -31,6 +32,12 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
 VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 GATES = {"physical", "upgrade", "recovery", "saved_settings", "management_access", "safety_state"}
+# A record of checks run on the owner's Mac, signed with the owner's release key. It stands in
+# for hosted CI only when hosted CI never ran and the policy at the release commit allows it.
+LOCAL_NAMESPACE = "jittersim-local-verification"
+LOCAL_RECORD = "local-verification.json"
+CHECK_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
+DEFAULT_LOCAL_CHECKS = ("lint", "python-tests", "browser-journeys")
 
 
 class ReleaseError(Exception):
@@ -321,16 +328,36 @@ def policy(git, commit):
                 and isinstance(jobs, list) and 1 <= len(jobs) <= 32
                 and all(isinstance(job, str) and 0 < len(job) <= 100 for job in jobs)
                 and len(set(jobs)) == len(jobs), "The required job list is invalid.")
+    local = result.get("local_verification", {"allowed": False})
+    checked(isinstance(local, dict) and set(local) <= {"allowed", "required_checks", "note"}
+            and type(local.get("allowed")) is bool, "The local verification policy is invalid.")
+    required = local.get("required_checks", list(DEFAULT_LOCAL_CHECKS))
+    checked(isinstance(required, list) and 1 <= len(required) <= 16 and len(set(required)) == len(required)
+            and all(isinstance(name, str) and CHECK_NAME.fullmatch(name) for name in required),
+            "The local verification policy is invalid.")
+    result["local_verification"] = {"allowed": local["allowed"], "required_checks": required}
     return result
 
 
-def verify_ci(git, commit, github):
-    expected = policy(git, commit)["workflows"]
+def _never_executed(rows):
+    """A billing or quota block ends every job as failed before a single step runs."""
+    return bool(rows) and all(not row.get("steps") and row.get("conclusion") != "success" for row in rows)
+
+
+def verify_ci(git, commit, github, local=None):
+    """Receipts for the required checks of COMMIT on main.
+
+    Hosted runs are the normal evidence. When a required workflow never ran (no run at all or
+    a run whose jobs never executed a step) a signed local verification record may stand in,
+    but only if the policy at COMMIT allows it and LOCAL = (record path, trusted public key)
+    is given. A hosted job that ran and failed always refuses."""
+    rules = policy(git, commit)
+    expected = rules["workflows"]
     answer = github.api(f"repos/{REPOSITORY}/actions/runs?head_sha={commit}&per_page=100")
     runs = answer.get("workflow_runs", [])
     checked(isinstance(runs, list) and len(runs) <= 100 and all(isinstance(run, dict) for run in runs),
             "Invalid workflow response.")
-    receipts = []
+    receipts, missing, blocked = [], [], []
     for path, job_names in expected.items():
         matches = [run for run in runs if run.get("path", "").split("@")[0] == path
                    and run.get("head_sha") == commit and run.get("event") == "push"
@@ -338,19 +365,23 @@ def verify_ci(git, commit, github):
                    and run.get("repository", {}).get("full_name") == REPOSITORY
                    and run.get("head_repository", {}).get("full_name") == REPOSITORY]
         if not matches:
-            raise NotReady("Required main checks have not completed for this commit.")
+            missing.append(path)
+            continue
         run = max(matches, key=lambda row: (row["id"], row.get("run_attempt", 1)))
         checked(type(run.get("id")) is int and 0 < run["id"] < 2 ** 53
                 and type(run.get("run_attempt", 1)) is int and 0 < run.get("run_attempt", 1) <= 1000,
                 "The workflow attempt is invalid.")
         if run.get("status") != "completed":
             raise NotReady("Required main checks are still running.")
-        checked(run.get("conclusion") == "success", "A required main workflow failed.")
         jobs = github.api(f"repos/{REPOSITORY}/actions/runs/{run['id']}/attempts/{run.get('run_attempt', 1)}/jobs?per_page=100")
         rows = jobs.get("jobs", [])
         checked(isinstance(rows, list) and all(isinstance(row, dict) for row in rows)
                 and jobs.get("total_count") == len(rows) and len(rows) <= 100,
                 "The complete job list could not be verified.")
+        if run.get("conclusion") != "success" and _never_executed(rows):
+            blocked.append(path)
+            continue
+        checked(run.get("conclusion") == "success", "A required main workflow failed.")
         checked(len(rows) == len(job_names) and {row.get("name") for row in rows} == set(job_names),
                 "Required jobs are missing or the workflow inventory changed.")
         checked(all(row.get("conclusion") == "success" and row.get("steps")
@@ -358,7 +389,113 @@ def verify_ci(git, commit, github):
                     for row in rows), "A required job or step did not pass.")
         receipts.append({"path": path, "run_id": run["id"], "attempt": run.get("run_attempt", 1),
                          "commit": commit, "jobs": sorted(job_names)})
+    if not missing and not blocked:
+        return receipts
+    allowed = rules["local_verification"]["allowed"]
+    if local is None or not allowed:
+        hint = (" Hosted CI did not run. Record the local checks with 'record-local' and pass"
+                " --local-evidence." if allowed and blocked else "")
+        if blocked:
+            raise ReleaseError("A required main workflow failed." + hint)
+        raise NotReady("Required main checks have not completed for this commit.")
+    receipt = verify_local(commit, local[0], local[1], rules["local_verification"]["required_checks"],
+                           tree=commit_tree(git, commit))
+    receipt["workflows_not_run"] = sorted(missing + blocked)
+    receipts.append(receipt)
     return receipts
+
+
+def _local_checks(rows, required):
+    checked(isinstance(rows, list) and 1 <= len(rows) <= 32, "The local record lists no checks.")
+    names = []
+    for row in rows:
+        checked(isinstance(row, dict) and set(row) == {"name", "command", "exit_code", "passed", "log_sha256"}
+                and isinstance(row["name"], str) and CHECK_NAME.fullmatch(row["name"])
+                and isinstance(row["command"], str) and 0 < len(row["command"]) <= 500
+                and type(row["exit_code"]) is int and type(row["passed"]) is bool
+                and isinstance(row["log_sha256"], str) and HASH.fullmatch(row["log_sha256"]),
+                "The local record has an invalid check.")
+        checked(row["passed"] is True and row["exit_code"] == 0,
+                f"The local check {row['name']} did not pass.")
+        names.append(row["name"])
+    checked(len(set(names)) == len(names), "The local record repeats a check.")
+    absent = [name for name in required if name not in names]
+    checked(not absent, "The local record is missing required checks: " + ", ".join(absent) + ".")
+    return names
+
+
+def commit_tree(git, commit):
+    """The tree of COMMIT or None when it cannot be read."""
+    try:
+        value = git.call("rev-parse", "--verify", commit + "^{tree}")
+    except ReleaseError:
+        return None
+    return value if SHA.fullmatch(value or "") else None
+
+
+def verify_local(commit, path, trusted_key, required, tree=None):
+    """Check a signed local verification record for COMMIT and return its receipt. The checks
+    ran on files, so a record of another commit with exactly the same tree also counts, for
+    example the release commit before GitHub merged it."""
+    raw = read_bytes(path, MAX_JSON)
+    signature = read_bytes(str(path) + ".sig", 16384)
+    verify_signature(path, str(path) + ".sig", trusted_key, LOCAL_NAMESPACE,
+                     payload=raw, signature_bytes=signature)
+    value = loads(raw)
+    checked(isinstance(value, dict) and set(value) == {"format", "kind", "repository", "commit", "tree", "created_at",
+                                                       "runner", "environment", "checks", "hosted_ci"}
+            and value["format"] == 1 and value["kind"] == "local-verification"
+            and value["repository"] == REPOSITORY and value["hosted_ci"] == "unavailable",
+            "The local verification record is invalid.")
+    checked(isinstance(value["tree"], str) and SHA.fullmatch(value["tree"]),
+            "The local verification record is invalid.")
+    checked(value["commit"] == commit or tree is not None and value["tree"] == tree,
+            "The local verification record names another commit.")
+    checked(type(value["created_at"]) is int and 0 < value["created_at"] <= time.time() + 300,
+            "The local verification record has an invalid time.")
+    checked(isinstance(value["runner"], str) and 0 < len(value["runner"]) <= 200
+            and isinstance(value["environment"], dict)
+            and all(isinstance(item, str) and len(item) <= 200 for item in value["environment"].values()),
+            "The local verification record is invalid.")
+    names = _local_checks(value["checks"], required)
+    return {"kind": "local", "commit": commit, "checked_commit": value["commit"], "tree": value["tree"],
+            "checks": sorted(names), "runner": value["runner"],
+            "created_at": value["created_at"], "record_sha256": hashlib.sha256(raw).hexdigest(),
+            "signature_sha256": hashlib.sha256(signature).hexdigest()}
+
+
+def record_local(git, ref, results, key, output):
+    """Write and sign the local verification record of REF from a results file of the release
+    script: {"runner": ..., "checks": [{"name", "command", "exit_code", "log_sha256"}]}."""
+    commit = git.commit(ref)
+    value = read_json(results)
+    checked(isinstance(value, dict) and set(value) == {"runner", "checks"} and isinstance(value["checks"], list),
+            "The local results file is invalid.")
+    checks = [dict(row, passed=row.get("exit_code") == 0) if isinstance(row, dict) else row
+              for row in value["checks"]]
+    _local_checks(checks, [])
+    output = Path(output)
+    checked(not output.exists() and not Path(str(output) + ".sig").exists(),
+            "A local verification record already exists. Keep it or remove it on purpose.")
+    tree = commit_tree(git, commit)
+    checked(tree is not None, "The tree of the checked commit could not be read.")
+    record = {"format": 1, "kind": "local-verification", "repository": REPOSITORY, "commit": commit,
+              "tree": tree, "created_at": int(time.time()), "runner": str(value["runner"])[:200],
+              "environment": {"system": platform.platform()[:200], "python": platform.python_version()},
+              "checks": checks, "hosted_ci": "unavailable"}
+    write_json(output, record)
+    command(["ssh-keygen", "-Y", "sign", "-f", str(key), "-n", LOCAL_NAMESPACE, str(output)])
+    verify_local(commit, output, str(key) + ".pub", [], tree=tree)
+    return record
+
+
+def inspect(archive, trusted_key):
+    """Verify a release archive's signature, then read its signed manifest."""
+    raw = read_bytes(archive, MAX_ARCHIVE)
+    verify_signature(archive, str(archive) + ".sig", trusted_key, payload=raw)
+    record = archive_record(archive, archive_bytes=raw)
+    record["archive_sha256"] = hashlib.sha256(raw).hexdigest()
+    return record
 
 
 @contextlib.contextmanager
@@ -411,7 +548,10 @@ def reserve(git, number):
         checked(len(value["reservations"]) < 10000, "The release registry needs archival before another reservation.")
         checked(all(version(number) > version(row["version"]) for row in value["reservations"]),
                 "The version has been used or is not newer than all reserved versions.")
+        # Development builds use their build time as release order. A stable order of at least
+        # the current time stays newer than every development build made before it.
         sequence = max([value["sequence_floor"], *[row["sequence"] for row in value["reservations"]]]) + 1
+        sequence = max(sequence, int(time.time()))
         checked(sequence < 2 ** 53, "Release order is exhausted.")
         row = {"version": number, "sequence": sequence, "state": "reserved"}
         value["reservations"].append(row)
@@ -591,11 +731,12 @@ def candidate(git, ref, output, github):
                                           "version": label, "archive_sha256": digest(archive), "checks": receipts})
 
 
-def prepare(git, ref, number, output, key, github):
+def prepare(git, ref, number, output, key, github, local_evidence=None):
     version(number)
     commit = git.commit(ref)
     git.on_main(commit)
-    receipts = verify_ci(git, commit, github)
+    local = None if local_evidence is None else (Path(local_evidence), str(key) + ".pub")
+    receipts = verify_ci(git, commit, github, local)
     checked(not git.call("status", "--porcelain", "--untracked-files=no"), "Commit release preparation changes before building.")
     with registry_lock(git) as path:
         value = registry(path)
@@ -611,6 +752,10 @@ def prepare(git, ref, number, output, key, github):
         output = Path(output).resolve()
         checked(not output.exists(), "Retain the existing candidate. Do not rebuild it.")
         output.mkdir(mode=0o700)
+        if local is not None and any(receipt.get("kind") == "local" for receipt in receipts):
+            # Keep the exact signed record with the package so approval and publication re-check it.
+            for suffix, limit in (("", MAX_JSON), (".sig", 16384)):
+                (output / (LOCAL_RECORD + suffix)).write_bytes(read_bytes(str(local[0]) + suffix, limit))
         archive = output / ASSET
         environment = {name: value for name, value in os.environ.items()
                        if name not in {"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}}
@@ -669,12 +814,38 @@ def acceptance(value, record):
                 "A required physical acceptance or recovery gate has not passed.")
 
 
+def bundle_local(folder, trusted_key):
+    """The local verification record retained with a package, if it has one."""
+    path = Path(folder) / LOCAL_RECORD
+    return (path, str(trusted_key)) if path.exists() else None
+
+
+def record_acceptance(folder, release_notes, targets, gates):
+    """Fill acceptance.json of a prepared package from plain answers. Every gate must be named
+    once with its evidence. The result is checked exactly as approval checks it."""
+    folder = Path(folder)
+    record = read_json(folder / "release.json")
+    path = folder / "acceptance.json"
+    value = read_json(path)
+    checked(not (folder / "approval.json").exists(), "Approval already exists. Retain the original signed record.")
+    answers = {}
+    for item in gates:
+        name, separator, evidence = item.partition("=")
+        checked(separator and name in GATES and name not in answers, "Name each acceptance gate once as NAME=EVIDENCE.")
+        answers[name] = {"passed": True, "evidence": evidence.strip()}
+    checked(set(answers) == GATES, "Every acceptance gate needs evidence: " + ", ".join(sorted(GATES)) + ".")
+    value.update(release_notes=release_notes.strip(), targets=list(targets), gates=answers)
+    acceptance(value, record)
+    write_json(path, value)
+    return value
+
+
 def approve(git, folder, evidence, key, confirm, github):
     checked(not (Path(folder) / "approval.json").exists(), "Approval already exists. Retain the original signed record.")
     record = bundle(folder, str(key) + ".pub")
     checked(confirm == record["version"], "Confirm the exact version being approved.")
     git.on_main(record["commit"])
-    receipts = verify_ci(git, record["commit"], github)
+    receipts = verify_ci(git, record["commit"], github, bundle_local(folder, str(key) + ".pub"))
     value = read_json(evidence)
     acceptance(value, record)
     who = github.api("user").get("login")
@@ -701,7 +872,7 @@ def approved(git, folder, trusted_key, github):
             "Approval does not name this exact release.")
     acceptance(approval.get("acceptance", {}), record)
     git.on_main(record["commit"])
-    verify_ci(git, record["commit"], github)
+    verify_ci(git, record["commit"], github, bundle_local(folder, trusted_key))
     return record, approval
 
 
@@ -715,9 +886,18 @@ def remote_tag(github, tag):
     return obj["sha"]
 
 
+def checks_line(approval):
+    local = [row for row in approval.get("checks", []) if row.get("kind") == "local"]
+    if not local:
+        return "Checks: hosted GitHub Actions on main.\n"
+    return ("Checks: LOCAL verification on the owner's Mac (" + ", ".join(local[0]["checks"])
+            + "). Hosted GitHub Actions did not run for this commit.\n"
+            f"Local record SHA-256: {local[0]['record_sha256']}\n")
+
+
 def notes(record, approval):
     return (f"JitterSim {record['version']}\n\n"
-            + approval["acceptance"]["release_notes"] + "\n\n" +
+            + approval["acceptance"]["release_notes"] + "\n\n" + checks_line(approval) +
             f"Source: {record['commit']}\nRelease order: {record['sequence']}\n"
             f"Archive SHA-256: {record['archive_sha256']}\nSignature SHA-256: {record['signature_sha256']}\n"
             f"Dependency locks SHA-256: {record['locks_sha256']}\n\n"
@@ -735,6 +915,9 @@ def publish(git, folder, trusted_key, github, confirm, dry_run=False):
             for name, limit in ((ASSET, MAX_ARCHIVE), (ASSET + ".sig", 16384), ("release.json", MAX_JSON),
                                 ("approval.json", MAX_JSON), ("approval.json.sig", 16384)):
                 (snapshot / name).write_bytes(read_bytes(folder / name, limit))
+            for name, limit in ((LOCAL_RECORD, MAX_JSON), (LOCAL_RECORD + ".sig", 16384)):
+                if (folder / name).exists():
+                    (snapshot / name).write_bytes(read_bytes(folder / name, limit))
             record, approval = approved(git, snapshot, trusted_key, github)
             checked(confirm == record["version"], "Confirm the exact version being published.")
             value = registry(registry_path)
@@ -825,6 +1008,21 @@ def main(argv=None):
         if name == "prepare":
             p.add_argument("--version", required=True)
             p.add_argument("--key", type=Path, required=True)
+            p.add_argument("--local-evidence", type=Path,
+                           help="signed local verification record, used only when hosted CI never ran")
+    p = sub.add_parser("record-local", help="write and sign the local verification record of a commit")
+    p.add_argument("--ref", required=True)
+    p.add_argument("--results", type=Path, required=True)
+    p.add_argument("--key", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p = sub.add_parser("inspect", help="verify a release archive signature and print its manifest")
+    p.add_argument("archive", type=Path)
+    p.add_argument("--trusted-key", type=Path, required=True)
+    p = sub.add_parser("accept", help="record the physical acceptance of a prepared package")
+    p.add_argument("--bundle", type=Path, required=True)
+    p.add_argument("--notes-file", type=Path, required=True)
+    p.add_argument("--target", action="append", required=True)
+    p.add_argument("--gate", action="append", required=True, metavar="NAME=EVIDENCE")
     p = sub.add_parser("approve", help="sign physical acceptance and exact package approval")
     p.add_argument("--bundle", type=Path, required=True)
     p.add_argument("--evidence", type=Path, required=True)
@@ -847,12 +1045,20 @@ def main(argv=None):
         elif args.operation == "candidate":
             candidate(git, args.ref, args.output, github)
         elif args.operation == "prepare":
-            prepare(git, args.ref, args.version, args.output, args.key, github)
+            prepare(git, args.ref, args.version, args.output, args.key, github, args.local_evidence)
+        elif args.operation == "record-local":
+            record_local(git, args.ref, args.results, args.key, args.output)
+        elif args.operation == "inspect":
+            print(json.dumps(inspect(args.archive, args.trusted_key), sort_keys=True))
+        elif args.operation == "accept":
+            record_acceptance(args.bundle, read_bytes(args.notes_file, 16000 * 4).decode(),
+                              args.target, args.gate)
         elif args.operation == "approve":
             approve(git, args.bundle, args.evidence, args.key, args.confirm_version, github)
         elif args.operation == "publish":
             publish(git, args.bundle, args.trusted_key, github, args.confirm_version, args.dry_run)
-        print("Release operation completed: " + args.operation)
+        if args.operation != "inspect":
+            print("Release operation completed: " + args.operation)
         return 0
     except NotReady as error:
         print(str(error))

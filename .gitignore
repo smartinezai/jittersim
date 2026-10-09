@@ -18,3 +18,5 @@ test-results/
 *.db-wal
 
 test-results/
+docs/releases/.registry.lock
+.venv-local-ci-*/
