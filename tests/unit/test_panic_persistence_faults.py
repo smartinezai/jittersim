@@ -404,7 +404,8 @@ def test_stale_gateway_temporary_is_never_loaded_as_committed_state(tmp_path):
 
 
 def test_stalled_state_sync_blocks_a_second_panic_with_helper_busy_then_recovers(monkeypatch):
-    monkeypatch.setattr(helper_module, "WRITE_LOCK_WAIT_SECONDS", 0.6)
+    # The second Panic waits on the network lock that the first one holds.
+    monkeypatch.setattr(helper_module, "PANIC_NETWORK_LOCK_WAIT_SECONDS", 0.6)
     with fault_rig(monkeypatch, "guard", "file-sync", stalled=True) as rig:
         socket_path = rig.directory / "helper.sock"
         outcome = {}

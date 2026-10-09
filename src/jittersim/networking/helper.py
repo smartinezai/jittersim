@@ -78,6 +78,11 @@ MAX_HELPER_CONNECTIONS = 8
 # Apply access rules and the device quick action so a poll must not refuse it either.
 WRITE_ACTIONS = ("apply", "apply-experiment", "reset", "recover-reset", "normal-access", "access-apply", "ad-blocking-configure")
 WRITE_LOCK_WAIT_SECONDS = 3.0
+# Normal access (Panic) does not take the request operation lock: a read such as a
+# five second DNS sample may hold that. It serializes on the network lock instead
+# and waits longer there than any other request, because an access change can
+# hold it for several seconds. The dashboard gives Panic 60 seconds in total.
+PANIC_NETWORK_LOCK_WAIT_SECONDS = 10.0
 ACCESS_STATUS_LOCK_WAIT_SECONDS = 0.5
 # Each waiting status read holds one of the MAX_HELPER_CONNECTIONS request slots.
 # At most this many wait at once, so the access lock holder and its waiters never
@@ -280,7 +285,7 @@ class HelperService:
                 return {"ok": True, "control_revision": self._control_revision,
                         "recovery_required": self._panic_recovery_failed}
         if action == "normal-access":
-            if not self._network_lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS):
+            if not self._network_lock.acquire(timeout=PANIC_NETWORK_LOCK_WAIT_SECONDS):
                 return {"ok": False, "error": "Pi networking is busy. Try again later.",
                         "reason": "helper-busy"}
             try:
@@ -1641,7 +1646,10 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "use the policy socket"})
             return
         # Capability flags are fixed for this process and read no live network state.
-        if action in ("ping", "capabilities", "control-revision", "dashboard-access", "update-retry") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
+        # Normal access serializes on the service's network lock. See
+        # PANIC_NETWORK_LOCK_WAIT_SECONDS.
+        if action in ("ping", "capabilities", "control-revision", "dashboard-access", "update-retry",
+                      "normal-access") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
             self._send_response(self.server.service.handle_payload(payload))
             return
         # Apply and reset wait a moment for a read so a poll never refuses Panic.
