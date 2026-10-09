@@ -74,6 +74,12 @@ Keep it outside `/opt/jittersim`, `/etc` and the appliance's data or runtime
 folders. A checkout or archive extracted by the login user does not meet this
 requirement. Do not copy credentials into the source tree.
 
+The upgrade notes for observed names: the installer clears the DNS names listed
+under Traffic once when any device is protected, because protected devices are no
+longer watched. It prints a notice with the number of names before it happens.
+The list fills again as devices browse. Names are kept for 30 days from their last
+sighting.
+
 The `jittersim` user must exist before you install (see [Service user](#service-user)).
 For a first installation, verify the official signed archive and its matching
 signature against the trusted release key before extracting it. Replace the

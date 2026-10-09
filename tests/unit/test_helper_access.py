@@ -3,13 +3,15 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from jittersim.config.models import Device, Impairment, MacPolicy, Profile, SiteBlock
+from jittersim.config.models import AccessOptions, Device, Impairment, MacPolicy, Profile, SiteBlock
 from jittersim.engine.access import AccessClient, AccessPlan
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
 from jittersim.networking.access import AccessManager
 from jittersim.networking.applier import NetworkApplier
+from jittersim.networking.commands import CommandResult
 from jittersim.networking.executor import FakeExecutor
 from jittersim.networking.helper import HelperService, restore_access_at_start
 from jittersim.networking.topology import Topology
@@ -70,6 +72,39 @@ class HelperAccessFailureTests(unittest.TestCase):
         self.assertTrue(answer["ok"], answer)
         self.assertTrue(answer["access_disabled"])
         self.assertFalse(self.manager.applied.options.enabled)
+
+    def test_panic_reports_incomplete_recovery_while_wifi_join_limits_stay(self):
+        # G1: the firewall opens, but hostapd refuses to clear the join limits.
+        # Excluded devices still cannot join, so Panic must ask for a retry.
+        restrictive = AccessPlan(
+            mac=MacPolicy("denylist", (), ("02:00:00:00:00:01",)),
+            options=AccessOptions(reject_wifi_joins=True),
+        )
+        with patch.object(self.manager, "admission_supported", return_value=True):
+            self.manager.apply(restrictive)
+            original = self.executor.run
+
+            def refuse(command):
+                if command.executable == "hostapd_cli":
+                    original(command)
+                    return CommandResult(return_code=0, stdout="FAIL\n")
+                return original(command)
+
+            with patch.object(self.executor, "run", refuse), self.assertLogs(level="WARNING"):
+                answer = self.service.handle_payload({"action": "normal-access"})
+            self.assertFalse(answer["ok"], answer)
+            self.assertFalse(answer["access_disabled"])
+            self.assertIn("not fully restored", answer["error"])
+            self.assertIn("join", answer["error"])
+            self.assertFalse(self.manager.applied.options.enabled)
+            revision = self.service.handle_payload({"action": "control-revision"})
+            self.assertTrue(revision["recovery_required"])
+            # The retry clears the join limits and confirms the recovery.
+            answer = self.service.handle_payload({"action": "normal-access"})
+        self.assertTrue(answer["ok"], answer)
+        self.assertTrue(answer["access_disabled"])
+        revision = self.service.handle_payload({"action": "control-revision"})
+        self.assertFalse(revision["recovery_required"])
 
     def test_an_apply_without_dns_rules_succeeds_while_the_resolver_is_broken(self):
         self.executor.fail_restarts = 100

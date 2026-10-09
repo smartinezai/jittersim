@@ -144,6 +144,7 @@ from jittersim.networking.dashboard_access import (
     normalize_mac as normalize_access_mac,
     validate_label as validate_access_label,
 )
+from jittersim.networking.deadlines import deadline_scope
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
     WIFI_DETAILS_MISSING_MESSAGE,
@@ -168,6 +169,8 @@ PROTECTED_ACCESS_RETRY_SECONDS = 10.0
 # A restarted helper is reconciled at once, but never more than once a second.
 PROTECTED_ACCESS_RESTART_RETRY_SECONDS = 1.0
 PROTECTED_ACCESS_SYNC_ATTEMPTS = 3
+# Startup restore asks a helper that answers helper-busy at most this often (one poll apart).
+STARTUP_HELPER_BUSY_ATTEMPTS = 4
 WIFI_COPY_BUSY_MESSAGE = "The router is busy right now. Try again in a moment."
 MAX_JSON_BODY_BYTES = 64 * 1024
 # One block or profile call may carry this many names.
@@ -293,6 +296,14 @@ PRIORITY_WRITE_PATHS = frozenset(("/api/normal-access",))
 # Panic and Reset check the device with the helper's emergency check, which does
 # not wait behind an ordinary verification (review T5 of PR 91).
 EMERGENCY_WRITE_PATHS = frozenset(("/api/normal-access", "/api/reset"))
+# Every helper call of that check (the emergency check, a protection resync, the
+# fallback for an older helper) shares this budget. With nothing left the answer
+# is 503, which the page retries, never access (review G4).
+EMERGENCY_CHECK_BUDGET_SECONDS = 8.0
+# What the Panic route needs besides the device check and the helper client: a
+# few small database writes and the response. The browser's Panic timeout is at
+# least the sum (docs/architecture.md, "Panic time budget").
+PANIC_DATABASE_ALLOWANCE_SECONDS = 5.0
 # The product name shown after the token is accepted. The public page never carries it.
 PRODUCT_NAME = "JitterSim"
 PRODUCT_COMMAND = "jittersim"
@@ -1384,12 +1395,46 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         if self.helper_client is None:
             raise HelperClientError("Device verification needs the Pi networking helper.")
         result = self._checked_access(operation, peer, values)
+        if operation == "emergency-status":
+            # Panic and Reset never wait for the routine protection retry.
+            return self._emergency_access(peer, values, result)
         if self._protected_access_due(result):
             # The helper restarted or an earlier sync failed: reconcile, then answer again.
             state = self.sync_protected_access(blocking=False)
             if state.get("synced") and operation in ("status", "list"):
                 result = self._checked_access(operation, peer, values)
         return result
+
+    def _emergency_access(self, peer: str, values: Dict[str, Any],
+                          result: Dict[str, Any]) -> Dict[str, Any]:
+        """Decide Panic's device check when a restarted helper lacks the protection grants.
+
+        Only the helper grants access. A refusal from a helper that has not received
+        the protection grants is final only when protection could not grant this
+        device. Otherwise the grants are synced once (never waiting for a sync that
+        is already running) and the device is checked again. When that still cannot
+        decide, the answer is helper-busy, which the page retries: never allowed.
+        """
+        if (result["allowed"] or result.get("protected_synced") is not False
+                or not self._may_be_protected(result.get("mac_address"))):
+            return result
+        if self.sync_protected_access(blocking=False).get("synced"):
+            result = self._checked_access("emergency-status", peer, values)
+        if not result["allowed"] and result.get("protected_synced") is False:
+            raise HelperClientError(
+                "Device verification is waiting for the Pi helper to restore protected "
+                "devices' access. Try again.", reason="helper-busy")
+        return result
+
+    def _may_be_protected(self, mac: Any) -> bool:
+        """Whether saved protection might grant this device (unreadable counts as yes)."""
+        if mac is None or getattr(self.helper_client, "dashboard_access_protected_sync", None) is None:
+            return False
+        try:
+            targets, _ = self._protected_access_targets()
+        except (StorageError, sqlite3.Error):
+            return True
+        return any(item["mac_address"] == mac for item in targets)
 
     def _checked_access(self, operation: str, peer: str, values: Dict[str, Any]) -> Dict[str, Any]:
         result = self.helper_client.dashboard_access(operation, peer=peer, **values)
@@ -1595,23 +1640,43 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         identity = self.dashboard_access(peer)
         if not (identity.get("network") == "test" and isinstance(identity.get("mac_address"), str)
                 and identity.get("grants") == ["protection"]):
-            identity = None
-        response = self.write_response_for(path, payload)
-        if identity is None or response[0] != HTTPStatus.OK:
-            return response
+            return self.write_response_for(path, payload)
         mac = identity["mac_address"]
-        if any(item.mac_address == mac for item in self.repository.list_unaffected_devices()):
+        granted: List[bool] = []
+
+        def keep_route_first(settings: SavedSettings) -> Optional[Tuple[int, str, bytes]]:
+            # Runs after validation and before the replacement is saved: the requester's only
+            # control route becomes a saved grant first, or nothing changes at all.
+            if any(item.mac_address == mac for item in settings.unaffected_devices):
+                return None
+            try:
+                kept = self._keep_access_as_saved_grant(peer, mac)
+            except HelperClientError as error:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                    {"error": "Nothing changed. These settings no longer protect this device "
+                              "and its dashboard access could not be saved: " + str(error)})
+            if not kept:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                    {"error": "Nothing changed. These settings no longer protect this device "
+                              "and its dashboard access could not be saved. Try again."})
+            granted.append(True)
+            return None
+
+        response = self.write_response_for(path, payload, before_replace=keep_route_first)
+        if not granted:
             return response
-        try:
-            kept = self._keep_access_as_saved_grant(peer, mac)
-        except HelperClientError:
-            kept = False
+        if any(item.mac_address == mac for item in self.repository.list_unaffected_devices()):
+            # The replacement was refused after the grant was saved: put access back as it was.
+            try:
+                self.dashboard_access(peer, "remove", mac_address=mac)
+            except HelperClientError:
+                LOGGER.warning("could not remove a saved grant for a refused settings change")
+            return response
+        # The grant stays even when the live apply of the saved replacement failed.
         self.reconcile_protected_access()
-        return self._note_access(response, (
-            "This device kept dashboard access as a separate saved grant because the restored "
-            "settings no longer protect it." if kept else
-            "The restored settings no longer protect this device and its dashboard access could "
-            "not be kept. Use Allow this device or the management network."))
+        return self._note_access(response, "This device kept dashboard access as a separate "
+                                           "saved grant because the restored settings no longer "
+                                           "protect it.")
 
     def _note_access(self, response: Tuple[int, str, bytes], message: str) -> Tuple[int, str, bytes]:
         status, content_type, body = response
@@ -2367,17 +2432,21 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(diagnostics)
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
-    def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+    def write_response_for(self, path: str, payload: Dict[str, Any], *,
+                           before_replace=None) -> Tuple[int, str, bytes]:
+        """Handle one write. before_replace(settings) runs on a validated import or restore
+        just before it is saved and may refuse it by returning a response."""
         if path in RESET_REQUEST_PATHS:
             # A device Apply that arrives while this runs, or waits behind it, starts nothing.
             self.note_reset_request()
             try:
-                return self._tracked_write_response_for(path, payload)
+                return self._tracked_write_response_for(path, payload, before_replace)
             finally:
                 self.note_reset_finished()
-        return self._tracked_write_response_for(path, payload)
+        return self._tracked_write_response_for(path, payload, before_replace)
 
-    def _tracked_write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+    def _tracked_write_response_for(self, path: str, payload: Dict[str, Any],
+                                    before_replace=None) -> Tuple[int, str, bytes]:
         if path == "/api/profiles/ranges":
             return self._write_response_for(path, payload)
         control_intent = None
@@ -2410,7 +2479,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 )
                 if access_response is not None:
                     return access_response
-                workflow = write_workflow(self, path, payload, _settings_from_payload)
+                workflow = write_workflow(self, path, payload, _settings_from_payload,
+                                          before_replace=before_replace)
                 if workflow is not None:
                     return workflow
                 if device_apply:
@@ -2418,12 +2488,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         payload, control_intent=control_intent, resets_at_entry=resets_at_entry)
                 return (self._write_response_for(path, payload, control_intent=control_intent)
                         if path == "/api/apply" or live_global or live_general or live_ads
-                        else self._write_response_for(path, payload))
+                        else self._write_response_for(path, payload, before_replace=before_replace))
             finally:
                 if self.repository.get_runtime_state().configuration_version != before:
                     WorkflowStore(self.repository).checkpoint(path.removeprefix("/api/").replace("/", " "))
 
-    def _write_response_for(self, path: str, payload: Dict[str, Any], *, control_intent=None) -> Tuple[int, str, bytes]:
+    def _write_response_for(self, path: str, payload: Dict[str, Any], *, control_intent=None,
+                            before_replace=None) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
 
         if path == "/api/profiles/ranges":
@@ -2501,6 +2572,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 )
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid settings import", error)
+            refused = before_replace(settings) if before_replace is not None else None
+            if refused is not None:
+                return refused
             self.repository.replace_settings(
                 self._with_counter_baselines(settings),
                 observation_addresses=self.newly_protected_station_addresses(settings),
@@ -5772,7 +5846,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             LOGGER.warning("saved ad-blocking choices could not be confirmed during dashboard startup")
         # Grants dashboard access to every saved protected device (also the upgrade step).
         self.recover_protected_access()
-        if not self._sync_gateway_persistence():
+        if not self._sync_gateway_persistence(busy_attempts=STARTUP_HELPER_BUSY_ATTEMPTS):
             return
         try:
             gateway_status = self.helper_client.gateway_status()
@@ -5825,19 +5899,27 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         else:
             self._record_activity(kind, message)
 
-    def _sync_gateway_persistence(self) -> bool:
-        """Give the helper the saved gateway persistence preference."""
+    def _sync_gateway_persistence(self, *, busy_attempts: int = 1) -> bool:
+        """Give the helper the saved gateway persistence preference.
+
+        A helper-busy answer is asked again up to busy_attempts times, one
+        helper poll apart, so a helper still busy at boot does not skip the restore.
+        """
 
         if self.helper_client is None:
             return False
-        try:
-            self.helper_client.set_gateway_persistence(
-                enabled=self.repository.get_persist_profiles_after_gateway_outage()
-            )
-        except HelperClientError:
-            LOGGER.error("gateway persistence setting did not reach the networking helper")
-            return False
-        return True
+        for attempt in range(busy_attempts):
+            try:
+                self.helper_client.set_gateway_persistence(
+                    enabled=self.repository.get_persist_profiles_after_gateway_outage()
+                )
+                return True
+            except HelperClientError as error:
+                if error.reason != "helper-busy" or attempt + 1 >= busy_attempts:
+                    break
+            time.sleep(self.helper_poll_seconds)
+        LOGGER.error("gateway persistence setting did not reach the networking helper")
+        return False
 
     def _record_activity(self, kind: str, message: str) -> None:
         try:
@@ -6174,14 +6256,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         peer = self.client_address[0]
         try:
             if emergency:
-                try:
-                    allowed = self.server.dashboard_access(peer, "emergency-status")["allowed"]
-                except HelperClientError as error:
-                    if error.reason == "helper-busy":
-                        raise
-                    # An older helper does not know the emergency check. The
-                    # ordinary check decides then, as before.
-                    allowed = self.server.dashboard_access(peer)["allowed"]
+                with deadline_scope(time.monotonic() + EMERGENCY_CHECK_BUDGET_SECONDS):
+                    try:
+                        allowed = self.server.dashboard_access(peer, "emergency-status")["allowed"]
+                    except HelperClientError as error:
+                        if error.reason == "helper-busy":
+                            raise
+                        # An older helper does not know the emergency check. The
+                        # ordinary check decides then, as before.
+                        allowed = self.server.dashboard_access(peer)["allowed"]
             else:
                 allowed = self.server.dashboard_access(peer)["allowed"]
         except HelperClientError as error:

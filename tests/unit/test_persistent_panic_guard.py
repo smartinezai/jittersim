@@ -416,3 +416,67 @@ def test_malformed_present_legacy_gateway_never_provisions_clear_or_enables_save
         assert service._panic_recovery_failed
     assert calls and all(plan is not None and not plan.options.enabled for plan in calls)
     assert persistent.read() is None
+
+
+def _gateway_record(**changes):
+    record = {
+        "version": 1,
+        "persistence_enabled": False,
+        "gateway_state": "available",
+        "outage_observed": False,
+        "outage_stop_latched": False,
+        "reset_pending": False,
+        "recovery_pending": False,
+        "consecutive_failures": 0,
+        "consecutive_successes": 0,
+        "panic_stop_latched": False,
+        "household_stop_latched": False,
+        "panic_recovery_failed": False,
+        "control_revision_required": False,
+    }
+    record.update(changes)
+    return json.dumps({key: value for key, value in record.items() if value is not ...})
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        None,
+        _gateway_record(),
+        _gateway_record(household_stop_latched=True, control_revision_required=True),
+        _gateway_record(panic_stop_latched=True, household_stop_latched=...),
+        _gateway_record(panic_stop_latched=True, household_stop_latched=True,
+                        panic_recovery_failed=True),
+        _gateway_record(panic_recovery_failed=True),
+        _gateway_record(household_stop_latched="yes"),
+        _gateway_record(gateway_state="broken"),
+        _gateway_record(consecutive_failures=99),
+        _gateway_record(version=2),
+        "{not json",
+        "[]",
+        " " * 5000,
+    ],
+    ids=["missing", "clear", "household", "panic-only", "failed", "inconsistent", "bad-flag",
+         "bad-health", "bad-count", "version", "not-json", "not-object", "too-large"],
+)
+def test_access_boot_decides_household_stop_like_the_helper(short_path, monkeypatch, contents):
+    # O3: a clear guard and a stopped (or unreadable) gateway.json stop both callers.
+    persistent = guard(short_path)
+    persistent.write({"version": 2, "panic_stop_latched": False, "household_stop_latched": False,
+                      "panic_recovery_failed": False, "control_revision_required": False})
+    gateway_path = short_path / "gateway-state.json"
+    if contents is not None:
+        gateway_path.write_text(contents)
+    service = helper_module.HelperService(
+        NetworkApplier(executor=FakeExecutor(), topology=Topology("eth0", "wlan0")),
+        gateway_state_path=gateway_path,
+        panic_guard=persistent,
+    )
+    decisions = []
+    fake = SimpleNamespace(disable=lambda **kwargs: decisions.append("stopped"),
+                           restore=lambda: decisions.append("restored"))
+    monkeypatch.setattr(access, "AccessManager", lambda **kwargs: fake)
+    monkeypatch.setattr(access, "PanicGuard", lambda: persistent)
+    monkeypatch.setattr(access, "ACCESS_RUNTIME", short_path / "access-policy.json")
+    assert access.main([]) == 0
+    assert decisions == ["stopped" if service._household_stop_latched else "restored"]

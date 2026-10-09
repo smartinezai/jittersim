@@ -319,10 +319,10 @@ def test_metadata_read_during_real_panic_cleanup_is_prompt_and_refuses_new_write
             original = service._handle_reset
             answers = []
 
-            def delayed():
+            def delayed(**kwargs):
                 entered.set()
                 assert release.wait(5)
-                return original()
+                return original(**kwargs)
 
             monkeypatch.setattr(service, "_handle_reset", delayed)
             worker = threading.Thread(target=lambda: answers.append(client.normal_access()))

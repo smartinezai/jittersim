@@ -204,8 +204,8 @@ def verify_fresh_installer_lock(update_root, descriptor, *, owner_uid=0):
 GUARD_LOCK_WAIT_SECONDS = 2.0
 
 
-def _bounded_exclusive_lock(descriptor):
-    deadline = time.monotonic() + GUARD_LOCK_WAIT_SECONDS
+def _bounded_exclusive_lock(descriptor, wait=None):
+    deadline = time.monotonic() + (GUARD_LOCK_WAIT_SECONDS if wait is None else wait)
     while True:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -270,7 +270,10 @@ class PanicGuard:
         finally:
             os.close(parent)
 
-    def write(self, state, *, initialize_only=False):
+    def write(self, state, *, initialize_only=False, wait=None):
+        """Save the record. `wait` (at most GUARD_LOCK_WAIT_SECONDS by default)
+        bounds the wait for another writer: Panic passes what its budget has left."""
+
         state = validate_panic_guard(state)
         parent = self._directory(create=True)
         temporary = ".panic-" + secrets.token_bytes(16).hex()
@@ -290,7 +293,7 @@ class PanicGuard:
                 or stat.S_IMODE(metadata.st_mode) != 0o600
             ):
                 raise PanicGuardError("Panic stop lock is not root-private")
-            _bounded_exclusive_lock(lock)
+            _bounded_exclusive_lock(lock, wait)
             if initialize_only:
                 try:
                     existing = self.read()

@@ -39,6 +39,7 @@ from jittersim.updates import (
     stage_upload,
     update_status,
 )
+from jittersim import panic_guard as panic_guard_module
 from jittersim.panic_guard import PANIC_GUARD_FORMAT, PanicGuard
 from jittersim.request_workers import RequestWorkers, WorkersStillRunning
 from jittersim.socket_deadlines import DeadlineReader, read_line
@@ -49,6 +50,7 @@ from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
 from .dashboard_access import (
     ACCESS_FILE, AccessError, AccessStore, identify_peer, is_active, normalize_mac,
 )
+from .deadlines import bounded_wait, deadline_scope, scope_remaining
 from .executor import CommandExecutionError, SubprocessExecutor
 from .renderer import queue_handle, queue_kind, queue_parent
 from .router import (
@@ -87,16 +89,30 @@ WRITE_LOCK_WAIT_SECONDS = 3.0
 # Normal access (Panic) does not take the request operation lock: a read such as a
 # five second DNS sample may hold that. It serializes on the network lock instead
 # and waits longer there than any other request, because an access change can
-# hold it for several seconds. The dashboard gives Panic 60 seconds in total.
+# hold it for several seconds.
 PANIC_NETWORK_LOCK_WAIT_SECONDS = 10.0
+# One Panic request has one deadline, this long after the helper takes it. Every
+# wait (network lock, Panic stop lock, ad pause, release lock, ad transition) and
+# every command uses only what is left of it. A step that opens the network or
+# records the result is still tried after the deadline, with PANIC_STEP_FLOOR_SECONDS.
+# The ad pause leaves PANIC_RELEASE_RESERVE_SECONDS for the household release.
+# Stacked at their bounds, the steps answer within PANIC_ANSWER_SECONDS
+# (tests/unit/test_panic_time_budget.py; docs/architecture.md, "Panic time budget").
+PANIC_DEADLINE_SECONDS = 12.0
+PANIC_STEP_FLOOR_SECONDS = 0.5
+PANIC_RELEASE_RESERVE_SECONDS = 4.0
+PANIC_ANSWER_SECONDS = 25.0
 # Gateway reads run while the request holds the operation lock. They wait this long
 # for a reset that holds the network lock, then answer helper-busy, so they never
 # keep the operation lock from Apply and Reset for longer than those wait for it.
 GATEWAY_STATUS_LOCK_WAIT_SECONDS = 1.0
 # A Panic client (dashboard or `jittersim normal-access`) asks a busy helper
-# again for this long, once every NORMAL_ACCESS_BUSY_RETRY_INTERVAL seconds.
-# Normal access is idempotent and a busy answer changed nothing.
-NORMAL_ACCESS_TIMEOUT_SECONDS = 60.0
+# again for NORMAL_ACCESS_BUSY_RETRY_SECONDS, once every
+# NORMAL_ACCESS_BUSY_RETRY_INTERVAL seconds. Normal access is idempotent and a busy
+# answer changed nothing. Every attempt starts with at least PANIC_ANSWER_SECONDS
+# left, so the helper always answers before the client gives up.
+NORMAL_ACCESS_BUSY_RETRY_SECONDS = 5.0
+NORMAL_ACCESS_TIMEOUT_SECONDS = PANIC_ANSWER_SECONDS + NORMAL_ACCESS_BUSY_RETRY_SECONDS + 1.0
 # Panic and Reset wait this long for the ad-blocking settings lock before they
 # report that the ad-blocking bypass could not be confirmed. An ad-blocking change
 # holds it while nft clears its routing, which can take a few seconds.
@@ -105,7 +121,9 @@ AD_PAUSE_PANIC_WAIT_SECONDS = 8.0
 # at the same address for this long (review T5 of PR 91). See
 # HelperService._handle_emergency_verification.
 EMERGENCY_STATION_CONFIRMATION_SECONDS = 30.0
-NORMAL_ACCESS_BUSY_RETRY_SECONDS = 15.0
+# Panic's device check waits at most this long for a saved-grant write (which holds
+# the access store lock through fsync), then answers helper-busy (review G7).
+EMERGENCY_ACCESS_STORE_WAIT_SECONDS = 0.5
 NORMAL_ACCESS_BUSY_RETRY_INTERVAL = 0.5
 ACCESS_STATUS_LOCK_WAIT_SECONDS = 0.5
 # Each waiting status read holds one of the MAX_HELPER_CONNECTIONS request slots.
@@ -315,45 +333,16 @@ class HelperService:
                 return {"ok": True, "control_revision": self._control_revision,
                         "recovery_required": self._panic_recovery_failed}
         if action == "normal-access":
-            if not self._network_lock.acquire(timeout=PANIC_NETWORK_LOCK_WAIT_SECONDS):
+            deadline = time.monotonic() + PANIC_DEADLINE_SECONDS
+            if not self._network_lock.acquire(
+                    timeout=bounded_wait(PANIC_NETWORK_LOCK_WAIT_SECONDS, deadline, floor=0.0)):
                 return {"ok": False, "error": "Pi networking is busy. Try again later.",
                         "reason": "helper-busy"}
             try:
-                with self._revision_lock:
-                    self._control_revision = secrets.token_bytes(16).hex()
-                    self._control_revision_required = True
-                    self._panic_stop_latched = True
-                    self._household_stop_latched = True
-                    self._panic_recovery_failed = True
-                self._write_panic_guard()
-                self._write_gateway_state(durable=True)
-                reset = self._handle_reset()
-                access_ok = False
-                try:
-                    if self._access_manager is None:
-                        raise ValueError("persistent access controls are unavailable")
-                    self._access_manager.disable()
-                    access_ok = True
-                except (OSError, ValueError, CommandExecutionError):
-                    LOGGER.exception("could not disable household restrictions")
-                failed = not reset["ok"] or not access_ok
-                saved = self._write_gateway_state(durable=True, panic_recovery_failed=failed)
-                saved = self._write_panic_guard(panic_recovery_failed=failed or not saved) and saved
-                with self._revision_lock:
-                    self._panic_recovery_failed = failed or not saved
-                if not saved:
-                    # Record the unconfirmed result in whichever file still accepts it.
-                    self._write_panic_guard()
-                    self._write_gateway_state(durable=True)
+                with deadline_scope(deadline, floor=PANIC_STEP_FLOOR_SECONDS):
+                    return self._restore_normal_access(deadline)
             finally:
                 self._network_lock.release()
-            if not saved:
-                return {"ok": False, "error": "normal access recovery state could not be saved",
-                        "experiments_stopped": reset["ok"], "access_disabled": access_ok}
-            if not reset["ok"] or not access_ok:
-                return {"ok": False, "error": "normal access was not fully restored",
-                        "experiments_stopped": reset["ok"], "access_disabled": access_ok}
-            return {"ok": True, "action": action, "experiments_stopped": True, "access_disabled": True}
         if action in ("access-status", "access-apply"):
             if self._access_manager is None:
                 return {"ok": False, "error": "persistent access controls are unavailable"}
@@ -628,6 +617,8 @@ class HelperService:
           it. Otherwise the station list is read fresh, which is bounded by its
           command timeout.
         - The saved device list is read fresh. A device removed since is refused.
+          A stalled grant write makes the answer helper-busy after
+          EMERGENCY_ACCESS_STORE_WAIT_SECONDS instead of an unbounded wait.
         """
 
         store = self._access_store
@@ -643,12 +634,26 @@ class HelperService:
             applier = (_ConfirmedStationApplier(self._applier, confirmed[1])
                        if confirmed is not None else self._applier)
             identity = identify_peer(applier, peer, require_reachable=False)
-            allowed = identity["network"] == "management" or (
-                identity["mac_address"] is not None
-                and any(device["mac_address"] == identity["mac_address"] and is_active(device)
-                        for device in store.list_devices())
-            )
-            return {"ok": True, **identity, "can_register": False, "allowed": allowed}
+            allowed = identity["network"] == "management"
+            if not allowed and identity["mac_address"] is not None:
+                # A grant write holds the store lock through fsync, which can stall.
+                # Wait a bounded time for it; without the current list there is no
+                # decision, so the answer is helper-busy (retried), never a grant.
+                # The lock is the store's own reentrant lock: list_devices takes it
+                # again in this thread, and the reviewed module stays unchanged.
+                if not store._lock.acquire(timeout=EMERGENCY_ACCESS_STORE_WAIT_SECONDS):
+                    return {"ok": False, "error": "Device verification is busy. Try again.",
+                            "reason": "helper-busy"}
+                try:
+                    devices = store.list_devices()
+                finally:
+                    store._lock.release()
+                allowed = any(device["mac_address"] == identity["mac_address"]
+                              and is_active(device) for device in devices)
+            # protected_synced lets the dashboard tell a restarted helper, which has not
+            # received the protection grants yet, from a final refusal.
+            return {"ok": True, **identity, "can_register": False, "allowed": allowed,
+                    "protected_synced": store.protected_synced}
         except AccessError as error:
             return {"ok": False, "error": str(error)}
         except (ValueError, TypeError, OSError, CommandExecutionError):
@@ -837,45 +842,15 @@ class HelperService:
         if path is None or not path.exists():
             return
         try:
-            with path.open("rb") as state_file:
-                contents = state_file.read(MAX_GATEWAY_STATE_BYTES + 1)
-            if len(contents) > MAX_GATEWAY_STATE_BYTES:
-                raise ValueError("gateway state is too large")
-            state = json.loads(contents.decode("utf-8"))
-            if not isinstance(state, dict) or state.get("version") != 1:
-                raise ValueError("gateway state has an unsupported format")
-            if not isinstance(state.get("persistence_enabled"), bool):
-                raise ValueError("gateway persistence setting is invalid")
-            if state.get("gateway_state") not in ("unknown", "available", "unavailable"):
-                raise ValueError("gateway health state is invalid")
-            for field in (
-                "outage_observed",
-                "outage_stop_latched",
-                "reset_pending",
-                "recovery_pending",
-            ):
-                if not isinstance(state.get(field), bool):
-                    raise ValueError("gateway recovery state is invalid")
-            failures = state.get("consecutive_failures")
-            successes = state.get("consecutive_successes")
-            if (
-                type(failures) is not int
-                or not 0 <= failures <= GATEWAY_FAILURES_TO_DOWN
-                or type(successes) is not int
-                or not 0 <= successes <= GATEWAY_SUCCESSES_TO_UP
-            ):
-                raise ValueError("gateway probe count is invalid")
-            for field in ("panic_stop_latched", "household_stop_latched", "panic_recovery_failed", "control_revision_required"):
-                if field in state and not isinstance(state[field], bool):
-                    raise ValueError("Panic recovery state is invalid")
+            state = read_gateway_state(path)
             self._panic_stop_latched = state.get("panic_stop_latched", False)
             self._household_stop_latched = state.get("household_stop_latched", self._panic_stop_latched)
             self._panic_recovery_failed = state.get("panic_recovery_failed", False)
             self._control_revision_required = state.get("control_revision_required", self._panic_stop_latched)
             if self._panic_stop_latched or self._household_stop_latched:
                 self._control_revision_required = True
-            if self._panic_recovery_failed and not (self._panic_stop_latched and self._household_stop_latched):
-                raise ValueError("Panic recovery state is inconsistent")
+            failures = state["consecutive_failures"]
+            successes = state["consecutive_successes"]
             self._persistence_enabled = state["persistence_enabled"]
             self._persistence_mode_initialized = True
             self._gateway_state = state["gateway_state"]
@@ -917,6 +892,54 @@ class HelperService:
                     "reason": "control-changed"}
         return None
 
+    def _restore_normal_access(self, deadline: float) -> Dict[str, Any]:
+        """Panic's work under the network lock. Each wait uses what is left of `deadline`."""
+
+        with self._revision_lock:
+            self._control_revision = secrets.token_bytes(16).hex()
+            self._control_revision_required = True
+            self._panic_stop_latched = True
+            self._household_stop_latched = True
+            self._panic_recovery_failed = True
+        self._write_panic_guard(deadline=deadline)
+        self._write_gateway_state(durable=True)
+        reset = self._handle_reset(deadline=deadline)
+        access_ok = False
+        incomplete = None
+        try:
+            if self._access_manager is None:
+                raise ValueError("persistent access controls are unavailable")
+            self._access_manager.disable(deadline=deadline)
+            # The network is open, but a restriction such as the Wi-Fi
+            # join limits may remain. That is not a confirmed recovery.
+            if getattr(self._access_manager, "release_incomplete", False) is True:
+                incomplete = (getattr(self._access_manager, "error", None)
+                              or "Some household restrictions could not be cleared.")
+                LOGGER.error("household release is incomplete: %s", incomplete)
+            else:
+                access_ok = True
+        except Exception:  # noqa: BLE001 - any failure is recorded and answered (review O4)
+            LOGGER.exception("could not disable household restrictions")
+        failed = not reset["ok"] or not access_ok
+        saved = self._write_gateway_state(durable=True, panic_recovery_failed=failed)
+        saved = self._write_panic_guard(panic_recovery_failed=failed or not saved,
+                                        deadline=deadline) and saved
+        with self._revision_lock:
+            self._panic_recovery_failed = failed or not saved
+        if not saved:
+            # Record the unconfirmed result in whichever file still accepts it.
+            self._write_panic_guard(deadline=deadline)
+            self._write_gateway_state(durable=True)
+            return {"ok": False, "error": "normal access recovery state could not be saved",
+                    "experiments_stopped": reset["ok"], "access_disabled": access_ok}
+        if not reset["ok"] or not access_ok:
+            error = "normal access was not fully restored"
+            if incomplete:
+                error += ". " + incomplete + " Retry Panic."
+            return {"ok": False, "error": error,
+                    "experiments_stopped": reset["ok"], "access_disabled": access_ok}
+        return {"ok": True, "action": "normal-access", "experiments_stopped": True, "access_disabled": True}
+
     def _block_unconfirmed_intent(self):
         with self._revision_lock:
             self._control_revision = secrets.token_bytes(16).hex()
@@ -925,9 +948,12 @@ class HelperService:
             self._household_stop_latched = True
             self._panic_recovery_failed = True
 
-    def _write_panic_guard(self, *, panic_recovery_failed=None):
+    def _write_panic_guard(self, *, panic_recovery_failed=None, deadline=None):
         if self._panic_guard is None:
             return True
+        # Panic's saves wait for another writer only as long as its budget allows.
+        wait = ({} if deadline is None else
+                {"wait": bounded_wait(panic_guard_module.GUARD_LOCK_WAIT_SECONDS, deadline)})
         try:
             self._panic_guard.write({
                 "version": PANIC_GUARD_FORMAT,
@@ -937,7 +963,7 @@ class HelperService:
                                           if panic_recovery_failed is None
                                           else panic_recovery_failed),
                 "control_revision_required": self._control_revision_required,
-            })
+            }, **wait)
             self._panic_guard_error = False
             return True
         except OSError:
@@ -1616,11 +1642,15 @@ class HelperService:
                 router.close()
         return {"ok": True, "action": "router-check"}
 
-    def _handle_reset(self, *, pause_ad_blocking: bool = True) -> Dict[str, Any]:
+    def _handle_reset(self, *, pause_ad_blocking: bool = True,
+                      deadline: Optional[float] = None) -> Dict[str, Any]:
         blocking_failed = False
         if pause_ad_blocking and self._ad_blocking_store is not None:
+            # Panic's ad pause leaves time for the household release after it.
+            wait = bounded_wait(AD_PAUSE_PANIC_WAIT_SECONDS, deadline,
+                                reserve=PANIC_RELEASE_RESERVE_SECONDS, floor=0.0)
             try:
-                self._ad_blocking_store.pause(wait=AD_PAUSE_PANIC_WAIT_SECONDS)
+                self._ad_blocking_store.pause(wait=wait)
             except (OSError, ValueError, CommandExecutionError):
                 blocking_failed = True
         self._active_plan = None
@@ -2794,6 +2824,15 @@ class HelperClient:
     def _request(
         self, payload: Dict[str, Any], *, timeout_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
+        # Inside a deadline scope (the dashboard's device check for Panic) a call
+        # gets only what is left. With nothing left there is no decision: busy.
+        left = scope_remaining()
+        if left is not None:
+            if left <= 0:
+                raise HelperClientError("The Pi helper did not answer in time. Try again.",
+                                        reason="helper-busy")
+            timeout_seconds = min(self.timeout_seconds if timeout_seconds is None else timeout_seconds,
+                                  left)
         if payload.get("action") in READ_ONLY_ACTIONS:
             return self._send(payload, timeout_seconds=timeout_seconds)
         # Anything else may change who is connected, so no earlier scan stays valid.
@@ -2858,6 +2897,64 @@ def _clean_queue_impairment(raw: Any) -> Dict[str, Any]:
         raise HelperClientError(QUEUE_STATS_INVALID_MESSAGE)
     clean["bandwidth_kbit"] = bandwidth
     return clean
+
+
+def read_gateway_state(path: Path) -> Dict[str, Any]:
+    """Read and check the helper's gateway.json. Raise ValueError or OSError when invalid.
+
+    The helper and the access-boot unit both decide the household stop from this.
+    """
+
+    with path.open("rb") as state_file:
+        contents = state_file.read(MAX_GATEWAY_STATE_BYTES + 1)
+    if len(contents) > MAX_GATEWAY_STATE_BYTES:
+        raise ValueError("gateway state is too large")
+    state = json.loads(contents.decode("utf-8"))
+    if not isinstance(state, dict) or state.get("version") != 1:
+        raise ValueError("gateway state has an unsupported format")
+    if not isinstance(state.get("persistence_enabled"), bool):
+        raise ValueError("gateway persistence setting is invalid")
+    if state.get("gateway_state") not in ("unknown", "available", "unavailable"):
+        raise ValueError("gateway health state is invalid")
+    for field in (
+        "outage_observed",
+        "outage_stop_latched",
+        "reset_pending",
+        "recovery_pending",
+    ):
+        if not isinstance(state.get(field), bool):
+            raise ValueError("gateway recovery state is invalid")
+    failures = state.get("consecutive_failures")
+    successes = state.get("consecutive_successes")
+    if (
+        type(failures) is not int
+        or not 0 <= failures <= GATEWAY_FAILURES_TO_DOWN
+        or type(successes) is not int
+        or not 0 <= successes <= GATEWAY_SUCCESSES_TO_UP
+    ):
+        raise ValueError("gateway probe count is invalid")
+    for field in ("panic_stop_latched", "household_stop_latched", "panic_recovery_failed", "control_revision_required"):
+        if field in state and not isinstance(state[field], bool):
+            raise ValueError("Panic recovery state is invalid")
+    panic = state.get("panic_stop_latched", False)
+    if state.get("panic_recovery_failed", False) and not (panic and state.get("household_stop_latched", panic)):
+        raise ValueError("Panic recovery state is inconsistent")
+    return state
+
+
+def gateway_household_stopped(path: Path) -> bool:
+    """Return whether gateway.json keeps household rules stopped, as the helper reads it.
+
+    A missing file stops nothing. An unreadable or invalid one counts as stopped.
+    """
+
+    if not path.exists():
+        return False
+    try:
+        state = read_gateway_state(path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return True
+    return state.get("household_stop_latched", state.get("panic_stop_latched", False))
 
 
 def restore_access_at_start(access: AccessManager, *, panic_stopped=False) -> bool:
