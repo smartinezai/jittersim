@@ -83,6 +83,10 @@ WRITE_LOCK_WAIT_SECONDS = 3.0
 # and waits longer there than any other request, because an access change can
 # hold it for several seconds. The dashboard gives Panic 60 seconds in total.
 PANIC_NETWORK_LOCK_WAIT_SECONDS = 10.0
+# Gateway reads run while the request holds the operation lock. They wait this long
+# for a reset that holds the network lock, then answer helper-busy, so they never
+# keep the operation lock from Apply and Reset for longer than those wait for it.
+GATEWAY_STATUS_LOCK_WAIT_SECONDS = 1.0
 ACCESS_STATUS_LOCK_WAIT_SECONDS = 0.5
 # Each waiting status read holds one of the MAX_HELPER_CONNECTIONS request slots.
 # At most this many wait at once, so the access lock holder and its waiters never
@@ -522,8 +526,13 @@ class HelperService:
             finally:
                 self._network_lock.release()
         if action == "gateway-status":
-            with self._network_lock:
+            if not self._network_lock.acquire(timeout=GATEWAY_STATUS_LOCK_WAIT_SECONDS):
+                return {"ok": False, "error": "Pi networking is busy. Try again later.",
+                        "reason": "helper-busy"}
+            try:
                 return {"ok": True, "action": action, **self._gateway_status()}
+            finally:
+                self._network_lock.release()
         if action == "gateway-persistence":
             return self._handle_gateway_persistence(payload)
         if action == "service-addresses":
@@ -916,7 +925,10 @@ class HelperService:
         enabled = payload.get("enabled")
         if not isinstance(enabled, bool):
             return {"ok": False, "error": "gateway persistence must be true or false"}
-        with self._network_lock:
+        if not self._network_lock.acquire(timeout=GATEWAY_STATUS_LOCK_WAIT_SECONDS):
+            return {"ok": False, "error": "Pi networking is busy. Try again later.",
+                    "reason": "helper-busy"}
+        try:
             changed = self._persistence_enabled != enabled
             self._persistence_enabled = enabled
             self._persistence_mode_initialized = True
@@ -929,6 +941,8 @@ class HelperService:
                 self._stop_for_gateway_outage()
             self._write_gateway_state()
             return {"ok": True, "action": "gateway-persistence", **self._gateway_status()}
+        finally:
+            self._network_lock.release()
 
     def monitor_gateway_once(self) -> None:
         """Update bounded gateway state and perform any required transition."""
