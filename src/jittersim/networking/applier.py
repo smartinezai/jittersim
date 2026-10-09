@@ -215,8 +215,20 @@ class NetworkApplier:
                 executable="tc",
                 arguments=("-j", "qdisc", "show", "dev", interface, "root"),
                 purpose=f"inspect the root queue on {interface}",
+                ignore_failure=not for_apply,
             )
         )
+        if result.return_code != 0:
+            # A reset (Normal access, Panic, router outage) must not fail because
+            # the test Wi-Fi interface is gone: it has no queue left to remove.
+            if "cannot find device" in result.stderr.lower():
+                return False
+            raise CommandExecutionError(
+                f"could not inspect the root queue on {interface}",
+                return_code=result.return_code,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
         if not result.stdout.strip():
             return False
         try:
