@@ -5,11 +5,15 @@ from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import EveryoneElseRule, ServiceQuotaRule, WebsiteFilter
 from jittersim.networking.renderer import (
+    INGRESS_HANDLE,
+    UPLOAD_DEVICE,
     queue_band,
     queue_handle,
     queue_parent,
     render_command_plan,
+    render_live_queue_changes,
     render_reset_commands,
+    withheld_upload_settings,
 )
 from jittersim.networking.topology import Topology, TopologyError
 
@@ -339,7 +343,7 @@ class RendererTests(unittest.TestCase):
             on_band = [
                 command
                 for command in commands
-                if "eth0" in command.argv and "10:2" in command.argv and command.argv[1] == "qdisc"
+                if "wlan0" in command.argv and "10:2" in command.argv and command.argv[1] == "qdisc"
             ]
             removed = [
                 command.argv[-1] for command in on_band if command.argv[2] == "del"
@@ -349,9 +353,9 @@ class RendererTests(unittest.TestCase):
             return removed, argv[argv.index("handle") + 1 :]
 
         normal = child(Profile(id="normal", name="Normal"))
-        slow = child(Profile(id="slow", name="Slow", upload=Impairment(delay_ms=50)))
+        slow = child(Profile(id="slow", name="Slow", download=Impairment(delay_ms=50)))
         doubled = child(
-            Profile(id="doubled", name="Doubled", upload=Impairment(duplicate_percent=10))
+            Profile(id="doubled", name="Doubled", download=Impairment(duplicate_percent=10))
         )
 
         # tc cannot change a netem into an fq_codel, so a band that switches kind
@@ -449,11 +453,11 @@ class RendererTests(unittest.TestCase):
 
     def test_netem_options_are_always_stated_so_old_values_do_not_linger(self) -> None:
         profiles = {
-            "plain": Profile(id="plain", name="Plain", upload=Impairment(delay_ms=100)),
+            "plain": Profile(id="plain", name="Plain", download=Impairment(delay_ms=100)),
             "limited": Profile(
                 id="limited",
                 name="Limited",
-                upload=Impairment(delay_ms=100, corrupt_percent=5, bandwidth_kbit=1_000),
+                download=Impairment(delay_ms=100, corrupt_percent=5, bandwidth_kbit=1_000),
             ),
         }
         plan = compile_plan(
@@ -470,7 +474,7 @@ class RendererTests(unittest.TestCase):
         )
 
         def netem_arguments(device_id):
-            purpose = f"upload impairment for device {device_id}"
+            purpose = f"download impairment for device {device_id}"
             command = next(c for c in commands if purpose in c.purpose)
             return command.argv[command.argv.index("netem") :]
 
@@ -606,7 +610,9 @@ class RendererTests(unittest.TestCase):
             topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
         )
 
-        for interface in ("eth0", "wlan0"):
+        # Uploads never duplicate (see the upstream safety tests), so only the
+        # download side shows the order.
+        for interface in ("wlan0",):
             queue_commands = [
                 command
                 for command in commands
@@ -633,6 +639,10 @@ class RendererTests(unittest.TestCase):
             )
             self.assertTrue(queue_commands[1].ignore_failure)
             self.assertIn("duplicate", queue_commands[2].arguments)
+        uploads = [command for command in commands if "eth0" in command.arguments
+                   and "netem" in command.arguments]
+        self.assertTrue(uploads)
+        self.assertFalse(any("duplicate" in command.arguments for command in uploads))
 
     def test_reset_targets_only_project_owned_state(self) -> None:
         commands = render_reset_commands(
@@ -752,7 +762,13 @@ class EveryoneElseRenderingTests(unittest.TestCase):
         # Saved devices keep their own rules, which come after these.
         device_rule = next(i for i, line in enumerate(lines) if "usage-device alice upload" in line)
         self.assertLess(start, device_rule)
-        self.assertEqual([line for line in lines if "ct mark" in line], [])
+        # The only connection marks are the upload classes the Wi-Fi intake reads.
+        self.assertEqual(
+            [line for line in lines if "ct mark" in line],
+            ['add rule inet jittersim upload_class iifname "wlan0" ct mark set meta mark and 0xff',
+             'add rule inet jittersim output oifname "wlan0" meta mark and 0xff != 0 '
+             "ct mark set meta mark and 0xff"],
+        )
 
     def test_without_a_list_or_saved_devices_every_client_is_marked(self) -> None:
         lines = self.lines()
@@ -959,3 +975,99 @@ class QueueClassTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpstreamSafetyRendererTests(unittest.TestCase):
+    """Nothing that damages, copies or reorders packets may run toward the router."""
+
+    TOPOLOGY = Topology(uplink_interface="eth0", test_interface="wlan0")
+    HARSH = Impairment(delay_ms=40, jitter_ms=20, loss_percent=2, reorder_percent=10,
+                       duplicate_percent=7, corrupt_percent=6, bandwidth_kbit=2000)
+
+    def plan(self, upload=HARSH):
+        return compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "harsh"),),
+            profiles={"harsh": Profile(id="harsh", name="Harsh", upload=upload,
+                                       download=self.HARSH)},
+        )
+
+    @staticmethod
+    def netems(commands, interface):
+        return [command.arguments for command in commands if command.executable == "tc"
+                and interface in command.arguments and "netem" in command.arguments]
+
+    def test_the_uplink_never_gets_a_damaging_setting(self) -> None:
+        for device in (None, UPLOAD_DEVICE):
+            commands = render_command_plan(plan=self.plan(), topology=self.TOPOLOGY,
+                                           upload_device=device)
+            (upload,) = self.netems(commands, "eth0")
+            self.assertEqual(upload[upload.index("corrupt") + 1], "0%")
+            self.assertNotIn("duplicate", upload)
+            self.assertNotIn("reorder", upload)
+            for setting in ("delay", "loss", "rate"):
+                self.assertIn(setting, upload)
+            (download,) = self.netems(commands, "wlan0")
+            for setting in ("duplicate", "reorder"):
+                self.assertIn(setting, download)
+            self.assertEqual(download[download.index("corrupt") + 1], "6%")
+
+    def test_upload_corruption_runs_alone_on_the_ifb_device(self) -> None:
+        commands = render_command_plan(plan=self.plan(), topology=self.TOPOLOGY,
+                                       upload_device=UPLOAD_DEVICE)
+
+        (corruption,) = self.netems(commands, UPLOAD_DEVICE)
+        self.assertEqual(corruption[corruption.index("netem"):],
+                         ("netem", "corrupt", "6%", "rate", "0bit"))
+        intake = [command.arguments for command in commands if INGRESS_HANDLE in command.arguments]
+        self.assertEqual(intake[0], ("qdisc", "add", "dev", "wlan0", "handle", "ffff:", "ingress"))
+        self.assertIn("connmark", intake[1])
+        self.assertEqual(intake[1][-1], "continue")
+        redirects = intake[2:]
+        self.assertEqual(len(redirects), 2)
+        for arguments in redirects:
+            self.assertEqual(arguments[arguments.index("handle") + 1], "1")
+            self.assertEqual(arguments[-3:], ("redirect", "dev", UPLOAD_DEVICE))
+
+    def test_without_upload_corruption_nothing_is_redirected(self) -> None:
+        commands = render_command_plan(plan=self.plan(Impairment(delay_ms=5)),
+                                       topology=self.TOPOLOGY, upload_device=UPLOAD_DEVICE)
+
+        self.assertFalse(any(UPLOAD_DEVICE in command.arguments for command in commands))
+        self.assertFalse(any(INGRESS_HANDLE in command.arguments for command in commands))
+
+    def test_live_changes_keep_uploads_safe(self) -> None:
+        before = self.plan(Impairment(delay_ms=20, reorder_percent=5, corrupt_percent=3))
+        after = self.plan(Impairment(delay_ms=10, corrupt_percent=9))
+
+        changes = render_live_queue_changes(previous=before, plan=after, topology=self.TOPOLOGY,
+                                            upload_device=UPLOAD_DEVICE)
+        by_device = {change.arguments[3]: change.arguments for change in changes}
+        self.assertEqual(set(by_device), {UPLOAD_DEVICE, "eth0"})
+        self.assertEqual(by_device[UPLOAD_DEVICE][-4:], ("corrupt", "9%", "rate", "0bit"))
+        self.assertEqual(by_device["eth0"][by_device["eth0"].index("corrupt") + 1], "0%")
+        self.assertNotIn("reorder", by_device["eth0"])
+        (change,) = render_live_queue_changes(previous=before, plan=after, topology=self.TOPOLOGY)
+        self.assertEqual(change.arguments[3], "eth0")
+        # A class that starts or stops corrupting changes what the intake redirects.
+        self.assertIsNone(render_live_queue_changes(
+            previous=self.plan(Impairment(delay_ms=20)), plan=after, topology=self.TOPOLOGY,
+            upload_device=UPLOAD_DEVICE))
+
+    def test_forwarded_uploads_are_classified_afresh_and_untracked_ones_dropped(self) -> None:
+        script = render_command_plan(plan=self.plan(), topology=self.TOPOLOGY)[0].stdin
+        lines = script.splitlines()
+
+        forward = [line for line in lines if " forward " in line and line.startswith("add rule")]
+        self.assertEqual(forward[0], 'add rule inet jittersim forward iifname "wlan0" meta mark set 0')
+        self.assertIn('add rule inet jittersim upload_class iifname "wlan0" oifname "eth0" '
+                      'ct state invalid drop comment "never forward untracked test traffic to the router"',
+                      lines)
+        self.assertIn('add rule inet jittersim upload_class iifname "wlan0" '
+                      'ct mark set meta mark and 0xff', lines)
+
+    def test_withheld_settings_are_named(self) -> None:
+        self.assertEqual(withheld_upload_settings(self.HARSH, corrupt=True),
+                         ["reordering", "duplication"])
+        self.assertEqual(withheld_upload_settings(self.HARSH, corrupt=False),
+                         ["reordering", "duplication", "corruption"])
+        self.assertEqual(withheld_upload_settings(Impairment(delay_ms=5), corrupt=False), [])

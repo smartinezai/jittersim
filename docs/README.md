@@ -57,6 +57,7 @@ a month (for example `2026-09`) was written in that month.
 | Document | Use it for |
 | --- | --- |
 | [outage-dossier-2026-10-04-2026-10-09.md](outage-dossier-2026-10-04-2026-10-09.md) | The three router failures during Pi-only Wi-Fi, ranked hypotheses and a read-only capture checklist |
+| [upstream-safe-impairments-2026-10-09.md](upstream-safe-impairments-2026-10-09.md) | Where each impairment runs, why the router never receives damaged, copied or reordered uploads, and the hardware experiment |
 | [router-incident-findings-2026-10-04.md](router-incident-findings-2026-10-04.md) | The Vodafone router outage of 4 October. The cause is unproven |
 | [pi-only-datapath-audit-2026-10-09.md](pi-only-datapath-audit-2026-10-09.md) | Every way a device can end up on the Pi without working internet, and what was fixed |
 | [update-path-audit-2026-10-09.md](update-path-audit-2026-10-09.md) | The update and release path mapped step by step |

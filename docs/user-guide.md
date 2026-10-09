@@ -207,7 +207,9 @@ See
 ### Profiles and network effects
 
 - Delay, jitter, packet loss, bandwidth limits, packet reordering, duplication
-  and corruption.
+  and corruption. Downloads get all of them. Uploads never get reordering or
+  duplication, and their corruption runs before the Pi forwards: see
+  [Upload safety for the router](#upload-safety-for-the-router).
 - Separate upload and download controls where the network supports them.
 - Per-device profile assignment from the dashboard.
 - A saved profiles list on the **Profiles** page with **Edit** and **Apply to
@@ -802,7 +804,10 @@ device name and direction then what is set and what happened:
   at a sample also counts as capped. A burst that drains between two samples
   can still be missed. A capped queue also shows `Queue wait now: about 320 ms`.
 - Delay and jitter and reordering and duplication and corruption show what is set
-  and say **not measured** because the counters cannot see them.
+  and say **not measured** because the counters cannot see them. Upload rows
+  show the profile's values even where upload reordering, duplication or
+  corruption is not applied (see
+  [Upload safety for the router](#upload-safety-for-the-router)).
 - A verdict in plain words: `Affected in the last minute` or `No traffic in the
   last minute` or `Too few packets to judge` or `No drops or cap hit seen` or
   `Effect not measured here`.
@@ -885,6 +890,35 @@ of spare bandwidth for JitterSim. Select one device to see its default-queue
 limits. Service-specific queues can use different limits, so those profile
 lines do not represent every flow from that device. Run a speed test on the
 connected device to check its experienced speed.
+
+### Upload safety for the router
+
+The household router must never receive damaged, copied or reordered packets
+from the Pi. On 3 and 4 October the Vodafone Station hung twice while a
+profile with upload corruption, duplication and reordering ran, and lab
+captures showed why that is risky: `netem` on the Pi's Ethernet port changes
+whole frames after the Pi built them, so a corrupted frame can carry a wrong
+MAC address, EtherType or IP header with a valid Ethernet checksum. See
+[the upstream-safe impairment notes](upstream-safe-impairments-2026-10-09.md).
+
+JitterSim therefore shapes uploads like this:
+
+- Delay, jitter, loss and bandwidth limits run on the Ethernet port. They
+  never change or copy a frame, and jitter keeps packets in order.
+- Corruption runs on a Linux `ifb` device fed from the test Wi-Fi's incoming
+  side, before the Pi routes the packet. The Pi drops a packet whose IP header
+  was damaged, and a packet whose TCP or UDP checksum was damaged fails at the
+  other end like on a real link. A connection's first packet is not corrupted.
+- Upload reordering and duplication are not applied. The profile form and the
+  Apply message say so. Downloads still get both.
+- If the Pi has no `ifb` module or tc `connmark` action, upload corruption is
+  left out and the Apply message says so. It never falls back to the old
+  placement.
+- The Pi's own traffic (ARP, DHCP, DNS, NTP, SSH, the dashboard) never enters a
+  shaping queue toward the router. The browser proxy's connections for browser
+  service profiles are the one exception: they get delay, jitter, loss and
+  rate only. Test Wi-Fi traffic that the Pi's connection
+  tracking cannot follow is dropped instead of reaching the router without NAT.
 
 ## Dashboard modes
 

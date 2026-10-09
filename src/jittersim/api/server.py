@@ -151,6 +151,7 @@ from jittersim.networking.router import (
     safe_router_wifi_message,
 )
 from jittersim.networking.wifi import DEFAULT_WIFI_NAME
+from jittersim.networking.renderer import UPLOAD_DEVICE, withheld_upload_settings
 from jittersim.networking.wifi_security import SECURITY_MODES
 from jittersim.api.router_operations import RouterOperations
 from jittersim.api.wifi_operations import WifiOperations, WifiOutcome, valid_request_id, issue_request_id
@@ -5284,6 +5285,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     "warning": _apply_warning(
                         plan.unverified_device_ids,
                         prepared.unresolved_names if prepared is not None else (),
+                        _upstream_warning(plan, result.get("upload_corruption_applied")),
                     ),
                 }
             ),
@@ -6174,8 +6176,51 @@ def _safe_wifi_copy_message(error: HelperClientError) -> str:
     return safe_router_check_message(str(error))
 
 
+# The helper creates this ifb device only while upload corruption runs before
+# the Pi forwards. sysfs is readable without privileges.
+UPLOAD_DEVICE_PATH = Path("/sys/class/net") / UPLOAD_DEVICE
+
+
+def _upload_device_present() -> bool:
+    try:
+        return UPLOAD_DEVICE_PATH.exists()
+    except OSError:
+        return False
+
+
+def _upstream_warning(plan: NetworkPlan, corruption_applied: Optional[bool] = None) -> Optional[str]:
+    """Name the upload settings left out so the household router stays safe.
+
+    `corruption_applied` is the helper's own report when it sends one. Without
+    it the ifb device's presence tells whether corruption ran.
+    """
+
+    uploads = [queue.impairment for queue in plan.queues if queue.direction.value == "upload"]
+    if not any(i.corrupt_percent or i.duplicate_percent or i.reorder_percent for i in uploads):
+        return None
+    if not isinstance(corruption_applied, bool):
+        corruption_applied = _upload_device_present()
+    withheld = set()
+    for impairment in uploads:
+        withheld.update(withheld_upload_settings(impairment, corrupt=corruption_applied))
+    parts = []
+    copied = [name for name in ("duplication", "reordering") if name in withheld]
+    if copied:
+        parts.append(
+            "Upload " + " and ".join(copied) + (" are" if len(copied) == 2 else " is")
+            + " not applied so the household router never receives copied or reordered packets"
+        )
+    if "corruption" in withheld:
+        parts.append(
+            "Upload corruption is not applied because this Pi cannot damage packets before it "
+            "forwards them (the ifb kernel module or tc connmark action is missing)"
+        )
+    return ". ".join(parts) if parts else None
+
+
 def _apply_warning(
-    unverified_device_ids: Sequence[str], unresolved_names: Sequence[str]
+    unverified_device_ids: Sequence[str], unresolved_names: Sequence[str],
+    upstream: Optional[str] = None,
 ) -> Optional[str]:
     """Say in plain words what an apply left out, or None when it left nothing out."""
 
@@ -6190,6 +6235,8 @@ def _apply_warning(
             "These website names could not be looked up in time and are left out of the rules "
             "until their lookup works: " + describe_timed_out_names(unresolved_names)
         )
+    if upstream:
+        parts.append(upstream)
     return ". ".join(parts) if parts else None
 
 
