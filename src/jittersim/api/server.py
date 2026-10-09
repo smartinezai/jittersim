@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import html
 import hmac
+import http.client
 import ipaddress
 import io
 import json
@@ -23,7 +24,8 @@ import threading
 import time
 import uuid
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass, replace
+from dataclasses import MISSING, asdict, dataclass, field, replace
+from dataclasses import fields as dataclass_fields
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -163,6 +165,12 @@ TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 REQUEST_INPUT_TIMEOUT_SECONDS = 10.0
 MAX_PENDING_CONNECTION_LIFETIME_SECONDS = 30.0
 MAX_PENDING_DASHBOARD_CONNECTIONS = 16
+# While every ordinary worker is busy, a waiting connection is read here until its
+# request is complete. Only a whole, authorized Panic request may then take a
+# reserved worker. This bounds what one waiting connection may buffer.
+MAX_WAITING_REQUEST_BYTES = 16 * 1024
+# Replacing waiting connections is logged at most this often, with a count.
+EVICTION_WARNING_INTERVAL_SECONDS = 60.0
 # Requests handled at the same time. A request over the limit gets a clear 503.
 MAX_DASHBOARD_WORKERS = 16
 # Extra threads kept for Panic alone, so it still gets in when every ordinary slot is busy.
@@ -260,6 +268,14 @@ ACTION_PATHS = frozenset(
      "/api/access-point/reset-name", "/api/updates/check-online", "/api/updates/retry")
 )
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
+# What the dashboard says when the standard library refuses a request before any route runs.
+REFUSED_REQUEST_SENTENCES = {
+    400: "the request could not be understood",
+    414: "the request address is too long",
+    431: "the request headers are too large",
+    501: "this request method is not supported",
+    505: "this HTTP version is not supported",
+}
 # Panic runs ahead of other writes: it never waits for the write lock of an apply in flight.
 PRIORITY_WRITE_PATHS = frozenset(("/api/normal-access",))
 # The product name shown after the token is accepted. The public page never carries it.
@@ -889,6 +905,10 @@ def _runtime_state_payload(state: RuntimeState) -> Dict[str, Any]:
     }
 
 
+RESET_REQUEST_PATHS = frozenset(("/api/reset", "/api/normal-access"))
+# Recorded when a device-only start failed and the helper cleanup did not succeed yet.
+DEVICE_CLEANUP_ERROR = "device-only cleanup failed"
+
 _RESET_SAVED_ONLY = {
     "live_applied": False,
     "message": "saved; the network is reset, so choose Start to use it",
@@ -906,6 +926,10 @@ class _PendingConnection:
     handshake: bool
     expires_at: float
     want_write: bool = False
+    # The client has sent something (TLS handshake or request bytes).
+    progressed: bool = False
+    # Request bytes read while every ordinary worker was busy.
+    buffer: bytearray = field(default_factory=bytearray)
 
 
 _RESET_REQUESTS_LOCK = threading.Lock()
@@ -997,6 +1021,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         self._active_workers = 0
         self._request_workers = RequestWorkers("jittersim-request", self._uncertain_worker_start)
         self._reserved_requests: Set[socket.socket] = set()
+        self._evictions_unreported = 0
+        self._eviction_warned_at = float("-inf")
         self.homepage_store = None
         self.homepage_server = None
         self.homepage_worker = None
@@ -1074,15 +1100,18 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         with self._workers_lock:
             return request in self._reserved_requests
 
-    def _refuse_request(self, request: socket.socket) -> None:
+    def _refuse_request(self, request: socket.socket, *, busy_body: bool = False) -> None:
         """Tell a client over the limit to retry instead of leaving it hanging."""
 
         # The accept loop must never wait for a client, so nothing here blocks.
+        body = _json_bytes({"error": "the dashboard is busy, try again"}) if busy_body else b""
+        kind = b"Content-Type: application/json\r\n" if busy_body else b""
         try:
             request.setblocking(False)
             request.send(
-                b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n"
-                b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+                b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n" + kind
+                + b"Content-Length: " + str(len(body)).encode("ascii")
+                + b"\r\nConnection: close\r\n\r\n" + body
             )
             # Read what the client already sent so closing does not reset the reply.
             request.recv(65536)
@@ -1105,26 +1134,31 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             writers = [connection for connection, pending
                        in self._pending_connections.items() if pending.want_write]
             readable, writable, _ = select.select(readers, writers, [], 0.05)
-            if self.socket in readable:
-                attempted = True
-                self._accept_connection()
+            # Waiting connections that are ready go first. A newcomer accepted
+            # before them could otherwise replace one whose request had arrived.
             for connection in readable + writable:
                 if connection is self.socket:
                     continue
                 pending = self._pending_connections.get(connection)
                 if pending is None:
-                    # Replaced by a newer connection during this round.
                     continue
+                pending.progressed = True
                 try:
                     if pending.handshake:
                         connection.do_handshake()
                         pending.handshake = False
                         pending.deadline = min(
                             pending.expires_at, time.monotonic() + REQUEST_INPUT_TIMEOUT_SECONDS)
-                    prefix = connection.recv(1)
-                    if not prefix:
-                        self._close_pending(connection)
-                        continue
+                    if not pending.buffer and self.active_workers < MAX_DASHBOARD_WORKERS:
+                        prefix = connection.recv(1)
+                        if not prefix:
+                            self._close_pending(connection)
+                            continue
+                    else:
+                        waiting = self._read_waiting_request(connection, pending)
+                        if waiting is None:
+                            continue
+                        prefix = waiting
                     remaining = pending.deadline - time.monotonic()
                     if remaining <= 0:
                         self._close_pending(connection)
@@ -1139,6 +1173,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     pending.want_write = False
                 except OSError:
                     self._close_pending(connection)
+            if self.socket in readable:
+                attempted = True
+                self._accept_connection()
         raise OSError("dashboard is stopping")
 
     def tls_context_for(self, local_address: str, peer_address: str) -> Optional[ssl.SSLContext]:
@@ -1157,16 +1194,127 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     continue
         return self._tls_context
 
+    def _read_waiting_request(self, connection: socket.socket,
+                              pending: _PendingConnection) -> Optional[bytes]:
+        """Read a waiting request while every ordinary worker is busy.
+
+        Return the bytes to dispatch, or None while the request must keep waiting
+        or after it was answered and closed here.
+        """
+        ended = False
+        try:
+            while len(pending.buffer) <= MAX_WAITING_REQUEST_BYTES:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    ended = True
+                    break
+                pending.buffer.extend(chunk)
+        except (ssl.SSLWantReadError, BlockingIOError):
+            pass
+        if self.active_workers < MAX_DASHBOARD_WORKERS and pending.buffer:
+            # An ordinary worker came free: carry on as usual with what was read.
+            return bytes(pending.buffer)
+        verdict = self._waiting_request_verdict(bytes(pending.buffer))
+        if verdict is True:
+            return bytes(pending.buffer)
+        if verdict is False or len(pending.buffer) > MAX_WAITING_REQUEST_BYTES:
+            self._pending_connections.pop(connection, None)
+            self._refuse_request(connection, busy_body=True)
+        elif ended:
+            self._close_pending(connection)
+        return None
+
+    def _waiting_request_verdict(self, data: bytes) -> Optional[bool]:
+        """Tell whether waiting input is a whole, authorized Panic request.
+
+        None means the request is not complete yet. Only True may take a worker
+        kept for Panic, so a stalled or unauthenticated client never holds one.
+        """
+        end = data.find(b"\r\n\r\n")
+        if end < 0:
+            return None
+        request_line, _, header_block = data[:end].partition(b"\r\n")
+        parts = request_line.split()
+        if len(parts) != 3 or parts[0] != b"POST":
+            return False
+        try:
+            path = urlsplit(parts[1].decode("ascii")).path
+            headers = http.client.parse_headers(io.BytesIO(header_block + b"\r\n\r\n"))
+        except (UnicodeDecodeError, ValueError, http.client.HTTPException):
+            return False
+        if path not in PRIORITY_WRITE_PATHS or headers.get("Transfer-Encoding") is not None:
+            return False
+        if not self.is_authorized(headers.get("Authorization")):
+            return False
+        try:
+            length = int(headers.get("Content-Length", "0"))
+        except ValueError:
+            return False
+        if length < 0 or length > MAX_WAITING_REQUEST_BYTES:
+            return False
+        return True if len(data) - (end + 4) >= length else None
+
+    def _eviction_victim(self) -> Optional[socket.socket]:
+        """Choose which waiting connection a newcomer replaces, if any.
+
+        The peer with the most waiting connections gives one up, so a single host
+        cannot push out everyone else. Within that peer a connection that has sent
+        nothing goes before one that has (a TLS handshake under way, for example),
+        oldest first. A connection with input ready to read is never chosen.
+        """
+        entries = list(self._pending_connections.items())
+        try:
+            ready = set(select.select([connection for connection, _ in entries], [], [], 0)[0])
+        except (OSError, ValueError):
+            ready = set()
+        for connection, _ in entries:
+            try:
+                if isinstance(connection, ssl.SSLSocket) and connection.pending():
+                    ready.add(connection)
+            except (OSError, ValueError):
+                pass
+
+        def peer(pending: _PendingConnection) -> str:
+            address = pending.address
+            return str(address[0] if isinstance(address, tuple) else address)
+
+        counts: Dict[str, int] = {}
+        for _, pending in entries:
+            counts[peer(pending)] = counts.get(peer(pending), 0) + 1
+        # Peers by how many they hold. Ties keep the order of each peer's oldest entry.
+        for name in sorted(counts, key=lambda name: -counts[name]):
+            candidates = [(connection, pending) for connection, pending in entries
+                          if peer(pending) == name and connection not in ready]
+            if candidates:
+                silent = [connection for connection, pending in candidates if not pending.progressed]
+                return silent[0] if silent else candidates[0][0]
+        return None
+
+    def _note_eviction(self) -> None:
+        self._evictions_unreported += 1
+        now = time.monotonic()
+        if now - self._eviction_warned_at >= EVICTION_WARNING_INTERVAL_SECONDS:
+            LOGGER.warning(
+                "dashboard replaced %d waiting dashboard connection(s) because the queue of %d was full",
+                self._evictions_unreported, MAX_PENDING_DASHBOARD_CONNECTIONS)
+            self._evictions_unreported = 0
+            self._eviction_warned_at = now
+
     def _accept_connection(self) -> None:
         connection, address = self.socket.accept()
         while len(self._pending_connections) >= MAX_PENDING_DASHBOARD_CONNECTIONS:
             # A waiting connection has not said what it wants yet, so the Panic
             # reserve cannot protect it here. Refusing newcomers would let a few
             # silent clients lock Panic out until they expire. Instead the newest
-            # connection replaces the oldest one that still has sent nothing: a
-            # real client sends its request at once, and an attacker must open
-            # connections faster than that to keep one out. The queue stays bounded.
-            self._close_pending(next(iter(self._pending_connections)))
+            # connection replaces a waiting one (see _eviction_victim), and the
+            # queue stays bounded.
+            victim = self._eviction_victim()
+            if victim is None:
+                # Every waiting connection has input ready. They are read next.
+                connection.close()
+                return
+            self._close_pending(victim)
+            self._note_eviction()
         try:
             connection.setblocking(False)
             if self._tls_context is not None:
@@ -1963,6 +2111,16 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+        if path in RESET_REQUEST_PATHS:
+            # A device Apply that arrives while this runs, or waits behind it, starts nothing.
+            self.note_reset_request()
+            try:
+                return self._tracked_write_response_for(path, payload)
+            finally:
+                self.note_reset_finished()
+        return self._tracked_write_response_for(path, payload)
+
+    def _tracked_write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
         if path == "/api/profiles/ranges":
             return self._write_response_for(path, payload)
         control_intent = None
@@ -1973,9 +2131,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         live_general = path in ("/api/general-profile", "/api/general-profile/stop")
         live_ads = path == "/api/ad-blocking"
         device_apply = path == "/api/connected-devices/apply-profile"
-        if path in ("/api/reset", "/api/normal-access"):
-            self.note_reset_request()
-        resets_at_entry = self._reset_requests
+        resets_at_entry = (self._reset_requests, self._resets_pending)
         if path == "/api/apply" or live_access or live_global or live_general or live_ads or device_apply:
             generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
             refused, revision = self._capture_control_intent(generation)
@@ -2770,8 +2926,11 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 if blocks is not None:
                     if not isinstance(blocks, list) or len(blocks) > 32:
                         raise ValueError("site_blocks must be a list of at most 32 rules")
-                    blocks = tuple(SiteBlock(**rule) for rule in blocks)
-                options = AccessOptions(**payload["options"]) if "options" in payload else None
+                    blocks = tuple(
+                        _from_known_fields(SiteBlock, rule, f"site_blocks[{index}]")
+                        for index, rule in enumerate(blocks))
+                options = (_from_known_fields(AccessOptions, payload["options"], "options")
+                           if "options" in payload else None)
                 # Check every supplied section above, then write only the sections the
                 # request carried. An omitted section keeps its stored value, while an
                 # explicit empty section resets just that section.
@@ -4382,6 +4541,11 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             )
 
     def _save_connected_group(self, payload: dict, *, existing: bool):
+        if existing and "group_id" in payload:
+            try:
+                _text_identifier(payload["group_id"], "group_id")
+            except ValueError as error:
+                return _bad_request("invalid group request", error)
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
             try:
@@ -4513,12 +4677,22 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             current = "This is the current device profile."
         return f"Profile {profile_label} saved for this device. " + current
 
-    # Counts Reset and Panic requests, so an action queued before one can tell.
+    # Counts Reset and Panic requests and those still running, so a device Apply can
+    # tell that one arrived before it or runs while it waits.
     _reset_requests = 0
+    _resets_pending = 0
+    # Waits before each retry of a failed device-only cleanup. Retries stop after the last.
+    cleanup_retry_delays = (2.0, 5.0, 15.0, 30.0, 60.0)
+    _cleanup_worker = None
 
     def note_reset_request(self) -> None:
         with _RESET_REQUESTS_LOCK:
             self._reset_requests += 1
+            self._resets_pending += 1
+
+    def note_reset_finished(self) -> None:
+        with _RESET_REQUESTS_LOCK:
+            self._resets_pending -= 1
 
     def _apply_profile_to_connected_device(self, payload: dict, *, control_intent=None,
                                            resets_at_entry=None):
@@ -4542,17 +4716,20 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 return refused
             control_intent = (generation, revision)
         if resets_at_entry is None:
-            resets_at_entry = self._reset_requests
+            resets_at_entry = (self._reset_requests, self._resets_pending)
+        overtaken = (HTTPStatus.CONFLICT, "application/json", _json_bytes({
+            "error": "Reset or Panic ran while this Apply waited. Nothing was saved or "
+                     "started. Apply the profile again if you still want it.",
+        }))
+        if resets_at_entry[1] > 0:
+            return overtaken
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
             refused = self._apply_refused(control_intent[0])
             if refused is not None:
                 return refused
-            if self._reset_requests != resets_at_entry:
-                return HTTPStatus.CONFLICT, "application/json", _json_bytes({
-                    "error": "Reset or Panic ran while this Apply waited. Nothing was saved or "
-                             "started. Apply the profile again if you still want it.",
-                })
+            if self._reset_requests != resets_at_entry[0]:
+                return overtaken
             try:
                 snapshot = station_snapshot(self.helper_client)
                 device, existing = _connected_device_from_payload(
@@ -4567,37 +4744,60 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         "This device is protected from profiles. Stop protecting it before applying a profile."
                     )
                 self._verify_selected_client(device, snapshot)
-                stopped = self.repository.get_runtime_state().last_action == "reset"
+                last_action = self.repository.get_runtime_state().last_action
+                stopped = last_action == "reset"
                 general = self.repository.get_general_profile()
                 if general is not None and not stopped:
                     raise ValueError(
                         f"Everyone uses {general.name} right now, so this device cannot run its own "
                         "profile yet. Nothing was saved. Stop Everyone first, or save the choice "
                         "in the device form to use it later."
+                        if last_action is not None else
+                        f"Everyone is saved as {general.name} and would cover this device. Nothing "
+                        "was saved. Choose Reset network first to start only this device, or "
+                        "stop Everyone."
                     )
-                if stopped and self._stop_latched():
-                    raise ValueError(
-                        "Panic or a router outage stopped profiles. Nothing was saved. Choose "
-                        "Start when it is safe, then apply this profile."
-                    )
+                if stopped:
+                    stop_state = self._stop_state()
+                    if stop_state != "clear":
+                        raise ValueError(
+                            "Panic or a router outage stopped profiles. Nothing was saved. Choose "
+                            "Start when it is safe, then apply this profile."
+                            if stop_state == "latched" else
+                            "The Pi did not say whether Panic or an outage stopped profiles. "
+                            "Nothing was saved. Try again in a moment."
+                        )
+                previous_scope = self.repository.get_device_start_scope() or frozenset()
                 if self.scheduler:
                     self.scheduler.sample_before_control_change(repository=self.repository)
-                if stopped:
-                    # Refuse a changed helper intent before saving, like Apply to everyone.
-                    refused, current_revision = self._capture_control_intent(control_intent[0])
-                    if refused is not None:
-                        return refused
-                    if control_intent[1] is not None and current_revision != control_intent[1]:
-                        return self._control_rejected(HelperClientError(
-                            "Network control changed before saving the device profile",
-                            reason="control-changed"))
-                with self.repository.transaction():
-                    self.repository.save_device(
-                        device, expected=existing, create_only=existing is None
-                    )
-                    self._validate_saved_plan()
-                    if stopped:
-                        self.repository.add_device_to_start_scope(device.id)
+                # Refuse a Panic or a changed helper intent before saving, on both paths.
+                refused, current_revision = self._capture_control_intent(control_intent[0])
+                if refused is not None:
+                    return refused
+                if control_intent[1] is not None and current_revision != control_intent[1]:
+                    return self._control_rejected(HelperClientError(
+                        "Network control changed before saving the device profile",
+                        reason="control-changed"))
+
+                def save():
+                    with self.repository.transaction():
+                        self.repository.save_device(
+                            device, expected=existing, create_only=existing is None
+                        )
+                        self._validate_saved_plan()
+                        if stopped:
+                            self.repository.add_device_to_start_scope(device.id)
+                            # The scoped plan must compile before the device joins it.
+                            with without_dns():
+                                compile_stored_plan(
+                                    repository=self.repository,
+                                    device_scope=previous_scope | {device.id},
+                                )
+
+                # Panic cannot land between the last check and the commit.
+                accepted, _ = self._publish_apply(control_intent[0], save)
+                if not accepted:
+                    return self._apply_refused(control_intent[0]) or overtaken
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             fields = {
@@ -4608,25 +4808,31 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             }
             if not stopped:
                 return self._saved_control_response(fields, snapshot)
-            return self._start_device_only(fields, snapshot, device, control_intent)
+            return self._start_device_only(fields, snapshot, device, control_intent, previous_scope)
 
-    def _stop_latched(self) -> bool:
-        """Whether a Panic, outage or state error keeps profiles stopped in the helper."""
+    def _stop_state(self) -> str:
+        """Whether a Panic, outage or state error keeps profiles stopped: latched, clear or unknown."""
 
         try:
             gateway_status = self.helper_client.gateway_status()
-        except (HelperClientError, AttributeError):
-            return False
-        return any(gateway_status.get(name) is True for name in (
+        except (HelperClientError, AttributeError, TypeError):
+            return "unknown"
+        if not isinstance(gateway_status, dict):
+            return "unknown"
+        latched = any(gateway_status.get(name) is True for name in (
             "outage_stop_latched", "panic_stop_latched", "state_error"))
+        return "latched" if latched else "clear"
 
-    def _start_device_only(self, fields, snapshot, device, control_intent):
+    def _start_device_only(self, fields, snapshot, device, control_intent, previous_scope):
         """Start the device-only scope after a Reset. Everything else stays stopped."""
 
         status, content_type, body = self._apply_configuration_locked(
             connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
             device_scope=True,
         )
+        if status != HTTPStatus.OK and self.repository.get_device_start_scope() is not None:
+            # Refused before the helper ran: the scope stays what it was.
+            self.repository.restore_device_start_scope(previous_scope)
         response = json.loads(body)
         response.update(fields)
         response["live_applied"] = status == HTTPStatus.OK
@@ -5020,11 +5226,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             LOGGER.error("network helper apply failed: %s", error)
             if self.scheduler is not None:
                 self.scheduler.invalidate_applied_plan()
-            # A failed device-only start ends its scope: the rest was never started.
-            accepted, state = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
-                observed_state="error", last_action=runtime_action, last_result="failure",
-                last_error="network helper apply failed",
-            ))
+            if scope is not None:
+                # A failed device-only start ends its scope and resets what it left behind.
+                accepted, state = self._clean_up_failed_device_start(halts_at_start)
+            else:
+                accepted, state = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
+                    observed_state="error", last_action=runtime_action, last_result="failure",
+                    last_error="network helper apply failed",
+                ))
             if not accepted:
                 return self._apply_refused(halts_at_start, undo=True)
             return (
@@ -5073,6 +5282,69 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 }
             ),
         )
+
+    def _clean_up_failed_device_start(self, generation):
+        """Reset the helper after a failed device-only start and record the result.
+
+        A failed cleanup stays pending: it is retried with bounded waits, reset only,
+        whether or not the scheduler runs.
+        """
+
+        if self.scheduler is not None:
+            self.scheduler.pause()
+        try:
+            self.helper_client.reset()
+        except HelperClientError:
+            LOGGER.error("cleanup after a failed device-only start failed; retrying")
+            result = self._publish_apply(generation, lambda: self.repository.update_runtime_state(
+                observed_state="error", last_action="reset", last_result="failure",
+                last_error=DEVICE_CLEANUP_ERROR,
+            ))
+            self._retry_device_cleanup()
+            return result
+        return self._publish_apply(generation, lambda: self.repository.update_runtime_state(
+            observed_state="reset", last_action="reset", last_result="success", last_error=None,
+        ))
+
+    def _cleanup_is_pending(self) -> bool:
+        state = self.repository.get_runtime_state()
+        return (state.last_action == "reset" and state.observed_state == "error"
+                and state.last_error == DEVICE_CLEANUP_ERROR)
+
+    def _retry_device_cleanup(self) -> None:
+        """Retry the reset of a failed device-only start a bounded number of times."""
+
+        worker = self._cleanup_worker
+        if worker is not None and worker.is_alive():
+            return
+
+        def run():
+            for delay in self.cleanup_retry_delays:
+                if self._stop_connections.wait(delay):
+                    return
+                operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
+                with operation:
+                    try:
+                        if not self._cleanup_is_pending():
+                            return  # Something newer decided the state.
+                        self.helper_client.reset()
+                        self.repository.update_runtime_state(
+                            observed_state="reset", last_action="reset", last_result="success",
+                            last_error=None,
+                        )
+                    except HelperClientError:
+                        LOGGER.warning("cleanup after a failed device-only start failed again")
+                        continue
+                    except (StorageError, sqlite3.Error):
+                        LOGGER.exception("could not record the device-only cleanup")
+                        return
+                self._record_activity("reset", "Cleanup after a failed device-only start completed")
+                return
+            LOGGER.error("cleanup after a failed device-only start is still not confirmed. Retry Panic")
+
+        self._cleanup_worker = threading.Thread(
+            target=run, name="jittersim-device-cleanup", daemon=True)
+        self._cleanup_worker.start()
 
     def _panic_since(self, halts_at_start: int) -> bool:
         return getattr(self.scheduler, "halt_count", 0) != halts_at_start
@@ -5251,11 +5523,17 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 "Profiles remain stopped after a router gateway outage",
             )
             return
+        # Rows an older dashboard left beside a completed Reset never start again.
+        self.repository.discard_stale_device_start_scope()
         state = self.repository.get_runtime_state()
         if state.last_action not in {"reset", "apply", "schedule"}:
             return
         if state.last_action == "reset":
-            if state.last_result != "success":
+            scoped = self.repository.get_device_start_scope() is not None
+            if not scoped and self._cleanup_is_pending():
+                # A failed device-only cleanup is a reset still to finish.
+                state = replace(state, last_result="success")
+            if state.last_result != "success" and not scoped:
                 if self.scheduler is not None:
                     self.scheduler.require_recovery()
                 LOGGER.error("saved recovery remains unconfirmed. Retry Panic before Start")
@@ -5423,11 +5701,49 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         self._handle_write()
 
+    def do_HEAD(self) -> None:
+        # Only the public health check answers HEAD, so a monitor can ask for the status alone.
+        if urlsplit(self.path).path == "/api/health":
+            self.do_GET()
+            return
+        self._method_not_allowed("this address does not answer HEAD requests")
+
     def do_DELETE(self) -> None:
+        self._method_not_allowed("delete actions are not enabled")
+
+    def do_OPTIONS(self) -> None:
+        self._method_not_allowed("this request method is not allowed")
+
+    def do_PATCH(self) -> None:
+        self._method_not_allowed("this request method is not allowed")
+
+    def _method_not_allowed(self, message: str) -> None:
         self._send_response(
             status=HTTPStatus.METHOD_NOT_ALLOWED,
             content_type="application/json",
-            body=_json_bytes({"error": "delete actions are not enabled"}),
+            body=_json_bytes({"error": message}),
+            headers={"Allow": "GET, HEAD, POST, PUT"},
+        )
+
+    def send_error(self, code: int, message: Optional[str] = None, explain: Optional[str] = None) -> None:
+        # The standard library answers requests it refuses itself (a request line or header that is
+        # too long, an unknown method or HTTP version) with an HTML page that can echo the request.
+        # Say the same in the JSON every other refusal uses and echo nothing.
+        try:
+            phrase = HTTPStatus(code).phrase.lower()
+        except ValueError:
+            phrase = "request refused"
+        sentence = REFUSED_REQUEST_SENTENCES.get(code, phrase)
+        self.log_error("request refused with status %s", code)
+        if getattr(self, "command", None) is None and getattr(self, "request_version", "") == "HTTP/0.9":
+            # The request line was refused before its version was read, and the standard library
+            # sends an answer to a request of that kind with no status line and no headers.
+            self.request_version = "HTTP/1.0"
+        self._send_response(
+            status=code,
+            content_type="application/json",
+            body=_json_bytes({"error": sentence}),
+            headers={"Connection": "close"},
         )
 
     def log_request(self, code: Any = "-", size: Any = "-") -> None:
@@ -5593,8 +5909,13 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             payload = json.loads(raw_body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
             raise RequestError("request body must be valid JSON") from error
+        except ValueError as error:
+            # Python refuses an integer literal of more than 4300 digits with a plain ValueError.
+            raise RequestError("a number in the request body has too many digits") from error
         if not isinstance(payload, dict):
             raise RequestError("request body must contain a JSON object")
+        if _has_lone_surrogate(payload):
+            raise RequestError("request body has a character that is not valid text (an unpaired surrogate)")
         return payload
 
     def send_response(self, code: int, message: Optional[str] = None) -> None:
@@ -5641,11 +5962,37 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(body)
+        if getattr(self, "command", None) != "HEAD":
+            self.wfile.write(body)
 
 
 class RequestError(ValueError):
     """Raised when an HTTP request body cannot be safely decoded."""
+
+
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _has_lone_surrogate(value: Any) -> bool:
+    """Say whether a decoded JSON value holds a UTF-16 surrogate with no partner.
+
+    json.loads joins a valid pair of escapes into one character but keeps a lone one, and a lone
+    one fails later in sqlite3 or str.encode with a UnicodeEncodeError. Looking once, where the
+    body is read, covers every route. The walk is iterative so deep nesting cannot recurse.
+    """
+
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            if _LONE_SURROGATE.search(item):
+                return True
+        elif isinstance(item, dict):
+            pending.extend(item)
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return False
 
 
 def handle_release_upload(handler: "ControlRequestHandler") -> None:
@@ -5825,6 +6172,41 @@ def _bad_request(message: str, error: Exception) -> Tuple[int, str, bytes]:
     return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": message})
 
 
+def _from_known_fields(model: Any, value: Any, label: str = "") -> Any:
+    """Build a settings dataclass from an object, naming the field that is wrong.
+
+    model(**value) alone answers with Python's own "got an unexpected keyword argument" text, or,
+    when the caller only catches ValueError, with no reason at all.
+    """
+
+    where = f"{label}: " if label else ""
+    if not isinstance(value, dict):
+        raise ValueError(f"{where}must be an object")
+    known = [spec.name for spec in dataclass_fields(model) if spec.init]
+    unknown = [key for key in value if key not in known]
+    if unknown:
+        shown = ", ".join(json.dumps(key if len(key) <= 40 else key[:40] + "...") for key in unknown[:3])
+        raise ValueError(
+            f"{where}unknown field {shown}{' and others' if len(unknown) > 3 else ''}"
+            f" (known fields: {', '.join(known)})")
+    for spec in dataclass_fields(model):
+        if spec.init and spec.default is MISSING and spec.default_factory is MISSING and spec.name not in value:
+            raise KeyError(f"{label}.{spec.name}" if label else spec.name)
+    return model(**value)
+
+
+def _text_identifier(value: Any, name: str) -> str:
+    """Check that an identifier named in a request is text before it is looked up.
+
+    A list, an object or a huge integer would otherwise reach sqlite as a bound value and fail there
+    with a ProgrammingError or an OverflowError, which the dashboard answers with 500.
+    """
+
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be text")
+    return value
+
+
 def _required_text(payload: Dict[str, Any], key: str) -> str:
     """Read one required non-empty string field."""
 
@@ -5985,7 +6367,7 @@ def _data_limit_from_payload(
 ) -> DataLimit:
     """Build a device quota while retaining usage when it is edited."""
 
-    device_id = payload["device_id"]
+    device_id = _text_identifier(payload["device_id"], "device_id")
     existing = repository.get_data_limit(device_id)
     reset_mode, reset_interval_seconds, reset_times = _quota_schedule_from_payload(payload)
     return DataLimit(
@@ -6020,7 +6402,7 @@ def _group_data_limit_from_payload(
 ) -> GroupDataLimit:
     """Build a shared group quota while retaining usage when it is edited."""
 
-    group_id = payload["group_id"]
+    group_id = _text_identifier(payload["group_id"], "group_id")
     existing = repository.get_group_data_limit(group_id)
     reset_mode, reset_interval_seconds, reset_times = _quota_schedule_from_payload(payload)
     return GroupDataLimit(
@@ -6044,12 +6426,12 @@ def _service_quota_from_payload(
 ) -> ServiceQuota:
     """Build a service quota from selected observed DNS domains."""
 
-    quota_id = payload.get("id", f"service-{time.time_ns()}")
+    quota_id = _text_identifier(payload.get("id", f"service-{time.time_ns()}"), "id")
     existing = repository.get_service_quota(quota_id)
     normalized_domains = tuple(
         normalize_domain(domain) for domain in _list_field(payload, "domains", required=True)
     )
-    device = repository.get_device(payload["device_id"])
+    device = repository.get_device(_text_identifier(payload["device_id"], "device_id"))
     if device is not None:
         observed_domains = {
             observation.domain
@@ -6091,12 +6473,12 @@ def _time_quota_from_payload(
 ) -> TimeQuota:
     """Build a timed service quota from selected observed DNS domains."""
 
-    quota_id = payload.get("id", f"time-{time.time_ns()}")
+    quota_id = _text_identifier(payload.get("id", f"time-{time.time_ns()}"), "id")
     existing = repository.get_time_quota(quota_id)
     normalized_domains = tuple(
         normalize_domain(domain) for domain in _list_field(payload, "domains", required=True)
     )
-    device = repository.get_device(payload["device_id"])
+    device = repository.get_device(_text_identifier(payload["device_id"], "device_id"))
     if device is not None:
         observed_domains = {
             observation.domain
@@ -6286,8 +6668,8 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
         mac_policy=mac_policy,
         website_policy=website_policy,
         site_blocks=parse_items("policies.site_blocks", policies.get("site_blocks", []),
-                                lambda value: SiteBlock(**value)),
-        access_options=AccessOptions(**policies.get("options", {})),
+                                lambda value: _from_known_fields(SiteBlock, value)),
+        access_options=_from_known_fields(AccessOptions, policies.get("options", {}), "policies.options"),
         persist_profiles_after_gateway_outage=persistence,
         data_limits=items(
             "data_limits",

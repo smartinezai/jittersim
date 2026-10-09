@@ -28,15 +28,10 @@ GET_ROUTES = (
 # Public by design: the page and the health check answer without a token.
 PUBLIC = ("/", "/favicon.ico", "/api/health")
 
-# What the log says when a request ends in a server error. These four are confirmed defects of
-# 2026-10-09 (see tests/qa/test_api_known_defects.py). A fuzz run may meet them again: it only
-# fails on a server error it has not seen before.
-KNOWN_ERROR_SIGNATURES = (
-    ("ValueError", "Exceeds the limit (4300 digits)"),
-    ("UnicodeEncodeError", "surrogates not allowed"),
-    ("ProgrammingError", "Error binding parameter"),
-    ("OverflowError", "too large to convert to SQLite INTEGER"),
-)
+# What the log says when a request ends in a server error that is already understood. Empty: the
+# four server errors the QA run of 2026-10-09 found (a digit limit, a lone surrogate, a list as an
+# identifier, an integer beyond sqlite's range) are fixed, so a fuzz run fails on any server error.
+KNOWN_ERROR_SIGNATURES = ()
 
 
 def signature(record):
