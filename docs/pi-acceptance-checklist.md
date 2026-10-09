@@ -2,7 +2,7 @@
 
 This is the one list of things the owner tries on the Pi after installing a release. Each box says what to do and what you should see. Tick a box only when you saw the result. If the result differs write down what you saw and the time. Panic in the sidebar is always the way back.
 
-Last updated: 2026-10-03. Nobody has ticked these boxes on a real Pi yet unless a line says so.
+Last updated: 2026-10-09. Nobody has ticked these boxes on a real Pi yet unless a line says so.
 
 Release tried: ________________  Date: ________________
 
@@ -15,7 +15,7 @@ Release tried: ________________  Date: ________________
 
 - **Keep two ways into the Pi.** SSH does not work from the test Wi-Fi. Use Ethernet or the router network for SSH and for installs. The test Wi-Fi cannot reach the router's own admin page either.
 - **The router locks its login after a few wrong passwords.** Enter the router admin password with care. If the dashboard rejects it once stop and look at the password on the router. Do not try again and again.
-- **Router Wi-Fi changes can cut you off.** The sidebar switch and **Copy router Wi-Fi to Pi** can drop the connection of the computer you work on. Do those checks from a computer on Ethernet.
+- **Router Wi-Fi copies can cut you off.** **Copy router Wi-Fi to Pi** can drop the connection of the computer you work on. Do that check from a computer on Ethernet. The sidebar **Router Wi-Fi** switch is read only since 9 October 2026. JitterSim never turns the router's Wi-Fi on or off.
 - **Never paste secrets into a chat or ticket.** That covers the admin token and the router password and the Wi-Fi password. On the Pi you can read the admin token with `sudo grep JITTERSIM_ADMIN_TOKEN /etc/jittersim/control.env`.
 - **Use test phones and a throwaway profile.** Never block or slow the computer you control the Pi from.
 - If the Pi login password was ever pasted into a chat change it now with `passwd` on the Pi.
@@ -31,8 +31,8 @@ Release tried: ________________  Date: ________________
   - Do: a few minutes later enter the token again and choose **Check token**.
   - Expect: the time in the note moves forward to 24 hours from now. A plain page reload does not move it.
 - [ ] **Start button wording**
-  - Do: press **Start with saved settings**. Then press **Panic**.
-  - Expect: while it runs the button reads **Re-apply saved settings** and the message lists what started. After Panic it reads **Start with saved settings** again.
+  - Do: press **Start**. Then press **Panic**.
+  - Expect: the button reads **Start** before and while it runs. While it runs the dashboard says so and the message lists what started. After Panic the sidebar reads `Profiles off` and the button still reads **Start**.
 - [ ] **Reboot the Pi** (from Ethernet or a local terminal)
   - Do: reboot the Pi and wait two minutes.
   - Expect: the test Wi-Fi comes back on its own and the dashboard opens. The last state is restored or JitterSim shows as not running if you had pressed Panic or Reset.
@@ -43,8 +43,8 @@ Release tried: ________________  Date: ________________
   - Do: join a phone to the test Wi-Fi. Open **Devices** and press **Check for devices**. Save a name for one device.
   - Expect: each device shows a name with its address in small text underneath. A device with no name says `Unknown device` and not `Client` plus an address. The saved name shows in the group picker and the Traffic page and the sidebar list too.
 - [ ] **Protected devices are not monitored**
-  - Do: open **Traffic** and scan. Then press **Make unaffected** beside a phone on **Devices** and scan again.
-  - Expect: the phone's lookups disappear from the results. Its row is greyed out and says `Traffic is not monitored` with its profile and group controls disabled. **Remove protection** still works.
+  - Do: open **Traffic** and scan. Then press **Protect** beside a phone on **Devices** and scan again.
+  - Expect: the phone's lookups disappear from the results. Its row is greyed out and says `Traffic is not monitored` with its profile and group controls disabled. **Stop protecting** still works.
 - [ ] **Traffic labels**
   - Do: scan on the **Traffic** page while a phone uses a few apps.
   - Expect: names show plain labels such as app or tracker or content delivery. A hint reading `Seen with` and an app name and `(guess)` can show on delivery names. **What is this?** opens a web search in a new tab.
@@ -62,7 +62,7 @@ Release tried: ________________  Date: ________________
 ### Profiles
 
 - [ ] **Saved profiles list**
-  - Do: open **Profiles**. Press **Apply to all** on one saved profile. Join a second phone while it runs. Then press **Stop general profile**.
+  - Do: open **Profiles**. Press **Apply to all** on one saved profile. Join a second phone while it runs. Then press **Stop** on the same profile.
   - Expect: every unprotected device gets the profile including the later arrival. A protected device stays normal. After **Stop** the saved device rules resume.
 - [ ] **Profile help icons**
   - Do: open **Save profile** and hover or tap the **?** beside Profile ID and Jitter and Reorder and Duplicate and Corrupt.
@@ -72,18 +72,18 @@ Release tried: ________________  Date: ________________
   - Expect: the row shows the profile and the sidebar lists the device. The phone sees the delay or loss of that profile.
 - [ ] **Sidebar status**
   - Do: look at the status block in the sidebar while a profile runs then after Panic.
-  - Expect: it names the general profile and says whether it is active or paused. It counts the affected devices and opens a list with the profile of each. It names the enabled service lists. After Panic the devices line reads `Profiles off`.
+  - Expect: its first line starts with `Everyone:` and names the profile with `active`, `paused` or `saved, not applied`. It counts the affected devices and opens a list with the profile of each. It names the enabled service lists. After Panic the devices line reads `Profiles off`.
 - [ ] **Panic with a profile active**
   - Do: run a profile that slows a phone then press **Panic** in the sidebar.
   - Expect: the phone is back to normal speed within seconds and the sidebar reads `Profiles off`. Your saved settings are still there.
-- [ ] **General profile on real phones** (tick it if the separate acceptance run already did this)
-  - Do: put two phones and one protected phone on the test Wi-Fi. Apply a general profile with a speed cap. Run a speed test on all three. Join and leave the Wi-Fi while it runs.
+- [ ] **Profile for Everyone on real phones** (tick it if the separate acceptance run already did this)
+  - Do: put two phones and one protected phone on the test Wi-Fi. Apply a profile for Everyone with a speed cap. Run a speed test on all three. Join and leave the Wi-Fi while it runs.
   - Expect: the two phones share the cap. The protected phone runs at full speed and never shows in Traffic discovery or the Impact card.
 
 ### Service lists
 
 - [ ] **Service list on an unprotected device**
-  - Do: under **Schedules and limits** make a service list with a profile of 1000 ms delay. Press **Start with saved settings**. On an unprotected phone open a listed service then an unrelated site.
+  - Do: under **Schedules and limits** make a service list with a profile of 1000 ms delay. Press **Start**. On an unprotected phone open a listed service then an unrelated site.
   - Expect: only the listed service is slow. A protected phone loads both at normal speed.
 - [ ] **The Pi fills the list**
   - Do: on the Pi run `sudo nft list set inet jittersim svc_1` and `sudo systemctl status jittersim-service-watch.service`.
@@ -92,20 +92,20 @@ Release tried: ________________  Date: ________________
 ### Router
 
 - [ ] **Router password check**
-  - Do: open the **Router password** panel. Enter a wrong password once and choose **Check password**. Then enter the right one.
-  - Expect: the wrong one is rejected and is not sent again until you edit it. The right one is accepted and the router switch shows On or Off with the time of the last check.
+  - Do: open the **Router password** panel. Enter a wrong password once and choose **Check password**. Then enter the right one and choose **Check password** again when the button stops counting down.
+  - Expect: the wrong one is rejected and is not sent again until you edit it. The Pi then spaces router sign-ins apart: after a wrong password the button waits 30 seconds (15 seconds after a right one) and the page says so. Pressing it early, in another tab or after a reload gets the same wait and the router is not contacted. The right one is accepted and the router status shows On or Off with the time of the last check.
   - **Warning:** a wrong password only once. The router locks its login after a few tries.
 - [ ] **Router password memory**
   - Do: tick **Remember for 24 hours** under the router password. Reload the page.
-  - Expect: the password comes back. The router switch stays unavailable until you choose **Check router Wi-Fi**. That deliberate check shows the confirmed state and last check time. Press **Clear** afterwards if the computer is shared.
+  - Expect: the password comes back. The router status stays unknown until you choose **Check router Wi-Fi**. That deliberate check shows the confirmed state and last check time. Press **Clear** afterwards if the computer is shared.
 - [ ] **Copy router Wi-Fi to Pi from the sidebar**
   - Do: from Ethernet with the router password accepted press **Copy router Wi-Fi to Pi** in the sidebar. Check the preview then cancel once. Repeat and confirm only when a test Wi-Fi restart is acceptable.
   - Expect: there is one combined button. Cancelling changes nothing. Confirming applies the router's Wi-Fi name and password together. The password is not displayed or copied to the clipboard. A rejected router password blocks another attempt until you edit it.
   - **Warning:** this changes the test Wi-Fi and disconnects its clients while it restarts. Keep Ethernet access throughout the check.
-- [ ] **Router Wi-Fi switch**
-  - Do: from a computer on Ethernet choose **Check router Wi-Fi** first then turn the sidebar **Router Wi-Fi** switch off then on again. Tick this only after performing the physical check.
-  - Expect: the switch shows `Changing` then the confirmed state. Devices on the router Wi-Fi drop and come back.
-  - **Warning:** turning it off cuts every device on the router Wi-Fi. Turn it back on with the same switch or from a computer on Ethernet. The test Wi-Fi cannot reach the router page.
+- [ ] **Router Wi-Fi status is read only**
+  - Do: from a computer on Ethernet choose **Check router Wi-Fi**. Then try to use the sidebar **Router Wi-Fi** switch.
+  - Expect: the label reads **Router Wi-Fi · read only** and the status shows On or Off with the time of the check. The switch cannot be used and its tooltip says `Router Wi-Fi switching is disabled for recovery safety. Use the router controls.` Nothing changes on the router.
+  - **Warning:** do not turn the router Wi-Fi off to try this. Change it only with the router's own button or page and keep a computer on Ethernet ready to turn it back on. The test Wi-Fi cannot reach the router page.
 
 ## Part B: installation, trusted access and recovery
 
@@ -167,7 +167,7 @@ Release tried: ________________  Date: ________________
   - **Warning:** put it back to 0 when you finish. At 100 nothing loads on the test Wi-Fi.
 - [ ] **Router outage option**
   - Do: on **Router and Wi-Fi** find **Router outage behavior**. Tick **Keep active profiles through router outages** and press **Save outage behavior**. Run a profile and restart the router from its own page. Repeat with the box unticked.
-  - Expect: with it on the profile returns once the router connection is back. With it off profiles stay stopped until you press **Start with saved settings**.
+  - Expect: with it on the profile returns once the router connection is back. With it off profiles stay stopped until you press **Start**.
   - **Warning:** restarting the router cuts the internet for the whole household and drops the Pi's Ethernet for a moment. Pick a quiet time.
 - [ ] **The DNS service after a reboot**
   - Do: with household access rules on reboot the Pi. Then run `sudo systemctl is-active jittersim-dns` on the Pi.
@@ -176,8 +176,8 @@ Release tried: ________________  Date: ________________
 ### More features
 
 - [ ] **Staged update flow**
-  - Do: stage a newer signed release from verified official `main` using `--stage-only`. On **Router and Wi-Fi** press **Check for updates** then **Install staged release**.
-  - Expect: the **Release staged** badge shows beside the page name and the check shows the staged and installed labels. After the install the dashboard comes back with the new release label.
+  - Do: stage a newer signed release from verified official `main` using `--stage-only`. On the **Updates** page press **Check for updates** then **Install update**.
+  - Expect: an **Update available** badge shows on the **Updates** link and in the sidebar, and the page shows the installed and newest release labels and who signed the newest one. After the install the dashboard comes back with the new release label.
   - **Warning:** keep independent management access ready. **Restore previous installation** uses the selected complete recovery point. Later ordinary profile, protection, device-access and usage changes can revert. Current signing trust, update token, certificate authority and Panic state have separate protections. Back up current data before trying restore.
 - [ ] **Scenarios**
   - Do: under **Schedules and limits** save a scenario with two or three short steps for one test phone. Start it.
@@ -190,7 +190,7 @@ Release tried: ________________  Date: ________________
   - Expect: your actions show newest first and moving a group shows one event for the group. The copy holds the same list. **Clear all** asks before it deletes.
 - [ ] **Export and import of settings**
   - Do: on **Diagnostics** open **Backup and action history**. Press **Export settings**. Then press **Import settings...** and choose the same file.
-  - Expect: the file holds profiles and devices and groups and schedules and access rules and limits. It holds no usage and no passwords. After the import the service lists and the general profile are still there.
+  - Expect: the file holds profiles and devices and groups and schedules and access rules and limits. It holds no usage and no passwords. After the import the service lists and the profile for Everyone are still there.
   - **Warning:** an import replaces all settings. Do the database backup first. Keep the file private because it lists device addresses.
 - [ ] **A device that comes back with a new address**
   - Do: switch a test phone's Wi-Fi off and on until it gets another address. Apply a profile to it.
@@ -218,8 +218,8 @@ Release tried: ________________  Date: ________________
   - **Warning:** a dry run does not prove completed checks or management recovery. SSH is blocked on the test Wi-Fi. Trusted HTTPS can upload a signed release there but initial manager upgrades and physical recovery need an independent route.
 - [ ] **Phone layout on a real phone** (only if your build has the phone layout change)
   - Do: sign in from a real phone on the test Wi-Fi after **Allow this device** and again on the router network. Open a long page and scroll to the bottom.
-  - Expect: Panic is always in view and the router switch is one tap away. A page starts on the first screen after you tap its name. Buttons are easy to hit and nothing scrolls sideways.
-  - **Warning:** do not turn the router Wi-Fi off from a phone that uses it.
+  - Expect: Panic is always in view and the read-only router status sits in the same bar. A page starts on the first screen after you tap its name. Buttons are easy to hit and nothing scrolls sideways.
+  - **Warning:** do not turn the router Wi-Fi off with its button while this phone is connected to it.
 
 ## Remaining physical checks
 

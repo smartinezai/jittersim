@@ -27,13 +27,7 @@ CONFIG_DIR = Path("/etc/jittersim")
 CONFIG_FILE = CONFIG_DIR / "trust.env"
 SHARED_DNS_DIR = Path("/etc/NetworkManager/dnsmasq-shared.d")
 SHARED_DNS_FILE = "jittersim-dashboard-name.conf"
-# Only the Pi hands out 192.168.50.0/24, so its DHCP server may answer a request
-# for an address from another network (a device that roamed from the router's
-# Wi-Fi to the copied name) with an immediate DHCPNAK. NetworkManager's
-# shared-mode dnsmasq ignores such a request by default and the device waits out
-# its own timeout first (15 s with ISC dhclient in tests/kernel/test_outage_lab.py).
-SHARED_DHCP_FILE = "jittersim-dhcp.conf"
-SHARED_DHCP_CONFIG = "dhcp-authoritative\n"
+SHARED_DHCP_FILE = "jittersim-shared-dhcp.conf"
 CONFIG_KEY = "JITTERSIM_DASHBOARD_NAME"
 # The key an earlier build of this feature used. It is still read when valid.
 EARLIER_CONFIG_KEY = "JITTERSIM_LOCAL_NAME"
@@ -139,6 +133,23 @@ def render_shared_dnsmasq(name: str, aliases: Optional[Tuple[str, ...]] = None) 
     return "".join("address=/%s/%s\n" % (item, GATEWAY_ADDRESS) for item in resolver_names(name, aliases))
 
 
+def render_shared_dhcp() -> str:
+    """Settings for the DHCP server NetworkManager runs on the test Wi-Fi.
+
+    That dnsmasq is the only DHCP server on the test Wi-Fi. Without
+    `dhcp-authoritative` it silently ignores a device that asks again for an
+    address it has no lease for. After the Pi copies the router's Wi-Fi name
+    that is every household device: each one asks for its router address
+    (192.168.0.x), gets no answer and may keep that address, associated but
+    without internet. Authoritative mode refuses it at once (DHCPNAK) so the
+    device asks for a test Wi-Fi address, and it confirms a test Wi-Fi address
+    whose lease record was lost.
+    """
+    return ("# Written by JitterSim (jittersim.localname). NetworkManager reads it when\n"
+            "# the test Wi-Fi starts. Its dnsmasq is the only DHCP server there.\n"
+            "dhcp-authoritative\n")
+
+
 def _write(path: Path, content: str, mode: int, group: Optional[str]) -> bool:
     """Write the file when it differs. True when it changed."""
     try:
@@ -205,9 +216,10 @@ def install_config(
 ) -> Tuple[str, bool]:
     """Keep the name setting and publish it to the shared test Wi-Fi resolver.
 
-    Also makes the shared DHCP server authoritative (SHARED_DHCP_FILE). Returns
-    the name and whether either file changed. The resolver reads both when the
-    test Wi-Fi starts, so a change needs a restart of that connection.
+    Also keeps the test Wi-Fi DHCP settings (`render_shared_dhcp`). Returns the
+    name and whether the resolver record or the DHCP settings changed. The
+    resolver reads both when the test Wi-Fi starts, so a change needs a restart
+    of that connection.
     """
     config_file = config_dir / "trust.env"
     if not os.path.lexists(config_file):
@@ -220,8 +232,8 @@ def install_config(
     dns_dir.mkdir(parents=True, exist_ok=True)
     changed = _write(dns_dir / SHARED_DNS_FILE,
                      render_shared_dnsmasq(name, compatibility_names(config_file)), 0o644, group)
-    changed = _write(dns_dir / SHARED_DHCP_FILE, SHARED_DHCP_CONFIG, 0o644, group) or changed
-    return name, changed
+    dhcp_changed = _write(dns_dir / SHARED_DHCP_FILE, render_shared_dhcp(), 0o644, group)
+    return name, changed or dhcp_changed
 
 
 def main(argv: Optional[list] = None) -> int:

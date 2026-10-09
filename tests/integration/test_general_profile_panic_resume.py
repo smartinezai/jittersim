@@ -110,7 +110,8 @@ def test_real_helper_resume_and_stop_preserve_persistent_panic():
                     assert write(server, "/api/normal-access", {})[0] == 200
                     count = service._plan_count
                     # Stop saves the removal but never starts the retained device profile.
-                    assert write(server, "/api/general-profile/stop", {})[0] == 502
+                    # Everyone was not running, so Stop applies nothing at all.
+                    assert write(server, "/api/general-profile/stop", {})[0] == 200
                     assert service._plan_count == count
                     assert client.gateway_status()["panic_stop_latched"] is True
                     assert guard.read()["panic_stop_latched"] is True

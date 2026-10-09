@@ -3,7 +3,7 @@
 #   docker run --rm --privileged jittersim-kernel-tests
 FROM python:3.11-slim-bookworm
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends iproute2 nftables iputils-ping unbound dnsutils hostapd conntrack \
+    && apt-get install -y --no-install-recommends iproute2 nftables iputils-ping unbound dnsutils hostapd conntrack dnsmasq-base \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /jittersim
 COPY pyproject.toml README.md ./

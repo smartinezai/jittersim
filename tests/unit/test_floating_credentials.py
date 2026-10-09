@@ -478,6 +478,70 @@ CASES = {
         assert.equal(element("check-router-password").disabled, false);
       }
     """,
+    "router_password_check_shows_the_servers_wait_and_keeps_the_earlier_result": r"""
+      enter("admin-token", "fixture token");
+      enter("router-admin-password", "fixture password");
+      network = async () => ({ok:true, json:async () => ({result: {ok: true}})});
+      await checkRouterPassword();
+      assert.equal(element("router-credential-state").textContent, "Accepted");
+      const wait = "The router was contacted a moment ago. Wait 12 seconds before checking the router password again.";
+      network = async () => ({ok:false, status:429, json:async () => ({error:wait, retry_after:12})});
+      await checkRouterPassword();
+      // A refused check is not a rejection: the password stays accepted and nothing was sent.
+      assert.equal(element("router-credential-state").textContent, "Accepted");
+      assert.equal(routerPasswordRejected, false);
+      assert.equal(element("credential-router-status").textContent, wait);
+      assert.equal(messages.at(-1).text, wait);
+      assert.notEqual(messages.at(-1).kind, "error");
+      // The button shows the countdown, cannot be pressed and comes back by itself.
+      assert.equal(element("check-router-password").textContent, "Wait 12 s");
+      assert.equal(element("check-router-password").disabled, true);
+      const count = networkCalls.length;
+      await checkRouterPassword();
+      renderRouterWifi();
+      assert.equal(networkCalls.length, count);
+      assert.equal(element("check-router-password").disabled, true);
+      assert.equal(timers.size, 1);
+      clock += 5000;
+      [...timers.values()].forEach(timer => timer.callback());
+      assert.equal(element("check-router-password").textContent, "Wait 7 s");
+      clock += 7000;
+      [...timers.values()].forEach(timer => timer.callback());
+      assert.equal(element("check-router-password").textContent, "Check password");
+      assert.equal(element("check-router-password").disabled, false);
+      assert.equal(timers.size, 0);
+    """,
+    "refused_router_status_refresh_says_how_long_to_wait_instead_of_doing_nothing": r"""
+      helperConfigured = true;
+      enter("admin-token", "fixture token");
+      adminTokenVerified = true;
+      enter("router-admin-password", "fixture password");
+      network = async () => ({ok:true, json:async () => ({result: {
+        enabled:null, checked_at:null, busy:false, retry_after:9, refresh_in:9}})});
+      await pollRouterWifi();
+      assert.equal(networkCalls.length, 1);
+      assert.equal(timers.size, 0);
+      assert.equal(messages.at(-1).text,
+        "The router was contacted a moment ago. Wait 9 seconds, then choose Check router Wi-Fi again.");
+      assert.equal(messages.at(-1).kind, "info");
+      // A read that is on its way, or a state that is still fresh, needs no such message.
+      const shown = messages.length;
+      network = async () => ({ok:true, json:async () => ({result: {
+        enabled:true, checked_at:clock/1000, busy:false, retry_after:9, refresh_in:9}})});
+      await pollRouterWifi();
+      assert.equal(messages.length, shown);
+      assert.equal(routerWifiEnabled, true);
+    """,
+    "router_password_check_refusal_without_a_wait_is_a_plain_failure": r"""
+      enter("admin-token", "fixture token");
+      enter("router-admin-password", "fixture password");
+      network = async () => ({ok:false, status:429, json:async () => ({error:"Slow down."})});
+      await checkRouterPassword();
+      assert.equal(element("credential-router-status").textContent, "Slow down.");
+      assert.equal(element("check-router-password").textContent, "Check password");
+      assert.equal(element("check-router-password").disabled, false);
+      assert.equal(timers.size, 0);
+    """,
     "router_password_check_needs_both_credentials": r"""
       enter("router-admin-password", "fixture password");
       await checkRouterPassword();

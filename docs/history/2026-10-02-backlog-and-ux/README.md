@@ -13,3 +13,9 @@ Current work belongs in the active backlog and release verification documents.
 No earlier idea or observation has been removed from this archive.
 
 The exact active feature list from accepted main `5e0fed2ccb2414373643f20db1df59aa2de25306` is also preserved in [its before-reconciliation snapshot](planned-features-accepted-main-before-reconciliation.md).
+
+Relative links to `pi-acceptance-checklist.md` inside `planned-features.md` and
+`planned-features-accepted-main-before-reconciliation.md` point to the folder
+the checklist was in when those files were written. It now lives at
+[docs/pi-acceptance-checklist.md](../../pi-acceptance-checklist.md). The archived
+files were left as they were submitted.

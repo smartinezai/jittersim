@@ -158,26 +158,27 @@ class LocalNameTests(unittest.TestCase):
                 localname.install_config(config, dns)
             self.assertEqual(record.read_text(), before)
 
-    def test_install_makes_the_test_wifi_dhcp_server_answer_foreign_leases_at_once(self) -> None:
-        # A device that roams from the router's Wi-Fi to the Pi's copied name asks
-        # for its old 192.168.0.x lease first (INIT-REBOOT). NetworkManager's
-        # shared-mode dnsmasq is not authoritative, ignores that request and the
-        # device waits out its own timeout (15 s for ISC dhclient in the outage
-        # lab, tests/kernel/test_outage_lab.py scenario 2). An authoritative server
-        # answers DHCPNAK at once. Only the Pi serves 192.168.50.0/24.
+    def test_install_makes_the_test_wifi_dhcp_authoritative(self) -> None:
+        # A device that joins the copied router name asks again for its router
+        # lease. A non-authoritative dnsmasq ignores it, so the device can stay
+        # on 192.168.0.x without internet (tests/kernel/test_shared_dhcp.py).
         with tempfile.TemporaryDirectory() as directory:
             config, dns = Path(directory) / "etc", Path(directory) / "dnsmasq"
             config.mkdir()
-            _, changed = localname.install_config(config, dns)
-            self.assertTrue(changed)
-            dhcp = dns / localname.SHARED_DHCP_FILE
-            self.assertEqual(dhcp.read_text(), "dhcp-authoritative\n")
-            self.assertEqual(dhcp.stat().st_mode & 0o777, 0o644)
-            self.assertEqual(localname.install_config(config, dns), ("netlab.local", False))
-            # An existing installation that only had the name record still reports a
-            # change, so the installer tells the owner to restart the test Wi-Fi.
-            dhcp.unlink()
+
             self.assertEqual(localname.install_config(config, dns), ("netlab.local", True))
+
+            settings = dns / localname.SHARED_DHCP_FILE
+            options = [line.strip() for line in settings.read_text().splitlines()
+                       if line.strip() and not line.lstrip().startswith("#")]
+            self.assertEqual(options, ["dhcp-authoritative"])
+            self.assertEqual(settings.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(localname.install_config(config, dns), ("netlab.local", False))
+
+            # An upgrade that only adds this file still asks for a Wi-Fi restart.
+            settings.unlink()
+            self.assertEqual(localname.install_config(config, dns), ("netlab.local", True))
+            self.assertTrue(settings.is_file())
 
     def test_install_moves_a_name_saved_under_the_earlier_key_to_the_new_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

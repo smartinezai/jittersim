@@ -1,0 +1,52 @@
+# Which browser modules `scripts/local-ci.sh --changed` runs for a changed file.
+#
+# One rule per line: a shell glob (a * also matches a /), then the modules it selects, or
+#   all    every browser module
+#   none   no browser module (the file cannot change what a browser module checks)
+# A file may match several rules and gets the union. A file that matches no rule at all runs
+# every browser module, so a new or unknown file can never silently skip coverage.
+# A file tests/browser/<module>.py always selects <module> without a rule here.
+#
+# Keep these rules narrow and certain. This is a quick pre-check. The full `browser` run is
+# what gates a pull request. tests/unit/test_local_ci.py checks that every module named here exists.
+
+# Files no browser module reads.
+docs/*                                    none
+*.md                                      none
+.gitignore                                none
+scripts/*                                 none
+deploy/*                                  none
+experiments/*                             none
+extensions/*                              none
+tests/unit/*                              none
+tests/integration/*                       none
+tests/kernel/*                            none
+tests/wifi/*                              none
+tests/fixtures/*                          none
+tests/test_homepage_reference_fixture.py  none
+
+# The GUI baseline, the accessibility scan and the homepage reference have their own commands.
+tests/browser/gui_*                       none
+tests/browser/a11y_axe.py                 none
+tests/browser/homepage*                   none
+tests/browser/Dockerfile                  none
+tests/browser/GUI_BASELINE.md             none
+tests/browser/vendor/*                    none
+
+# Shared test helpers: the modules that import them.
+tests/browser/diagnostics_keyboard.py     dashboard_navigation
+tests/browser/draft_navigation.py         dashboard_navigation
+tests/browser/service_list_focus.py       journeys
+tests/browser/journeys.py                 journeys dns_failure
+tests/browser/router_copy.py              router_copy trust_access
+tests/browser/protected_clients.py        protected_clients ad_blocking group_devices
+tests/browser/phone_layout.py             phone_layout help_icons
+tests/browser/page_polling.py             page_polling update_status_recovery
+
+# Source files that only one area of the dashboard uses. Shared files (dashboard.html, dashboard.js,
+# server.py, the engine, the models) are deliberately not listed, so they run every module.
+src/jittersim/api/trust.js                trust_access
+src/jittersim/api/trust.py                trust_access
+src/jittersim/localca.py                  trust_access
+src/jittersim/networking/adblocking.py    ad_blocking
+src/jittersim/config/adblocking.py        ad_blocking
