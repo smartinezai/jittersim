@@ -107,7 +107,8 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("Installed: v1.0", output.getvalue())
-        self.assertIn("It does not check the private repository online", output.getvalue())
+        self.assertIn("Add --online to ask GitHub", output.getvalue())
+        self.assertIn("sudo jittersim update", output.getvalue())
 
 
 if __name__ == "__main__":

@@ -56,9 +56,10 @@ check fails after installing the backup is restored by itself. The sidebar
 shows **Update available** while a release is staged. Checking every day and
 installing automatically are both off until you turn them on.
 
-On the Pi the same takes two commands:
-`sudo jittersim update check --online` and
-`sudo jittersim update install --yes --wait`.
+On the Pi the same is one command: `sudo jittersim update`. It checks GitHub,
+shows the new version and its notes, asks, installs and waits for the health
+check. From the Mac use `jittersim remote update now`. `jittersim version`
+prints the version the Pi runs.
 
 The Pi stages and installs only releases signed by a release signing key you
 trust on it and newer than the one it runs. The admin token can only install
@@ -103,6 +104,7 @@ sudo jittersim status
 sudo jittersim access status
 sudo jittersim access dns-failure show
 sudo jittersim persistence show
+sudo jittersim update
 sudo jittersim update check
 sudo jittersim diagnostics
 sudo jittersim logs dns --lines 80
