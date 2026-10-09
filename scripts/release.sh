@@ -184,7 +184,15 @@ path, tag, day, notes = Path(sys.argv[1]), sys.argv[2], sys.argv[3], Path(sys.ar
 text = path.read_text() if path.exists() else "# Changelog\n\nEvery JitterSim release. The newest is first.\n"
 if f"\n## {tag} " in text or f"\n## {tag}\n" in text:
     sys.exit(f"CHANGELOG.md already has {tag}")
-section = f"## {tag} - {day}\n\n{notes}\n\n"
+# Hand-written Unreleased entries become part of this release, above the generated notes.
+lines = text.splitlines(keepends=True)
+start = next((i for i, line in enumerate(lines) if line.rstrip() == "## Unreleased"), None)
+written = ""
+if start is not None:
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    written = "".join(lines[start + 1:end]).strip()
+    text = "".join(lines[:start] + lines[end:])
+section = f"## {tag} - {day}\n\n" + (written + "\n\n" if written else "") + f"{notes}\n\n"
 lines = text.splitlines(keepends=True)
 at = next((i for i, line in enumerate(lines) if line.startswith("## ")), len(lines))
 head = "".join(lines[:at]).rstrip("\n") + "\n\n"

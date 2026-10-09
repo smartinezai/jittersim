@@ -58,15 +58,33 @@ class Pi:
             folder.mkdir()
         updates.trust_key(public, config=self.config, root=self.root)
         self.installs = []
+        # The phases the update service publishes after an install request, one per status
+        # read, as apply_update does: the new release record appears before the health check.
+        self.outcome = "complete"
+        self.pending = []
         outer = self
+
+        def advance():
+            if not outer.pending:
+                return
+            phase, installed = outer.pending.pop(0)
+            fields = {key: value for key, value in updates.read_json(outer.root / "status.json").items()
+                      if key in ("request_id", "request_kind", "request_version")}
+            if installed is not None:
+                updates.atomic_json(outer.code / ".jittersim-release.json", {"version": installed})
+            if phase in ("complete", "rolled-back", "failed"):
+                (outer.root / "request.json").unlink(missing_ok=True)
+            updates.atomic_json(outer.root / "status.json", {
+                "phase": phase, "message": "Update " + phase + ".", **fields})
 
         class Helper:
             def ping(self):
                 return {"ok": True}
 
             def release_status(self):
+                advance()
                 return {"ok": True, **updates.update_status(
-                    root=outer.root, code=outer.code, config=outer.config)}
+                    root=outer.root, code=outer.code, config=outer.config, retry_probe=False)}
 
             def stage_uploaded_release(self, *, upload_id=None):
                 try:
@@ -81,9 +99,16 @@ class Pi:
                 updates.request_update(version, root=outer.root, code=outer.code,
                                        config=outer.config, run=lambda *a: None)
                 outer.installs.append(version)
-                # The update service installs it: the Pi now reports the new release.
-                updates.atomic_json(outer.code / ".jittersim-release.json", {"version": version})
-                return {"ok": True, **self.release_status()}
+                before = updates.read_json(outer.code / ".jittersim-release.json").get("version")
+                outer.pending = [("preparing", None), ("installing", None), ("checking", version)]
+                if outer.outcome == "complete":
+                    outer.pending.append(("complete", version))
+                elif outer.outcome == "rolled-back":
+                    outer.pending += [("rolling-back", version), ("rolled-back", before or "old")]
+                else:
+                    outer.pending.append(("failed", version))
+                return {"ok": True, **updates.update_status(
+                    root=outer.root, code=outer.code, config=outer.config, retry_probe=False)}
 
         ready = threading.Event()
 

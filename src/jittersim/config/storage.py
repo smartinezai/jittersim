@@ -510,6 +510,18 @@ class ConfigRepository:
             CREATE TABLE IF NOT EXISTS device_start_scope (
                 device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE
             );
+            -- The database ends a device-only start on every plain Reset, Panic or Start,
+            -- including writes from an older dashboard that knows nothing about the scope.
+            -- Only a scheduled failure keeps it: the scheduler retries the same scope.
+            CREATE TRIGGER IF NOT EXISTS end_device_start_scope
+            AFTER UPDATE ON runtime_state
+            WHEN NEW.last_action IS NOT 'reset'
+                OR NEW.observed_state IN ('resetting', 'reset')
+                OR (NEW.last_result = 'failure'
+                    AND NEW.last_error IS NOT 'scheduled network plan failed')
+            BEGIN
+                DELETE FROM device_start_scope;
+            END;
             CREATE TABLE IF NOT EXISTS activity_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 happened_at INTEGER NOT NULL,
@@ -985,6 +997,33 @@ class ConfigRepository:
             "INSERT OR IGNORE INTO device_start_scope (device_id) VALUES (?)", (device_id,)
         )
         self._commit()
+
+    def restore_device_start_scope(self, device_ids) -> None:
+        """Put back the scope a refused start found, without the device it tried to add."""
+
+        with self.transaction():
+            self._connection.execute("DELETE FROM device_start_scope")
+            self._connection.executemany(
+                "INSERT OR IGNORE INTO device_start_scope (device_id) "
+                "SELECT id FROM devices WHERE id = ?",
+                [(device_id,) for device_id in sorted(device_ids)],
+            )
+
+    def discard_stale_device_start_scope(self) -> bool:
+        """Drop scope rows beside a completed plain Reset or a Start. Return whether any went."""
+
+        cursor = self._connection.execute(
+            """
+            DELETE FROM device_start_scope
+            WHERE EXISTS (
+                SELECT 1 FROM runtime_state WHERE id = 1 AND (
+                    last_action IS NOT 'reset' OR observed_state IN ('resetting', 'reset')
+                )
+            )
+            """
+        )
+        self._commit()
+        return bool(cursor.rowcount)
 
     def clear_device_start_scope(self) -> None:
         self._connection.execute("DELETE FROM device_start_scope")

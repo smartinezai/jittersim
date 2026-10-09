@@ -801,9 +801,15 @@ jittersim version
 
 `sudo jittersim update` is the one-step route: it asks GitHub for a newer signed
 release when a token is saved, shows the version, signer and release notes,
-installs after you confirm and waits until the Pi passed its health check. A
-failed check restores the previous installation by itself. `--offline` skips
-GitHub and `--yes` skips the question. `update check` reports the release
+installs after you confirm and waits until that install reached `complete` and
+the Pi runs the new version. When the health check fails the Pi tries to
+restore the previous installation; the command says it was restored only when
+the Pi confirmed it, otherwise it says recovery is not confirmed. A failed
+check on GitHub (for example an expired token) is an error and installs
+nothing. An update that is already running is followed instead of started
+again. Under `--yes` a release that just failed on the Pi is not installed
+again. `sudo jittersim update --offline` skips GitHub and `--yes` skips the
+question (both also work as `update now --offline` and `update now --yes`). `update check` reports the release
 already staged on the Pi, who signed it and whether it can be installed.
 `sudo jittersim update check --online` also asks GitHub for the newest release
 and stages it when a trusted key signed it and it is newer. Asking GitHub needs
@@ -1162,8 +1168,13 @@ high-water mark. Limits: Content-Length is required, the archive is at most 25 M
 the signature at most 16 KiB and the whole upload must finish within 120 seconds.
 `jittersim remote update status|upload|install` does the same from the command
 line. `jittersim remote update now` asks the Pi to check GitHub with its own
-token, shows the release, installs it after you confirm and waits, and
-`jittersim remote update check` only checks. Publishing stable releases requires the retained signed package and owner
+token, shows the release, installs it after you confirm and waits until that
+install reached `complete`, with the same failure reports as on the Pi. When
+Install automatically is on and the check made the Pi start installing, `now`
+follows that install instead of asking. `jittersim remote update check` only
+checks while Install automatically is off; with it on, a check that finds a
+new release starts the install (until the Pi update service treats manual
+checks as check-only). `now --json` prints one JSON answer and needs `--yes`. Publishing stable releases requires the retained signed package and owner
 approval. Follow the [release guide](../../docs/releases/README.md).
 
 ### Who can do what
