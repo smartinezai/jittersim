@@ -990,6 +990,13 @@ PANIC_APPROVED_SOURCES = ({
     "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
     "src/jittersim/networking/helper.py": "1cbc5dd4eb2e93f6205035f38218fe4ca11b34281a23e2c998ccb6e8b76c4228",
     "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
+}, {
+    # See docs/review-results-panic-consumers-outage-logging-2026-10-09.json. Persistent outage
+    # logging and the bounded dashboard status wait. The diagnostic modules that the helper
+    # dispatch calls are pinned by tests/unit/test_panic_dispatch_dependencies.py.
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "252ccaffac176fc0f97dad552d28edb9d8119f291958d8a45876c6b3ca1be166",
+    "src/jittersim/networking/access.py": "ddc801a896afa2b977c12662bdb34388680502350b8b5b16099cbc3978725ddd",
 },)
 
 
