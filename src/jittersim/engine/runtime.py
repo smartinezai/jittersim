@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
+from jittersim.diagnostic_records import Operation
 from jittersim.config.device_names import saved_device_title
 from jittersim.config.models import (
     DataLimit,
@@ -740,6 +741,7 @@ class RuntimeScheduler:
         active_repository = repository or ConfigRepository(self._database_path)
         configuration_version: Optional[int] = None
         helper_attempted = False
+        diagnostic_operation = None
         previous_rolls = {key: replace(roll) for key, roll in self._rolls.items()}
         self._pending_events = []
         published = False
@@ -844,6 +846,7 @@ class RuntimeScheduler:
             if not self.can_apply(halts_at_start):
                 return False
             helper_attempted = True
+            diagnostic_operation = Operation("schedule", "scheduler", configuration_version)
             try:
                 apply = getattr(self._helper_client, "apply_experiment", self._helper_client.apply)
                 arguments = {"control_revision": control_revision} if control_revision is not None else {}
@@ -904,6 +907,9 @@ class RuntimeScheduler:
                 LOGGER.exception("could not record scheduled network failure")
             return False
         finally:
+            if diagnostic_operation is not None:
+                diagnostic_operation.finish("succeeded" if published else
+                                            "cancelled" if not self.can_apply(halts_at_start) else "failed")
             if not published and not self._paused and self.can_apply(halts_at_start):
                 self._rolls = previous_rolls
             self._pending_events = []

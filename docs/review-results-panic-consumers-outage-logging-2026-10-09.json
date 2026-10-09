@@ -1,0 +1,55 @@
+{
+  "candidate": "c2e944d574918d3095f3f228e4c1141fca4fee30",
+  "branch": "integrate/outage-logging-2026-10-09",
+  "base": "bf334fe (origin/main)",
+  "date": "2026-10-09",
+  "review_type": "Independent second-pass adversarial security review (read-only)",
+  "previous_review": "review-panic-consumers-outage-logging-2026-10-09.json (approve-with-conditions, F1-F3)",
+  "decision": "Approve this exact consumer tuple for source admission. Release testing and live acceptance remain separate gates.",
+  "consumer_hashes": {
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "252ccaffac176fc0f97dad552d28edb9d8119f291958d8a45876c6b3ca1be166",
+    "src/jittersim/networking/access.py": "ddc801a896afa2b977c12662bdb34388680502350b8b5b16099cbc3978725ddd"
+  },
+  "pinned_dispatch_hashes": {
+    "src/jittersim/diagnostic_records.py": "d40a3b15302ae2428727181dbe7fb69ad52f2a1dbb1650a1fb89853d84d2f0d8",
+    "src/jittersim/diagnostic_privacy.py": "add098a0a8fa879795cda12e70bfc9acfdc8801b1bf1a7e983ff85674c9d8193"
+  },
+  "findings": [
+    {"id": "F1", "topic": "Diagnostic modules outside the Panic hash gate", "severity": "low (resolved with residual note)", "status": "resolved",
+     "evidence": "tests/unit/test_panic_dispatch_dependencies.py pins both sha256 values (match recomputed hashes) and checks helper.py imports both and keeps '@recorded_payload' on handle_payload. Mutation check in a scratch copy: appending one byte to either module, or removing the decorator, each fails exactly one test.",
+     "judgement": "Acceptable substitute. Extending PANIC_SOURCE_FILES would break admission of every older bundle and rollback target. The pin is a CI-time control, not runtime admission, so it relies on the existing rule that only CI-green signed releases ship. It is stricter than the pre-existing state of helper.py's other transitive imports (engine, config), which are also outside the gate (pre-existing, out of scope). Both modules import only the stdlib plus each other. Bypassing the decorator check requires editing helper.py, which is itself hash-gated."},
+    {"id": "F2", "topic": "Status-read waiters could fill the 8 helper slots", "severity": "none (resolved)", "status": "resolved",
+     "evidence": "helper.py:474-481. Lock tried non-blocking first; only on failure a non-blocking BoundedSemaphore(3) permit is taken, the timed wait (0.5 s) runs inside try/finally that always releases the permit (covers success, timeout and exceptions). Permit release only follows a successful acquire, so BoundedSemaphore cannot over-release and cannot leak. Waiter that obtains the lock gives up its permit, so at most 1 holder + 3 waiters = 4 of 8 slots. Access writes (operation != status) keep acquire(blocking=False). normal-access and reset never touch _access_lock or the semaphore (grep). dashboard-access is not served on the policy_only socket (2 slots), so the cap does not interact with it. Test test_waiting_status_reads_never_take_the_slots_panic_and_reset_need passes and checks budget recovery.",
+     "residual": "Other non-access actions (Wi-Fi/router actions, write waiters up to 3 s) can still occupy slots; that is pre-existing and not made worse."},
+    {"id": "F3", "topic": "Rollback removed journal settings while services were stopped", "severity": "none (resolved)", "status": "resolved",
+     "evidence": "updates.py:4132-4141 wait_restarted_healthy runs wait_healthy first, then configure_outage_journal remove only when the restored code lacks journal_policy.py. All four restart paths use it: restart_only retry (4177-4178), rollback (4245-4246 via restore() which ends in restart_services), exception rollback (4384-4385), exception stopped-restart (4387-4388). restart_services no longer calls it. Forward install path (4340-4343) is unchanged: health first, then install. No path missed.",
+     "double_run": "Possible but harmless: a failed rollback health check raises into the except branch which restores and runs the step again; and a restart_only retry followed by a later failure. The remove action is idempotent and bounded (10 s).",
+     "failure": "configure_outage_journal swallows OSError, ValueError and plain UpdateError and returns False, and healthy is returned regardless, so an ordinary failure cannot turn a successful rollback into a failed one. Only CommandNotStopped/OperationOwnershipUnknown propagate (deliberate existing gate); then the services are already restarted and healthy, the request is kept with command_pending and reported failed. This is conservative and strictly better than before F3, where the same exception left services stopped."},
+    {"id": "Q1", "topic": "Nothing on the Panic path blocks", "severity": "none", "status": "holds",
+     "evidence": "recorded_payload wraps only listed actions; Operation/_emit/send_fields use a non-blocking module gate and a non-blocking AF_UNIX datagram send; all exceptions swallowed; the wrapped function's return and exceptions are unchanged. JournalHandler.handle bypasses the handler lock."},
+    {"id": "Q2", "topic": "No secrets in records, exports or errors", "severity": "none", "status": "holds",
+     "evidence": "Records carry a fixed schema (format, operation id, source, action, phase, outcome, elapsed_ms, configuration_version) with no payload data. SafeFormatter allows only audited fixed templates and replaces every non-numeric argument with '[detail omitted]'. SafeServerErrors suppresses socketserver tracebacks and client addresses; sys/threading excepthooks log a fixed message."},
+    {"id": "Q3", "topic": "access.py behaviour unchanged", "severity": "none", "status": "holds",
+     "evidence": "Only diff: import and one configure_logging() call at main() start (logging setup and excepthooks)."},
+    {"id": "Q4", "topic": "journald limits bounded and optional", "severity": "none", "status": "holds",
+     "evidence": "journal_policy.py fixed SystemMaxUse=64M, SystemMaxFileSize=8M, MaxRetentionSec=7day, RuntimeMaxUse=8M; option allow-list; configure_outage_journal is best-effort and never fails the install path except for the pre-existing unknown-command gate."},
+    {"id": "Q5", "topic": "Locks and lock order", "severity": "none", "status": "holds",
+     "evidence": "No new lock is held across another lock; the waiter semaphore is only taken non-blocking and released before the access lock body runs; diagnostic gate is leaf and non-blocking. panic_guard.py byte-identical to the admitted bundles."},
+    {"id": "C1", "topic": "Admission bundle not yet present", "severity": "condition (non-blocking for code)", "status": "open",
+     "evidence": "PANIC_APPROVED_SOURCES at this head does not contain helper.py 252ccaff... or access.py ddc801a8..., so the updater would refuse this candidate.",
+     "required_change": "Add one bundle with exactly the three consumer_hashes above to PANIC_APPROVED_SOURCES in src/jittersim/updates.py with a comment citing this review file (committed under docs/ like earlier review-results files). That edit must not change any of the three gated files or the two pinned modules."}
+  ],
+  "tests_run": [
+    "tests/unit/test_panic_dispatch_dependencies.py, tests/unit/test_panic_saturation_recovery.py, tests/unit/test_dashboard_access.py, tests/unit/test_outage_diagnostics.py, tests/unit/test_outage_journal_policy.py, tests/unit/test_outage_proof_safety.py: 127 passed",
+    "tests/unit/test_updates.py -k 'journal or rollback or roll': 9 passed",
+    "tests/integration/test_panic_saturation_recovery.py does not exist; the unit file of that name was run instead",
+    "Pin-test mutation check in a scratch copy: 3 of 3 mutations detected"
+  ],
+  "limits": [
+    "No live Pi or router calls",
+    "Not approval of deployment or full release pipeline",
+    "Full test suite not run"
+  ],
+  "verdict": "approve"
+}

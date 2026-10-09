@@ -225,40 +225,42 @@ class DashboardConnectionTests(unittest.TestCase):
         finally:
             release.set()
 
-    def test_connection_capacity_rejects_excess_and_recovers(self) -> None:
+    def test_connection_capacity_replaces_the_oldest_silent_connection(self) -> None:
+        # A full queue of silent connections no longer locks newcomers out (Panic
+        # among them): the newest replaces the oldest, and the queue stays bounded.
         clients = [socket.create_connection(self.server.server_address, timeout=2)
                    for _ in range(3)]
-        rejected = []
-
-        def excess() -> None:
-            started = time.monotonic()
-            try:
-                with self._connect():
-                    self.fail("excess connection was accepted")
-            except OSError:
-                rejected.append(time.monotonic() - started)
-
-        self._start_client(excess)
-        try:
-            with patch.object(api, "MAX_PENDING_DASHBOARD_CONNECTIONS", 3):
-                self._handle_next_request()
-            self.threads[-1].join(timeout=2)
-            self.assertLess(rejected[0], 0.5)
-            self.assertEqual(len(self.server._pending_connections), 0)
-        finally:
-            for client in clients:
-                client.close()
         response = []
 
-        def healthy() -> None:
+        def newcomer() -> None:
             with self._connect() as client:
                 client.sendall(b"GET /api/health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
                 response.append(self._response(client))
 
-        self._start_client(healthy)
-        self._handle_next_request()
-        self.threads[-1].join(timeout=2)
-        self.assertTrue(response[0].startswith(b"HTTP/1.0 200 OK"))
+        self._start_client(newcomer)
+        sizes = []
+        accept = self.server._accept_connection
+
+        def recording_accept() -> None:
+            accept()
+            sizes.append(len(self.server._pending_connections))
+
+        try:
+            with patch.object(api, "MAX_PENDING_DASHBOARD_CONNECTIONS", 3), \
+                    patch.object(self.server, "_accept_connection", recording_accept):
+                self._handle_next_request()
+            self.threads[-1].join(timeout=2)
+            self._wait_for_idle_server()
+            self.assertTrue(response[0].startswith(b"HTTP/1.0 200 OK"))
+            self.assertEqual(len(sizes), 4)
+            self.assertLessEqual(max(sizes), 3)
+            # The oldest silent client was closed cleanly, not reset.
+            clients[0].settimeout(2)
+            self.assertEqual(clients[0].recv(1), b"")
+            self.assertEqual(len(self.server._pending_connections), 2)
+        finally:
+            for client in clients:
+                client.close()
 
     def test_shutdown_releases_idle_connections_promptly(self) -> None:
         worker = threading.Thread(target=self.server.serve_forever)

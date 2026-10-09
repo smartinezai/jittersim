@@ -237,16 +237,6 @@ def test_silent_connections_take_no_worker_slot_and_expire_before_panic_goes_thr
         assert env.server.active_workers == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ControlServer._accept_connection (src/jittersim/api/server.py:1146) closes every new "
-        "connection once MAX_PENDING_DASHBOARD_CONNECTIONS (16, server.py:161) silent clients are "
-        "waiting for their first byte. The 2 Panic workers are not consulted at that stage, so "
-        "Panic is reset instead of answered, and nothing is returned to ordinary clients either. "
-        "The slots free only at REQUEST_INPUT_TIMEOUT_SECONDS (10 s, 5 s for TLS handshakes)."
-    ),
-)
 def test_panic_gets_through_while_silent_connections_fill_the_pending_queue(monkeypatch):
     with dashboard(monkeypatch) as env:
         running_experiment(env.service)
@@ -258,6 +248,51 @@ def test_panic_gets_through_while_silent_connections_fill_the_pending_queue(monk
             status = None
         assert status == 200
         assert env.service._panic_stop_latched is True
+
+
+def test_silent_flood_evicts_the_oldest_cleanly_and_stays_within_the_bound(monkeypatch):
+    with dashboard(monkeypatch) as env:
+        running_experiment(env.service)
+        sizes = []
+        accept = env.server._accept_connection
+
+        def recording_accept():
+            accept()
+            sizes.append(len(env.server._pending_connections))
+
+        monkeypatch.setattr(env.server, "_accept_connection", recording_accept)
+        limit = api.MAX_PENDING_DASHBOARD_CONNECTIONS
+        oldest = env.stall(limit, data=b"")
+        assert wait_until(lambda: len(env.server._pending_connections) == limit, 2)
+        newest = []
+        for _ in range(8):
+            # One at a time, so the order of arrival is the order of acceptance.
+            accepted = len(sizes)
+            newest.extend(env.stall(1, data=b""))
+            assert wait_until(lambda: len(sizes) > accepted, 2)
+
+        # Each newcomer replaced the oldest silent connection, which saw a clean close.
+        for connection in oldest[:8]:
+            connection.settimeout(2)
+            assert connection.recv(1) == b""
+        for connection in oldest[8:] + newest:
+            connection.settimeout(0.05)
+            with pytest.raises(socket.timeout):
+                connection.recv(1)
+        assert max(sizes) <= limit
+        assert len(env.server._pending_connections) == limit
+        assert env.server.active_workers == 0
+
+        status, _, body = env.request("POST", "/api/normal-access", {})
+        assert status == 200, body
+        assert env.service._panic_stop_latched is True
+        assert max(sizes) <= limit
+
+        # The survivors expire at the input deadline and capacity comes back whole.
+        assert wait_until(lambda: not env.server._pending_connections, INPUT_SECONDS + 3)
+        assert wait_until(lambda: env.server.active_workers == 0, 2)
+        assert env.server._reserved_requests == set()
+        assert env.request("GET", "/api/profiles")[0] == 200
 
 
 def stall_helper(path, count):

@@ -21,6 +21,7 @@ from pathlib import Path
 
 import requests
 
+from jittersim.diagnostic_privacy import configure_logging
 from jittersim.panic_guard import PanicGuard
 
 from jittersim.config.adblocking import (
@@ -635,6 +636,7 @@ def main(argv=None):
     parser.add_argument("--clear-only", action="store_true")
     parser.add_argument("--fetch-domains", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    configure_logging()
     if args.fetch_domains:
         if args.test_interface or args.clear_only:
             parser.error("A list fetch cannot change routing")

@@ -5673,15 +5673,17 @@
         // A dropped connection says nothing about the token. It is kept and checked again
         // as soon as the Pi answers, so a Wi-Fi restart never looks like a sign-out.
         const connectionLost = typeof isConnectionLost === "function" && isConnectionLost(error);
-        adminTokenRejected = !connectionLost;
+        const helperBusy = error.code === "helper-busy";
+        adminTokenRejected = !connectionLost && !helperBusy;
         adminTokenRefused = error.status === 401;
         setDashboardUnlocked(false);
         element("allow-dashboard-device").disabled = true;
-        setPrivateDataPanels(connectionLost ? error.message : "Token check failed: " + error.message);
+        setPrivateDataPanels(connectionLost || helperBusy ? error.message : "Token check failed: " + error.message);
         status.textContent = connectionLost ? error.message + " Your token is kept and checked again when the Pi answers."
+          : helperBusy ? "Device verification is busy. Your token is kept. Choose Check token to try again."
           : "Token check failed: " + error.message;
-        status.className = "token-check-status error";
-        showMessage(status.textContent, "error");
+        status.className = "token-check-status " + (helperBusy ? "" : "error");
+        showMessage(status.textContent, connectionLost || helperBusy ? "info" : "error");
         if (connectionLost && typeof recheckTokenWhenPiAnswers === "function") recheckTokenWhenPiAnswers();
       } finally {
         if (tokenRevision !== adminTokenRevision) return;
