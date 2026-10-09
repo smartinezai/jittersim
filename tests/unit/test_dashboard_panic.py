@@ -364,9 +364,9 @@ CASES = {
       };
       press("panic-button");
       await flush();
-      // Panic is allowed the long wait that applying and resetting get.
-      const wait = timers.find(timer => timer.milliseconds === 45000);
-      assert.ok(wait, "Panic has the 45 second timeout");
+      // Panic waits longer than the dashboard needs to answer it (review G4).
+      const wait = timers.find(timer => timer.milliseconds === 50000);
+      assert.ok(wait, "Panic has the 50 second timeout");
       wait.callback();
       await flush(); await flush(); await flush();
       assert.equal(networkCalls.length, 2);

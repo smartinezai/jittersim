@@ -301,10 +301,13 @@ class AdStore:
             self._clear()
 
     @contextmanager
-    def access_transition(self):
-        """Bypass ads while household DNS rules change without losing saved switches."""
+    def access_transition(self, *, wait=3.0):
+        """Bypass ads while household DNS rules change without losing saved switches.
 
-        with self.lock():
+        `wait` bounds each wait for the settings lock. Panic's release passes a short one.
+        """
+
+        with self.lock(wait):
             try:
                 state = self.read()
             except (OSError, ValueError):
@@ -319,7 +322,7 @@ class AdStore:
             yield
         finally:
             if suspended:
-                with self.lock():
+                with self.lock(wait):
                     try:
                         state = self.read()
                     except (OSError, ValueError):

@@ -26,6 +26,7 @@ from jittersim.panic_guard import PanicGuard
 from jittersim.localname import GATEWAY_ADDRESS, read_local_name, resolver_names, validate_local_name
 
 from .commands import Command
+from .deadlines import bounded_wait
 from .executor import CommandExecutionError, SubprocessExecutor
 from .renderer import DASHBOARD_REPLY_MARK
 from .topology import Topology
@@ -43,9 +44,12 @@ DNS_PORT = 5335
 # same exception further down the input hook.
 DASHBOARD_PORT = 8080
 # Panic's household release waits at most this long for another access change
-# (an address refresh or the boot restoration) and then reports busy. The
-# dashboard gives the whole helper Panic request 60 seconds.
-RELEASE_LOCK_WAIT_SECONDS = 20.0
+# (an address refresh or the boot restoration) and then reports busy. Panic's
+# deadline can shorten it further (docs/architecture.md, "Panic time budget").
+RELEASE_LOCK_WAIT_SECONDS = 10.0
+# Panic already paused ad blocking, so its release waits only briefly for the
+# ad-blocking settings lock. A busy lock never keeps household rules on.
+RELEASE_TRANSITION_WAIT_SECONDS = 1.0
 # A release clears old DNS connection state at most this many times, and all
 # attempts together get at most this long. Each conntrack call is bounded by
 # its own timeout as well, so the cleanup cannot hold Panic for longer.
@@ -476,14 +480,17 @@ class AccessManager:
             atomic_write(path, "\n".join(addresses) + "\n", 0o600)
             self._hostapd("set", name + "_mac_file", str(path))
 
-    def _stop_dns(self):
+    def _stop_dns(self, *, wait=True):
         # Nothing is redirected to the resolver any more. A failed stop must not
-        # block an emergency release or an Apply that needs no DNS rules.
+        # block an emergency release or an Apply that needs no DNS rules. A
+        # release only queues the stop (`--no-block`): it is cleanup and must not
+        # hold Panic's answer. A later restart replaces a queued stop.
         try:
             self.executor.run(
                 Command(
                     executable="systemctl",
-                    arguments=("stop", "jittersim-dns.service"),
+                    arguments=("stop", "jittersim-dns.service") if wait
+                    else ("stop", "--no-block", "jittersim-dns.service"),
                     ignore_failure=True,
                     timeout_seconds=8,
                     purpose="stop the unused filtered resolver",
@@ -592,11 +599,14 @@ class AccessManager:
                     else "Filtered DNS is unavailable. Device blocks remain active."
                 )
 
-    def disable(self, *, bounded=True):
+    def disable(self, *, bounded=True, deadline=None):
         # Panic calls this while it holds the helper's network lock. A slow address
         # refresh or boot restoration must not hold Panic for longer than
-        # RELEASE_LOCK_WAIT_SECONDS. Boot restoration waits as before.
-        wait = RELEASE_LOCK_WAIT_SECONDS if bounded else None
+        # RELEASE_LOCK_WAIT_SECONDS, nor past Panic's own `deadline` (a monotonic
+        # time; the release lock still gets the deadline scope's floor after it).
+        # Boot restoration waits as before.
+        wait = bounded_wait(RELEASE_LOCK_WAIT_SECONDS, deadline) if bounded else None
+        panic_deadline = deadline
         deadline = None if wait is None else time.monotonic() + wait
         if not self.lock.acquire(timeout=-1 if wait is None else wait):
             raise ValueError("Household rules are busy with another change. Try again.")
@@ -609,20 +619,22 @@ class AccessManager:
                 replace(plan, options=replace(plan.options, enabled=False)),
                 force=True,
                 wait=None if deadline is None else max(0.0, deadline - time.monotonic()),
+                deadline=panic_deadline,
             )
         finally:
             self.lock.release()
 
-    def apply(self, plan: AccessPlan, *, force=False, wait=None, guard=True):
+    def apply(self, plan: AccessPlan, *, force=False, wait=None, guard=True, deadline=None):
         """Replace the policy. `wait` bounds the wait for another change, in seconds.
 
         ``guard`` closes test Wi-Fi forwarding while the rules change. An address
         refresh does not need it: nft swaps its table atomically and DNS for the
-        listed clients fails closed while the resolver restarts.
+        listed clients fails closed while the resolver restarts. ``deadline`` is
+        Panic's: a release then waits only briefly for the ad-blocking lock.
         """
 
         with self._locked(wait):
-            return self._apply_locked(plan, force=force, guard=guard)
+            return self._apply_locked(plan, force=force, guard=guard, deadline=deadline)
 
     def _relax(self, problems, description, step, *arguments):
         """Run one release step. A failure is recorded and the release goes on.
@@ -638,7 +650,7 @@ class AccessManager:
             problems.append((description, error))
             return False
 
-    def _release(self, plan: AccessPlan):
+    def _release(self, plan: AccessPlan, *, deadline=None):
         """Turn household rules off without ever closing the test network.
 
         Every step only relaxes, so none is rolled back and a failed step does not
@@ -654,8 +666,13 @@ class AccessManager:
         previous = self.applied
         redirected = previous is None or previous.has_dns_rules or self._dns_flows_pending
         try:
-            transition = (self.ad_blocking_store.access_transition()
-                          if self.ad_blocking_store is not None else nullcontext())
+            if self.ad_blocking_store is None:
+                transition = nullcontext()
+            elif deadline is None:
+                transition = self.ad_blocking_store.access_transition()
+            else:
+                transition = self.ad_blocking_store.access_transition(
+                    wait=bounded_wait(RELEASE_TRANSITION_WAIT_SECONDS, deadline, floor=0.0))
             transition.__enter__()
             entered = True
         except Exception:  # noqa: BLE001 - the release must go on
@@ -696,7 +713,8 @@ class AccessManager:
                     lambda: atomic_write(self.directory / "unbound.conf", render_dns(plan)))
                 if self._clear_old_dns_flows() or not redirected:
                     self._dns_flows_pending = False
-                    self._relax(logged, "stopping the unused resolver", self._stop_dns)
+                    self._relax(logged, "stopping the unused resolver",
+                                lambda: self._stop_dns(wait=False))
                 else:
                     self._dns_flows_pending = True
                     warnings.append(("old DNS connections could not be cleared", None))
@@ -740,7 +758,7 @@ class AccessManager:
         )
         return self.status()
 
-    def _apply_locked(self, plan: Optional[AccessPlan], *, force=False, guard=True):
+    def _apply_locked(self, plan: Optional[AccessPlan], *, force=False, guard=True, deadline=None):
         self.dns_failed = False
         self.release_incomplete = False
         if (
@@ -752,7 +770,7 @@ class AccessManager:
         ):
             return self.status()
         if plan is not None and not plan.options.enabled:
-            return self._release(plan)
+            return self._release(plan, deadline=deadline)
         self.runtime_path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
         if plan is None:
             self._nft(transition_firewall(self.topology))
@@ -768,7 +786,7 @@ class AccessManager:
         if plan is None:
             plan = old
             if not plan.options.enabled:
-                return self._release(plan)
+                return self._release(plan, deadline=deadline)
         if (
             plan.options.enabled
             and plan.options.reject_wifi_joins

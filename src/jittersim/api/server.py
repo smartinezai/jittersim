@@ -144,6 +144,7 @@ from jittersim.networking.dashboard_access import (
     normalize_mac as normalize_access_mac,
     validate_label as validate_access_label,
 )
+from jittersim.networking.deadlines import deadline_scope
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
     WIFI_DETAILS_MISSING_MESSAGE,
@@ -293,6 +294,14 @@ PRIORITY_WRITE_PATHS = frozenset(("/api/normal-access",))
 # Panic and Reset check the device with the helper's emergency check, which does
 # not wait behind an ordinary verification (review T5 of PR 91).
 EMERGENCY_WRITE_PATHS = frozenset(("/api/normal-access", "/api/reset"))
+# Every helper call of that check (the emergency check, a protection resync, the
+# fallback for an older helper) shares this budget. With nothing left the answer
+# is 503, which the page retries, never access (review G4).
+EMERGENCY_CHECK_BUDGET_SECONDS = 8.0
+# What the Panic route needs besides the device check and the helper client: a
+# few small database writes and the response. The browser's Panic timeout is at
+# least the sum (docs/architecture.md, "Panic time budget").
+PANIC_DATABASE_ALLOWANCE_SECONDS = 5.0
 # The product name shown after the token is accepted. The public page never carries it.
 PRODUCT_NAME = "JitterSim"
 PRODUCT_COMMAND = "jittersim"
@@ -6237,14 +6246,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         peer = self.client_address[0]
         try:
             if emergency:
-                try:
-                    allowed = self.server.dashboard_access(peer, "emergency-status")["allowed"]
-                except HelperClientError as error:
-                    if error.reason == "helper-busy":
-                        raise
-                    # An older helper does not know the emergency check. The
-                    # ordinary check decides then, as before.
-                    allowed = self.server.dashboard_access(peer)["allowed"]
+                with deadline_scope(time.monotonic() + EMERGENCY_CHECK_BUDGET_SECONDS):
+                    try:
+                        allowed = self.server.dashboard_access(peer, "emergency-status")["allowed"]
+                    except HelperClientError as error:
+                        if error.reason == "helper-busy":
+                            raise
+                        # An older helper does not know the emergency check. The
+                        # ordinary check decides then, as before.
+                        allowed = self.server.dashboard_access(peer)["allowed"]
             else:
                 allowed = self.server.dashboard_access(peer)["allowed"]
         except HelperClientError as error:

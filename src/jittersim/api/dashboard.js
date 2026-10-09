@@ -5848,12 +5848,16 @@
 
     const PANIC_ATTEMPTS = 3;
 
+    // The dashboard answers Panic within 44 seconds: the device check, the helper and
+    // the saves (docs/architecture.md, "Panic time budget"). Wait at least that long.
+    const PANIC_REQUEST_TIMEOUT_MS = 50000;
+
     async function requestPanic(path) {
       const revision = adminTokenRevision;
       for (let attempt = 1; ; attempt += 1) {
         if (revision !== adminTokenRevision || !adminTokenVerified) throw new Error("Panic sign-in changed. Check token again.");
         try {
-          return await request(path, "POST", {});
+          return await request(path, "POST", {}, {timeoutMs: PANIC_REQUEST_TIMEOUT_MS});
         } catch (error) {
           const again = error.timeout === true || PANIC_RETRY_STATUSES.includes(error.status);
           if (!again || attempt >= PANIC_ATTEMPTS) throw error;

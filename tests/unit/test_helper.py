@@ -2353,7 +2353,7 @@ class FakeAccessManager:
         self.fail = fail
         self.dns_failed = False
 
-    def disable(self):
+    def disable(self, **_):
         self.disabled += 1
         if self.fail:
             raise CommandExecutionError("simulated access failure")
