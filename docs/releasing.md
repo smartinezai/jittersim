@@ -20,7 +20,7 @@ Version labels are the same everywhere:
 |---|---|---|
 | git tag | `v0.3.0` | none |
 | `pyproject.toml` and `src/jittersim/__init__.py` | `0.3.0` | the next patch number, for example `0.3.1` |
-| Signed manifest, dashboard Updates page, `jittersim update check` | `0.3.0` | `0.3.1.dev+abc1234` |
+| Signed manifest, dashboard, `jittersim version`, `jittersim update check` | `0.3.0` | `0.3.1.dev+abc1234` |
 
 After a release main moves to the next patch number, so a development build is
 always newer than the release before it.
@@ -68,8 +68,8 @@ JITTERSIM_RELEASE_PYTHON="$PWD/.venv/bin/python" scripts/release.sh --dry-run 0.
 ## Install a release
 
 Dashboard: open **Updates**, choose **Check for updates** and then **Install
-update**. Pi terminal: `sudo jittersim update check --online` and then
-`sudo jittersim update install --yes --wait`. Each one checks the signature,
+update**. Pi terminal: `sudo jittersim update`. Mac terminal:
+`jittersim remote update now`. Each one checks the signature,
 keeps a recovery copy, checks the Pi's health after installing and restores the
 previous installation by itself when that check fails.
 

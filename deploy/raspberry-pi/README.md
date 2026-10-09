@@ -791,17 +791,24 @@ Update commands use the same verified staged release and recovery service as
 the dashboard:
 
 ```sh
+sudo jittersim update
 sudo jittersim update check
+sudo jittersim update check --online
 sudo jittersim update install
 sudo jittersim update rollback
+jittersim version
 ```
 
-`update check` reports releases already staged on the Pi, who signed them and
-whether they can be installed. It does not query the private repository
-online. `sudo jittersim update check --online` does: it asks GitHub for the
-newest release and stages it when a trusted key signed it and it is newer. It
-needs the read-only token that `sudo jittersim update set-token` saves (the
-token is read from standard input and never printed). `clear-token` removes it.
+`sudo jittersim update` is the one-step route: it asks GitHub for a newer signed
+release when a token is saved, shows the version, signer and release notes,
+installs after you confirm and waits until the Pi passed its health check. A
+failed check restores the previous installation by itself. `--offline` skips
+GitHub and `--yes` skips the question. `update check` reports the release
+already staged on the Pi, who signed it and whether it can be installed.
+`sudo jittersim update check --online` also asks GitHub for the newest release
+and stages it when a trusted key signed it and it is newer. Asking GitHub needs
+the read-only token that `sudo jittersim update set-token` saves (the token is
+read from standard input and never printed). `clear-token` removes it.
 Install and rollback ask for confirmation and briefly interrupt the
 dashboard and test network. Keep Ethernet or SSH available for recovery.
 `sudo jittersim update retry --yes --wait` retries one failed update when
@@ -1154,7 +1161,9 @@ key must have signed exactly those bytes and the sequence must be newer than the
 high-water mark. Limits: Content-Length is required, the archive is at most 25 MiB,
 the signature at most 16 KiB and the whole upload must finish within 120 seconds.
 `jittersim remote update status|upload|install` does the same from the command
-line. Publishing stable releases requires the retained signed package and owner
+line. `jittersim remote update now` asks the Pi to check GitHub with its own
+token, shows the release, installs it after you confirm and waits, and
+`jittersim remote update check` only checks. Publishing stable releases requires the retained signed package and owner
 approval. Follow the [release guide](../../docs/releases/README.md).
 
 ### Who can do what
