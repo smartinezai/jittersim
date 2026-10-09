@@ -2,6 +2,7 @@
 
 The exact October2 fix list is preserved in [the historical archive](history/2026-10-02-backlog-and-ux/planned-fixes.md).
 This page describes accepted main `5e0fed2ccb2414373643f20db1df59aa2de25306` and tested candidate 6fb864f.
+New feature ideas are in [feature proposals](feature-proposals-2026-10-09.md).
 
 ## Changes after that candidate (9 October 2026)
 

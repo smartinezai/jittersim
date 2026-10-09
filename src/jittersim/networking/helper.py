@@ -229,10 +229,17 @@ class HelperService:
         if panic_guard is not None:
             try:
                 guard = panic_guard.provision(gateway_state_path)
-                self._panic_stop_latched = guard["panic_stop_latched"]
-                self._household_stop_latched = guard["household_stop_latched"]
-                self._panic_recovery_failed = guard["panic_recovery_failed"]
-                self._control_revision_required = guard["control_revision_required"]
+                # Either record can be the newer one. A guard save that fails before its
+                # rename keeps an older clear guard, and a stop between the two saves leaves
+                # one file behind. A stop is only cleared after both saves succeed, so a stop
+                # in either record wins. An unreadable gateway.json already counts as stopped.
+                self._panic_stop_latched = self._panic_stop_latched or guard["panic_stop_latched"]
+                self._household_stop_latched = (self._household_stop_latched
+                                                or guard["household_stop_latched"])
+                self._panic_recovery_failed = (self._panic_recovery_failed
+                                               or guard["panic_recovery_failed"])
+                self._control_revision_required = (self._control_revision_required
+                                                   or guard["control_revision_required"])
                 if (self._panic_stop_latched and self._active_plan_path is not None
                         and self._active_plan_path.exists()):
                     self._reset_pending = True
@@ -299,7 +306,9 @@ class HelperService:
                 with self._revision_lock:
                     self._panic_recovery_failed = failed or not saved
                 if not saved:
+                    # Record the unconfirmed result in whichever file still accepts it.
                     self._write_panic_guard()
+                    self._write_gateway_state(durable=True)
             finally:
                 self._network_lock.release()
             if not saved:
