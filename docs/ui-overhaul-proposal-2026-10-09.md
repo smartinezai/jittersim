@@ -73,11 +73,25 @@ Spacing and shape: a 0.25 rem step scale (`--sp-1` to `--sp-6`), radii 0.45, 0.6
 
 Components: cards with a faint top sheen. Buttons with a top highlight, press feedback and a stronger primary. Fields with a clear hover, an accent border and a soft halo on focus. Status badges with a dot. A dashed, centred empty state. Tables with quiet uppercase headers and row hover. A sidebar with a logo mark, one icon per page and an accent bar on the current page.
 
-Motion: cards rise in over 280 ms when a page opens, toasts slide in, the pending badge pulses. Under `prefers-reduced-motion: reduce` every animation and transition is cut to nothing.
+Motion: cards rise in over 280 ms when a page opens, toasts slide in, the pending badge pulses. Only position moves, never opacity: a fade made the axe contrast check read blended colours and report 19 false contrast failures, so it was dropped. Under `prefers-reduced-motion: reduce` every animation and transition is cut to nothing.
 
 Icons: inline SVG drawn as CSS masks (`url("data:image/svg+xml,...")`) so no markup changed, nothing is fetched and `img-src 'self' data:` already allows it. The colour follows the text colour.
 
 Accessibility: the focus ring is a two pixel outline plus a halo on every control. Text roles keep at least 4.5 to 1 contrast on their surfaces (a unit test checks the Impact card). Touch targets are untouched. Landmark names are untouched.
+
+## Before and after
+
+Screenshots from `python -m tests.browser.gui_baseline` with fixture data, dark theme. Before on the left, after on the right in each row of the table.
+
+| Page | Before | After |
+| --- | --- | --- |
+| Devices, 1440 px | ![](ui-overhaul/devices-1440-before.png) | ![](ui-overhaul/devices-1440-after.png) |
+| Profiles, 1440 px | ![](ui-overhaul/profiles-1440-before.png) | ![](ui-overhaul/profiles-1440-after.png) |
+| Traffic, 1440 px | ![](ui-overhaul/traffic-1440-before.png) | ![](ui-overhaul/traffic-1440-after.png) |
+| Router and Wi-Fi, 1440 px | ![](ui-overhaul/router-1440-before.png) | ![](ui-overhaul/router-1440-after.png) |
+| Devices, 375 px | ![](ui-overhaul/devices-375-before.png) | ![](ui-overhaul/devices-375-after.png) |
+| Profiles, 375 px | ![](ui-overhaul/profiles-375-before.png) | ![](ui-overhaul/profiles-375-after.png) |
+| Schedules, 375 px | ![](ui-overhaul/schedules-375-before.png) | ![](ui-overhaul/schedules-375-after.png) |
 
 ## Not done and why
 

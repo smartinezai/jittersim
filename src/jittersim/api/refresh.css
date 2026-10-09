@@ -241,8 +241,10 @@ summary::marker { color: var(--tx-muted); }
 .switch-thumb { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45); transition: transform var(--dur) var(--ease); }
 
 /* Page change: the cards of the opened page rise in. Static screenshots use the end state. */
-@keyframes card-in { from { opacity: 0; transform: translateY(0.4rem); } to { opacity: 1; transform: none; } }
-@keyframes toast-in { from { opacity: 0; transform: translateY(0.5rem) scale(0.98); } to { opacity: 1; transform: none; } }
+/* Only the position moves. A fade would blend the text colour with the background while it runs
+   and make a contrast check read the wrong colour. */
+@keyframes card-in { from { transform: translateY(0.5rem); } to { transform: none; } }
+@keyframes toast-in { from { transform: translateY(0.6rem); } to { transform: none; } }
 @keyframes pulse-dot { 50% { opacity: 0.25; } }
 .page:not([hidden]) > .card { animation: card-in 280ms var(--ease) both; }
 .page:not([hidden]) > .card:nth-child(2) { animation-delay: 30ms; }
