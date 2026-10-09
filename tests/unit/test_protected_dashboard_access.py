@@ -414,6 +414,53 @@ class ProtectedAccessServerTests(unittest.TestCase):
         self.assertTrue(self.allowed())
         self.assertEqual(len(self.helper.sync_payloads), syncs + 1)
 
+    def restart_helper(self):
+        self.service = HelperService(self.applier, access_store=AccessStore(self.store.path))
+        self.helper.service = self.service
+
+    def test_panic_from_a_protection_only_device_resyncs_a_restarted_helper(self):
+        # G2: no once-a-second wait in front of Panic, one sync, then a fresh check.
+        self.protect()
+        self.restart_helper()
+        syncs = len(self.helper.sync_payloads)
+        result = self.server.dashboard_access(PEER, "emergency-status")
+        self.assertTrue(result["allowed"])
+        self.assertIs(result["protected_synced"], True)
+        self.assertEqual(len(self.helper.sync_payloads), syncs + 1)
+        # Checked once before and once after the sync.
+        self.assertEqual(self.helper.operations[-2:], ["emergency-status", "emergency-status"])
+
+    def test_panic_is_busy_not_allowed_while_a_restarted_helper_cannot_be_resynced(self):
+        self.protect()
+        self.restart_helper()
+        self.helper.fail_sync = 99
+        with self.assertRaises(HelperClientError) as raised:
+            self.server.dashboard_access(PEER, "emergency-status")
+        self.assertEqual(raised.exception.reason, "helper-busy")
+        self.assertFalse(self.service._access_store.protected_synced)
+
+    def test_panic_from_an_unprotected_device_is_refused_without_a_sync(self):
+        # Protection could not grant this device, so an unsynced helper decides alone.
+        self.protect(OTHER)
+        self.restart_helper()
+        syncs = len(self.helper.sync_payloads)
+        result = self.server.dashboard_access(PEER, "emergency-status")
+        self.assertFalse(result["allowed"])
+        self.assertIs(result["protected_synced"], False)
+        self.assertEqual(len(self.helper.sync_payloads), syncs)
+
+    def test_a_synced_helper_that_still_refuses_is_final(self):
+        # The saved protection changed after the dashboard read it: the helper decides.
+        self.protect()
+        self.restart_helper()
+        original = self.helper.dashboard_access_protected_sync
+        self.helper.dashboard_access_protected_sync = lambda devices: original(
+            [item for item in devices if item["mac_address"] != MAC]) and {
+            "protected_synced": True, "protected_count": len(devices)}
+        result = self.server.dashboard_access(PEER, "emergency-status")
+        self.assertFalse(result["allowed"])
+        self.assertIs(result["protected_synced"], True)
+
     def test_existing_protected_devices_are_upgraded_once_and_repeatably(self):
         self.store.add(OTHER, "Saved Mac")
         saved = self.store.path.read_bytes()
@@ -742,6 +789,12 @@ class ProtectedAccessHttpTests(unittest.TestCase):
 
         self.repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))
         self.server.sync_protected_access()
+        # The helper restarted, so this device's only grant must be synced again, and an
+        # ordinary request holds the access lock that the protection sync needs. Panic's
+        # own check never waits for that lock (see the next test), so the request that
+        # cannot be decided yet is the restart resync.
+        self.service = HelperService(self.applier, access_store=AccessStore(self.store.path))
+        self.server.helper_client.service = self.service
         self.service._access_lock.acquire()
         try:
             started = time.monotonic()
@@ -752,6 +805,21 @@ class ProtectedAccessHttpTests(unittest.TestCase):
         finally:
             self.service._access_lock.release()
         status, body = self.send("POST", "/api/normal-access", {})
+        self.assertEqual(status, 200, body)
+        self.assertTrue(self.service._access_store.protected_synced)
+
+    def test_panic_from_a_synced_protected_device_gets_through_a_held_access_lock(self):
+        import time
+
+        self.repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))
+        self.server.sync_protected_access()
+        self.service._access_lock.acquire()
+        try:
+            started = time.monotonic()
+            status, body = self.send("POST", "/api/normal-access", {})
+            self.assertLess(time.monotonic() - started, 2)
+        finally:
+            self.service._access_lock.release()
         self.assertEqual(status, 200, body)
 
     def test_panic_from_the_management_network_ignores_access_lock_and_resync(self):

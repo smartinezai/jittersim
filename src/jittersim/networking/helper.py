@@ -648,7 +648,10 @@ class HelperService:
                 and any(device["mac_address"] == identity["mac_address"] and is_active(device)
                         for device in store.list_devices())
             )
-            return {"ok": True, **identity, "can_register": False, "allowed": allowed}
+            # protected_synced lets the dashboard tell a restarted helper, which has not
+            # received the protection grants yet, from a final refusal.
+            return {"ok": True, **identity, "can_register": False, "allowed": allowed,
+                    "protected_synced": store.protected_synced}
         except AccessError as error:
             return {"ok": False, "error": str(error)}
         except (ValueError, TypeError, OSError, CommandExecutionError):

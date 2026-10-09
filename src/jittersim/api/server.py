@@ -1386,13 +1386,44 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         result = self._checked_access(operation, peer, values)
         if operation == "emergency-status":
             # Panic and Reset never wait for the routine protection retry.
-            return result
+            return self._emergency_access(peer, values, result)
         if self._protected_access_due(result):
             # The helper restarted or an earlier sync failed: reconcile, then answer again.
             state = self.sync_protected_access(blocking=False)
             if state.get("synced") and operation in ("status", "list"):
                 result = self._checked_access(operation, peer, values)
         return result
+
+    def _emergency_access(self, peer: str, values: Dict[str, Any],
+                          result: Dict[str, Any]) -> Dict[str, Any]:
+        """Decide Panic's device check when a restarted helper lacks the protection grants.
+
+        Only the helper grants access. A refusal from a helper that has not received
+        the protection grants is final only when protection could not grant this
+        device. Otherwise the grants are synced once (never waiting for a sync that
+        is already running) and the device is checked again. When that still cannot
+        decide, the answer is helper-busy, which the page retries: never allowed.
+        """
+        if (result["allowed"] or result.get("protected_synced") is not False
+                or not self._may_be_protected(result.get("mac_address"))):
+            return result
+        if self.sync_protected_access(blocking=False).get("synced"):
+            result = self._checked_access("emergency-status", peer, values)
+        if not result["allowed"] and result.get("protected_synced") is False:
+            raise HelperClientError(
+                "Device verification is waiting for the Pi helper to restore protected "
+                "devices' access. Try again.", reason="helper-busy")
+        return result
+
+    def _may_be_protected(self, mac: Any) -> bool:
+        """Whether saved protection might grant this device (unreadable counts as yes)."""
+        if mac is None or getattr(self.helper_client, "dashboard_access_protected_sync", None) is None:
+            return False
+        try:
+            targets, _ = self._protected_access_targets()
+        except (StorageError, sqlite3.Error):
+            return True
+        return any(item["mac_address"] == mac for item in targets)
 
     def _checked_access(self, operation: str, peer: str, values: Dict[str, Any]) -> Dict[str, Any]:
         result = self.helper_client.dashboard_access(operation, peer=peer, **values)
