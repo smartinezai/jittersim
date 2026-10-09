@@ -98,7 +98,7 @@ def test_unregistered_token_cannot_read_change_or_download(tmp_path):
             "/api/unaffected-devices",
         ):
             assert request(path)[0] == 403, path
-        assert store.list_devices() == []
+        assert store.saved_devices() == []
 
 
 def test_self_registration_rejects_forgery_and_cross_site_then_unlocks_and_removes(tmp_path):
@@ -108,12 +108,12 @@ def test_self_registration_rejects_forgery_and_cross_site_then_unlocks_and_remov
         assert request(register, "POST", {}, Origin="https://untrusted.example")[0] == 403
         assert request(register, "POST", {}, **{"Sec-Fetch-Site": "cross-site"})[0] == 403
         assert request(register, "POST", {"name": "My Mac"})[0] == 200
-        assert store.list_devices()[0]["mac_address"] == MAC
+        assert store.saved_devices()[0]["mac_address"] == MAC
         assert request("/api/profiles")[0] == 200
         assert request("/api/backup")[0] == 200
         assert request("/api/profiles", token="wrong")[0] == 401
         assert request(register, "POST", {"name": "Retry"})[0] == 200
-        assert len(store.list_devices()) == 1
+        assert len(store.saved_devices()) == 1
         assert request("/api/dashboard-access/remove", "POST", {"mac_address": MAC})[0] == 200
         assert request("/api/profiles")[0] == 403
         assert request("/api/backup")[0] == 403
@@ -124,7 +124,7 @@ def test_ambiguous_and_unavailable_observations_fail_closed(tmp_path):
         applier.neighbors *= 2
         status, body = request("/api/dashboard-access/register-self", "POST", {})
         assert status == 503, body
-        assert store.list_devices() == []
+        assert store.saved_devices() == []
         applier.route = {}
         assert request("/api/dashboard-access/register-self", "POST", {})[0] == 503
         assert request("/api/backup")[0] != 200
@@ -147,7 +147,7 @@ def test_moving_to_a_new_address_needs_the_token_and_the_connection_identity(tmp
             request(move, "POST", {"from_mac": old}, Origin="https://untrusted.example")[0] == 403
         )
         assert request(move, "POST", {}, **{"Sec-Fetch-Site": "cross-site"})[0] == 403
-        assert [item["mac_address"] for item in store.list_devices()] == [old]
+        assert [item["mac_address"] for item in store.saved_devices()] == [old]
         assert request("/api/profiles")[0] == 403
 
 
@@ -158,7 +158,7 @@ def test_moving_from_a_device_that_was_never_saved_is_refused(tmp_path):
             "/api/dashboard-access/move", "POST", {"from_mac": "02:00:00:00:00:55"}
         )
         assert status == 400, body
-        assert [item["mac_address"] for item in store.list_devices()] == ["02:00:00:00:00:99"]
+        assert [item["mac_address"] for item in store.saved_devices()] == ["02:00:00:00:00:99"]
 
 
 def test_moving_registers_the_new_address_and_undo_can_reverse_it(tmp_path):
@@ -171,7 +171,7 @@ def test_moving_registers_the_new_address_and_undo_can_reverse_it(tmp_path):
         status, body = request("/api/dashboard-access/move", "POST", {"from_mac": old})
         assert status == 200, body
         assert json.loads(body)["allowed"]
-        entries = store.list_devices()
+        entries = store.saved_devices()
         assert entries[0]["replaced_by"] == MAC and entries[1]["mac_address"] == MAC
         assert request("/api/profiles")[0] == 200
         moves = json.loads(request("/api/dashboard-access/moves")[1])
@@ -183,7 +183,7 @@ def test_moving_registers_the_new_address_and_undo_can_reverse_it(tmp_path):
         )
         status, body = request("/api/dashboard-access/move-undo", "POST", {"from_mac": old})
         assert status == 200, body
-        assert [item["mac_address"] for item in store.list_devices()] == [old]
+        assert [item["mac_address"] for item in store.saved_devices()] == [old]
         assert request("/api/profiles")[0] == 403
 
 
@@ -219,7 +219,7 @@ def test_post_commit_conflict_keeps_saved_access_and_protection_together(tmp_pat
         assert json.loads(body)["saved"] is True
         assert any(
             item["mac_address"] == MAC and "replaced_by" not in item
-            for item in store.list_devices()
+            for item in store.saved_devices()
         )
     with ConfigRepository(tmp_path / "config.db") as repository:
         assert [item.mac_address for item in repository.list_unaffected_devices()] == [MAC]
@@ -253,7 +253,7 @@ def test_failed_compensation_retains_a_recoverable_move(tmp_path, monkeypatch):
         assert result["recovery_required"] and result["old_mac"] == old and result["new_mac"] == MAC
         monkeypatch.setattr(store, "undo_move", original_undo)
         assert request("/api/dashboard-access/move-undo", "POST", {"from_mac": old})[0] == 200
-        assert [item["mac_address"] for item in store.list_devices()] == [old]
+        assert [item["mac_address"] for item in store.saved_devices()] == [old]
     with ConfigRepository(tmp_path / "config.db") as repository:
         assert [item.mac_address for item in repository.list_unaffected_devices()] == [old]
         assert repository.get_address_move(old) is None
@@ -320,7 +320,7 @@ def test_source_replacement_during_helper_wait_is_not_overwritten(tmp_path):
         store.add(old, "Aeromac")
         status, body = request("/api/dashboard-access/move", "POST", {"from_mac": old})
         assert status == 409, body
-        assert [entry["mac_address"] for entry in store.list_devices()] == [old]
+        assert [entry["mac_address"] for entry in store.saved_devices()] == [old]
     with ConfigRepository(tmp_path / "config.db") as repository:
         assert [entry.mac_address for entry in repository.list_unaffected_devices()] == [old]
 
@@ -381,8 +381,8 @@ def test_undo_parent_fsync_failure_uses_exact_completed_receipt(tmp_path, monkey
         status, body = request("/api/dashboard-access/move-undo", "POST", {"from_mac": old})
         assert status == 409, body
         assert json.loads(body)["recovery_required"]
-        assert [item["mac_address"] for item in store.list_devices()] == [old]
-        assert store.list_devices()[0]["undo_id"]
+        assert [item["mac_address"] for item in store.saved_devices()] == [old]
+        assert store.saved_devices()[0]["undo_id"]
         request.server.test_peer = "127.0.0.1"
         recovery = json.loads(request("/api/dashboard-access/moves")[1])["replaced"]
         assert recovery[0]["recovery_required"] and recovery[0]["old_mac"] == old
@@ -424,7 +424,7 @@ def test_same_pair_retry_keeps_pending_id_and_does_not_repeat_helper_write(tmp_p
         assert status == 200, body
         assert len(observed) == 1
         assert (
-            next(item for item in store.list_devices() if item["mac_address"] == MAC)["owner_id"]
+            next(item for item in store.saved_devices() if item["mac_address"] == MAC)["owner_id"]
             == observed[0]
         )
 
@@ -447,7 +447,7 @@ def test_original_move_cannot_overwrite_completed_recovery(tmp_path):
     with dashboard(tmp_path, configure) as (request, store, _):
         store.add(old, "Aeromac")
         assert request("/api/dashboard-access/move", "POST", {"from_mac": old})[0] == 409
-        assert [item["mac_address"] for item in store.list_devices()] == [old]
+        assert [item["mac_address"] for item in store.saved_devices()] == [old]
     with ConfigRepository(tmp_path / "config.db") as repository:
         assert repository.get_address_move(old) is None
         assert [item.mac_address for item in repository.list_unaffected_devices()] == [old]
@@ -515,7 +515,7 @@ def test_lost_reply_cannot_hide_access_transfer_after_initial_registration_chang
         request.server.test_peer = "127.0.0.1"
         status, body = request("/api/dashboard-access/move-undo", "POST", {"from_mac": old})
         assert status == 200, body
-        entries = store.list_devices()
+        entries = store.saved_devices()
         assert [item["mac_address"] for item in entries] == [old]
         assert "replaced_by" not in entries[0]
 
@@ -537,11 +537,11 @@ def test_older_helper_refuses_owned_move_before_mutating_access(tmp_path):
     with dashboard(tmp_path, prepare_protected_move, BeforeOwnedOperations) as (request, store, _):
         store.add(old, "Aeromac")
         assert request.server.helper_client.dashboard_access("capabilities")["owned_moves"]
-        before = store.list_devices()
+        before = store.saved_devices()
         status, body = request("/api/dashboard-access/move", "POST", {"from_mac": old})
         assert status == 409, body
         assert json.loads(body)["recovery_required"]
-        assert store.list_devices() == before
+        assert store.saved_devices() == before
 
 
 def test_older_helper_refuses_owned_undo_and_keeps_recovery_evidence(tmp_path):
@@ -562,10 +562,10 @@ def test_older_helper_refuses_owned_undo_and_keeps_recovery_evidence(tmp_path):
 
     with dashboard(tmp_path, configure, BeforeOwnedOperations) as (request, store, _):
         assert request.server.helper_client.dashboard_access("capabilities")["owned_moves"]
-        before = store.list_devices()
+        before = store.saved_devices()
         status, body = request("/api/dashboard-access/move-undo", "POST", {"from_mac": old})
         assert status == 409, body
         assert json.loads(body)["recovery_required"]
-        assert store.list_devices() == before
+        assert store.saved_devices() == before
     with ConfigRepository(tmp_path / "config.db") as repository:
         assert repository.get_address_move(old).phase == "undoing"
