@@ -20,6 +20,7 @@ from jittersim.engine.access import (
     access_from_payload,
     domain_matches,
 )
+from jittersim.diagnostic_privacy import configure_logging
 from jittersim.panic_guard import PanicGuard
 
 from jittersim.localname import GATEWAY_ADDRESS, read_local_name, resolver_names, validate_local_name
@@ -628,6 +629,7 @@ def main(argv=None):
     parser.add_argument("--uplink", default="eth0")
     parser.add_argument("--test-interface", default="wlan0")
     args = parser.parse_args(argv)
+    configure_logging()
     try:
         guard = PanicGuard().provision(ACCESS_RUNTIME.parent / "gateway-state.json")
         stopped = guard["household_stop_latched"]

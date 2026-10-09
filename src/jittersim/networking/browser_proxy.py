@@ -13,6 +13,8 @@ from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
 from typing import Callable, Optional, Sequence, Set, Tuple
 
+from jittersim.diagnostic_privacy import SafeServerErrors, configure_logging
+
 from jittersim.config.adblocking import ActiveBlocking
 from jittersim.config.exemptions import normalize_exempt_mac
 from jittersim.config.models import MacPolicy, ValidationError, normalize_domain
@@ -364,7 +366,7 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
                     pass
 
 
-class BrowserProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+class BrowserProxyServer(SafeServerErrors, socketserver.ThreadingMixIn, socketserver.TCPServer):
     """Serve a fixed number of browser tunnels from the isolated test network."""
 
     allow_reuse_address = True
@@ -488,7 +490,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--port", type=int, default=3128)
     parser.add_argument("--plan", type=Path, default=Path("/run/jittersim/active-plan.json"))
     arguments = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO)
+    configure_logging(level=logging.INFO)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             _set_socket_mark(probe, 1)

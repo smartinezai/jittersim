@@ -1286,6 +1286,65 @@ The privileged helper has no option to re-enable router Wi-Fi writes. The
 dashboard switch stays read only. Use the router's own controls for any
 intentional upstream Wi-Fi change.
 
-Additional private operation logging is deferred. This repair adds no logging
-I/O to privileged requests or startup. The original outage cause remains
+Operation logging comes from the separate outage evidence change below. This
+repair adds no logging I/O to privileged requests or startup. The original outage cause remains
 unconfirmed. Keep router Wi-Fi on during recovery acceptance.
+
+## Outage evidence
+
+The optional outage journal setup keeps previous-boot evidence on the Pi. It
+uses a 64 MiB disk target, at least 256 MiB free space and seven-day retention
+for otherwise default system logging. A larger default free-space reserve is
+kept. Existing administrator settings or masks cause setup to stop rather than
+be overwritten. Active files can exceed the target and heavy logging can remove
+evidence sooner than seven days. A power loss can lose the newest messages.
+
+Apply, Reset, Panic, scheduled changes and Wi-Fi writes add safe start and outcome
+records. They contain action categories, operation identity and elapsed time.
+Scheduled changes include the configuration version when already available.
+They do not contain passwords, tokens, names, addresses, request bodies or
+browsing history. Failed or busy logging drops records without delaying recovery.
+A start without an outcome means completion is unknown.
+
+After a failure, export local evidence over the management connection:
+
+```sh
+sudo jittersim diagnostics export > jittersim-outage-evidence.json
+```
+
+The command requires root and reads selected events from the current and
+previous available boot. It limits input entries to 1,000 per boot, output to
+1 MiB and external reads to ten seconds in total. It reports missing or clipped
+evidence. Unknown message text, device observations and personal network details
+are omitted. The existing 500-entry action history stays compatible. The older
+`jittersim logs` command shows raw selected service logs and is separate from
+this filtered export. Review raw logs locally before sharing them.
+
+To stop the project's persistent logging, use the retained policy utility:
+
+```sh
+sudo python3 -I /usr/local/lib/jittersim-outage-journal.py remove
+```
+
+It restores the prior storage behavior and keeps existing logs. When the prior
+behavior used memory, a small `Storage=volatile` compatibility file remains.
+Do not delete it while relying on memory-only logging. The shared journal
+directory can otherwise enable persistence again. When logging was already
+persistent, only the owned policy files and link are removed. Administrator
+changes are preserved. The policy utility also supports older-release rollback.
+
+Setup stops and prints one fixed reason word when it cannot be sure it is safe.
+`administrator-policy` means a journald file already sets storage or limits.
+Distribution defaults count too. Raspberry Pi OS may ship a volatile storage
+default. In that case set the limits yourself or ask for a decision. Nothing
+is overwritten. `unsafe-directory` or `unsafe-configuration` means an owner or
+permission check failed. `low-space` means the card is too full. An interrupted
+setup leaves `/etc/jittersim-outage-journal` behind and later runs refuse to
+guess. Delete that folder and the link under
+`/usr/local/lib/systemd/journald.conf.d` to try again. Debian's staff group may
+write `/usr/local`. That is accepted. Any other group or world write is not.
+
+This feature improves future evidence. It cannot recover logs already lost or
+identify the cause of the Vodafone outages. Deployment and a real disposable-VM
+reboot proof are still required before treating this local change as verified
+previous-boot persistence.
