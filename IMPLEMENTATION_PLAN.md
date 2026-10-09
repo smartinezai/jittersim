@@ -1,5 +1,15 @@
 # jittersim implementation plan
 
+Status: historical. This is the first plan, written in September 2026. It stays
+as the record of the original design and is not kept up to date. The three
+decisions it lists below as open are settled in the code: the dashboard uses
+Python's standard `http.server` (`src/jittersim/api/server.py`), the privileged
+helper is a Unix-socket service (`src/jittersim/networking/helper.py`) and
+private data and controls need the admin token plus, on the test Wi-Fi, saved
+device access. For what the product does today read the
+[README](README.md) and the [Pi guide](deploy/raspberry-pi/README.md). The
+[documentation index](docs/README.md) lists the later plans.
+
 ## Summary for review
 
 `jittersim` will be a Raspberry Pi network-emulation appliance for an isolated test network. A browser dashboard will manage device profiles while a Linux traffic-control engine applies the profiles. The design separates the web control plane from the privileged networking data plane so policy validation can be tested on a Mac without modifying its network.

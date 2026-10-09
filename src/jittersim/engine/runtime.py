@@ -174,6 +174,13 @@ class _DeviceRollState:
     random_mode: str = "repeatable"
 
 
+def _general_profile_runs(repository: ConfigRepository) -> bool:
+    """A saved Everyone profile stays paused while a device-only start runs."""
+
+    return (repository.get_general_profile() is not None
+            and repository.get_device_start_scope() is None)
+
+
 class RuntimeScheduler:
     """Apply only changed scheduled plans while the dashboard is running."""
 
@@ -345,6 +352,7 @@ class RuntimeScheduler:
         repository: ConfigRepository,
         now: Optional[float] = None,
         connected_snapshot: Optional[dict] = None,
+        device_scope: Optional[frozenset] = None,
     ) -> NetworkPlan:
         """Preview the current runtime plan without advancing rerolls or outages.
 
@@ -360,7 +368,8 @@ class RuntimeScheduler:
             self._rolls = {key: replace(roll) for key, roll in previous_rolls.items()}
             try:
                 plan, _ = self._build_plan(
-                    repository=repository, now=current_time, connected_snapshot=connected_snapshot
+                    repository=repository, now=current_time, connected_snapshot=connected_snapshot,
+                    device_scope=device_scope,
                 )
                 return plan
             finally:
@@ -373,13 +382,19 @@ class RuntimeScheduler:
         repository: ConfigRepository,
         now: Optional[float] = None,
         connected_snapshot: Optional[dict] = None,
+        device_scope: Optional[frozenset] = None,
     ) -> PreparedRuntimePlan:
-        """Keep source descriptions paired with the exact plan being applied."""
+        """Keep source descriptions paired with the exact plan being applied.
+
+        `device_scope` limits the plan to a device-only start. Without it the
+        whole saved configuration runs.
+        """
 
         current_time = time.time() if now is None else now
         with self._apply_lock:
             plan, states = self._build_plan(
-                repository=repository, now=current_time, connected_snapshot=connected_snapshot
+                repository=repository, now=current_time, connected_snapshot=connected_snapshot,
+                device_scope=device_scope,
             )
             return PreparedRuntimePlan(
                 plan=plan, states=states, unresolved_names=self._unresolved_names
@@ -760,9 +775,17 @@ class RuntimeScheduler:
             )
             runtime_state = active_repository.get_runtime_state()
             configuration_version = runtime_state.configuration_version
+            device_scope = None
             if runtime_state.last_action == "reset":
-                self._honor_external_reset(repository=active_repository, now=current_time)
-                return False
+                # A device-only start keeps the Reset for everything outside its scope.
+                device_scope = active_repository.get_device_start_scope()
+                if device_scope is None:
+                    self._honor_external_reset(
+                        repository=active_repository, now=current_time,
+                        # A saved change marks the state unknown, an outside reset says reset.
+                        scope_ended=runtime_state.observed_state != "reset",
+                    )
+                    return False
             self._follow_device_addresses(repository=active_repository, now=current_time)
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
@@ -789,6 +812,7 @@ class RuntimeScheduler:
                 repository=active_repository,
                 now=current_time,
                 random_website_outcomes=random_website_outcomes,
+                device_scope=device_scope,
             )
             if random_website_outcomes:
                 try:
@@ -1045,10 +1069,13 @@ class RuntimeScheduler:
         except StorageError:
             LOGGER.warning("could not record activity", exc_info=True)
 
-    def _honor_external_reset(self, *, repository: ConfigRepository, now: float) -> None:
+    def _honor_external_reset(
+        self, *, repository: ConfigRepository, now: float, scope_ended: bool = False
+    ) -> None:
         # Someone reset the network outside the dashboard, for example with
         # `jittersim reset`. Stop applying, and reset once more in case a
-        # scheduled apply raced that reset.
+        # scheduled apply raced that reset. A device-only start whose devices
+        # were all deleted ends the same way.
         self.pause()
         try:
             self._helper_client.reset()
@@ -1056,7 +1083,18 @@ class RuntimeScheduler:
             LOGGER.warning("could not repeat an external network reset", exc_info=True)
             message = "Network reset requested outside the dashboard; repeating it failed"
         else:
-            message = "Network reset outside the dashboard"
+            message = (
+                "Device-only start ended because its devices were removed"
+                if scope_ended else "Network reset outside the dashboard"
+            )
+            if scope_ended:
+                try:
+                    repository.update_runtime_state(
+                        observed_state="reset", last_action="reset",
+                        last_result="success", last_error=None,
+                    )
+                except StorageError:
+                    LOGGER.warning("could not record the ended device-only start", exc_info=True)
         self._record(repository, [("reset", message)], now)
 
     def _build_plan(
@@ -1066,6 +1104,7 @@ class RuntimeScheduler:
         now: float,
         random_website_outcomes: Optional[List[RandomWebsiteOutcome]] = None,
         connected_snapshot: Optional[dict] = None,
+        device_scope: Optional[frozenset] = None,
     ) -> Tuple[NetworkPlan, Dict[str, TargetState]]:
         """Build the runtime plan and what applies to each target, for the activity log.
 
@@ -1080,6 +1119,7 @@ class RuntimeScheduler:
                     now=now,
                     random_website_outcomes=random_website_outcomes,
                     connected_snapshot=connected_snapshot,
+                    device_scope=device_scope,
                 )
             finally:
                 self._unresolved_names = tuple(lookups.timed_out)
@@ -1091,14 +1131,20 @@ class RuntimeScheduler:
         now: float,
         random_website_outcomes: Optional[List[RandomWebsiteOutcome]] = None,
         connected_snapshot: Optional[dict] = None,
+        device_scope: Optional[frozenset] = None,
     ) -> Tuple[NetworkPlan, Dict[str, TargetState]]:
-        general_profile = repository.get_general_profile()
+        scoped = device_scope is not None
+        general_profile = None if scoped else repository.get_general_profile()
         if general_profile is not None:
             return self._build_general_plan(repository=repository, profile=general_profile, now=now)
         snapshot = connected_snapshot
         if snapshot is None and repository.list_unaffected_devices():
             snapshot = station_snapshot(self._helper_client)
         clients = eligible_clients(repository, snapshot)
+        if scoped:
+            # A device-only start: every other saved choice stays stopped.
+            clients = replace(clients, devices=tuple(
+                device for device in clients.devices if device.id in device_scope))
         profiles = {profile.id: profile for profile in repository.list_profiles()}
         schedules = repository.list_schedules()
         active_progressions = {}
@@ -1117,7 +1163,7 @@ class RuntimeScheduler:
                 device_runs.setdefault(run.device_id, running)
             elif run.group_id is not None:
                 group_runs.setdefault(run.group_id, running)
-            elif everyone_else_run is None:
+            elif everyone_else_run is None and not scoped:
                 everyone_else_run = running
         moment = datetime.fromtimestamp(now).replace(second=0, microsecond=0)
         runtime_devices = []
@@ -1308,7 +1354,7 @@ class RuntimeScheduler:
                 f"step {position.step_index + 1} of {len(scenario.steps)}",
             )
         else:
-            everyone_else_schedule = active_schedule(
+            everyone_else_schedule = None if scoped else active_schedule(
                 schedules=schedules, everyone_else=True, moment=moment
             )
             # A schedule or scenario can give everyone else a profile even when
@@ -1316,7 +1362,7 @@ class RuntimeScheduler:
             everyone_else_profile_id = (
                 everyone_else_schedule.profile_id
                 if everyone_else_schedule is not None
-                else repository.get_everyone_else_profile_id()
+                else None if scoped else repository.get_everyone_else_profile_id()
             )
             if everyone_else_schedule is not None:
                 everyone_else_described = (
@@ -1364,7 +1410,7 @@ class RuntimeScheduler:
                 next_change_at=self._next_schedule_change(schedules, now, everyone_else=True),
             )
 
-        service_list_rules = self._build_service_list_rules(
+        service_list_rules = () if scoped else self._build_service_list_rules(
             repository=repository,
             profiles=profiles,
             now=now,
@@ -1403,6 +1449,8 @@ class RuntimeScheduler:
         devices_by_id = {device.id: device for device in runtime_devices}
         for assignment in repository.list_service_assignments():
             if not assignment.enabled or assignment.device_id in clients.excluded_ids:
+                continue
+            if scoped and assignment.device_id not in devices_by_id:
                 continue
             device = devices_by_id.get(assignment.device_id)
             profile = profiles.get(assignment.profile_id)
@@ -1783,7 +1831,7 @@ class RuntimeScheduler:
     def _sample_traffic_if_needed(self, *, repository: ConfigRepository, now: float) -> None:
         """Persist a bounded DNS sample when a traffic progression is active."""
 
-        if repository.get_general_profile() is not None or now - self._last_traffic_sample_at < 5:
+        if _general_profile_runs(repository) or now - self._last_traffic_sample_at < 5:
             return
         progressions = repository.list_active_progressions(now=int(now))
         if not any(progression.mode == "traffic" for progression in progressions):
@@ -1837,7 +1885,7 @@ class RuntimeScheduler:
     def counter_device_ids(self, *, repository: ConfigRepository) -> set:
         """Use the installed rule membership when adding shared counters."""
 
-        if repository.get_general_profile() is not None:
+        if _general_profile_runs(repository):
             return set()
         protected = {item.mac_address for item in repository.list_unaffected_devices()}
         allowed = {

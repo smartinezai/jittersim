@@ -359,3 +359,20 @@ def test_a_failed_request_keeps_the_choice_and_shows_the_error():
     assert result["messages"][-1] == ["Fixture network update failed", "error"]
     assert result["control"]["value"] == "lossy"
     assert result["control"]["button"] == "Apply to all devices" and result["control"]["disabled"] is False
+
+
+@NEEDS_NODE
+def test_a_pending_choice_survives_when_the_same_saved_profile_starts_or_pauses():
+    # A refresh that only changes whether the saved Everyone profile runs must not
+    # replace a choice that has not been applied yet.
+    result = run_node(
+        with_profiles(SLOW, LOSSY) + f"generalProfileState = {state(SLOW, False, 'reset')};",
+        "renderActiveProfileControl(); choose('lossy');\n"
+        f"generalProfileState = {state(SLOW, True)}; renderActiveProfileControl();\n"
+        "const started = [control().value, control().button];\n"
+        f"generalProfileState = {state(SLOW, False, 'reset')}; renderActiveProfileControl();\n"
+        "console.log(JSON.stringify({sent, started, paused: [control().value, control().button]}));",
+    )
+    assert result["sent"] == []
+    assert result["started"] == ["lossy", "Apply to all devices"]
+    assert result["paused"] == ["lossy", "Apply to all devices"]

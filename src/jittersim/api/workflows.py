@@ -4,7 +4,6 @@ import json
 import re
 import shutil
 import time
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from jittersim.config.storage import StorageError
@@ -16,6 +15,7 @@ from jittersim.engine.compiler import (
 )
 from jittersim.engine.timeline import device_timeline
 from jittersim.networking.helper import HelperClientError
+from jittersim.release_info import current_label
 
 WORKFLOW_WRITES = frozenset(
     (
@@ -47,11 +47,8 @@ def response(value, status=200):
 
 
 def machine_health():
-    try:
-        installed = version("jittersim")
-    except PackageNotFoundError:
-        installed = "development"
-    result = {"version": installed, "checked_at": int(time.time())}
+    # The signed release label (X.Y.Z or X.Y.Z.dev+COMMIT) so health and Updates agree.
+    result = {"version": current_label(), "checked_at": int(time.time())}
     try:
         result["disk_free_bytes"] = shutil.disk_usage(Path.cwd()).free
     except OSError:

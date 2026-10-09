@@ -330,6 +330,7 @@
           error.status = response.status;
           error.code = data.code;
           error.profile = data.profile;
+          if (typeof data.retry_after === "number") error.retryAfter = data.retry_after;
           if (waitingForRejoin) error.transient = true;
           throw error;
         }
@@ -721,6 +722,10 @@
     let routerPasswordRejected = false;
 
     let routerPasswordChecking = false;
+
+    // Until then the Pi refuses another router password check (see tickRouterCheckWait).
+    let routerCheckWaitUntil = 0;
+    let routerCheckWaitTimer = null;
 
     let routerActionPending = false;
     let routerWifiEnabled = null;
@@ -2355,7 +2360,9 @@
       const clients = input.clients || [];
       const serviceLists = input.serviceLists || [];
       const steady = running && (state === "applied" || state === "unknown");
-      const generalInEffect = !!generalProfile && steady &&
+      // A device-only start runs its own devices. Everyone and the rest stay paused.
+      const deviceOnly = Array.isArray(input.deviceOnly) ? input.deviceOnly : [];
+      const generalInEffect = !!generalProfile && steady && deviceOnly.length === 0 &&
         (generalState.active === true || state === "unknown");
       const generalName = generalProfile ? generalProfile.name || generalProfile.id : "";
 
@@ -2365,7 +2372,7 @@
           ? {text: "Everyone: " + generalName + " · active", tone: "on"}
           : {
               text: "Everyone: " + generalName + " · " +
-                (state === "reset" ? "paused" : "saved, not applied"),
+                (state === "reset" || deviceOnly.length ? "paused" : "saved, not applied"),
               tone: "muted"
             };
       }
@@ -2397,7 +2404,8 @@
           : clients
               .filter((client) => !client.unaffected && client.assigned_device_id &&
                 client.assigned_effective_state !== "unverified" &&
-                client.assigned_effective_state !== "protected")
+                client.assigned_effective_state !== "protected" &&
+                (deviceOnly.length === 0 || deviceOnly.includes(client.assigned_device_id)))
               .map((client) => ({
                 name: nameOf(client),
                 profile: profileNameOf(client.group_profile_id || client.assigned_profile_id)
@@ -2413,7 +2421,7 @@
         };
       }
 
-      const enabledLists = steady
+      const enabledLists = steady && deviceOnly.length === 0
         ? serviceLists.filter((serviceList) => serviceList.enabled).map((serviceList) => serviceList.name)
         : [];
       return {
@@ -2457,6 +2465,7 @@
         runtimeState: lastRuntimeState ? lastRuntimeState.observed_state : null,
         running: !!lastRuntimeState && lastRuntimeState.running === true,
         lastAction: lastRuntimeState ? lastRuntimeState.last_action : null,
+        deviceOnly: lastRuntimeState ? lastRuntimeState.device_only : null,
         generalState: generalProfileState,
         profiles,
         clients: connectedClients,
@@ -2593,6 +2602,14 @@
       }
       if (state === "applying") return {text: "Applying…", tone: "working"};
       if (state === "resetting") return {text: "Resetting…", tone: "working"};
+      const deviceOnly = Array.isArray(options.deviceOnly) ? options.deviceOnly.length : 0;
+      if (running === true && deviceOnly > 0 && (state === "applied" || state === "unknown")) {
+        return {
+          text: "Running for " + deviceOnly + (deviceOnly === 1 ? " device" : " devices") +
+            " only. Everyone and other saved settings stay paused. Start resumes them all.",
+          tone: "ok"
+        };
+      }
       if (running === true) {
         if (state === "applied") {
           return {
@@ -2692,6 +2709,7 @@
         lastRuntimeState.running === true,
         {
           lastAction: lastRuntimeState.last_action,
+          deviceOnly: lastRuntimeState.device_only,
           helperConfigured: helperKnown ? helperConfigured : true
         }
       );
@@ -5874,10 +5892,13 @@
       setActionBusy(true, path);
       showMessage(stop ? "Stopping the profile for everyone..." : "Applying the profile to all unprotected devices...", "working");
       try {
-        await request(path, "POST", stop ? {} : {profile_id: profileId});
+        const result = await request(path, "POST", stop ? {} : {profile_id: profileId});
         if (!current()) return;
+        // While the network is stopped, Stop only saves the removal and says so.
         refreshAfterSuccess(stop
-          ? "Stopped the profile for everyone. Saved device rules resumed."
+          ? (result && result.live_applied === false && result.message
+              ? result.message
+              : "Stopped the profile for everyone. Saved device rules resumed.")
           : "Profile applied for everyone. Protected devices keep normal access.");
       } catch (error) {
         if (!current()) return;
@@ -5902,6 +5923,7 @@
     // Active profile control in the sidebar: it names the general profile above the Start button
     // and applies or stops one with the same requests and messages as the saved profiles list.
     // The owner's choice stays until the saved general profile changes, here or elsewhere.
+    // Starting or pausing the same saved profile never replaces a pending choice.
     let activeProfilePick = null;
     let activeProfileSeen = null;
 
@@ -5939,7 +5961,7 @@
 
     function renderActiveProfileControl() {
       const state = generalProfileState;
-      const seen = state && state.profile ? state.profile.id + "|" + (state.active === true) : "";
+      const seen = state && state.profile ? state.profile.id : "";
       if (seen !== activeProfileSeen) {
         activeProfileSeen = seen;
         activeProfilePick = null;
@@ -7167,7 +7189,7 @@
         !helperConfigured ? "Needs the Pi helper" :
         routerPasswordRejected ? "Router password rejected. Enter it again." : busy ? "Working…" :
         !password ? "Enter the router password first" : "Copy the router Wi-Fi name, password and security to the Pi";
-      element("check-router-password").disabled = busy;
+      element("check-router-password").disabled = busy || routerCheckWaiting();
       element("refresh-router-wifi").disabled = !helperConfigured || !adminTokenVerified ||
         !password || routerPasswordRejected || busy;
       button.disabled = true;
@@ -7180,6 +7202,23 @@
         routerActionPending || routerWifiRemoteChanging ? "Changing…" : busy ? "Checking…" :
         known ? (routerWifiEnabled ? "On" : "Off") + " · " + new Date(routerWifiCheckedAt * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}) : routerWifiError ? "Status unavailable" : "Check router Wi-Fi";
       status.title = routerWifiError || (known ? "Last checked " + new Date(routerWifiCheckedAt * 1000).toLocaleTimeString() : "Automatic router checks are paused. Choose Check router Wi-Fi.");
+    }
+
+    // The Pi spaces router sign-ins apart. When it refuses a password check the button counts
+    // the wait down, and the Pi still enforces it after a reload or from another tab.
+    function routerCheckWaiting() {
+      return Date.now() < routerCheckWaitUntil;
+    }
+
+    function tickRouterCheckWait() {
+      window.clearTimeout(routerCheckWaitTimer);
+      routerCheckWaitTimer = null;
+      const left = Math.ceil((routerCheckWaitUntil - Date.now()) / 1000);
+      if (!routerPasswordChecking) {
+        element("check-router-password").textContent = left > 0 ? "Wait " + left + " s" : "Check password";
+      }
+      if (left > 0) routerCheckWaitTimer = window.setTimeout(tickRouterCheckWait, 1000);
+      renderRouterWifi();
     }
 
     async function pollRouterWifi() {
@@ -7205,7 +7244,14 @@
           routerWifiEnabled = typeof result.enabled === "boolean" && result.checked_at >= routerWifiMinimumCheck ? result.enabled : null;
           routerWifiCheckedAt = result.checked_at;
           routerWifiError = result.error || "";
-          if (!routerWifiRemoteBusy) break;
+          if (!routerWifiRemoteBusy) {
+            if (attempt === 0 && routerWifiEnabled === null && !routerWifiError && result.refresh_in > 0) {
+              // The Pi spaces router sign-ins apart and did not ask the router this time.
+              showMessage("The router was contacted a moment ago. Wait " + result.refresh_in + " second" +
+                (result.refresh_in === 1 ? "" : "s") + ", then choose Check router Wi-Fi again.", "info");
+            }
+            break;
+          }
           if (attempt >= 44 || context.now() >= context.deadline) {
             throw new Error("Router check timed out. Wait before checking again.");
           }
@@ -7374,7 +7420,9 @@
         return;
       }
       if (routerPasswordBlocked(button)) return;
+      if (routerCheckWaiting()) return;
       const routerButtons = ["sync-router-ap", "router-wifi-toggle"];
+      const wasVerified = routerPasswordVerified;
       routerPasswordChecking = true;
       routerPasswordVerified = false;
       routerPasswordRejected = false;
@@ -7394,15 +7442,22 @@
         showMessage(status.textContent, "success");
       } catch (error) {
         if (passwordRevision !== routerPasswordRevision) return;
+        const tooSoon = error.status === 429 && error.retryAfter > 0;
         routerPasswordRejected = isRouterLoginFailure(error);
+        if (tooSoon) {
+          // Nothing reached the router, so what the last check said still stands.
+          routerPasswordVerified = wasVerified;
+          routerCheckWaitUntil = Date.now() + Math.ceil(error.retryAfter) * 1000;
+        }
         status.textContent = error.message;
-        showMessage(error.message, "error");
+        showMessage(error.message, tooSoon ? "info" : "error");
       } finally {
         routerPasswordChecking = false;
         routerButtons.forEach((id) => { element(id).disabled = false; });
         setButtonBusy(button, false);
         button.textContent = "Check password";
         updateCredentialStatus();
+        if (routerCheckWaiting()) tickRouterCheckWait();
       }
     }
 

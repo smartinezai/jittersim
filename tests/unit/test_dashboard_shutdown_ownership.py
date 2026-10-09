@@ -1,7 +1,10 @@
 """A shutdown timeout must retain shared state and prevent worker restart."""
 
 import json
+import os
+import signal
 import threading
+import time
 
 import pytest
 
@@ -142,3 +145,85 @@ def test_background_start_exception_cannot_drop_or_replace_started_worker(kind, 
     finally:
         release.set()
         owner.stop()
+
+
+class _StopsItself:
+    """A dashboard server that is told to stop by the service manager while it serves."""
+
+    closed = 0
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def recover_saved_network_state(self):
+        pass
+
+    def serve_forever(self):
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(5)
+        raise AssertionError("SIGTERM did not stop the server")
+
+    def server_close(self):
+        # A second SIGTERM must not cut into the shutdown that the first one began.
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(0.05)
+        type(self).closed += 1
+
+
+def test_sigterm_takes_the_ctrl_c_exit_path_and_exits_zero(monkeypatch):
+    repository = ConfigRepository(":memory:")
+    _StopsItself.closed = 0
+    before = signal.getsignal(signal.SIGTERM)
+    monkeypatch.setattr(api, "ConfigRepository", lambda path: repository)
+    monkeypatch.setattr(api, "ControlServer", _StopsItself)
+    stopped = []
+    monkeypatch.setattr(RuntimeScheduler, "stop", lambda self, *a, **k: stopped.append(self))
+    try:
+        started = time.monotonic()
+        assert api.main(["--database", ":memory:"]) == 0
+        assert time.monotonic() - started < 3
+        assert _StopsItself.closed == 1 and len(stopped) == 1
+        # The process leaves the signal as it found it.
+        assert signal.getsignal(signal.SIGTERM) is before
+    finally:
+        signal.signal(signal.SIGTERM, before)
+        repository.close()
+
+
+def test_sigterm_with_unresolved_workers_still_exits_nonzero(monkeypatch):
+    repository = ConfigRepository(":memory:")
+    before = signal.getsignal(signal.SIGTERM)
+
+    class Unresolved(_StopsItself):
+        def server_close(self):
+            raise WorkersStillRunning("request still owns repository")
+
+    monkeypatch.setattr(api, "ConfigRepository", lambda path: repository)
+    monkeypatch.setattr(api, "ControlServer", Unresolved)
+    try:
+        with pytest.raises(WorkersStillRunning):
+            api.main(["--database", ":memory:"])
+        assert repository.get_runtime_state() is not None
+        assert signal.getsignal(signal.SIGTERM) is before
+    finally:
+        signal.signal(signal.SIGTERM, before)
+        repository.close()
+
+
+def test_sigterm_while_the_server_is_still_starting_exits_zero(monkeypatch):
+    repository = ConfigRepository(":memory:")
+    before = signal.getsignal(signal.SIGTERM)
+
+    def starting(*args, **kwargs):
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(5)
+        raise AssertionError("SIGTERM did not stop the start")
+
+    monkeypatch.setattr(api, "ConfigRepository", lambda path: repository)
+    monkeypatch.setattr(api, "ControlServer", starting)
+    try:
+        assert api.main(["--database", ":memory:"]) == 0
+        assert signal.getsignal(signal.SIGTERM) is before
+    finally:
+        signal.signal(signal.SIGTERM, before)
+        repository.close()
