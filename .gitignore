@@ -19,3 +19,4 @@ test-results/
 
 test-results/
 docs/releases/.registry.lock
+.venv-local-ci-*/
