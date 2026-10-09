@@ -889,6 +889,10 @@ def _runtime_state_payload(state: RuntimeState) -> Dict[str, Any]:
     }
 
 
+RESET_REQUEST_PATHS = frozenset(("/api/reset", "/api/normal-access"))
+# Recorded when a device-only start failed and the helper cleanup did not succeed yet.
+DEVICE_CLEANUP_ERROR = "device-only cleanup failed"
+
 _RESET_SAVED_ONLY = {
     "live_applied": False,
     "message": "saved; the network is reset, so choose Start to use it",
@@ -1963,6 +1967,16 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+        if path in RESET_REQUEST_PATHS:
+            # A device Apply that arrives while this runs, or waits behind it, starts nothing.
+            self.note_reset_request()
+            try:
+                return self._tracked_write_response_for(path, payload)
+            finally:
+                self.note_reset_finished()
+        return self._tracked_write_response_for(path, payload)
+
+    def _tracked_write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
         if path == "/api/profiles/ranges":
             return self._write_response_for(path, payload)
         control_intent = None
@@ -1973,9 +1987,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         live_general = path in ("/api/general-profile", "/api/general-profile/stop")
         live_ads = path == "/api/ad-blocking"
         device_apply = path == "/api/connected-devices/apply-profile"
-        if path in ("/api/reset", "/api/normal-access"):
-            self.note_reset_request()
-        resets_at_entry = self._reset_requests
+        resets_at_entry = (self._reset_requests, self._resets_pending)
         if path == "/api/apply" or live_access or live_global or live_general or live_ads or device_apply:
             generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
             refused, revision = self._capture_control_intent(generation)
@@ -4513,12 +4525,22 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             current = "This is the current device profile."
         return f"Profile {profile_label} saved for this device. " + current
 
-    # Counts Reset and Panic requests, so an action queued before one can tell.
+    # Counts Reset and Panic requests and those still running, so a device Apply can
+    # tell that one arrived before it or runs while it waits.
     _reset_requests = 0
+    _resets_pending = 0
+    # Waits before each retry of a failed device-only cleanup. Retries stop after the last.
+    cleanup_retry_delays = (2.0, 5.0, 15.0, 30.0, 60.0)
+    _cleanup_worker = None
 
     def note_reset_request(self) -> None:
         with _RESET_REQUESTS_LOCK:
             self._reset_requests += 1
+            self._resets_pending += 1
+
+    def note_reset_finished(self) -> None:
+        with _RESET_REQUESTS_LOCK:
+            self._resets_pending -= 1
 
     def _apply_profile_to_connected_device(self, payload: dict, *, control_intent=None,
                                            resets_at_entry=None):
@@ -4542,17 +4564,20 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 return refused
             control_intent = (generation, revision)
         if resets_at_entry is None:
-            resets_at_entry = self._reset_requests
+            resets_at_entry = (self._reset_requests, self._resets_pending)
+        overtaken = (HTTPStatus.CONFLICT, "application/json", _json_bytes({
+            "error": "Reset or Panic ran while this Apply waited. Nothing was saved or "
+                     "started. Apply the profile again if you still want it.",
+        }))
+        if resets_at_entry[1] > 0:
+            return overtaken
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
             refused = self._apply_refused(control_intent[0])
             if refused is not None:
                 return refused
-            if self._reset_requests != resets_at_entry:
-                return HTTPStatus.CONFLICT, "application/json", _json_bytes({
-                    "error": "Reset or Panic ran while this Apply waited. Nothing was saved or "
-                             "started. Apply the profile again if you still want it.",
-                })
+            if self._reset_requests != resets_at_entry[0]:
+                return overtaken
             try:
                 snapshot = station_snapshot(self.helper_client)
                 device, existing = _connected_device_from_payload(
@@ -4567,37 +4592,60 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         "This device is protected from profiles. Stop protecting it before applying a profile."
                     )
                 self._verify_selected_client(device, snapshot)
-                stopped = self.repository.get_runtime_state().last_action == "reset"
+                last_action = self.repository.get_runtime_state().last_action
+                stopped = last_action == "reset"
                 general = self.repository.get_general_profile()
                 if general is not None and not stopped:
                     raise ValueError(
                         f"Everyone uses {general.name} right now, so this device cannot run its own "
                         "profile yet. Nothing was saved. Stop Everyone first, or save the choice "
                         "in the device form to use it later."
+                        if last_action is not None else
+                        f"Everyone is saved as {general.name} and would cover this device. Nothing "
+                        "was saved. Choose Reset network first to start only this device, or "
+                        "stop Everyone."
                     )
-                if stopped and self._stop_latched():
-                    raise ValueError(
-                        "Panic or a router outage stopped profiles. Nothing was saved. Choose "
-                        "Start when it is safe, then apply this profile."
-                    )
+                if stopped:
+                    stop_state = self._stop_state()
+                    if stop_state != "clear":
+                        raise ValueError(
+                            "Panic or a router outage stopped profiles. Nothing was saved. Choose "
+                            "Start when it is safe, then apply this profile."
+                            if stop_state == "latched" else
+                            "The Pi did not say whether Panic or an outage stopped profiles. "
+                            "Nothing was saved. Try again in a moment."
+                        )
+                previous_scope = self.repository.get_device_start_scope() or frozenset()
                 if self.scheduler:
                     self.scheduler.sample_before_control_change(repository=self.repository)
-                if stopped:
-                    # Refuse a changed helper intent before saving, like Apply to everyone.
-                    refused, current_revision = self._capture_control_intent(control_intent[0])
-                    if refused is not None:
-                        return refused
-                    if control_intent[1] is not None and current_revision != control_intent[1]:
-                        return self._control_rejected(HelperClientError(
-                            "Network control changed before saving the device profile",
-                            reason="control-changed"))
-                with self.repository.transaction():
-                    self.repository.save_device(
-                        device, expected=existing, create_only=existing is None
-                    )
-                    self._validate_saved_plan()
-                    if stopped:
-                        self.repository.add_device_to_start_scope(device.id)
+                # Refuse a Panic or a changed helper intent before saving, on both paths.
+                refused, current_revision = self._capture_control_intent(control_intent[0])
+                if refused is not None:
+                    return refused
+                if control_intent[1] is not None and current_revision != control_intent[1]:
+                    return self._control_rejected(HelperClientError(
+                        "Network control changed before saving the device profile",
+                        reason="control-changed"))
+
+                def save():
+                    with self.repository.transaction():
+                        self.repository.save_device(
+                            device, expected=existing, create_only=existing is None
+                        )
+                        self._validate_saved_plan()
+                        if stopped:
+                            self.repository.add_device_to_start_scope(device.id)
+                            # The scoped plan must compile before the device joins it.
+                            with without_dns():
+                                compile_stored_plan(
+                                    repository=self.repository,
+                                    device_scope=previous_scope | {device.id},
+                                )
+
+                # Panic cannot land between the last check and the commit.
+                accepted, _ = self._publish_apply(control_intent[0], save)
+                if not accepted:
+                    return self._apply_refused(control_intent[0]) or overtaken
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             fields = {
@@ -4608,25 +4656,31 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             }
             if not stopped:
                 return self._saved_control_response(fields, snapshot)
-            return self._start_device_only(fields, snapshot, device, control_intent)
+            return self._start_device_only(fields, snapshot, device, control_intent, previous_scope)
 
-    def _stop_latched(self) -> bool:
-        """Whether a Panic, outage or state error keeps profiles stopped in the helper."""
+    def _stop_state(self) -> str:
+        """Whether a Panic, outage or state error keeps profiles stopped: latched, clear or unknown."""
 
         try:
             gateway_status = self.helper_client.gateway_status()
-        except (HelperClientError, AttributeError):
-            return False
-        return any(gateway_status.get(name) is True for name in (
+        except (HelperClientError, AttributeError, TypeError):
+            return "unknown"
+        if not isinstance(gateway_status, dict):
+            return "unknown"
+        latched = any(gateway_status.get(name) is True for name in (
             "outage_stop_latched", "panic_stop_latched", "state_error"))
+        return "latched" if latched else "clear"
 
-    def _start_device_only(self, fields, snapshot, device, control_intent):
+    def _start_device_only(self, fields, snapshot, device, control_intent, previous_scope):
         """Start the device-only scope after a Reset. Everything else stays stopped."""
 
         status, content_type, body = self._apply_configuration_locked(
             connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
             device_scope=True,
         )
+        if status != HTTPStatus.OK and self.repository.get_device_start_scope() is not None:
+            # Refused before the helper ran: the scope stays what it was.
+            self.repository.restore_device_start_scope(previous_scope)
         response = json.loads(body)
         response.update(fields)
         response["live_applied"] = status == HTTPStatus.OK
@@ -5020,11 +5074,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             LOGGER.error("network helper apply failed: %s", error)
             if self.scheduler is not None:
                 self.scheduler.invalidate_applied_plan()
-            # A failed device-only start ends its scope: the rest was never started.
-            accepted, state = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
-                observed_state="error", last_action=runtime_action, last_result="failure",
-                last_error="network helper apply failed",
-            ))
+            if scope is not None:
+                # A failed device-only start ends its scope and resets what it left behind.
+                accepted, state = self._clean_up_failed_device_start(halts_at_start)
+            else:
+                accepted, state = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
+                    observed_state="error", last_action=runtime_action, last_result="failure",
+                    last_error="network helper apply failed",
+                ))
             if not accepted:
                 return self._apply_refused(halts_at_start, undo=True)
             return (
@@ -5073,6 +5130,69 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 }
             ),
         )
+
+    def _clean_up_failed_device_start(self, generation):
+        """Reset the helper after a failed device-only start and record the result.
+
+        A failed cleanup stays pending: it is retried with bounded waits, reset only,
+        whether or not the scheduler runs.
+        """
+
+        if self.scheduler is not None:
+            self.scheduler.pause()
+        try:
+            self.helper_client.reset()
+        except HelperClientError:
+            LOGGER.error("cleanup after a failed device-only start failed; retrying")
+            result = self._publish_apply(generation, lambda: self.repository.update_runtime_state(
+                observed_state="error", last_action="reset", last_result="failure",
+                last_error=DEVICE_CLEANUP_ERROR,
+            ))
+            self._retry_device_cleanup()
+            return result
+        return self._publish_apply(generation, lambda: self.repository.update_runtime_state(
+            observed_state="reset", last_action="reset", last_result="success", last_error=None,
+        ))
+
+    def _cleanup_is_pending(self) -> bool:
+        state = self.repository.get_runtime_state()
+        return (state.last_action == "reset" and state.observed_state == "error"
+                and state.last_error == DEVICE_CLEANUP_ERROR)
+
+    def _retry_device_cleanup(self) -> None:
+        """Retry the reset of a failed device-only start a bounded number of times."""
+
+        worker = self._cleanup_worker
+        if worker is not None and worker.is_alive():
+            return
+
+        def run():
+            for delay in self.cleanup_retry_delays:
+                if self._stop_connections.wait(delay):
+                    return
+                operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
+                with operation:
+                    try:
+                        if not self._cleanup_is_pending():
+                            return  # Something newer decided the state.
+                        self.helper_client.reset()
+                        self.repository.update_runtime_state(
+                            observed_state="reset", last_action="reset", last_result="success",
+                            last_error=None,
+                        )
+                    except HelperClientError:
+                        LOGGER.warning("cleanup after a failed device-only start failed again")
+                        continue
+                    except (StorageError, sqlite3.Error):
+                        LOGGER.exception("could not record the device-only cleanup")
+                        return
+                self._record_activity("reset", "Cleanup after a failed device-only start completed")
+                return
+            LOGGER.error("cleanup after a failed device-only start is still not confirmed. Retry Panic")
+
+        self._cleanup_worker = threading.Thread(
+            target=run, name="jittersim-device-cleanup", daemon=True)
+        self._cleanup_worker.start()
 
     def _panic_since(self, halts_at_start: int) -> bool:
         return getattr(self.scheduler, "halt_count", 0) != halts_at_start
@@ -5251,11 +5371,17 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 "Profiles remain stopped after a router gateway outage",
             )
             return
+        # Rows an older dashboard left beside a completed Reset never start again.
+        self.repository.discard_stale_device_start_scope()
         state = self.repository.get_runtime_state()
         if state.last_action not in {"reset", "apply", "schedule"}:
             return
         if state.last_action == "reset":
-            if state.last_result != "success":
+            scoped = self.repository.get_device_start_scope() is not None
+            if not scoped and self._cleanup_is_pending():
+                # A failed device-only cleanup is a reset still to finish.
+                state = replace(state, last_result="success")
+            if state.last_result != "success" and not scoped:
                 if self.scheduler is not None:
                     self.scheduler.require_recovery()
                 LOGGER.error("saved recovery remains unconfirmed. Retry Panic before Start")

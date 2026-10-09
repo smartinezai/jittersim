@@ -198,8 +198,9 @@ class DeviceApplyStartTests(DeviceApplyFixture):
         self.assertIn("did not start", result["error"])
         self.assertEqual(self.repository.get_device(AIR_ID).profile_id, "slow-test")
         self.assertIsNone(self.repository.get_device_start_scope())
+        # The helper is reset after the failed start, so the network is a clean Reset.
         state = self.repository.get_runtime_state()
-        self.assertEqual((state.last_action, state.observed_state), ("reset", "error"))
+        self.assertEqual((state.last_action, state.observed_state), ("reset", "reset"))
 
     # Reset, Panic and ordering.
 
