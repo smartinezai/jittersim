@@ -16,6 +16,8 @@ from queue import Empty, Queue
 from socketserver import ThreadingMixIn
 from urllib.parse import urlsplit
 
+from jittersim.diagnostic_privacy import SafeServerErrors
+
 LOGGER = logging.getLogger(__name__)
 EXTENSION_ID = re.compile(r"[a-p]{32}\Z")
 TOKEN = re.compile(r"[a-f0-9]{64}\Z")
@@ -386,7 +388,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-class PolicyServer(ThreadingMixIn, HTTPServer):
+class PolicyServer(SafeServerErrors, ThreadingMixIn, HTTPServer):
     """Four physical workers include TLS handshakes with no application queue."""
 
     daemon_threads = True
