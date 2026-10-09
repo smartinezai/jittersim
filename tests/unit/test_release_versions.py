@@ -172,7 +172,8 @@ class InstallerTests(unittest.TestCase):
 
     def test_the_release_notes_say_how_to_cut_a_release(self) -> None:
         readme = " ".join((ROOT / "deploy" / "raspberry-pi" / "README.md").read_text().split())
-        for phrase in ("git tag vMAJOR.MINOR.PATCH", "dev+", "older number"):
+        for phrase in ("scripts/release.sh MAJOR.MINOR.PATCH", "git tag vMAJOR.MINOR.PATCH", "dev+",
+                       "older number"):
             self.assertIn(phrase, readme)
 
 

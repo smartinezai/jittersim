@@ -16,5 +16,14 @@
       "Pi Linux release checks",
       "Pi browser journeys"
     ]
+  },
+  "local_verification": {
+    "allowed": true,
+    "required_checks": [
+      "lint",
+      "python-tests",
+      "browser-journeys"
+    ],
+    "note": "Owner decision 2026-10-09: while hosted GitHub Actions cannot run, a local verification record signed with the owner's release key may stand in for the workflows above. It is used only when a required workflow never ran. A hosted job that ran and failed always blocks. Set allowed to false to require hosted runs again."
   }
 }

@@ -2407,6 +2407,38 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body), {"result": {"ok": True, "action": "router-check"}})
         self.assertNotIn("router-secret", body.decode())
 
+    def _router_wait_is_over(self) -> None:
+        """Let the next router password check through, as if the wait after the last one ended."""
+        self.server.router_operations._next_read = 0.0
+
+    def test_router_check_is_refused_for_the_wait_after_any_earlier_check(self) -> None:
+        for fail in (False, True):
+            with self.subTest(failed_first_check=fail):
+                self._router_wait_is_over()
+                calls = []
+
+                class CountingHelper(FakeHelper):
+                    def check_router_password(self, *, admin_password):
+                        calls.append(admin_password)
+                        if fail:
+                            raise HelperClientError("Router login failed.")
+                        return {"ok": True, "action": "router-check"}
+
+                self.server.helper_client = CountingHelper()
+                first, _, _ = self.server.write_response_for(
+                    "/api/router/check", {"admin_password": "router-secret"})
+                self.assertEqual(first, 502 if fail else 200)
+                for payload in ({"admin_password": "router-secret"}, {"admin_password": "other-secret"},
+                                {"admin_password": "router-secret", "background": False}):
+                    status, content_type, body = self.server.write_response_for("/api/router/check", payload)
+                    data = json.loads(body)
+                    self.assertEqual((status, content_type), (429, "application/json"))
+                    self.assertTrue(1 <= data["retry_after"] <= (30 if fail else 15))
+                    self.assertNotIn("secret", body.decode())
+                self.assertEqual(calls, ["router-secret"])
+                # The budget behind the refusal is the one every router login shares.
+                self.assertEqual(self.server.router_operations.begin_check()[0], 429)
+
     def test_router_check_endpoint_needs_a_helper_and_a_password(self) -> None:
         self.server.helper_client = None
         status, _, body = self.server.write_response_for(
@@ -2443,6 +2475,7 @@ class ControlServerTests(unittest.TestCase):
                         raise HelperClientError(message)
 
                 self.server.helper_client = FailedHelper()
+                self._router_wait_is_over()
                 with self.assertLogs("jittersim.api.server", level="WARNING") as logs:
                     status, _, body = self.server.write_response_for(
                         "/api/router/check", {"admin_password": "router-secret"}
@@ -2619,6 +2652,7 @@ class ControlServerTests(unittest.TestCase):
                     raise error
 
             self.server.helper_client = Failing()
+            self._router_wait_is_over()
             status, _, body = self.server.write_response_for(
                 "/api/router/check", {"admin_password": "router-secret"})
             self.assertEqual(status, 502)
@@ -2882,7 +2916,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(self.server.helper_client.applied_plan.mark_rules[0].device_id, "alice")
         self.assertEqual(len(self.server.helper_client.applied_plan.mark_rules), 2)
 
-    def test_connected_device_profile_assignment_keeps_a_reset_network_reset(self) -> None:
+    def test_connected_device_profile_assignment_after_a_reset_starts_only_that_device(self) -> None:
         self.server.helper_client = FakeHelper()
         self.repository.update_runtime_state(
             observed_state="reset", last_action="reset", last_result="success", last_error=None
@@ -2898,16 +2932,20 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 200)
-        self.assertFalse(json.loads(body)["live_applied"])
-        self.assertIsNone(self.server.helper_client.applied_plan)
+        self.assertTrue(json.loads(body)["live_applied"])
+        # The other saved device stays stopped: only the chosen one starts.
+        self.assertEqual(
+            [rule.device_id for rule in self.server.helper_client.applied_plan.mark_rules],
+            ["client-dc1ed53e974c"],
+        )
         self.assertEqual(
             self.repository.get_device_by_ipv4_address("192.168.50.178").profile_id, "slow"
         )
-        # Only an explicit Apply may undo a Reset. The dashboard relays the server's
-        # message, which says so.
+        self.assertEqual(self.repository.get_runtime_state().last_action, "reset")
+        # The dashboard relays the server's message, which names Start for the rest.
         assign = DASHBOARD_HTML.split("async function applyProfileToDevice(", 1)[1]
         self.assertIn("result.message", assign.split("\n    }\n", 1)[0])
-        self.assertIn("Start", json.loads(body)["message"])
+        self.assertIn("Start resumes all saved settings", json.loads(body)["message"])
 
     def test_profile_assignment_rejects_a_neighbor_without_verified_association(self) -> None:
         class UnverifiedHelper(FakeHelper):
@@ -4549,6 +4587,7 @@ class ControlServerTests(unittest.TestCase):
             json.loads(body)["state"],
             {
                 "configuration_version": 2,
+                "device_only": [],
                 "last_action": None,
                 "last_error": None,
                 "last_result": None,
