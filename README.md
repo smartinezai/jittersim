@@ -44,23 +44,29 @@ choose **Start with saved settings**. Saved profiles and schedules stay
 available. This first version covers router outages only. Pi restart behavior
 is unchanged.
 
-### Check for a staged update
+### Update the Pi
 
-<img src="docs/screenshots/staged-update-check.png" alt="Automatic checking is on and a verified release staged on the Pi is ready to install" width="100%" />
+<img src="docs/screenshots/staged-update-check.png" alt="A verified release staged on the Pi is ready to install" width="100%" />
 
-Automatic checking is on by default and the setting is saved on the Pi. When
-you open the dashboard, it checks for a verified release already staged there.
-You can turn automatic checking off and use **Check for updates** manually.
-Checking does not download or install a release. The **Router and Wi-Fi** page shows a badge
-when the staged and installed release labels differ. The terminal command
-`sudo jittersim update check` shows the same status.
+Open **Updates** and choose **Check for updates**. When a read-only GitHub
+token is saved on the Pi, the Pi downloads the newest release, checks its
+signature and stages it. Choose **Install update** to install it. The previous
+installation and its settings are backed up first, and when the Pi's health
+check fails after installing the backup is restored by itself. The sidebar
+shows **Update available** while a release is staged. Checking every day and
+installing automatically are both off until you turn them on.
+
+On the Pi the same takes two commands:
+`sudo jittersim update check --online` and
+`sudo jittersim update install --yes --wait`.
 
 The Pi stages and installs only releases signed by a release signing key you
 trust on it and newer than the one it runs. The admin token can only install
 the release already staged. See
 [Signed releases](deploy/raspberry-pi/README.md#signed-releases) for the
-one-time setup, passwordless deploys and what a leaked token or a stolen key
-can do.
+one-time setup (trusted key and GitHub token), passwordless deploys and what a
+leaked token or a stolen key can do. To publish a new release see
+[Releasing JitterSim](docs/releasing.md) and the [changelog](CHANGELOG.md).
 
 ## What you can try
 

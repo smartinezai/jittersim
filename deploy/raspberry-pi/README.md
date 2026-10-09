@@ -829,7 +829,7 @@ JitterSim database.
 ## Approved release updates
 
 Install this version once using the normal installer to add the update service.
-After that, Router and Wi-Fi can check the installed version, install a signed staged
+After that, the Updates page can check the installed version, install a signed staged
 release and restore the previous installation. Optional online checks may use
 a separately configured private GitHub token. Signing keys on the Pi are public
 trust keys. The private release key stays on the signing machine. See
@@ -837,11 +837,14 @@ trust keys. The private release key stays on the signing machine. See
 
 Releases have version numbers: MAJOR.MINOR.PATCH. A new feature raises
 MINOR and a fix raises PATCH. A change that needs a reinstall with the installer
-or breaks saved settings raises MAJOR. Put the number in `pyproject.toml` and in
-`src/jittersim/__init__.py` then mark the reviewed official `main` commit with
-`git tag vMAJOR.MINOR.PATCH`. A test fails when the tag and the files disagree.
+or breaks saved settings raises MAJOR. `scripts/release.sh MAJOR.MINOR.PATCH`
+sets the number in `pyproject.toml` and `src/jittersim/__init__.py`, tags the
+reviewed `main` commit, signs and publishes the release (see
+[Releasing JitterSim](../../docs/releasing.md)). A test fails when the tag and
+the files disagree.
 
-Build a bundle from the tag on the development machine:
+By hand: mark the reviewed `main` commit with `git tag vMAJOR.MINOR.PATCH` and build a
+bundle from the tag on the development machine:
 
 ```sh
 ./deploy/raspberry-pi/build-release.sh vMAJOR.MINOR.PATCH /tmp ~/.ssh/jittersim_release_ed25519
@@ -874,7 +877,7 @@ paths, links, more than 5000 files and excessive compressed or expanded size.
 write the staged files. The dashboard can select only that staged release and
 cannot submit a URL, path or shell command.
 
-On Router and Wi-Fi press Check for updates then Install staged release. The operation
+On the Updates page choose Check for updates then Install update. The operation
 runs the release steps of `install.sh`. It first runs the release's network
 preflight and kernel egress-hook check. If either fails nothing changes. It
 then stops the dashboard, helper and browser proxy. It backs up the
@@ -895,7 +898,7 @@ the installed manager before choosing that route.
 The recovery program uses system Python and is stored outside the app's virtual
 environment. A queued operation runs again after reboot. An interrupted install
 with a complete recovery copy restores the old installation before another
-attempt. Recovery failures remain visible on Router and Wi-Fi when the dashboard can run.
+attempt. Recovery failures remain visible on the Updates page when the dashboard can run.
 Inspect a failure over SSH with:
 
 ```sh
