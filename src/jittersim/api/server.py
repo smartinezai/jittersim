@@ -168,6 +168,8 @@ PROTECTED_ACCESS_RETRY_SECONDS = 10.0
 # A restarted helper is reconciled at once, but never more than once a second.
 PROTECTED_ACCESS_RESTART_RETRY_SECONDS = 1.0
 PROTECTED_ACCESS_SYNC_ATTEMPTS = 3
+# Startup restore asks a helper that answers helper-busy at most this often (one poll apart).
+STARTUP_HELPER_BUSY_ATTEMPTS = 4
 WIFI_COPY_BUSY_MESSAGE = "The router is busy right now. Try again in a moment."
 MAX_JSON_BODY_BYTES = 64 * 1024
 # One block or profile call may carry this many names.
@@ -5835,7 +5837,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             LOGGER.warning("saved ad-blocking choices could not be confirmed during dashboard startup")
         # Grants dashboard access to every saved protected device (also the upgrade step).
         self.recover_protected_access()
-        if not self._sync_gateway_persistence():
+        if not self._sync_gateway_persistence(busy_attempts=STARTUP_HELPER_BUSY_ATTEMPTS):
             return
         try:
             gateway_status = self.helper_client.gateway_status()
@@ -5888,19 +5890,27 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         else:
             self._record_activity(kind, message)
 
-    def _sync_gateway_persistence(self) -> bool:
-        """Give the helper the saved gateway persistence preference."""
+    def _sync_gateway_persistence(self, *, busy_attempts: int = 1) -> bool:
+        """Give the helper the saved gateway persistence preference.
+
+        A helper-busy answer is asked again up to busy_attempts times, one
+        helper poll apart, so a helper still busy at boot does not skip the restore.
+        """
 
         if self.helper_client is None:
             return False
-        try:
-            self.helper_client.set_gateway_persistence(
-                enabled=self.repository.get_persist_profiles_after_gateway_outage()
-            )
-        except HelperClientError:
-            LOGGER.error("gateway persistence setting did not reach the networking helper")
-            return False
-        return True
+        for attempt in range(busy_attempts):
+            try:
+                self.helper_client.set_gateway_persistence(
+                    enabled=self.repository.get_persist_profiles_after_gateway_outage()
+                )
+                return True
+            except HelperClientError as error:
+                if error.reason != "helper-busy" or attempt + 1 >= busy_attempts:
+                    break
+            time.sleep(self.helper_poll_seconds)
+        LOGGER.error("gateway persistence setting did not reach the networking helper")
+        return False
 
     def _record_activity(self, kind: str, message: str) -> None:
         try:
