@@ -49,6 +49,21 @@ The product constraint is the test suite and the ids, not the framework. A migra
 
 Honest cost: several days of work for the first three pages, weeks for all nine, with no change visible to users that the token refresh does not already give.
 
+## Existing libraries considered
+
+Rule from the owner: check for a mature free library before writing a component. What was checked, what was chosen and why. Licences and sizes below are what was verified on 2026-10-09. Where a figure could not be confirmed it says so.
+
+| Option | Verdict | Reason |
+| --- | --- | --- |
+| Lucide icons (ISC, `lucide-static` 1.54.0) | Adopted | Mature, maintained, free for a private repo. Ten drawings are copied into `refresh.css` as inline SVG masks. No runtime, no request, works with `img-src 'self' data:`. The licence text is in `docs/third-party-notices.md`. This replaced icons I had drawn by hand. |
+| Preact (MIT) | Prototype only | 6.4 KB gzip for the Devices page. Fits the constraints but a migration is the cost, not the library. See above. |
+| Open Props | Not adopted | It is a set of generic CSS custom properties (sizes, shadows, easings, palettes). The dashboard needs named roles (card, inset row, success text) that Open Props does not provide, so the roles would still be hand-written. I did not confirm its licence or size. Worth another look if the spacing and shadow scales grow. |
+| Pico.css (MIT per its README) | Not adopted | Restyles bare HTML elements. The dashboard is built from about 400 custom classes and strict id-based tests, so adopting it means overriding most of it. It would also turn the incremental refresh into a rewrite. |
+| Tailwind standalone CLI | Not adopted | Needs a build step and utility classes in the markup. Most markup is built in `dashboard.js` template strings that other work is editing. The strict CSP is fine (generated static CSS) but the migration is the cost. |
+| Alpine.js | Not adopted | Its default build needs `unsafe-eval`. A CSP build exists but limits expressions to component methods. Gain is small because the page logic is already plain JS. |
+| htmx | Not adopted | Built for server-rendered HTML fragments. The Pi serves JSON, so it would mean changing the server for no visual gain. |
+| Lit, Svelte | Not adopted | See the framework table. Shadow DOM hides ids from the tests (Lit). A compile step per page (Svelte). |
+
 ## Visual direction (implemented)
 
 Palette (dark, slightly less saturated than before, layered by lightness):
@@ -75,7 +90,7 @@ Components: cards with a faint top sheen. Buttons with a top highlight, press fe
 
 Motion: cards rise in over 280 ms when a page opens, toasts slide in, the pending badge pulses. Only position moves, never opacity: a fade made the axe contrast check read blended colours and report 19 false contrast failures, so it was dropped. Under `prefers-reduced-motion: reduce` every animation and transition is cut to nothing.
 
-Icons: inline SVG drawn as CSS masks (`url("data:image/svg+xml,...")`) so no markup changed, nothing is fetched and `img-src 'self' data:` already allows it. The colour follows the text colour.
+Icons: Lucide drawings (ISC) inlined as CSS masks (`url("data:image/svg+xml,...")`) so no markup changed, nothing is fetched and `img-src 'self' data:` already allows it. The colour follows the text colour.
 
 Accessibility: the focus ring is a two pixel outline plus a halo on every control. Text roles keep at least 4.5 to 1 contrast on their surfaces (a unit test checks the Impact card). Touch targets are untouched. Landmark names are untouched.
 
@@ -103,4 +118,4 @@ Screenshots from `python -m tests.browser.gui_baseline` with fixture data, dark 
 
 1. Light theme: yes or no. If yes, change `test_dark_only` and the colour-scheme line in `journeys.py` and add a light token block. Roughly half a day.
 2. Framework: stay vanilla (recommended) or start a Preact migration from the Devices page. The prototype shows the cost and the size, nothing more.
-3. Brand: the sidebar logo mark is a placeholder pulse line on the accent colour. Replace it if there is a real logo.
+3. Brand: the sidebar logo mark (not from a library) is a placeholder pulse line on the accent colour. Replace it if there is a real logo.
