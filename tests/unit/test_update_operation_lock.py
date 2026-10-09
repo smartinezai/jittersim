@@ -11,6 +11,7 @@ import types
 import pytest
 
 from jittersim import updates
+from tests.marker_support import PUBLISH_MARKER
 
 
 @pytest.fixture
@@ -128,12 +129,12 @@ def test_unknown_leaf_keeps_kernel_lock_after_parent_scope_exits(root, monkeypat
 def test_killed_owner_and_leader_cannot_hide_a_writer_without_lock_fd(root, tmp_path):
     leader_file, writer_file = tmp_path / "leader.pid", tmp_path / "writer.pid"
     writes = tmp_path / "owned-writes"
-    writer = ("import os,sys,time; from pathlib import Path; "
-              "Path(sys.argv[1]).write_text(str(os.getpid())); "
+    writer = (PUBLISH_MARKER + "import os,sys,time; from pathlib import Path; "
+              "publish_marker(sys.argv[1], str(os.getpid())); "
               "target=Path(sys.argv[2]); "
               "\nfor number in range(300):\n target.write_text(str(number))\n time.sleep(.1)\n")
-    leaf = ("import os,subprocess,sys,time; from pathlib import Path; "
-            "Path(sys.argv[1]).write_text(str(os.getpid())); "
+    leaf = (PUBLISH_MARKER + "import os,subprocess,sys,time; from pathlib import Path; "
+            "publish_marker(sys.argv[1], str(os.getpid())); "
             "subprocess.Popen([sys.executable,'-c'," + repr(writer) + ",sys.argv[2],sys.argv[3]],close_fds=True); "
             "time.sleep(30)")
     owner = ("from pathlib import Path; from jittersim.updates import update_lock,run_command; import sys; "
@@ -190,11 +191,11 @@ def test_running_publication_failure_never_executes_mutable_leaf(root, tmp_path,
 
 def test_parent_death_before_go_never_executes_mutable_leaf(root, tmp_path):
     ready, marker = tmp_path / "before-go", tmp_path / "must-not-run"
-    source = ("import sys,time; from pathlib import Path; from jittersim import updates; "
+    source = (PUBLISH_MARKER + "import sys,time; from pathlib import Path; from jittersim import updates; "
               "atomic=updates.atomic_json; "
               "\ndef pause(path,record):\n"
               " if path.name=='operation-pending.json' and record.get('state')=='running':\n"
-              "  Path(sys.argv[2]).write_text(str(record['group']))\n  time.sleep(30)\n"
+              "  publish_marker(sys.argv[2], str(record['group']))\n  time.sleep(30)\n"
               " return atomic(path,record)\n"
               "updates.atomic_json=pause\n"
               "with updates.update_lock(Path(sys.argv[1])):\n"
@@ -334,7 +335,7 @@ def test_unknown_health_command_propagates_without_authorizing_recovery(root):
 
 def test_killed_installer_parent_and_shell_keep_fd_free_child_owned(root, tmp_path):
     installer, ready = tmp_path / "install.sh", tmp_path / "ready"
-    child = "import os,sys,time; from pathlib import Path; Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)"
+    child = PUBLISH_MARKER + "import os,sys,time; publish_marker(sys.argv[1], str(os.getpid())); time.sleep(30)"
     installer.write_text("#!/bin/sh\n" + repr(sys.executable) + " -c "
                          + shlex.quote(child) + " "
                          + shlex.quote(str(ready)) + " 9>&- &\nwait\n")
