@@ -297,6 +297,15 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _removal_firewall(topology: Topology) -> str:
+    """Remove every access table and the transition guard."""
+
+    return "\n".join(
+        _table("jittersim_access") + ["delete table inet jittersim_access"]
+        + _table("jittersim_access", "netdev") + ["delete table netdev jittersim_access"]
+    ) + "\n" + transition_firewall(topology, clear=True)
+
+
 def transition_firewall(topology: Topology, *, clear: bool = False) -> str:
     table = "jittersim_access_transition"
     lines = _table(table)
@@ -554,11 +563,16 @@ class AccessManager:
         finally:
             self.lock.release()
 
-    def apply(self, plan: AccessPlan, *, force=False, wait=None):
-        """Replace the policy. `wait` bounds the wait for another change, in seconds."""
+    def apply(self, plan: AccessPlan, *, force=False, wait=None, guard=True):
+        """Replace the policy. `wait` bounds the wait for another change, in seconds.
+
+        ``guard`` closes test Wi-Fi forwarding while the rules change. An address
+        refresh does not need it: nft swaps its table atomically and DNS for the
+        listed clients fails closed while the resolver restarts.
+        """
 
         with self._locked(wait):
-            return self._apply_locked(plan, force=force)
+            return self._apply_locked(plan, force=force, guard=guard)
 
     def _relax(self, problems, description, step, *arguments):
         """Run one release step. A failure is recorded and the release goes on.
@@ -598,20 +612,35 @@ class AccessManager:
         try:
             opened = self._relax(failures, "the open access firewall",
                                  lambda: self._nft(render_access_firewall(plan, self.topology)))
+            guard_cleared = False
+            if not opened:
+                # Never fall back to the restrictions a release removes. A plain
+                # removal of the access tables and the guard needs no new rules and
+                # is the least that can fail.
+                opened = guard_cleared = self._relax(
+                    failures, "removing the access tables", lambda: self._nft(_removal_firewall(self.topology)))
+                if opened:
+                    LOGGER.warning("the open access firewall did not load. The access tables were removed")
+                    failures.clear()
             if opened:
                 # Nothing is redirected to the resolver or to a MAC rule any more.
                 self.applied = plan
-            self._relax(failures, "clearing the transition guard",
-                        lambda: self._nft(transition_firewall(self.topology, clear=True)))
-            self._relax(warnings, "Wi-Fi admission lists could not be cleared",
+            if not guard_cleared:
+                self._relax(failures, "clearing the transition guard",
+                            lambda: self._nft(transition_firewall(self.topology, clear=True)))
+            self._relax(warnings, "the Wi-Fi join limits could not be cleared",
                         self._admission, plan)
             if opened:
                 # Before this the old table may still send DNS to the resolver.
-                self._relax(warnings, "the unused resolver was not stopped", self._stop_dns)
-                self._relax(warnings, "the resolver configuration was not rewritten",
+                # The unused resolver and old DNS mappings (which expire within a
+                # minute) are only logged: they never keep anything closed.
+                logged = []
+                self._relax(logged, "stopping the unused resolver", self._stop_dns)
+                self._relax(logged, "rewriting the resolver configuration",
                             lambda: atomic_write(self.directory / "unbound.conf", render_dns(plan)))
-                self._relax(warnings, "old DNS connection state was not cleared",
-                            self._clear_dns_connections)
+                self._relax(logged, "clearing old DNS connection state", self._clear_dns_connections)
+                for description, error in logged:
+                    LOGGER.warning("household release: %s failed: %s", description, error)
             if not failures:
                 content = json.dumps(plan.payload(), sort_keys=True) + "\n"
 
@@ -643,7 +672,7 @@ class AccessManager:
         )
         return self.status()
 
-    def _apply_locked(self, plan: Optional[AccessPlan], *, force=False):
+    def _apply_locked(self, plan: Optional[AccessPlan], *, force=False, guard=True):
         self.dns_failed = False
         if (
             not force
@@ -688,7 +717,8 @@ class AccessManager:
         transition = (self.ad_blocking_store.access_transition()
                       if self.ad_blocking_store is not None else nullcontext())
         with transition:
-            self._nft(transition_firewall(self.topology))
+            if guard:
+                self._nft(transition_firewall(self.topology))
             try:
                 self._install(plan)
                 content = json.dumps(plan.payload(), sort_keys=True) + "\n"
@@ -719,6 +749,9 @@ class AccessManager:
                     self.error = (
                         "Access recovery failed. "
                         "The test network is closed until recovery succeeds."
+                        if guard else
+                        "Access recovery failed. "
+                        "Filtered DNS may be unavailable until recovery succeeds."
                     )
                     LOGGER.exception("persistent access recovery failed")
                 raise
@@ -763,7 +796,7 @@ class AccessManager:
             except ValueError:
                 return
             if candidate != self.applied:
-                self.apply(candidate)
+                self.apply(candidate, guard=False)
 
 
 def main(argv=None):
