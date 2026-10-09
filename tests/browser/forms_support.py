@@ -162,16 +162,22 @@ def rows_inside(container):
     )
 
 
+# The profile form asks the Pi to work out the ranges it shows. That is a question with a POST,
+# sent on its own after a load, and it saves nothing.
+READ_POSTS = ("profiles/ranges",)
+
+
 def record_writes(page):
-    """Collect every request that is not a read, so that a refused form can show it sent none."""
+    """Collect every request that saves something, so that a refused form can show it sent none."""
 
     writes = []
-    page.on(
-        "request",
-        lambda request: writes.append(request.method + " " + request.url.split("/api/", 1)[-1])
-        if request.method != "GET" and "/api/" in request.url
-        else None,
-    )
+
+    def record(request):
+        path = request.url.split("/api/", 1)[-1]
+        if request.method != "GET" and "/api/" in request.url and path not in READ_POSTS:
+            writes.append(request.method + " " + path)
+
+    page.on("request", record)
     return writes
 
 
