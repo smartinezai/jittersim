@@ -8,7 +8,7 @@ and Cancel. Removing a member keeps its saved device profile. Deleting a group
 explains the removal of its shared limit, schedules and running scenarios.
 
 The implementation is isolated at
-`/Users/samantha.martinez/Github repos/jittersim.worktrees/group-device-controls`
+`<home>/Github repos/jittersim.worktrees/group-device-controls`
 on `codex/group-device-controls`. Its base is
 `04c982d6150d225c3be6cc082573afc64a656842`.
 The source plan is `docs/implementation-plan-group-device-controls-2026-10-04.md`.

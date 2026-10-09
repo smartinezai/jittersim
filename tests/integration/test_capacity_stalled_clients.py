@@ -10,9 +10,12 @@ the timeouts can be observed without waiting ten seconds.
 import http.client
 import json
 import socket
+import ssl
+import subprocess
 import tempfile
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,22 +95,51 @@ def running_experiment(service):
 
 
 @contextmanager
-def dashboard(monkeypatch, *, input_seconds=INPUT_SECONDS):
+def dashboard(monkeypatch, *, input_seconds=INPUT_SECONDS, tls=False):
     monkeypatch.setattr(api, "REQUEST_INPUT_TIMEOUT_SECONDS", input_seconds)
     with tempfile.TemporaryDirectory(prefix="js70-", dir="/tmp") as temporary:
         directory = Path(temporary).resolve()
+        certificates = {}
+        context = None
+        if tls:
+            certificate, key = directory / "dashboard.crt", directory / "dashboard.key"
+            subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes", "-days", "1",
+                 "-keyout", str(key), "-out", str(certificate), "-subj", "/CN=127.0.0.1",
+                 "-addext", "subjectAltName=IP:127.0.0.1"],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            certificates = {"tls_certfile": certificate, "tls_keyfile": key}
+            context = ssl.create_default_context(cafile=str(certificate))
         with served_helper(directory) as (service, client, _), ConfigRepository(":memory:") as repo:
             repo.save_profile(Profile(id="normal", name="Normal"))
             scheduler = RuntimeScheduler(database_path=":memory:", helper_client=client)
             server = api.ControlServer(
-                ("127.0.0.1", 0), repo, admin_token=TOKEN, helper_client=client, scheduler=scheduler
+                ("127.0.0.1", 0), repo, admin_token=TOKEN, helper_client=client, scheduler=scheduler,
+                **certificates,
             )
             serving = threading.Thread(target=server.serve_forever, daemon=True)
             serving.start()
             clients = []
 
             def request(method, path, body=None):
-                connection = http.client.HTTPConnection(*server.server_address[:2], timeout=10)
+                connection = (
+                    http.client.HTTPSConnection(*server.server_address[:2], timeout=10, context=context)
+                    if tls else http.client.HTTPConnection(*server.server_address[:2], timeout=10))
+                if tls:
+                    # Under a flood the kernel's listen queue can overflow, and macOS
+                    # then resets the TCP connect before the server ever sees it.
+                    # Nothing was sent, so only that step is retried. A reset during
+                    # the TLS handshake or the request still fails the test.
+                    deadline = time.monotonic() + 5
+                    while True:
+                        try:
+                            raw = socket.create_connection(server.server_address[:2], timeout=10)
+                            break
+                        except (ConnectionResetError, ConnectionRefusedError):
+                            if time.monotonic() > deadline:
+                                raise
+                    connection.sock = context.wrap_socket(raw, server_hostname="127.0.0.1")
                 try:
                     headers = {"Authorization": "Bearer " + TOKEN}
                     payload = None if body is None else json.dumps(body)
@@ -187,14 +219,18 @@ def test_sixteen_stalled_clients_still_leave_the_reserve_for_panic_alone(monkeyp
         assert env.request("POST", "/api/normal-access", {})[0] == 200
 
 
-def test_every_worker_stalled_refuses_new_connections_then_capacity_recovers(monkeypatch):
+def test_stalled_clients_cannot_take_the_panic_reserve_and_capacity_recovers(monkeypatch):
+    # Changed on purpose (was: the reserve fills with stalled clients and Panic gets 503).
+    # A reserved slot is now handed out only for a complete, authorized Panic request,
+    # so clients that stall after a few bytes wait in the bounded pending queue instead.
     with dashboard(monkeypatch) as env:
         running_experiment(env.service)
         env.stall(ORDINARY + RESERVE)
-        assert wait_until(lambda: env.server.active_workers == ORDINARY + RESERVE, 2)
-        assert len(env.server._reserved_requests) == RESERVE
+        assert wait_until(lambda: env.server.active_workers == ORDINARY, 2)
+        assert wait_until(lambda: len(env.server._pending_connections) == RESERVE, 2)
+        assert env.server._reserved_requests == set()
 
-        # Beyond 16+2 the answer is an immediate bare 503, never a wait or a new worker.
+        # An ordinary request beyond the 16 workers is still refused at once, never queued.
         started = time.monotonic()
         refused = socket.create_connection(env.server.server_address[:2], timeout=2)
         try:
@@ -205,21 +241,127 @@ def test_every_worker_stalled_refuses_new_connections_then_capacity_recovers(mon
         assert reply.startswith(b"HTTP/1.1 503 ")
         assert b"Retry-After: 1" in reply
         assert time.monotonic() - started < 1.0
-        assert env.server.active_workers == ORDINARY + RESERVE
+        assert env.server.active_workers == ORDINARY
 
-        # Panic is refused too while the reserve is full of stalled clients.
-        status, _, _ = env.request("POST", "/api/normal-access", {})
-        assert status == 503
+        # A Panic request without the token does not get the reserve either.
+        unauthorized = socket.create_connection(env.server.server_address[:2], timeout=2)
+        try:
+            unauthorized.sendall(b"POST /api/normal-access HTTP/1.1\r\nHost: x\r\n"
+                                 b"Authorization: Bearer wrong\r\nContent-Length: 2\r\n\r\n{}")
+            assert unauthorized.recv(4096).startswith(b"HTTP/1.1 503 ")
+        finally:
+            unauthorized.close()
         assert env.service._panic_stop_latched is False
-        assert env.service._active_plan is not None
+
+        # Panic gets through while the stalled clients are still there.
+        status, _, body = env.request("POST", "/api/normal-access", {})
+        assert status == 200, body
+        assert env.service._panic_stop_latched is True
+        assert env.service._active_plan is None
 
         # Every stalled client is cut off at the input deadline and capacity comes back whole.
         assert wait_until(lambda: env.server.active_workers == 0, INPUT_SECONDS + 3)
+        assert wait_until(lambda: not env.server._pending_connections, 2)
         assert env.server._reserved_requests == set()
         assert env.request("GET", "/api/profiles")[0] == 200
         assert env.request("POST", "/api/normal-access", {})[0] == 200
+
+
+def test_panic_gets_through_while_one_byte_stalls_are_renewed(monkeypatch):
+    # Eighteen connections that send one byte and stall, renewed as soon as one ends.
+    with dashboard(monkeypatch) as env:
+        running_experiment(env.service)
+        stop = threading.Event()
+        renewed = [0]
+
+        def staller():
+            open_ = []
+            while not stop.is_set():
+                open_ = [c for c in open_ if not _closed_by_server(c)]
+                while len(open_) < ORDINARY + RESERVE and not stop.is_set():
+                    try:
+                        connection = socket.create_connection(env.server.server_address[:2], timeout=2)
+                        connection.sendall(b"P")
+                    except OSError:
+                        break
+                    open_.append(connection)
+                    renewed[0] += 1
+                time.sleep(0.01)
+            for connection in open_:
+                connection.close()
+
+        thread = threading.Thread(target=staller, daemon=True)
+        thread.start()
+        try:
+            assert wait_until(lambda: env.server.active_workers == ORDINARY, 3)
+            assert wait_until(lambda: renewed[0] >= ORDINARY + RESERVE, 3)
+            for _ in range(3):
+                status, _, body = env.request("POST", "/api/normal-access", {})
+                assert status == 200, body
+            assert env.server._reserved_requests == set()
+            assert len(env.server._pending_connections) <= api.MAX_PENDING_DASHBOARD_CONNECTIONS
+        finally:
+            stop.set()
+            thread.join(5)
         assert env.service._panic_stop_latched is True
-        assert env.service._active_plan is None
+        assert wait_until(lambda: env.server.active_workers == 0, INPUT_SECONDS + 3)
+        assert env.request("GET", "/api/profiles")[0] == 200
+
+
+def _closed_by_server(connection):
+    connection.setblocking(False)
+    try:
+        return connection.recv(1) == b""
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
+    finally:
+        connection.setblocking(True)
+
+
+def test_tls_panic_completes_its_handshake_during_a_continuing_flood(monkeypatch):
+    with dashboard(monkeypatch, tls=True) as env:
+        running_experiment(env.service)
+        stop = threading.Event()
+        opened = [0]
+
+        def flood():
+            held = deque()
+            while not stop.is_set():
+                try:
+                    held.append(socket.create_connection(env.server.server_address[:2], timeout=1))
+                except OSError:
+                    continue
+                opened[0] += 1
+                if len(held) > 40:
+                    held.popleft().close()
+                # About a thousand connections a second in all: far more than the 16 a
+                # Panic handshake can afford to see, but within what the kernel's listen
+                # queue holds. Beyond that macOS resets connections before accept.
+                time.sleep(0.002)
+            for connection in held:
+                connection.close()
+
+        threads = [threading.Thread(target=flood, daemon=True) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        try:
+            limit = api.MAX_PENDING_DASHBOARD_CONNECTIONS
+            assert wait_until(lambda: len(env.server._pending_connections) == limit, 3)
+            assert wait_until(lambda: opened[0] >= 4 * limit, 5)
+            for _ in range(3):
+                before = opened[0]
+                status, _, body = env.request("POST", "/api/normal-access", {})
+                assert status == 200, body
+                # The flood kept going while Panic made its handshake.
+                assert opened[0] > before
+            assert len(env.server._pending_connections) <= limit
+        finally:
+            stop.set()
+            for thread in threads:
+                thread.join(5)
+        assert env.service._panic_stop_latched is True
 
 
 def test_silent_connections_take_no_worker_slot_and_expire_before_panic_goes_through(monkeypatch):

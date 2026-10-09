@@ -27,7 +27,10 @@ class DashboardSaturationTests(unittest.TestCase):
     request = concurrency.DashboardConcurrencyTests.request
     start_slow_apply = concurrency.DashboardConcurrencyTests.start_slow_apply
 
-    def test_reserved_slow_headers_expire_then_panic_retry_recovers(self):
+    def test_slow_panic_headers_wait_outside_the_reserve_and_panic_gets_through(self):
+        # Changed on purpose (was: two slow header requests fill the reserve, Panic
+        # gets 503 until they expire). A reserved worker is now handed out only for
+        # a complete, authorized Panic request, so the stalled ones wait instead.
         sockets = []
         with (
             patch.object(api, "MAX_DASHBOARD_WORKERS", 1),
@@ -41,16 +44,17 @@ class DashboardSaturationTests(unittest.TestCase):
                     connection.sendall(b"POST /api/normal-access HTTP/1.1\r\nHost:")
                     sockets.append(connection)
                 deadline = time.monotonic() + 0.4
-                while self.server.active_workers != 3 and time.monotonic() < deadline:
+                while len(self.server._pending_connections) != 2 and time.monotonic() < deadline:
                     time.sleep(0.005)
-                assert self.server.active_workers == 3
-                assert self.request("POST", "/api/normal-access", {})[0] == 503
-                assert self.helper.normal_access_calls == 0
-                deadline = time.monotonic() + 1.5
-                while self.server.active_workers != 1 and time.monotonic() < deadline:
-                    time.sleep(0.005)
+                assert len(self.server._pending_connections) == 2
                 assert self.server.active_workers == 1
                 assert self.request("POST", "/api/normal-access", {})[0] == 200
+                assert self.helper.normal_access_calls == 1
+                deadline = time.monotonic() + 1.5
+                while self.server._pending_connections and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                assert not self.server._pending_connections
+                assert self.server.active_workers == 1
                 self.helper.release_apply.set()
                 worker.join(2)
                 assert result["response"][0] == 409

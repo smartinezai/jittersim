@@ -40,7 +40,7 @@ you see the effect.
 
 With this option on, active profiles return when the router connection comes
 back. With it off, a confirmed router outage stops active profiles until you
-choose **Start with saved settings**. Saved profiles and schedules stay
+choose **Start**. Saved profiles and schedules stay
 available. This first version covers router outages only. Pi restart behavior
 is unchanged.
 
@@ -56,9 +56,10 @@ check fails after installing the backup is restored by itself. The sidebar
 shows **Update available** while a release is staged. Checking every day and
 installing automatically are both off until you turn them on.
 
-On the Pi the same takes two commands:
-`sudo jittersim update check --online` and
-`sudo jittersim update install --yes --wait`.
+On the Pi the same is one command: `sudo jittersim update`. It checks GitHub,
+shows the new version and its notes, asks, installs and waits for the health
+check. From the Mac use `jittersim remote update now`. `jittersim version`
+prints the version the Pi runs.
 
 The Pi stages and installs only releases signed by a release signing key you
 trust on it and newer than the one it runs. The admin token can only install
@@ -79,13 +80,16 @@ leaked token or a stolen key can do. To publish a new release see
 - Use the browser proxy to test different profiles on selected secure
   websites.
 - Choose whether profiles stop or resume after a router outage.
-- Restore the Pi Wi-Fi name to JitterSim from the dashboard or terminal.
+- Restore the Pi Wi-Fi name to its default (`TestNet`) from the dashboard or
+  terminal.
 
 **Reset network** stops active profile effects while leaving saved settings
 and household access rules in place. **Normal access** also turns off device
 and website blocking. Both keep the test Wi-Fi separated from your home
 devices. If the dashboard is unavailable, connect to the Pi over SSH and run
-`sudo jittersim normal-access`.
+`sudo jittersim normal-access`. The
+[runbook for an unreachable dashboard](docs/runbooks/dashboard-unreachable.md)
+lists what to check first.
 
 Site rules include subdomains. A VPN, encrypted DNS or direct internet
 connection can bypass network-only filtering. Existing connections or cached
@@ -103,6 +107,7 @@ sudo jittersim status
 sudo jittersim access status
 sudo jittersim access dns-failure show
 sudo jittersim persistence show
+sudo jittersim update
 sudo jittersim update check
 sudo jittersim diagnostics
 sudo jittersim logs dns --lines 80
@@ -115,7 +120,7 @@ Run `sudo jittersim --help` for the command list. More examples are in the
 [Pi installation and recovery guide](deploy/raspberry-pi/README.md).
 
 Use **Reset Wi-Fi name** on Router and Wi-Fi or run `sudo jittersim wifi reset` on the Pi.
-It restores `JitterSim` and keeps the current password. Confirming the reset
+It restores the default name `TestNet` and keeps the current password. Confirming the reset
 restarts test Wi-Fi, so its clients need to reconnect. Add `--yes` when running
 without a prompt. This command needs the local helper but not the dashboard or
 its settings database.
@@ -167,6 +172,8 @@ control characters.
 | `jittersim traffic block DOMAIN` | Adds a name to the global block list. While household access rules are on the names under it are blocked too. `traffic unblock DOMAIN` removes the exact name. Both say so when nothing had to change. |
 | `jittersim wifi show` | The router's own Wi-Fi name, read live from the router. It also asks for the router admin password with a hidden prompt. Add `--password` to show the Wi-Fi password too. |
 | `jittersim impact` | The **Impact** check: two samples of the Pi's queues `--wait` seconds apart (10 by default, at most 50) judged with the dashboard's rules. The verdicts name the time it measured such as "in the last 10 seconds". |
+
+The terminal commands call the profile for **Everyone** the general profile.
 
 Add `--json` to any of them for machine-readable output (a failure is then
 `{"error": ..., "exit_code": ...}` on standard output) or `--help` for details.
@@ -239,7 +246,7 @@ See
 - Click-to-select devices and assign profiles from the dashboard.
 - Device groups that apply one profile override to several devices at once.
 - Add connected clients to groups without entering their IP or MAC address.
-- A saved list of devices unaffected by all profiles and profile quotas.
+- A saved list of **Protected devices** that no profile or profile quota affects.
 - A live upload and download graph with packet rates for assigned devices.
 - MAC address allowlists and denylists.
 - A global blocked-site list.
@@ -280,14 +287,19 @@ bytes.
 
 ### Pi and router controls
 
-The left sidebar, visible on every page, includes one **Router Wi-Fi** switch.
-On a phone the switch sits in the bar at the bottom of the screen next to
-**Panic**. It shows the router's confirmed On or Off state and the last check time.
+The left sidebar, visible on every page, shows **Router Wi-Fi · read only**.
+On a phone it sits in the bar at the bottom of the screen next to **Panic**.
+It shows the router's confirmed On or Off state and the last check time. The
+switch is always disabled. JitterSim does not turn the router's Wi-Fi on or
+off. The Pi's helper refuses router Wi-Fi changes before it contacts the
+router. Use the router's own button or settings page for that.
 Enter the router admin password then choose **Check router Wi-Fi** for a
 fresh status. Remembering the password or opening the page does not start
-automatic router checks. A change shows **Changing** until the router confirms
-it. An unavailable status disables the switch instead of guessing. Keep the Pi
-connected by Ethernet when changing router Wi-Fi.
+automatic router checks. The Pi spaces router sign-ins apart: after a right
+password a check can run again 15 seconds later and after a wrong one 30
+seconds later. A check pressed too soon is refused and the router is not
+contacted. An unavailable status says so instead of guessing.
+Keep the Pi connected by Ethernet when copying router Wi-Fi.
 
 Under the switch **Copy router Wi-Fi to Pi** applies the router's Wi-Fi name,
 password and security together to the Pi's test network. Its progress and
@@ -298,13 +310,14 @@ restarts so keep a separate management connection. The copy action keeps the
 Wi-Fi password out of the page and clipboard.
 
 The sidebar also shows a short status block once the admin token is accepted.
-**General profile** says which saved profile is the general profile and whether
-it is active or paused or only saved. **Devices** says how many connected
-devices are affected right now and opens a list with the profile each one
-gets. Protected devices are never listed. **Service lists** names the enabled
-lists. The block says `Profiles off` after Reset or Panic and `Not running`
+Its first line starts with **Everyone:** and names the profile for Everyone with
+`active`, `paused` or `saved, not applied`. It says `Everyone: none` when no
+profile is chosen. The next line says how many connected devices are affected
+right now and opens a list with the profile each one gets. Protected devices are
+never listed. A line starting with **Service lists:** names the enabled lists.
+The device line says `Profiles off` after Reset or Panic and `Not running`
 before the first start. After a device-only start it lists only the devices
-that run and shows the general profile as paused.
+that run and shows the profile for Everyone as paused.
 
 **Copy router Wi-Fi to Pi** checks the router's security before copying its
 name and password. The confirmation shows the source band and security type.
@@ -319,8 +332,8 @@ that network. After copying router Wi-Fi this is the router's Wi-Fi password.
 It is different from the router administration password and dashboard token.
 
 Use **Reset Wi-Fi name** on the **Router and Wi-Fi** page or run
-`sudo jittersim wifi reset` on the Pi to restore `JitterSim`. Both keep the
-current password and security type. The action restarts Wi-Fi and disconnects
+`sudo jittersim wifi reset` on the Pi to restore the default name `TestNet`.
+Both keep the current password and security type. The action restarts Wi-Fi and disconnects
 test clients. Add `--yes` to confirm without an interactive prompt. The console
 works with the dashboard stopped and needs the local helper.
 
@@ -376,7 +389,7 @@ network address ranges. Check its fingerprint against the installer output
 before installing it on your device.
 
 Only dashboard traffic avoids simulated loss and client blocks. Your ordinary
-internet traffic still follows its profile. The separate unaffected-device
+internet traffic still follows its profile. The separate **Protected devices**
 list continues to cover broader profile exemptions. SSH and access to private
 router devices remain restricted.
 
@@ -424,9 +437,11 @@ Rollback restores that older access behavior while retaining the saved file.
 
 - The Pi's Ethernet network name and router gateway in the dashboard.
 - Rename the Pi test access point and change its password locally.
-- Enter the Vodafone TG3442DE admin password for one action at a time.
+- Enter the Vodafone TG3442DE admin password. The Pi does not save it. The
+  browser keeps it in the page only, or for 24 hours if you choose Remember.
 - Check and copy the router's Wi-Fi name, password and security to the Pi.
-- Turn the router's primary Wi-Fi on or off from the dashboard.
+- Read the router's primary Wi-Fi status. This is read only. Turning the router
+  Wi-Fi on or off is done with the router's own button or page.
 - A direct link to the Vodafone router page for settings JitterSim cannot
   change.
 - A visible status area for the current mode, connected devices, schedules,
@@ -498,11 +513,10 @@ profile for them. You can keep several lists with a different profile each.
 While a list is enabled, traffic from an affected device to its services gets
 that profile instead of whatever the device would otherwise get. That
 includes no profile at all, a device, group, schedule, timer, progression or
-quota profile, a browser service profile and the general profile. A device with
+quota profile, a browser service profile and the profile for Everyone. A device with
 no profile browses normally until it opens one of the listed services. All
 other traffic is untouched. The list applies to upload and download traffic of
-any protocol including QUIC. Devices in **Unaffected by profiles** are never
-touched. Global MAC and website rules still apply. A random outage or website
+any protocol including QUIC. **Protected devices** are never touched. Global MAC and website rules still apply. A random outage or website
 list from the device's own profile does not cut a listed service. A device in
 a random outage still loses the Pi's DNS and browser proxy so it reaches a
 listed service only through addresses it already has.
@@ -516,7 +530,7 @@ rejected on these service paths because their scope cannot be preserved there.
 Global access rules still apply.
 
 All affected devices share one speed limit for each list in the same way the
-general profile shares its limit. Delay, jitter and loss apply to each packet.
+profile for Everyone shares its limit. Delay, jitter and loss apply to each packet.
 
 ### Changing patterns
 
@@ -572,32 +586,31 @@ plan supports at most 15 combined devices, service rules and service lists.
 
 ### Starting and stopping
 
-**Start with saved settings** starts JitterSim with everything you saved: device
-and group profiles and schedules and limits and service lists and access rules.
-While JitterSim runs the dashboard says so and the button reads **Re-apply saved
-settings**. Changes you save apply on their own within a few seconds so you do
-not press the button again. **Reset network** stops the profiles and removes
+**Start** starts JitterSim with everything you saved: device and group profiles
+and schedules and limits and service lists and access rules. The button always
+reads **Start**. While JitterSim runs the dashboard says so and pressing **Start**
+again applies the saved settings again. Changes you save apply on their own
+within a few seconds so you do not press the button again. **Reset network** stops the profiles and removes
 their rules from the Pi. Household blocking of devices and sites stays on.
 **Panic** does the same and turns household blocking off too. Your saved
-settings are kept. Choose **Start with saved settings** to run the profiles
-again. After Panic turn household blocking back on under Access rules.
+settings are kept. Choose **Start** to run the profiles again. After Panic turn household blocking back on under Access rules.
 Protected devices are never touched.
 
 After **Reset network** you can start one device on its own: choose a profile
 beside a connected client and click **Apply profile**. Only that device starts.
-The general profile, other saved devices, everyone else, service lists and ad
-blocking stay paused. Apply more clients the same way to add them. The status
-line says `Running for N devices only` and **Start with saved settings** resumes
-every saved setting. **Reset network** or **Panic** stops the devices again.
-After Panic or a router outage, choose **Start with saved settings** first.
+The profile for Everyone, other saved devices, everyone else, service lists and
+ad blocking stay paused. Apply more clients the same way to add them. The status
+line says `Running for N devices only` and **Start** resumes every saved
+setting. **Reset network** or **Panic** stops the devices again. After Panic or
+a router outage, choose **Start** first.
 
 The line under the button counts what is saved. The message after a start counts
 what JitterSim really started. Access rules also run after a start so a start
 with no profiles saved says that they apply. Without the Pi helper the dashboard
 says that it needs the helper to run.
 
-**Active profile** above the button names the general profile that is active
-right now. When none is active choose a saved profile in the list. Nothing
+**Active profile** above the button names the profile for Everyone that is
+active right now. When none is active choose a saved profile in the list. Nothing
 changes until you press **Apply to all devices**. While that profile is active
 the button reads **Stop**. It works like **Apply to all** and **Stop** on the
 Profiles page and protected devices stay untouched.
@@ -607,46 +620,49 @@ Profiles page and protected devices stay untouched.
 Up to a width of 768 pixels the dashboard uses a phone layout. The top of the
 page shows the name, the mode, every page in one row that scrolls sideways and
 one line of status. Tap the status line to open the full status block. A page
-link shows the start of that page. **Panic** and the **Router Wi-Fi** switch
-stay in a bar at the bottom of the screen on every page. **Controls** in that
-bar opens a sheet with **Active profile**, **Start with saved settings**,
-**Reset network**, the status and message lines, the two copy buttons and the
-**Admin token** and **Router password** buttons. Tap outside the sheet or press
+link shows the start of that page. **Panic** and the read-only **Router Wi-Fi**
+status stay in a bar at the bottom of the screen on every page. **Controls** in that
+bar opens a sheet with **Active profile**, **Start**,
+**Reset network**, the status and message lines, **Check router Wi-Fi**,
+**Copy router Wi-Fi to Pi** and the **Admin token** and **Router password**
+buttons. Tap outside the sheet or press
 Escape to close it. Buttons, fields and the page links are at least 44 pixels
 tall.
 
-### General profile
+### Everyone: one profile for the whole test Wi-Fi
 
-Choose a saved profile under **General profile** then click **Apply to all**.
+The terminal commands and older notes call this the general profile. Choose a
+saved profile under **Everyone** on the **Devices** page then click **Apply to
+all**.
 It applies immediately to every unprotected device on JitterSim Wi-Fi,
 including clients without saved assignments and clients that connect later.
 There is no device selection, schedule, duration or usage quota to configure.
 
 The profile's upload and download speed limits are shared only by affected
-devices. Clients in **Unaffected by profiles** bypass those limits completely
+devices. **Protected devices** bypass those limits completely
 and do not consume that shared allowance. They also bypass the profile's delay,
 loss, website rules and random outages. Separate global access rules still
 apply to all clients.
 
-While the general profile is active it takes priority over saved device,
+While the profile for Everyone is active it takes priority over saved device,
 group, schedule, timer, progression, browser service and quota profile rules.
-Service lists still take priority over the general profile for their services.
+Service lists still take priority over it for their services.
 Those settings remain saved. Quota charging pauses during this mode. Timers
 and schedules keep their original times. The traffic chart shows the shared
 limit and combined affected traffic rather than an individual device limit.
 Random changes apply to the network together. Their choices are not added to
 the per-device random website history.
 
-**Stop general profile** resumes the saved device rules that are current at
-that moment. While the network is reset, Stop only removes the selection and
-starts nothing. **Panic** or **Reset network** turns all profiles off while keeping
-the selection. **Apply to all** or **Start with saved settings** resumes it.
-A restart repeats the last Start or Reset unless a saved change cleared that
-record. Then JitterSim is not running until you choose **Start with saved
-settings** or **Reset network**. Protected clients remain protected through
-reconnects and IP changes.
+**Stop for everyone** (or **Stop** in the sidebar) resumes the saved device
+rules that are current at that moment. While the network is reset, Stop only
+removes the selection and starts nothing. **Panic** or **Reset network** turns
+all profiles off while keeping the selection. **Apply to all** or **Start**
+resumes it. A restart repeats the last Start or Reset unless a saved change
+cleared that record. Then JitterSim is not running until you choose **Start** or
+**Reset network**. Protected clients remain protected through reconnects and IP
+changes.
 
-### Connected clients and unaffected devices
+### Connected clients and protected devices
 
 Open **Connected clients** after checking the admin token. This panel shows
 devices on the Pi's test Wi-Fi. Devices on the router's Wi-Fi are outside this
@@ -655,17 +671,19 @@ or group can be assigned.
 
 Choose a profile beside a client then click **Assign profile** or **Apply
 profile**. Choose an existing group then click **Add to group**. For a client
-without a saved assignment, that group needs a profile override. The **Group
-devices** form can also select several connected clients. A client can belong
-to one group. A base profile can be overridden by a group, schedule, timer,
-progression or quota. The save message explains the current override.
+without a saved assignment, that group needs a profile (**Profile for this
+group**). The **Group devices** form can also select several connected clients.
+A client can belong to one group. A device's own profile can be overridden by a
+group, schedule, timer, progression or quota. The save message explains the
+current override.
 **Apply profile** starts the profile for that client at once. While JitterSim
 runs, the saved settings are applied again with it. After **Reset network**
-only that client starts and everything else stays paused. While a general
-profile is active, **Apply profile** is refused and nothing is saved. Stop the
-general profile first, or save the choice under **Saved devices** for later.
+only that client starts and everything else stays paused. While a profile for
+Everyone is active, **Apply profile** is refused and nothing is saved. Stop it
+first with **Stop for everyone**, or save the choice under **Saved devices** for
+later.
 
-Click **Make unaffected** to protect a connected client from every profile,
+Click **Protect** to protect a connected client from every profile,
 random outage, profile website rule and device or service quota. Its traffic
 also stops consuming shared group quotas. Its saved assignments stay in place
 and resume when protection is removed. Global MAC and website access rules
@@ -673,15 +691,14 @@ still apply. Protection also lets the device open the dashboard with the
 admin token (see **Dashboard access from Pi Wi-Fi**). It never grants SSH,
 router administration or public internet access.
 
-The **Unaffected by profiles** list keeps protection when a client disconnects
+The **Protected devices** list keeps protection when a client disconnects
 or changes IP. It supports up to 256 saved Wi-Fi MAC addresses. Use **Add an
 offline device** for a device that is not connected. If its private Wi-Fi MAC
 changes, add the new address. When protection is configured, unverifiable
 clients have their profile rules skipped and the dashboard reports a warning.
 If applying a change fails, the dashboard reports that settings were saved
-but network protection is not confirmed. Retry **Start with saved settings**
-after fixing the helper error. The button reads **Re-apply saved settings** while
-JitterSim runs.
+but network protection is not confirmed. Retry **Start** after fixing the
+helper error.
 
 ### Device names
 
@@ -694,9 +711,9 @@ announced name instead of `Client <ip>`.
 
 ### Protected devices and privacy
 
-A device in **Unaffected by profiles** stays out of traffic monitoring. Its row says `Traffic
+A device in **Protected devices** stays out of traffic monitoring. Its row says `Traffic
 is not monitored` and is greyed out with its profile and group controls
-disabled. **Remove protection** and the name and type editor stay active.
+disabled. **Stop protecting** and the name and type editor stay active.
 
 - The DNS scan behind Traffic discovery skips the device's frames before they
   are captured. The Pi also drops any row that belongs to a protected MAC
@@ -788,8 +805,8 @@ buttons. A group opened stays open when the page refreshes.
   that already is an allow-list adds the names without a question.
 
 A block or profile change from this card is saved at once. It applies on its
-own while JitterSim is running. After Reset or Panic choose **Start with saved
-settings**. After Panic also turn household blocking back on.
+own while JitterSim is running. After Reset or Panic choose **Start**. After
+Panic also turn household blocking back on.
 
 ### Impact check
 
@@ -809,7 +826,7 @@ device name and direction then what is set and what happened:
   last minute` or `Too few packets to judge` or `No drops or cap hit seen` or
   `Effect not measured here`.
 
-General profile and service list and quota queues appear with their own names.
+The profile for Everyone and service list and quota queues appear with their own names.
 Protected devices are listed on one muted line and never get a row. Applying a
 plan restarts the history. A busy helper keeps the rows and shows `Update
 paused`. Counters describe packets and drops. They cannot prove how much delay
@@ -833,7 +850,7 @@ Any household device can join the JitterSim Wi-Fi without a JitterSim device
 record. The DHCP service and ordinary internet forwarding run in
 NetworkManager, independently of the dashboard and network helper. A network
 plan normally marks devices you add in the dashboard. Other clients use a
-normal fair queue. When a general profile is active every unprotected client
+normal fair queue. When a profile for Everyone is active every unprotected client
 receives it instead. Protected clients keep their normal traffic path.
 
 The connected-device list shows devices currently associated with the Pi's
@@ -864,8 +881,10 @@ the trial. See the [official hardware specifications](https://www.raspberrypi.co
 and [wireless setup guide](https://www.raspberrypi.com/documentation/computers/configuration.html).
 
 Test Wi-Fi clients can use the Pi for public internet access but cannot reach
-the dashboard or private upstream addresses such as the Vodafone router's
-`192.168.0.1`. Dashboard changes also require the administrator token.
+private upstream addresses such as the Vodafone router's `192.168.0.1`. They
+reach the dashboard's sign-in page. Private data and controls need the
+administrator token and **Allow this device** (see [Dashboard access from Pi
+Wi-Fi](#dashboard-access-from-pi-wi-fi)).
 
 Website rules, service quotas and device-data progression are best-effort. VPNs,
 encrypted DNS, direct IP access, cached connections and shared hosting can hide
@@ -892,16 +911,19 @@ connected device to check its experienced speed.
   traffic.
 - **Hardware mode** uses the Pi helper to apply the saved plan.
 
-Enter the admin token in the **Control token** box and click **Check token** to
-load diagnostics. Dashboard actions show when they start and whether they
+Choose **Admin token** in the sidebar, enter the token and click **Check token**
+to load diagnostics. Dashboard actions show when they start and whether they
 worked, without requiring you to scroll to the status area.
 
-For a Vodafone TG3442DE, the dashboard can read the primary Wi-Fi settings and
-turn the primary Wi-Fi radios on or off. The router password is used for one
-authenticated request and is not saved. Keep the Pi connected by Ethernet
-before changing router Wi-Fi. If a router firmware update changes its local
-web interface, use the direct router link or the manual Pi access-point form.
-See the [Pi deployment guide](deploy/raspberry-pi/README.md).
+For a Vodafone TG3442DE, the dashboard can read the primary Wi-Fi status and
+copy the router's Wi-Fi name, password and security to the Pi. It cannot turn
+the router's Wi-Fi on or off. The Pi's helper refuses router Wi-Fi changes
+before it contacts the router, so use the router's own button or settings page.
+The router password is used for one authenticated request and is not saved on
+the Pi. Keep the Pi connected by Ethernet while copying router Wi-Fi. If a
+router firmware update changes its local web interface, use the direct router
+link or the manual Pi access-point form. See the
+[Pi deployment guide](deploy/raspberry-pi/README.md).
 
 For control from another location, join the Pi and laptop to your Tailscale
 network and privately serve the dashboard over the Pi's Tailscale name. Keep
@@ -942,16 +964,26 @@ interface still uses HTTP between the Pi and router.
    available as a recovery path.
 2. Use Raspberry Pi OS with NetworkManager 1.50 or newer. Set the correct
    wireless country for the Pi before starting its access point.
-3. From the verified official release folder run:
+3. Create a user named `jittersim` when you write the SD card with Raspberry
+   Pi Imager. The installer stops before it changes anything and prints `the
+   jittersim service user must be created by Raspberry Pi Imager` if this user
+   does not exist. The dashboard, browser proxy and service watcher run as this
+   user, and the Mac deploy script logs in as `jittersim` by default. For a Pi
+   that already runs without it see the
+   [service user note](deploy/raspberry-pi/README.md#service-user).
+4. From the verified official release folder run the installer as root. The
+   [Pi guide](deploy/raspberry-pi/README.md#install-or-update) shows how to
+   unpack a release so that only root can change it, which the installer
+   requires:
 
    ```sh
    sudo deploy/raspberry-pi/install.sh
    ```
 
-4. Open `https://netlab.local:8080` or use an IP address covered by its
+5. Open `https://netlab.local:8080` or use an IP address covered by its
    certificate. Verify the public authority fingerprint through the Pi or an
    independent management connection before following **Trust this Pi**.
-5. Open **Admin token** in the sidebar, enter the admin token and choose
+6. Open **Admin token** in the sidebar, enter the admin token and choose
    **Check token**. On the Pi, run
    `sudo grep JITTERSIM_ADMIN_TOKEN /etc/jittersim/control.env` to read it.
    From the test Wi-Fi also choose **Allow this device** once unless the
@@ -971,17 +1003,19 @@ when the list was cleared until the first new name arrives and `jittersim
 traffic` says the same. The list fills again as devices browse. Names are kept
 for 30 days from their last sighting. Nothing else is lost.
 
-The test network requires WPA3 with AES and protected Wi-Fi management messages.
-Upgrades save the stronger security settings and report when an active network
-needs a planned restart. Manual
-Wi-Fi changes, router imports and name resets activate the stronger settings.
-Devices must support WPA3 to join. The radio is checked for WPA3 authentication
-and required protection before runtime changes report success.
+A fresh installation and manual Wi-Fi changes from the dashboard use WPA3 with
+AES and required protection for Wi-Fi management messages. Devices must
+support WPA3 to join such a network. An upgrade keeps the security type of the
+existing test Wi-Fi. **Copy router Wi-Fi to Pi** matches the router's personal
+security mode when the Pi can verify it. **Reset Wi-Fi name** keeps the current
+mode. The radio is checked before a runtime change reports success.
 
 Copying your router's Wi-Fi name can make your debugging computer join the Pi
-instead. Keep a working management connection before using that action. The
-reset button is available through management access. A computer already on the
-test Wi-Fi cannot reach the dashboard or SSH.
+instead. Keep a working management connection before using that action.
+**Reset Wi-Fi name** and `sudo jittersim wifi reset` restore the default name.
+A computer already on the test Wi-Fi cannot use SSH. It can use the dashboard
+after you sign in and choose **Allow this device**. Recovery over SSH needs the
+router network, Ethernet or a local Pi terminal.
 
 The test Wi-Fi is separate from your home network. Devices on it cannot reach
 your router's private network or each other. Printing, casting and other local
@@ -992,12 +1026,14 @@ trial guide](deploy/raspberry-pi/README.md).
 ## Run locally
 
 Local mode saves settings and builds plans without changing network traffic.
+Needs Python 3.9 or newer. Install the checkout in editable mode so that Python
+imports the files you edit:
 
 ```sh
 python3 -m venv .venv
-.venv/bin/pip install '.[dev]'
+.venv/bin/pip install -e '.[dev]'
 export JITTERSIM_ADMIN_TOKEN='use-a-long-local-token'
-PYTHONPATH=src .venv/bin/python -m jittersim.api --database ./jittersim.db
+.venv/bin/python -m jittersim.api --database ./jittersim.db
 ```
 
 Open <http://127.0.0.1:8080/>. For Pi setup, remote access and recovery, see
@@ -1005,11 +1041,23 @@ the [deployment guide](deploy/raspberry-pi/README.md).
 
 ## Run checks
 
-Run the Python tests with:
+Use the editable install from the previous section. A plain `pip install
+'.[dev]'` copies the package into the virtual environment, and `python -m
+pytest` then tests that copy and not your edits. To see which copy Python uses,
+run `.venv/bin/python -c 'import jittersim; print(jittersim.__file__)'`. The
+path must point into `src/`.
+
+Run the Python tests and the lint check the way the CI workflows do:
 
 ```sh
 .venv/bin/python -m pytest -q
+.venv/bin/ruff check --select E9,F63,F7,F82,F811 src tests
 ```
+
+CI runs the Python tests on Python 3.9, 3.11 and 3.13. Some tests start other
+programs and skip themselves when the program is missing. Many need Node.js.
+Others need `openssl`, `git`, `ssh-keygen` or `curl`. A skipped test is not a
+pass. Run `.venv/bin/python -m pytest -q -rs` to list the skips.
 
 The Linux network checks use real firewall and traffic rules in disposable
 network namespaces. Run them in a privileged Linux container with:
@@ -1019,12 +1067,32 @@ tests/kernel/run-in-docker.sh
 ```
 
 The browser checks exercise the dashboard on desktop and phone-sized screens
-(390, 360 and 320 pixels wide, also with wider fonts).
-GitHub Actions runs the Python, Linux and browser checks for each pull
-request.
+(390, 360 and 320 pixels wide, also with wider fonts). They are programs run
+with `python -m`, not pytest tests, and they need Playwright and a Chromium
+download. The `browser` job in `.github/workflows/tests.yml` installs the built
+package in a clean environment so that a dashboard file missing from the
+package fails the run:
+
+```sh
+pip install . 'playwright==1.63.0'
+python -m playwright install --with-deps chromium
+python -m tests.browser.journeys
+```
+
+The workflows in `.github/workflows` list every check that CI runs for a pull
+request: the Python, Linux, browser, homepage reference and GUI baseline jobs.
+Hosted runs are currently blocked by a GitHub billing limit (see the
+[planned features](docs/planned-features.md)), so run the checks you need
+yourself.
 
 ## More information
 
 - [Pi installation, security, recovery and hardware testing](deploy/raspberry-pi/README.md)
+- Runbooks: [dashboard unreachable](docs/runbooks/dashboard-unreachable.md),
+  [update rollback and recovery copy](docs/runbooks/update-rollback-and-recovery-copy.md),
+  [router outage and Pi-only rollback](docs/runbooks/router-outage-pi-only-rollback.md),
+  [key rotation and trusted keys](docs/runbooks/key-rotation-and-trusted-keys.md),
+  [restore and reimage](docs/runbooks/restore-and-reimage.md)
 - [Measured effects of the profile presets](docs/measurements-2026-09.md)
 - [Product roadmap and known limits](ROADMAP.md)
+- [Index of the documents in `docs/`](docs/README.md)
