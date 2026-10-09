@@ -69,11 +69,10 @@ def test_all_helper_input_slots_stalled_still_let_normal_access_through():
         with helper(directory) as (_, client):
             sockets = []
             try:
-                for _ in range(helper_module.MAX_PENDING_HELPER_INPUT):
-                    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    connection.connect(str(directory / "helper.sock"))
-                    connection.sendall(b"{")
-                    sockets.append(connection)
+                # Repeats a connect that the small listen backlog refused.
+                from tests.integration.test_capacity_stalled_clients import stall_helper
+
+                sockets = stall_helper(directory / "helper.sock", helper_module.MAX_PENDING_HELPER_INPUT)
                 # Each connection has a real admitted input worker first.
                 time.sleep(0.05)
                 with pytest.raises(HelperClientError) as failed:
