@@ -101,6 +101,10 @@ NORMAL_ACCESS_TIMEOUT_SECONDS = 60.0
 # report that the ad-blocking bypass could not be confirmed. An ad-blocking change
 # holds it while nft clears its routing, which can take a few seconds.
 AD_PAUSE_PANIC_WAIT_SECONDS = 8.0
+# Panic's own device check reuses a Wi-Fi station confirmation of the same device
+# at the same address for this long (review T5 of PR 91). See
+# HelperService._handle_emergency_verification.
+EMERGENCY_STATION_CONFIRMATION_SECONDS = 30.0
 NORMAL_ACCESS_BUSY_RETRY_SECONDS = 15.0
 NORMAL_ACCESS_BUSY_RETRY_INTERVAL = 0.5
 ACCESS_STATUS_LOCK_WAIT_SECONDS = 0.5
@@ -230,6 +234,10 @@ class HelperService:
         self._access_lock = threading.Lock()
         self._access_status_waiters = threading.BoundedSemaphore(ACCESS_STATUS_MAX_WAITERS)
         self._peer_cache: Dict[str, Any] = {}
+        # Address -> (time, MAC) of the last ordinary verification that confirmed an
+        # allowed device as a Wi-Fi station. Read by Panic's emergency check only.
+        self._station_confirmations: Dict[str, Tuple[float, str]] = {}
+        self._station_confirmations_lock = threading.Lock()
         self._gateway_state_path = gateway_state_path
         self._access_manager = access_manager
         self._persistence_enabled = False
@@ -502,6 +510,10 @@ class HelperService:
                     self._network_lock.release()
         if action == "dashboard-access":
             operation = payload.get("operation", "status")
+            if operation == "emergency-status":
+                # Panic and Reset: never wait for the access lock that an ordinary
+                # verification may hold for seconds.
+                return self._handle_emergency_verification(payload)
             if operation == "status":
                 # Allow a short burst of dashboard refreshes to take turns while
                 # keeping access changes serialized with each authorization check.
@@ -590,6 +602,59 @@ class HelperService:
         if action == "router-wifi-credentials":
             return self._handle_router_wifi_credentials(payload)
         return {"ok": False, "error": "unknown action"}
+
+    def _remember_station_confirmation(self, peer: str, mac: str, now: float) -> None:
+        with self._station_confirmations_lock:
+            fresh = {key: value for key, value in self._station_confirmations.items()
+                     if now - value[0] < EMERGENCY_STATION_CONFIRMATION_SECONDS}
+            if peer in fresh or len(fresh) < MAX_CONNECTED_CLIENTS:
+                fresh[peer] = (now, mac)
+            self._station_confirmations = fresh
+
+    def _handle_emergency_verification(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Check the device that presses Panic or Reset without the access lock.
+
+        The dashboard has already checked the bearer token. This keeps the
+        saved-device check and never fails open:
+
+        - The route and the kernel neighbour entry of the address are read fresh
+          (`ip route`, `ip neigh`: fast commands), as in the ordinary check.
+        - The slow part of the ordinary check is the Wi-Fi station list (`iw
+          station dump`, up to five seconds). When an ordinary verification
+          confirmed this same address and MAC as an allowed station within
+          EMERGENCY_STATION_CONFIRMATION_SECONDS, that confirmation stands in for
+          it. Otherwise the station list is read fresh, which is bounded by its
+          command timeout.
+        - The saved device list is read fresh. A device removed since is refused.
+        """
+
+        store = self._access_store
+        if store is None:
+            return {"ok": False, "error": "Saved dashboard access is not configured."}
+        try:
+            peer = str(IPv4Address(payload.get("peer")))
+            now = time.monotonic()
+            with self._station_confirmations_lock:
+                confirmed = self._station_confirmations.get(peer)
+            if confirmed is not None and now - confirmed[0] >= EMERGENCY_STATION_CONFIRMATION_SECONDS:
+                confirmed = None
+            applier = (_ConfirmedStationApplier(self._applier, confirmed[1])
+                       if confirmed is not None else self._applier)
+            identity = identify_peer(applier, peer, require_reachable=False)
+            allowed = identity["network"] == "management" or (
+                identity["mac_address"] is not None
+                and any(device["mac_address"] == identity["mac_address"] and is_active(device)
+                        for device in store.list_devices())
+            )
+            return {"ok": True, **identity, "can_register": False, "allowed": allowed}
+        except AccessError as error:
+            return {"ok": False, "error": str(error)}
+        except (ValueError, TypeError, OSError, CommandExecutionError):
+            return {
+                "ok": False,
+                "error": "Dashboard access could not be verified or saved. "
+                "Check the Pi access file and reconnect directly to its Wi-Fi.",
+            }
 
     def _handle_dashboard_access(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         store = self._access_store
@@ -702,6 +767,8 @@ class HelperService:
                     device["mac_address"] == identity["mac_address"] and is_active(device)
                     for device in devices
                 )
+            if allowed and identity["network"] == "test" and identity["mac_address"]:
+                self._remember_station_confirmation(peer, identity["mac_address"], now)
             result = {"ok": True, **identity, "allowed": allowed}
             if operation in ("move-address", "move-address-owned"):
                 result["moved"] = moved
@@ -1676,6 +1743,24 @@ def _uses_panic_reserve(payload: Any) -> bool:
     return payload.get("action") == "normal-access" or (
         payload.get("action") == "dashboard-access" and payload.get("operation") == "emergency-status"
     )
+
+
+class _ConfirmedStationApplier:
+    """An applier whose Wi-Fi station list is one recently confirmed station.
+
+    identify_peer still reads the route and the neighbour entry fresh, and accepts
+    the address only when its current MAC is exactly the confirmed one.
+    """
+
+    def __init__(self, applier, mac: str) -> None:
+        self._applier = applier
+        self._mac = mac
+
+    def __getattr__(self, name):
+        return getattr(self._applier, name)
+
+    def list_connected_stations(self) -> str:
+        return f"Station {self._mac} (on {self._applier.test_interface})\n"
 
 
 class _Admission:

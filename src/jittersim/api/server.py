@@ -261,6 +261,9 @@ ACTION_PATHS = frozenset(
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
 # Panic runs ahead of other writes: it never waits for the write lock of an apply in flight.
 PRIORITY_WRITE_PATHS = frozenset(("/api/normal-access",))
+# Panic and Reset check the device with the helper's emergency check, which does
+# not wait behind an ordinary verification (review T5 of PR 91).
+EMERGENCY_WRITE_PATHS = frozenset(("/api/normal-access", "/api/reset"))
 # The product name shown after the token is accepted. The public page never carries it.
 PRODUCT_NAME = "JitterSim"
 PRODUCT_COMMAND = "jittersim"
@@ -1198,7 +1201,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
     def dashboard_access(self, peer: str, operation: str = "status", **values: Any) -> Dict[str, Any]:
         """Authorize the socket peer through the helper instead of request headers."""
-        if operation == "status" and peer in ("127.0.0.1", "::1"):
+        if operation in ("status", "emergency-status") and peer in ("127.0.0.1", "::1"):
             return {"ok": True, "network": "management", "allowed": True,
                     "can_register": False, "mac_address": None}
         if self.helper_client is None:
@@ -5310,7 +5313,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if path not in ("/api/dashboard-access/register-self", "/api/dashboard-access/move"
-                        ) and not self._check_device_access():
+                        ) and not self._check_device_access(emergency=path in EMERGENCY_WRITE_PATHS):
             return
         if path == RELEASE_UPLOAD_PATH:
             handle_release_upload(self)
@@ -5389,9 +5392,20 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             LOGGER.exception("could not record action history for %s", path)
         self._send_response(status=status, content_type=content_type, body=body)
 
-    def _check_device_access(self) -> bool:
+    def _check_device_access(self, *, emergency: bool = False) -> bool:
+        peer = self.client_address[0]
         try:
-            allowed = self.server.dashboard_access(self.client_address[0])["allowed"]
+            if emergency:
+                try:
+                    allowed = self.server.dashboard_access(peer, "emergency-status")["allowed"]
+                except HelperClientError as error:
+                    if error.reason == "helper-busy":
+                        raise
+                    # An older helper does not know the emergency check. The
+                    # ordinary check decides then, as before.
+                    allowed = self.server.dashboard_access(peer)["allowed"]
+            else:
+                allowed = self.server.dashboard_access(peer)["allowed"]
         except HelperClientError as error:
             self._send_response(status=HTTPStatus.SERVICE_UNAVAILABLE, content_type="application/json",
                                 body=_json_bytes({"error": str(error)}))
