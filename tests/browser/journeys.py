@@ -491,6 +491,11 @@ def run():
                 expect(page.locator("#release-status")).to_contain_text(
                     "candidate-release"
                 )
+                expect(page.locator("#release-install")).to_have_text("Install candidate-release")
+                expect(page.locator("#release-install")).to_be_enabled()
+                expect(page.locator("#update-recovery")).to_contain_text("Made automatically")
+                expect(page.locator("#update-notes-box")).to_be_visible()
+                expect(page.locator("#update-notes")).to_contain_text("Faster update checks")
                 dismiss_toasts(page)
                 page.locator("#release-controls").screenshot(
                     path="test-results/staged-update-check-desktop.png"
@@ -514,6 +519,8 @@ def run():
                 page.get_by_role("button", name="Check for updates", exact=True).click()
                 expect(page.locator("#update-available-badge")).to_be_hidden()
                 expect(page.locator("#release-install")).to_be_disabled()
+                expect(page.locator("#release-install")).to_have_text("Install update")
+                expect(page.locator("#update-notes-box")).to_be_hidden()
                 page.unroute("**/api/updates")
                 page.route(
                     "**/api/updates",
