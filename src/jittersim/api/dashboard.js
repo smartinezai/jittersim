@@ -656,7 +656,8 @@
           const failed = document.createElement("p");
           failed.className = "form-note";
           failed.setAttribute("role", "alert");
-          failed.textContent = "Dashboard access for protected devices is not confirmed. " + (sync.error || "") + " ";
+          failed.textContent = "Dashboard access for protected devices is not confirmed. " + (sync.error || "") +
+            " A device that is no longer protected may still open the dashboard until Retry succeeds. ";
           const retry = document.createElement("button");
           retry.type = "button";
           retry.textContent = "Retry protected access";

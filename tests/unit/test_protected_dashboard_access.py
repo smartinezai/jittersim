@@ -358,6 +358,19 @@ class ProtectedAccessServerTests(unittest.TestCase):
         self.assertTrue(state["synced"])
         self.assertTrue(self.allowed())
 
+    def test_a_failed_removal_sync_says_the_device_may_keep_access_until_retry(self):
+        self.protect()
+        self.helper.fail_sync = 1
+        status, _, body = self.unprotect(MAC)
+        data = json.loads(body)
+        self.assertEqual(status, 200, body)
+        self.assertFalse(data["dashboard_access"]["synced"])
+        self.assertIn("may still open the dashboard until Retry succeeds", data["warning"])
+        # The stale grant is exactly the window the warning describes.
+        self.assertTrue(self.allowed())
+        self.assertTrue(self.server.sync_protected_access()["synced"])
+        self.assertFalse(self.allowed())
+
     def test_a_busy_helper_is_retried_before_failing(self):
         calls = []
         original = self.helper.dashboard_access_protected_sync
@@ -527,6 +540,34 @@ class ProtectedAccessServerTests(unittest.TestCase):
         self.assertTrue(identity["allowed"])
         self.assertEqual(identity["grants"], ["manual"])
 
+    def history_restore(self, identifier):
+        preview = json.loads(self.server.write_response_for(
+            "/api/history/preview", {"id": identifier})[2])
+        return self.server.history_restore_for_peer(
+            {"id": identifier, "current_version": preview["current_version"]}, PEER)
+
+    def test_a_history_restore_that_drops_the_requesters_protection_keeps_its_access(self):
+        # The first saved version predates protection.
+        first = min(item["id"] for item in json.loads(self.server.response_for("/api/history")[2])["versions"])
+        self.protect()
+        status, _, body = self.history_restore(first)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.repository.list_unaffected_devices(), ())
+        self.assertIn("kept dashboard access", json.loads(body)["dashboard_access"]["message"])
+        identity = self.server.dashboard_access(PEER)
+        self.assertTrue(identity["allowed"])
+        self.assertEqual(identity["grants"], ["manual"])
+
+    def test_a_history_restore_for_another_device_needs_no_saved_grant(self):
+        first = min(item["id"] for item in json.loads(self.server.response_for("/api/history")[2])["versions"])
+        self.protect(OTHER)
+        status, _, body = self.history_restore(first)
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("message", json.loads(body).get("dashboard_access", {}))
+        self.assertEqual(self.store.saved_devices(), [])
+        self.server.reconcile_protected_access()
+        self.assertEqual(self.helper.dashboard_access("local-list")["devices"], [])
+
     def test_restoring_settings_resyncs_protection(self):
         settings = json.loads(self.server.response_for("/api/export")[2])
         settings["everyone_else"]["unaffected_devices"] = [{"mac_address": MAC, "name": "Phone"}]
@@ -669,6 +710,48 @@ class ProtectedAccessHttpTests(unittest.TestCase):
             self.assertEqual(status, 401)
         self.assertEqual(len(self.repository.list_unaffected_devices()), 1)
 
+    def test_panic_still_works_while_a_restart_resync_is_pending(self):
+        self.repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))
+        self.server.sync_protected_access()
+        # The root helper restarts: its protection set is empty until the dashboard resyncs.
+        self.service = HelperService(self.applier, access_store=AccessStore(self.store.path))
+        self.server.helper_client.service = self.service
+        self.server._protected_access_attempted -= 2
+        status, body = self.send("POST", "/api/normal-access", {})
+        self.assertEqual(status, 200, body)
+        self.assertTrue(self.server.helper_client.access_plan is None
+                        or not self.server.helper_client.access_plan.options.enabled)
+        self.assertTrue(self.service._access_store.protected_synced)
+
+    def test_panic_is_retryable_while_the_access_lock_is_held_and_works_after(self):
+        import time
+
+        self.repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))
+        self.server.sync_protected_access()
+        self.service._access_lock.acquire()
+        try:
+            started = time.monotonic()
+            status, body = self.send("POST", "/api/normal-access", {})
+            # Refused at once with a status the page retries, never queued behind the lock.
+            self.assertEqual(status, 503, body)
+            self.assertLess(time.monotonic() - started, 2)
+        finally:
+            self.service._access_lock.release()
+        status, body = self.send("POST", "/api/normal-access", {})
+        self.assertEqual(status, 200, body)
+
+    def test_panic_from_the_management_network_ignores_access_lock_and_resync(self):
+        self.repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))
+        self.server.helper_client.service = HelperService(
+            self.applier, access_store=AccessStore(self.store.path))
+        self.server.helper_client.service._access_lock.acquire()
+        try:
+            self.server.get_request = lambda: ControlServer.get_request(self.server)
+            status, body = self.send("POST", "/api/normal-access", {})
+        finally:
+            self.server.helper_client.service._access_lock.release()
+        self.assertEqual(status, 200, body)
+
     def test_an_unprotected_device_with_the_token_is_still_refused(self):
         for method, path, payload in (
             ("GET", "/api/devices", None),
@@ -694,6 +777,20 @@ class ProtectedAccessHttpTests(unittest.TestCase):
         self.assertEqual(listing["devices"][0]["protected"], True)
         status, body = self.send("POST", "/api/dashboard-access/sync-protected", {})
         self.assertEqual(status, 200, body)
+
+    def test_a_history_restore_over_http_keeps_this_devices_only_route(self):
+        self.repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))
+        status, body = self.send("GET", "/api/history")
+        first = min(item["id"] for item in json.loads(body)["versions"])
+        status, body = self.send("POST", "/api/history/preview", {"id": first})
+        self.assertEqual(status, 200, body)
+        version = json.loads(body)["current_version"]
+        status, body = self.send(
+            "POST", "/api/history/restore", {"id": first, "current_version": version})
+        self.assertEqual(status, 200, body)
+        self.assertIn("kept dashboard access", json.loads(body)["dashboard_access"]["message"])
+        status, body = self.send("GET", "/api/dashboard-access/status")
+        self.assertEqual(json.loads(body)["grants"], ["manual"])
 
     def test_unprotecting_this_device_over_http_asks_first(self):
         self.repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))

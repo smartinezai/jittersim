@@ -1347,7 +1347,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         data["dashboard_access"] = state
         if not state["synced"]:
             note = ("Protection is saved but dashboard access for protected devices is not "
-                    "confirmed. Retry under Dashboard access.")
+                    "confirmed. A device that is no longer protected may still open the "
+                    "dashboard until Retry succeeds. Retry under Dashboard access.")
             data["warning"] = (str(data["warning"]) + " " + note) if data.get("warning") else note
         return status, content_type, _json_bytes(data)
 
@@ -1410,11 +1411,20 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
 
     def import_for_peer(self, payload: Any, peer: str) -> Tuple[int, str, bytes]:
         """Import settings and keep the requester's access when protection was its only route."""
+        return self._replace_settings_for_peer("/api/import", payload, peer)
+
+    def history_restore_for_peer(self, payload: Any, peer: str) -> Tuple[int, str, bytes]:
+        """Restore a saved version and keep the requester's only access route the same way."""
+        return self._replace_settings_for_peer("/api/history/restore", payload, peer)
+
+    def _replace_settings_for_peer(
+        self, path: str, payload: Any, peer: str
+    ) -> Tuple[int, str, bytes]:
         identity = self.dashboard_access(peer)
         if not (identity.get("network") == "test" and isinstance(identity.get("mac_address"), str)
                 and identity.get("grants") == ["protection"]):
             identity = None
-        response = self.write_response_for("/api/import", payload)
+        response = self.write_response_for(path, payload)
         if identity is None or response[0] != HTTPStatus.OK:
             return response
         mac = identity["mac_address"]
@@ -1426,9 +1436,9 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             kept = False
         self.reconcile_protected_access()
         return self._note_access(response, (
-            "This device kept dashboard access as a separate saved grant because the imported "
+            "This device kept dashboard access as a separate saved grant because the restored "
             "settings no longer protect it." if kept else
-            "The imported settings no longer protect this device and its dashboard access could "
+            "The restored settings no longer protect this device and its dashboard access could "
             "not be kept. Use Allow this device or the management network."))
 
     def _note_access(self, response: Tuple[int, str, bytes], message: str) -> Tuple[int, str, bytes]:
@@ -5601,6 +5611,9 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                     payload, self.client_address[0])
             elif path == "/api/import":
                 status, content_type, body = self.server.import_for_peer(
+                    payload, self.client_address[0])
+            elif path == "/api/history/restore":
+                status, content_type, body = self.server.history_restore_for_peer(
                     payload, self.client_address[0])
             elif path.startswith("/api/dashboard-access/"):
                 register = path.endswith("/register-self")
