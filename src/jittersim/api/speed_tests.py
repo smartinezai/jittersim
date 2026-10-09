@@ -95,7 +95,9 @@ class SpeedTestRun:
             "label": self.label,
             "duration_seconds": self.duration_seconds,
             "started_at": int(self.started_at),
-            "seconds_left": max(0, int(round(self.deadline - now))) if self.state == "running" else 0,
+            "seconds_left": (
+                max(0, int(round(self.deadline - now))) if self.state == "running" else 0
+            ),
             "source": self.source,
             "source_label": SOURCE_LABELS[self.source],
             "source_note": self.source_note,
@@ -130,7 +132,8 @@ class SpeedTestManager:
         return SpeedTestStore(self.repository)
 
     def _protected(self, mac_address: str) -> bool:
-        return any(item.mac_address == mac_address for item in self.repository.list_unaffected_devices())
+        protected = self.repository.list_unaffected_devices()
+        return any(item.mac_address == mac_address for item in protected)
 
     def _read_queues(self) -> Optional[List[Dict[str, Any]]]:
         helper = self.server.helper_client
@@ -148,7 +151,8 @@ class SpeedTestManager:
     def start(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         allowed = {"mac_address", "provider", "duration_seconds", "label"}
         if not isinstance(payload, dict) or set(payload) - allowed:
-            raise SpeedTestRequestError("Only mac_address, provider, duration_seconds and label are allowed")
+            raise SpeedTestRequestError(
+                "Only mac_address, provider, duration_seconds and label are allowed")
         try:
             mac_address = normalize_exempt_mac(payload.get("mac_address"))
         except (TypeError, ValueError) as error:
@@ -173,7 +177,8 @@ class SpeedTestManager:
                 raise SpeedTestRequestError("A speed test is already running for this device", 409)
             if len(active) >= MAX_ACTIVE_RUNS:
                 raise SpeedTestRequestError(
-                    f"At most {MAX_ACTIVE_RUNS} speed tests can run at once. Wait for one to end.", 409)
+                    f"At most {MAX_ACTIVE_RUNS} speed tests can run at once. "
+                    "Wait for one to end.", 409)
             run = self._new_run(mac_address, provider, duration, label)
             self.runs[run.id] = run
             self._trim()
@@ -187,7 +192,8 @@ class SpeedTestManager:
         labels = repository.list_connected_device_labels()
         name = (labels.get(mac_address, {}).get("display_name") or (device.name if device else "")
                 or mac_address)
-        ipv4 = str(device.ipv4_address) if device is not None else self._connected_address(mac_address)
+        ipv4 = (str(device.ipv4_address) if device is not None
+                else self._connected_address(mac_address))
         now = self.clock()
         queues, note = None, None
         try:
@@ -344,7 +350,8 @@ class SpeedTestManager:
         run.state = "ended"
         run.ended_reason = reason
         caps = {
-            direction: (run.identity or {}).get(direction, {}).get("impairment", {}).get("bandwidth_kbit")
+            direction: ((run.identity or {}).get(direction, {}).get("impairment") or {})
+            .get("bandwidth_kbit")
             for direction in DIRECTIONS
         }
         summary: Dict[str, Any] = {}
@@ -425,7 +432,8 @@ def pick_queues(queues, device_id, prefer=None):
 
 
 def _identity(entry: Dict[str, Any]) -> Dict[str, Any]:
-    return {key: entry.get(key) for key in ("generation", "interface", "handle", "kind", "impairment")}
+    keys = ("generation", "interface", "handle", "kind", "impairment")
+    return {key: entry.get(key) for key in keys}
 
 
 def _sample(entries: Dict[str, Dict[str, Any]], now: float) -> Dict[str, Any]:
@@ -470,7 +478,11 @@ def read_speed_test(server, path: str, query: str = ""):
     if path not in SPEED_TEST_READS:
         return None
     try:
-        return _read(server, path, parse_qs(query, max_num_fields=8))
+        fields = parse_qs(query, max_num_fields=8)
+    except ValueError:
+        return response({"error": "Too many query fields"}, 400)
+    try:
+        return _read(server, path, fields)
     except SpeedTestRequestError as error:
         return response({"error": str(error)}, error.status)
 

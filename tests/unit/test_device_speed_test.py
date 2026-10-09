@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from jittersim.api import speed_tests as routes
-from jittersim.api.server import ControlServer, WRITE_PATHS
+from jittersim.api.server import WRITE_PATHS, ControlServer
 from jittersim.api.speed_tests import SPEED_TEST_READS, SPEED_TEST_WRITES, SpeedTestManager
 from jittersim.config import speed_tests as store_module
 from jittersim.config.exemptions import UnaffectedDevice
@@ -87,9 +87,11 @@ class ArithmeticTests(unittest.TestCase):
         self.assertEqual(percentile(list(range(1, 11)), 0.9), 9)
 
     def test_probe_summary(self) -> None:
-        probes = {1: {"rtt_ms": 10.0}, 2: {"rtt_ms": None}, 3: {"rtt_ms": 30.0}, 4: {"rtt_ms": 20.0}}
+        probes = {1: {"rtt_ms": 10.0}, 2: {"rtt_ms": None}, 3: {"rtt_ms": 30.0},
+                  4: {"rtt_ms": 20.0}}
         summary = summarize_probes(probes, "measured")
-        self.assertEqual((summary["sent"], summary["received"], summary["loss_percent"]), (4, 3, 25.0))
+        self.assertEqual((summary["sent"], summary["received"], summary["loss_percent"]),
+                         (4, 3, 25.0))
         self.assertEqual((summary["rtt_min_ms"], summary["rtt_median_ms"], summary["rtt_max_ms"]),
                          (10.0, 20.0, 30.0))
         self.assertEqual(summarize_probes({1: {"rtt_ms": None}}, "measured")["status"], "no-answer")
@@ -246,7 +248,8 @@ class StoreTests(unittest.TestCase):
 
     def test_update_and_delete(self) -> None:
         saved = self.store.save(self.row(label="before"))
-        updated = self.store.update(saved["id"], label="  No   limits ", reported={"download_mbit": 48.5})
+        updated = self.store.update(saved["id"], label="  No   limits ",
+                                    reported={"download_mbit": 48.5})
         self.assertEqual(updated["label"], "No limits")
         self.assertEqual(updated["reported"], {"download_mbit": 48.5})
         self.assertIsNone(self.store.update(999, label="x"))
@@ -330,7 +333,8 @@ class ManagerTests(unittest.TestCase):
         self.addCleanup(self.repository.close)
         self.repository.save_profile(
             Profile(id="slow", name="Slow", download=Impairment(bandwidth_kbit=250)))
-        self.repository.save_device(Device("lab", "Lab phone", "192.168.50.10", "slow", mac_address=PHONE))
+        self.repository.save_device(
+            Device("lab", "Lab phone", "192.168.50.10", "slow", mac_address=PHONE))
         self.repository.update_runtime_state(
             observed_state="applied", last_action="apply", last_result="success", last_error=None)
         self.server = ControlServer(("127.0.0.1", 0), self.repository)
@@ -362,9 +366,11 @@ class ManagerTests(unittest.TestCase):
 
     def test_a_full_window_measures_the_device_queues_and_saves_the_result(self) -> None:
         status, run = self.write("/api/speed-tests/start",
-                                 {"mac_address": PHONE.upper(), "duration_seconds": 15, "label": "Slow"})
+                                 {"mac_address": PHONE.upper(), "duration_seconds": 15,
+                                  "label": "Slow"})
         self.assertEqual(status, 201)
-        self.assertEqual((run["source"], run["state"], run["device_name"]), ("device", "running", "Lab phone"))
+        self.assertEqual((run["source"], run["state"], run["device_name"]),
+                         ("device", "running", "Lab phone"))
         self.assertEqual(self.targets, ["192.168.50.10"])
         self.run_seconds(run["id"], 5)
         status, _, body = self.read("/api/speed-tests/status", "run=" + run["id"])
@@ -505,10 +511,12 @@ class ManagerTests(unittest.TestCase):
                         {"result_id": 1, "label": "x", "other": 2},
                         {"result_id": 1, "reported": {"download_mbit": -1}}):
             self.assertEqual(self.write("/api/speed-tests/update", payload)[0], 400, payload)
-        self.assertEqual(self.write("/api/speed-tests/update", {"result_id": 5, "label": "x"})[0], 404)
+        self.assertEqual(
+            self.write("/api/speed-tests/update", {"result_id": 5, "label": "x"})[0], 404)
         self.assertEqual(self.write("/api/speed-tests/delete", {"result_id": 5})[0], 404)
         self.assertEqual(self.read("/api/speed-tests/compare", "baseline=1&result=x")[0], 400)
         self.assertEqual(self.read("/api/speed-tests/export", "format=xml")[0], 400)
+        self.assertEqual(self.read("/api/speed-tests", "&".join(["a=1"] * 20))[0], 400)
         self.assertEqual(self.read("/api/speed-tests/status", "run=unknown")[0], 404)
 
     def test_compare_update_delete_and_export(self) -> None:
@@ -532,7 +540,8 @@ class ManagerTests(unittest.TestCase):
         rows = list(csv.DictReader(io.StringIO(text)))
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[1]["label"], "'=cmd")
-        status, content_type, body = self.read("/api/speed-tests/export", "format=json&mac=" + PHONE)
+        status, content_type, body = self.read(
+            "/api/speed-tests/export", "format=json&mac=" + PHONE)
         exported = json.loads(body)
         self.assertEqual(exported["format"], "jittersim-speed-tests")
         self.assertEqual(len(exported["results"]), 2)
@@ -560,7 +569,8 @@ class RouteTests(unittest.TestCase):
             for method, paths in (("GET", SPEED_TEST_READS), ("POST", SPEED_TEST_WRITES)):
                 for path in sorted(paths):
                     for headers in ({}, {"Authorization": "Bearer wrong"}):
-                        connection = http.client.HTTPConnection(*self.server.server_address, timeout=5)
+                        connection = http.client.HTTPConnection(
+                            *self.server.server_address, timeout=5)
                         connection.request(method, path, body="{}" if method == "POST" else None,
                                            headers={**headers, "Content-Type": "application/json"})
                         answer = connection.getresponse()
@@ -580,7 +590,8 @@ class RouteTests(unittest.TestCase):
             thread.join(timeout=5)
 
     def test_the_default_manager_is_made_once(self) -> None:
-        self.assertIs(routes.speed_test_manager(self.server), routes.speed_test_manager(self.server))
+        manager = routes.speed_test_manager(self.server)
+        self.assertIs(manager, routes.speed_test_manager(self.server))
 
 
 if __name__ == "__main__":

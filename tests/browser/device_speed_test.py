@@ -103,7 +103,8 @@ def check_width(browser, width, height):
             assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
             dialog.screenshot(path=f"test-results/device-speed-test-running-{width}.png")
             page.locator("#speed-test-finish").click()
-            expect(page.locator("#speed-test-announce")).to_have_text("Speed test saved.", timeout=LIMIT)
+            expect(page.locator("#speed-test-announce")).to_have_text(
+                "Speed test saved.", timeout=LIMIT)
             expect(page.locator("#speed-test-start")).to_be_visible()
 
         # a baseline without limits, with the numbers the device's page showed typed in
@@ -171,7 +172,8 @@ def check_width(browser, width, height):
         page.reload()
         expect(page.locator("#private-dashboard")).to_be_visible(timeout=LIMIT)
         page.locator('[data-page-link="devices"]').first.click()
-        expect(row.get_by_role("button", name=f"Test speed of {NAME}")).to_be_disabled(timeout=LIMIT)
+        expect(row.get_by_role("button", name=f"Test speed of {NAME}")).to_be_disabled(
+            timeout=LIMIT)
         expect(row).to_contain_text("Protected devices are not measured.")
         refused = page.request.post(base + "/api/speed-tests/start", headers=HEADERS,
                                     data={"mac_address": MAC_ADDRESS})

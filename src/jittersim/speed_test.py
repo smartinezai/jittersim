@@ -235,7 +235,8 @@ def compare_results(baseline: Dict[str, Any], later: Dict[str, Any]) -> Dict[str
             if change is not None and before not in (0, 0.0) else None
         )
         changes.append(
-            {"field": name, "baseline": before, "result": after, "change": change, "percent": percent}
+            {"field": name, "baseline": before, "result": after, "change": change,
+             "percent": percent}
         )
     warnings = []
     if baseline.get("mac_address") != later.get("mac_address"):
