@@ -48,7 +48,6 @@ code, pre, .saved-profile-id, .analytics-domain { font-family: var(--font-mono);
 h1 { letter-spacing: -0.03em; }
 h2 { font-size: var(--fs-xl); font-weight: 650; letter-spacing: -0.015em; line-height: 1.25; }
 .card h2 { font-size: var(--fs-xl); }
-h3 { font-size: var(--fs-xs); font-weight: 650; letter-spacing: 0.07em; }
 .card > p, .card > label { color: var(--tx); }
 .card p:not([class]) { line-height: 1.55; }
 .form-note, .policy-note, .section-heading p, .device-empty { line-height: 1.5; }
@@ -209,17 +208,12 @@ summary::marker { color: var(--tx-muted); }
 .traffic-chart-wrap { border-color: var(--bd-subtle); border-radius: var(--radius); background: var(--bg-deep); }
 
 /* Icons */
-.icon { width: 1.05rem; height: 1.05rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
-.brand-mark { flex: none; width: 1.6rem; height: 1.6rem; }
-.sidebar-brand { flex-wrap: nowrap; gap: 0.5rem; }
-.sidebar-brand h1 { min-width: 0; font-size: 1.2rem; font-weight: 700; letter-spacing: -0.02em; overflow-wrap: anywhere; }
-.sidebar-brand .badge { margin-left: auto; font-size: 0.68rem; }
-.sidebar-nav .nav-text { flex: 1 1 auto; min-width: 0; }
-.sidebar-nav a { gap: 0.6rem; justify-content: flex-start; font-weight: 560; transition: background var(--dur) var(--ease), color var(--dur) var(--ease); }
+.sidebar-brand { gap: 0.25rem 0.4rem; }
+.sidebar-brand h1 { font-size: 1.1rem; font-weight: 700; letter-spacing: -0.02em; white-space: nowrap; }
+.sidebar-brand .badge { margin-left: auto; padding: 0.16rem 0.42rem; font-size: 0.64rem; gap: 0.28rem; }
+.sidebar-brand .badge::before { width: 0.38rem; height: 0.38rem; }
+.sidebar-nav a { gap: 0.6rem; justify-content: flex-start; font-weight: 550; transition: background var(--dur) var(--ease), color var(--dur) var(--ease); }
 .sidebar-nav a .nav-chip { margin-left: auto; }
-.sidebar-nav a .icon { opacity: 0.8; }
-.sidebar-nav a[aria-current="page"] .icon { opacity: 1; color: var(--accent); }
 
 @media (min-width: 48.01rem) {
   .sidebar { background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0) 12rem), var(--bg-sidebar); }
@@ -230,7 +224,7 @@ summary::marker { color: var(--tx-muted); }
     background: linear-gradient(90deg, rgba(90, 169, 255, 0.20), rgba(90, 169, 255, 0.07));
     color: #fff;
   }
-  .sidebar-nav a[aria-current="page"]::before {
+  .sidebar-nav a[aria-current="page"]::after {
     content: ""; position: absolute; left: -0.5rem; top: 22%; bottom: 22%; width: 0.2rem;
     border-radius: 0 0.2rem 0.2rem 0; background: var(--accent);
   }
@@ -261,4 +255,28 @@ summary::marker { color: var(--tx-muted); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }
   button:active:not(:disabled) { transform: none; }
+}
+
+/* Navigation icons: inline SVG as masks, so no markup and no request. The colour follows the text. */
+.sidebar-nav a::before {
+  content: ""; flex: none; width: 1.05rem; height: 1.05rem; background: currentColor; opacity: 0.8;
+  -webkit-mask: var(--nav-icon) center / contain no-repeat; mask: var(--nav-icon) center / contain no-repeat;
+}
+.sidebar-nav a[aria-current="page"]::before { color: var(--accent); opacity: 1; }
+.sidebar-nav a[href="#devices"] { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Crect x=%223%22 y=%224%22 width=%2218%22 height=%2212%22 rx=%222%22/%3E%3Cpath d=%22M8 20h8M12 16v4%22/%3E%3C/svg%3E"); }
+.sidebar-nav a[href="#profiles"] { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M4 6h8M18 6h2M4 12h2M12 12h8M4 18h10M20 18h0%22/%3E%3Ccircle cx=%2215%22 cy=%226%22 r=%222%22/%3E%3Ccircle cx=%229%22 cy=%2212%22 r=%222%22/%3E%3Ccircle cx=%2217%22 cy=%2218%22 r=%222%22/%3E%3C/svg%3E"); }
+.sidebar-nav a[href="#schedules"] { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Ccircle cx=%2212%22 cy=%2212%22 r=%228.5%22/%3E%3Cpath d=%22M12 7.5V12l3 2%22/%3E%3C/svg%3E"); }
+.sidebar-nav a[href="#router"] { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M3 9.5a13 13 0 0 1 18 0M6 13a8.5 8.5 0 0 1 12 0M9.2 16.3a4 4 0 0 1 5.6 0%22/%3E%3Ccircle cx=%2212%22 cy=%2219.5%22 r=%220.9%22/%3E%3C/svg%3E"); }
+.sidebar-nav a[href="#traffic"] { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M3 12h4l3-7 4 14 3-7h4%22/%3E%3C/svg%3E"); }
+.sidebar-nav a[href="#measurements"] { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M5 20v-8M12 20V5M19 20v-5%22/%3E%3C/svg%3E"); }
+.sidebar-nav a[href="#activity"] { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M9 6h11M9 12h11M9 18h11%22/%3E%3Ccircle cx=%224.5%22 cy=%226%22 r=%220.9%22/%3E%3Ccircle cx=%224.5%22 cy=%2212%22 r=%220.9%22/%3E%3Ccircle cx=%224.5%22 cy=%2218%22 r=%220.9%22/%3E%3C/svg%3E"); }
+.sidebar-nav a[href="#access"] { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M12 3l7.5 2.8v5.7c0 4.6-3.2 7.6-7.5 9.5-4.3-1.9-7.5-4.9-7.5-9.5V5.8z%22/%3E%3Cpath d=%22M9 12l2.2 2.2L15.5 10%22/%3E%3C/svg%3E"); }
+.sidebar-nav a[href="#diagnostics"] { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Ccircle cx=%2210.5%22 cy=%2210.5%22 r=%226%22/%3E%3Cpath d=%22M15 15l5 5%22/%3E%3C/svg%3E"); }
+.sidebar-nav a[href="#updates"] { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M12 4v11M7.5 10.5L12 15l4.5-4.5M5 20h14%22/%3E%3C/svg%3E"); }
+
+/* Brand mark */
+.sidebar-brand::before {
+  content: ""; flex: none; width: 1.35rem; height: 1.35rem; border-radius: 0.4rem;
+  background: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22white%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M4.5 14.5l3-3.5 3 5.5 3-9 3 7 3-2.5%22/%3E%3C/svg%3E") center / 100% no-repeat, linear-gradient(135deg, var(--accent), var(--bg-primary));
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12) inset, 0 0.3rem 0.8rem rgba(42, 108, 184, 0.35);
 }

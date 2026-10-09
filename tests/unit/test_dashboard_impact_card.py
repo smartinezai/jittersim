@@ -135,9 +135,19 @@ def contrast(first, second):
     return (lighter + 0.05) / (darker + 0.05)
 
 
-# The card background (rgba(18, 31, 49, 0.9)) over the page background (#0b1220).
-CARD_BACKGROUND = "#111e2f"
-ROW_BACKGROUND = "#0d1b2d"
+# Colours are named design tokens in the first :root block of the stylesheet.
+TOKENS = dict(re.findall(r"(--[a-z0-9-]+):\s*(#[0-9a-f]{6});", STYLE))
+
+
+def resolve(value):
+    """Return the hex value of a literal colour or of a var(--token) reference."""
+
+    match = re.fullmatch(r"var\((--[a-z0-9-]+)\)", value)
+    return TOKENS[match.group(1)] if match else value
+
+
+CARD_BACKGROUND = TOKENS["--bg-card"]
+ROW_BACKGROUND = TOKENS["--bg-inset"]
 
 
 def impact_rules():
@@ -168,7 +178,8 @@ def test_every_impact_text_colour_has_enough_contrast_on_its_background():
         color = declarations.get("color")
         if not color:
             continue
-        background = declarations.get("background") or backgrounds.get(selector, ROW_BACKGROUND)
+        color = resolve(color)
+        background = resolve(declarations.get("background") or backgrounds.get(selector, ROW_BACKGROUND))
         assert re.fullmatch(r"#[0-9a-f]{6}", color), selector
         assert re.fullmatch(r"#[0-9a-f]{6}", background), selector
         assert contrast(color, background) >= 4.5, (selector, contrast(color, background))
@@ -187,10 +198,10 @@ def test_every_impact_text_colour_has_enough_contrast_on_its_background():
 
 def test_the_affected_chip_uses_the_amber_pair_and_the_others_stay_muted():
     rules = impact_rules()
-    assert rules[".impact-chip.affected"]["color"] == "#f5ca78"
-    assert "#a77b31" in rules[".impact-chip.affected"]["border-color"]
+    assert resolve(rules[".impact-chip.affected"]["color"]) == TOKENS["--warn-text"]
+    assert resolve(rules[".impact-chip.affected"]["border-color"]) == TOKENS["--warn-border"]
     for muted in (".impact-chip.idle", ".impact-chip.too-few", ".impact-chip.clean", ".impact-chip.unmeasured"):
-        assert rules.get(muted, {}).get("color") != "#f5ca78", muted
+        assert resolve(rules.get(muted, {}).get("color", "")) != TOKENS["--warn-text"], muted
 
 
 HARNESS = r"""
