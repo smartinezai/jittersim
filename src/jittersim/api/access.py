@@ -5,6 +5,7 @@ import sqlite3
 import time
 from dataclasses import replace
 
+from jittersim.diagnostic_records import recorded
 from jittersim.config.models import MacPolicy, SiteBlock, normalize_mac_address
 from jittersim.config.storage import DeviceConflictError, StorageError
 from jittersim.engine.access import build_access_plan
@@ -75,6 +76,7 @@ def read_access_api(server, path):
     return response(result)
 
 
+@recorded("panic", "dashboard")
 def normal_access(server):
     repository = server.repository
     if server.helper_client is None or not hasattr(server.helper_client, "normal_access"):
