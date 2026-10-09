@@ -36,6 +36,7 @@ tests/browser/vendor/*                    none
 # Shared test helpers: the modules that import them.
 tests/browser/diagnostics_keyboard.py     dashboard_navigation
 tests/browser/draft_navigation.py         dashboard_navigation
+tests/browser/forms_support.py            schedules_timers limits_quotas
 tests/browser/service_list_focus.py       journeys
 tests/browser/journeys.py                 journeys dns_failure
 tests/browser/router_copy.py              router_copy trust_access
