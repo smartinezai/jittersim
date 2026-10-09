@@ -297,7 +297,8 @@ it is active or paused or only saved. **Devices** says how many connected
 devices are affected right now and opens a list with the profile each one
 gets. Protected devices are never listed. **Service lists** names the enabled
 lists. The block says `Profiles off` after Reset or Panic and `Not running`
-before the first start.
+before the first start. After a device-only start it lists only the devices
+that run and shows the general profile as paused.
 
 **Copy router Wi-Fi to Pi** checks the router's security before copying its
 name and password. The confirmation shows the source band and security type.
@@ -552,6 +553,14 @@ settings are kept. Choose **Start with saved settings** to run the profiles
 again. After Panic turn household blocking back on under Access rules.
 Protected devices are never touched.
 
+After **Reset network** you can start one device on its own: choose a profile
+beside a connected client and click **Apply profile**. Only that device starts.
+The general profile, other saved devices, everyone else, service lists and ad
+blocking stay paused. Apply more clients the same way to add them. The status
+line says `Running for N devices only` and **Start with saved settings** resumes
+every saved setting. **Reset network** or **Panic** stops the devices again.
+After Panic or a router outage, choose **Start with saved settings** first.
+
 The line under the button counts what is saved. The message after a start counts
 what JitterSim really started. Access rules also run after a start so a start
 with no profiles saved says that they apply. Without the Pi helper the dashboard
@@ -599,7 +608,8 @@ Random changes apply to the network together. Their choices are not added to
 the per-device random website history.
 
 **Stop general profile** resumes the saved device rules that are current at
-that moment. **Panic** or **Reset network** turns all profiles off while keeping
+that moment. While the network is reset, Stop only removes the selection and
+starts nothing. **Panic** or **Reset network** turns all profiles off while keeping
 the selection. **Apply to all** or **Start with saved settings** resumes it.
 A restart repeats the last Start or Reset unless a saved change cleared that
 record. Then JitterSim is not running until you choose **Start with saved
@@ -619,6 +629,11 @@ without a saved assignment, that group needs a profile override. The **Group
 devices** form can also select several connected clients. A client can belong
 to one group. A base profile can be overridden by a group, schedule, timer,
 progression or quota. The save message explains the current override.
+**Apply profile** starts the profile for that client at once. While JitterSim
+runs, the saved settings are applied again with it. After **Reset network**
+only that client starts and everything else stays paused. While a general
+profile is active, **Apply profile** is refused and nothing is saved. Stop the
+general profile first, or save the choice under **Saved devices** for later.
 
 Click **Make unaffected** to protect a connected client from every profile,
 random outage, profile website rule and device or service quota. Its traffic

@@ -2347,7 +2347,9 @@
       const clients = input.clients || [];
       const serviceLists = input.serviceLists || [];
       const steady = running && (state === "applied" || state === "unknown");
-      const generalInEffect = !!generalProfile && steady &&
+      // A device-only start runs its own devices. Everyone and the rest stay paused.
+      const deviceOnly = Array.isArray(input.deviceOnly) ? input.deviceOnly : [];
+      const generalInEffect = !!generalProfile && steady && deviceOnly.length === 0 &&
         (generalState.active === true || state === "unknown");
       const generalName = generalProfile ? generalProfile.name || generalProfile.id : "";
 
@@ -2357,7 +2359,7 @@
           ? {text: "Everyone: " + generalName + " · active", tone: "on"}
           : {
               text: "Everyone: " + generalName + " · " +
-                (state === "reset" ? "paused" : "saved, not applied"),
+                (state === "reset" || deviceOnly.length ? "paused" : "saved, not applied"),
               tone: "muted"
             };
       }
@@ -2389,7 +2391,8 @@
           : clients
               .filter((client) => !client.unaffected && client.assigned_device_id &&
                 client.assigned_effective_state !== "unverified" &&
-                client.assigned_effective_state !== "protected")
+                client.assigned_effective_state !== "protected" &&
+                (deviceOnly.length === 0 || deviceOnly.includes(client.assigned_device_id)))
               .map((client) => ({
                 name: nameOf(client),
                 profile: profileNameOf(client.group_profile_id || client.assigned_profile_id)
@@ -2405,7 +2408,7 @@
         };
       }
 
-      const enabledLists = steady
+      const enabledLists = steady && deviceOnly.length === 0
         ? serviceLists.filter((serviceList) => serviceList.enabled).map((serviceList) => serviceList.name)
         : [];
       return {
@@ -2449,6 +2452,7 @@
         runtimeState: lastRuntimeState ? lastRuntimeState.observed_state : null,
         running: !!lastRuntimeState && lastRuntimeState.running === true,
         lastAction: lastRuntimeState ? lastRuntimeState.last_action : null,
+        deviceOnly: lastRuntimeState ? lastRuntimeState.device_only : null,
         generalState: generalProfileState,
         profiles,
         clients: connectedClients,
@@ -2585,6 +2589,14 @@
       }
       if (state === "applying") return {text: "Applying…", tone: "working"};
       if (state === "resetting") return {text: "Resetting…", tone: "working"};
+      const deviceOnly = Array.isArray(options.deviceOnly) ? options.deviceOnly.length : 0;
+      if (running === true && deviceOnly > 0 && (state === "applied" || state === "unknown")) {
+        return {
+          text: "Running for " + deviceOnly + (deviceOnly === 1 ? " device" : " devices") +
+            " only. Everyone and other saved settings stay paused. Start resumes them all.",
+          tone: "ok"
+        };
+      }
       if (running === true) {
         if (state === "applied") {
           return {
@@ -2684,6 +2696,7 @@
         lastRuntimeState.running === true,
         {
           lastAction: lastRuntimeState.last_action,
+          deviceOnly: lastRuntimeState.device_only,
           helperConfigured: helperKnown ? helperConfigured : true
         }
       );
@@ -5855,10 +5868,13 @@
       setActionBusy(true, path);
       showMessage(stop ? "Stopping the profile for everyone..." : "Applying the profile to all unprotected devices...", "working");
       try {
-        await request(path, "POST", stop ? {} : {profile_id: profileId});
+        const result = await request(path, "POST", stop ? {} : {profile_id: profileId});
         if (!current()) return;
+        // While the network is stopped, Stop only saves the removal and says so.
         refreshAfterSuccess(stop
-          ? "Stopped the profile for everyone. Saved device rules resumed."
+          ? (result && result.live_applied === false && result.message
+              ? result.message
+              : "Stopped the profile for everyone. Saved device rules resumed.")
           : "Profile applied for everyone. Protected devices keep normal access.");
       } catch (error) {
         if (!current()) return;
@@ -5883,6 +5899,7 @@
     // Active profile control in the sidebar: it names the general profile above the Start button
     // and applies or stops one with the same requests and messages as the saved profiles list.
     // The owner's choice stays until the saved general profile changes, here or elsewhere.
+    // Starting or pausing the same saved profile never replaces a pending choice.
     let activeProfilePick = null;
     let activeProfileSeen = null;
 
@@ -5920,7 +5937,7 @@
 
     function renderActiveProfileControl() {
       const state = generalProfileState;
-      const seen = state && state.profile ? state.profile.id + "|" + (state.active === true) : "";
+      const seen = state && state.profile ? state.profile.id : "";
       if (seen !== activeProfileSeen) {
         activeProfileSeen = seen;
         activeProfilePick = null;
