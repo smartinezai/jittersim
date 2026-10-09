@@ -1,9 +1,9 @@
-"""Defects the QA run of 2026-10-09 found in the dashboard API, each pinned by a failing test.
+"""Defects the QA run of 2026-10-09 found in the dashboard API, now fixed and held by these tests.
 
-Every test is marked xfail(strict=True): it fails today and says why. When the defect is fixed the
-test passes, strict mode reports that as a failure, and the marker is removed. None of these is a
-security hole: each needs the admin token. Each makes the server answer 500 and write a traceback to
-the journal where it should answer 400 with a sentence a person can read.
+Each one made the server answer 500 and write a traceback to the journal where it should answer 400
+with a sentence a person can read. None was a security hole: each needs the admin token. The
+standard library's HTML error pages for refused requests (finding 6) are JSON now too. The tests
+keep what was fixed from coming back.
 
 Run one by hand against a local fixture, for example:
 
@@ -39,16 +39,12 @@ def assert_client_error(dashboard, route, body, raw=None):
     assert "error" in json.loads(data)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "server.py _read_json_body catches json.JSONDecodeError but json.loads raises a plain ValueError "
-    "for an integer literal of more than 4300 digits (Python's int/str limit), so every POST route "
-    "answers 500 and logs a traceback instead of 400 request body must be valid JSON"))
 def test_an_integer_literal_over_4300_digits_is_a_bad_request_on_every_route(dashboard):
     body = b'{"version": ' + b"9" * 4301 + b"}"
     wrong = []
     for route in POST_ROUTES:
-        status, _ = post_status(dashboard, route, None, raw=body)
-        if not 400 <= status < 500:
+        status, data = post_status(dashboard, route, None, raw=body)
+        if status != 400 or json.loads(data).get("error") != "a number in the request body has too many digits":
             wrong.append((route, status))
     assert not wrong, f"{len(wrong)} of {len(POST_ROUTES)} routes: {wrong[:5]}"
 
@@ -68,17 +64,31 @@ LONE_SURROGATE_DELETES = (
 )
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "a lone UTF-16 surrogate in a JSON string (\"\\ud800\") passes json.loads and reaches sqlite3 or "
-    "str.encode('utf-8') unchecked: storage.py lines 1192, 1671, 1924, 2224, 2879, 2946 and "
-    "router_operations.py:38 raise UnicodeEncodeError, so the route answers 500"))
 def test_a_lone_surrogate_in_an_identifier_is_a_bad_request(dashboard):
     wrong = []
     for route, key in LONE_SURROGATE_DELETES:
-        status, _ = post_status(dashboard, route, None, raw=('{"%s": "\\ud800"}' % key).encode())
-        if not 400 <= status < 500:
+        status, data = post_status(dashboard, route, None, raw=('{"%s": "\\ud800"}' % key).encode())
+        if status != 400 or "unpaired surrogate" not in json.loads(data)["error"]:
             wrong.append((route, status))
     assert not wrong, f"{len(wrong)} of {len(LONE_SURROGATE_DELETES)} routes: {wrong}"
+
+
+@pytest.mark.parametrize("raw", [
+    b'{"id": "x", "extra": ["a", {"deep": "\\udc00"}]}',
+    b'{"id": "x", "\\ud800": 1}',
+    b'{"id": "\\ud83d"}',
+    b'{"id": "\\ude00\\ud83d"}',
+])
+def test_a_lone_surrogate_is_found_in_a_key_and_in_a_nested_value(dashboard, raw):
+    status, data = post_status(dashboard, "/api/profiles/delete", None, raw=raw)
+    assert status == 400 and "unpaired surrogate" in json.loads(data)["error"]
+
+
+def test_a_valid_surrogate_pair_is_still_read(dashboard):
+    # \ud83d\ude00 is one character (an emoji). It is not a lone surrogate.
+    status, data = post_status(dashboard, "/api/profiles/delete", None, raw=b'{"id": "\\ud83d\\ude00"}')
+    assert "surrogate" not in json.loads(data)["error"]
+    assert status in (400, 404)
 
 
 NON_STRING_IDENTIFIERS = (
@@ -94,30 +104,22 @@ NON_STRING_IDENTIFIERS = (
 )
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "these handlers pass an identifier from the body to repository.get_* without checking that it is a "
-    "string: a list or object raises sqlite3.ProgrammingError (storage.py 1206, 1935, 2465, 2618, 2761, "
-    "3023) and an integer of 2**63 or more raises OverflowError, so the route answers 500. Other routes "
-    "with the same field answer 400 invalid ... configuration"))
 @pytest.mark.parametrize("route,field,body", NON_STRING_IDENTIFIERS,
                          ids=[f"{route}:{field}" for route, field, _ in NON_STRING_IDENTIFIERS])
 def test_a_list_or_object_as_an_identifier_is_a_bad_request(dashboard, route, field, body):
     wrong = []
-    for bad in (["x"], {"a": 1}, 2**63, -2**63 - 1):
-        status, _ = post_status(dashboard, route, {**body, field: bad})
-        if not 400 <= status < 500:
+    for bad in (["x"], {"a": 1}, 2**63, -2**63 - 1, True, None):
+        status, data = post_status(dashboard, route, {**body, field: bad})
+        if status != 400 or f"{field} must be text" not in json.loads(data)["error"]:
             wrong.append((json.dumps(bad)[:20], status))
     assert not wrong, f"{route} {field}: {wrong}"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "config/workflows.py:147 binds the settings version id to SQLite without a range check, so an id of "
-    "2**63 or more raises OverflowError: /api/history/preview and /api/history/restore answer 500. "
-    "9223372036854775807 correctly answers 400 settings version no longer exists"))
 @pytest.mark.parametrize("route", ["/api/history/preview", "/api/history/restore"])
 def test_a_settings_version_id_beyond_sqlite_range_is_a_bad_request(dashboard, route):
-    assert_client_error(dashboard, route, {"id": 2**63})
-    assert_client_error(dashboard, route, {"id": -2**63 - 1})
+    for identifier in (2**63, -2**63 - 1, 10**30):
+        status, data = post_status(dashboard, route, {"id": identifier, "current_version": 1})
+        assert status == 400 and json.loads(data)["error"] == "settings version no longer exists", (identifier, status)
 
 
 def test_the_edge_of_the_range_is_already_answered_correctly(dashboard):
@@ -125,29 +127,70 @@ def test_the_edge_of_the_range_is_already_answered_correctly(dashboard):
 
 
 RAW_ERRORS = {
-    "request line too long (414)": b"GET /api/" + b"a" * 70000 + b" HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
-    "header too large (431)": b"GET /api/health HTTP/1.1\r\nHost: x\r\nX-A: " + b"a" * 70000 + b"\r\nConnection: close\r\n\r\n",
-    "OPTIONS (501)": b"OPTIONS /api/profiles HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
-    "PATCH (501)": b"PATCH /api/profiles HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-    "HTTP version (505)": b"GET /api/health HTTP/9.9\r\nHost: x\r\nConnection: close\r\n\r\n",
+    "request line too long": (
+        b"GET /api/" + b"a" * 70000 + b" HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 414),
+    "header too large": (
+        b"GET /api/health HTTP/1.1\r\nHost: x\r\nX-A: " + b"a" * 70000 + b"\r\nConnection: close\r\n\r\n", 431),
+    "too many headers": (
+        b"GET /api/health HTTP/1.1\r\nHost: x\r\n" + b"X-A: a\r\n" * 120 + b"Connection: close\r\n\r\n", 431),
+    "OPTIONS": (b"OPTIONS /api/profiles HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 405),
+    "PATCH": (b"PATCH /api/profiles HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", 405),
+    "DELETE": (b"DELETE /api/profiles HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 405),
+    "unknown method": (b"FOO /api/profiles HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 501),
+    "HTTP version": (b"GET /api/health HTTP/9.9\r\nHost: x\r\nConnection: close\r\n\r\n", 505),
+    "bad request line": (b"GET /api/health HTTP/1.1 extra\r\nHost: x\r\nConnection: close\r\n\r\n", 400),
 }
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "requests that http.server refuses before the handler runs (too long a request line or header, a "
-    "method with no do_ function, an unknown HTTP version) get the standard library's HTML error page, "
-    "not the JSON {\"error\": ...} every other refusal uses. OPTIONS and PATCH answer 501 where 405 "
-    "with an Allow header is the usual answer. A client that parses every error as JSON breaks on them."))
+def split_reply(reply):
+    head, _, body = reply.partition(b"\r\n\r\n")
+    status_line, *header_lines = head.split(b"\r\n")
+    headers = {line.split(b":", 1)[0].decode().lower(): line.split(b":", 1)[1].strip().decode()
+               for line in header_lines if b":" in line}
+    return status_line, headers, body
+
+
 def test_every_refusal_under_api_is_json(dashboard):
     wrong = []
-    for name, raw in RAW_ERRORS.items():
-        reply = dashboard.raw(raw, timeout=15)
-        head, _, body = reply.partition(b"\r\n\r\n")
+    for name, (raw, wanted) in RAW_ERRORS.items():
+        status_line, headers, body = split_reply(dashboard.raw(raw, timeout=15))
         try:
-            json.loads(body)
-            is_json = b"application/json" in head
-        except ValueError:
+            message = json.loads(body)["error"]
+            is_json = headers.get("content-type") == "application/json" and bool(message)
+        except (ValueError, KeyError):
             is_json = False
-        if not is_json:
-            wrong.append((name, body[:30]))
+        if not is_json or f" {wanted} ".encode() not in status_line + b" ":
+            wrong.append((name, status_line[:40], body[:30]))
     assert not wrong, wrong
+
+
+def test_a_refusal_by_the_standard_library_echoes_nothing_of_the_request(dashboard):
+    secret = b"<script>alert(1)</script>"
+    for raw in (b"GET /api/health HTTP/1.1 " + secret + b"\r\nHost: x\r\n\r\n",
+                b"GET /api/health HTTP/" + secret + b"\r\nHost: x\r\n\r\n",
+                secret + b" /api/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"):
+        reply = dashboard.raw(raw, timeout=15)
+        assert b"script" not in reply and b"alert" not in reply, reply[:200]
+        assert json.loads(split_reply(reply)[2])["error"]
+
+
+def test_methods_the_dashboard_does_not_answer_say_which_it_does(dashboard):
+    for method in ("OPTIONS", "PATCH", "DELETE"):
+        status, headers, data = dashboard.request(method, "/api/profiles")
+        assert status == 405, method
+        assert {item.strip() for item in headers["Allow"].split(",")} == {"GET", "HEAD", "POST", "PUT"}
+        assert json.loads(data)["error"]
+
+
+def test_head_answers_the_health_check_with_headers_and_no_body(dashboard):
+    status, headers, data = dashboard.request("HEAD", "/api/health", token=None)
+    get_status, get_headers, get_data = dashboard.request("GET", "/api/health", token=None)
+    assert status == get_status == 200 and data == b""
+    assert headers["Content-Type"] == "application/json"
+    assert int(headers["Content-Length"]) == len(get_data) > 0
+
+
+def test_head_answers_nothing_else(dashboard):
+    for path in ("/api/profiles", "/", "/api/nothing-here"):
+        status, headers, data = dashboard.request("HEAD", path)
+        assert status == 405 and data == b"" and "Allow" in headers, path
