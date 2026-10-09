@@ -325,13 +325,16 @@ def check_router_switch(page, what):
     sidebar_control(page, "#refresh-router-wifi").click()
     close_controls(page)
     switch = page.locator("#router-wifi-toggle")
-    expect(switch).to_be_enabled(timeout=10000)
+    # Router Wi-Fi switching is refused for recovery safety. The switch only shows the state.
+    expect(switch).to_have_attribute("aria-checked", "true", timeout=10000)
+    expect(switch).to_be_disabled()
     inside_window(page, "#router-wifi-toggle", what)
     writes = []
     page.on("request", lambda request: writes.append(request)
             if request.url.endswith("/api/router/wifi") else None)
     page.once("dialog", lambda dialog: dialog.dismiss())
-    switch.click()
+    switch.click(force=True)
+    page.wait_for_timeout(300)
     assert not writes, writes
 
 

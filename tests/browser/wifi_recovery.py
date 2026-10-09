@@ -1,6 +1,7 @@
 """Exercise name recovery through the served release dashboard."""
 
 import os
+import re
 import selectors
 import subprocess
 import sys
@@ -95,42 +96,26 @@ def check_router_copy(page):
 
 def check_router_switch(page):
     button = page.locator("#router-wifi-toggle")
-    state = page.locator("#router-wifi-status")
     checks = []
     page.on("request", lambda request: checks.append(request.post_data_json["refresh"])
             if request.url.endswith("/api/router/status") else None)
     expect(button).to_be_disabled()
     page.locator("#refresh-router-wifi").click()
-    expect(button).to_be_enabled(timeout=10000)
+    # Router Wi-Fi switching is refused for recovery safety. The switch only shows the state.
+    expect(button).to_have_attribute("aria-checked", "true", timeout=10000)
     assert checks and checks[0] is True and all(refresh is False for refresh in checks[1:])
-    expect(button).to_have_attribute("aria-checked", "true")
+    expect(button).to_be_disabled()
+    expect(button).to_have_attribute("title", re.compile("disabled for recovery safety"))
+    expect(page.locator("#router-wifi-label")).to_contain_text("read only")
     expect(button).to_be_in_viewport()
     writes = []
     page.on("request", lambda request: writes.append(request)
             if request.url.endswith("/api/router/wifi") else None)
-    page.once("dialog", lambda dialog: dialog.dismiss())
-    button.click()
+    button.click(force=True)
+    page.wait_for_timeout(300)
     assert not writes
     expect(button).to_have_attribute("aria-checked", "true")
-
-    held = []
-    page.route("**/api/router/wifi", lambda route: held.append(route))
-    page.once("dialog", lambda dialog: dialog.accept())
-    with page.expect_request("**/api/router/wifi", timeout=10000):
-        button.click()
-    expect(button).to_be_disabled()
-    expect(state).to_contain_text("Changing")
-    assert len(held) == 1 and held[0].request.post_data_json["background"] is True
     assert page.request.get(page.url + "api/health").status == 200
-    held[0].continue_()
-    expect(button).to_have_attribute("aria-checked", "false", timeout=10000)
-    expect(state).to_contain_text("Off")
-    expect(button).to_be_enabled()
-    page.unroute("**/api/router/wifi")
-    button.click()
-    expect(button).to_have_attribute("aria-checked", "true", timeout=10000)
-    expect(state).to_contain_text("On")
-    assert len(writes) == 2
 
 
 def run():
@@ -166,7 +151,8 @@ def run():
                 expect(page.locator("#reset-wifi-name")).to_be_in_viewport()
                 expect(page.locator("#router-wifi-toggle")).to_be_disabled()
                 page.locator("#refresh-router-wifi").click()
-                expect(page.locator("#router-wifi-toggle")).to_be_enabled(timeout=10000)
+                expect(page.locator("#router-wifi-toggle")).to_have_attribute(
+                    "aria-checked", "true", timeout=10000)
                 page.screenshot(path="test-results/wifi-pi-desktop.png", animations="disabled")
                 page.set_viewport_size({"width": 1280, "height": 800})
                 # Whole controls and not a sliver of them. The sidebar lists nine pages
