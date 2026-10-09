@@ -202,17 +202,25 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
                 release.set()
             self.assertEqual(pending.result(timeout=3)["ssid"], "TestNet")
 
+    def wait_for_free_slots(self, expected):
+        """Wait until the helper has accepted its connections and `expected` slots are free."""
+
+        deadline = time.monotonic() + 30
+        while self.helper._request_slots._value != expected and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(self.helper._request_slots._value, expected)
+
     def test_idle_socket_clients_cannot_create_unbounded_workers(self):
         clients = []
         try:
-            for _ in range(MAX_HELPER_CONNECTIONS):
+            for taken in range(1, MAX_HELPER_CONNECTIONS + 1):
                 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 client.connect(str(self.socket))
                 clients.append(client)
-            deadline = time.monotonic() + 2
-            while self.helper._request_slots._value and time.monotonic() < deadline:
-                time.sleep(0.005)
-            self.assertEqual(self.helper._request_slots._value, 0)
+                # The helper's listen backlog is small and a refused connect never reached it.
+                # So let it accept this client before the next one connects. On a busy machine
+                # eight back-to-back connects otherwise overflow the backlog.
+                self.wait_for_free_slots(MAX_HELPER_CONNECTIONS - taken)
             with self.assertRaises(HelperClientError) as caught:
                 HelperClient(socket_path=self.socket, timeout_seconds=1).ping()
             self.assertEqual(caught.exception.reason, "helper-busy")
