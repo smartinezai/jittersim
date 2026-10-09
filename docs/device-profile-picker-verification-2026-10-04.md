@@ -10,7 +10,7 @@ profiles as recovery.
 
 - Branch: `codex/device-profile-picker`.
 - Base: `04c982d6150d225c3be6cc082573afc64a656842`.
-- Checkout: `/Users/samantha.martinez/Github repos/jittersim.worktrees/device-profile-picker`.
+- Checkout: `<home>/Github repos/jittersim.worktrees/device-profile-picker`.
 - Review the complete change with `git diff 04c982d6150d225c3be6cc082573afc64a656842..HEAD`.
 - The implementation plan is `implementation-plan-device-profile-picker-2026-10-04.md`.
 - Application changes are limited to `dashboard.html`, `dashboard.js` and
@@ -19,7 +19,7 @@ profiles as recovery.
 ## Actual checks
 
 1. Focused dashboard tests: **119 passed** in 5.07 seconds on the final source.
-   Command: `PYTHONPATH=src /Users/samantha.martinez/Github\ repos/jittersim/.venv/bin/python -m pytest tests/unit/test_dashboard_saved_profiles.py tests/unit/test_dashboard_sidebar_inputs.py tests/unit/test_dashboard_help_text.py tests/unit/test_dashboard_auth_state.py -q -o addopts='' --tb=short`.
+   Command: `PYTHONPATH=src <home>/Github\ repos/jittersim/.venv/bin/python -m pytest tests/unit/test_dashboard_saved_profiles.py tests/unit/test_dashboard_sidebar_inputs.py tests/unit/test_dashboard_help_text.py tests/unit/test_dashboard_auth_state.py -q -o addopts='' --tb=short`.
 2. API and device-management tests: **375 passed** before the final small change
    that hides an empty status note and clears the warning after a valid choice.
    Command: the same Python runtime with `-m pytest tests/integration/test_device_management.py tests/unit/test_api.py -q --tb=short`.
@@ -29,7 +29,7 @@ profiles as recovery.
 4. Browser journey: `python -m tests.browser.saved_profiles` passed on the final
    source at **1920 × 1000** and **390 × 844**. Runtime:
    `/private/tmp/jittersim-erratic-browser-venv/bin/python`. Chromium:
-   `/Users/samantha.martinez/Library/Caches/ms-playwright/chromium-1243/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`.
+   `<home>/Library/Caches/ms-playwright/chromium-1243/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`.
    The journey checks required selection, saving the intended ID, names that
    match, preserved selection, empty and missing choices, failure recovery,
    access clearing and draft restoration. Screenshots were inspected together

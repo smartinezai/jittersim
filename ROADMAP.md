@@ -125,6 +125,7 @@ Goal: control the emulator from a Mac without a screen or keyboard attached to t
 - [x] Offer the connected devices in forms instead of typed addresses.
 - [x] Give the dashboard a phone layout: a short header, Panic and the router Wi-Fi switch
   pinned to the bottom of the screen and the other sidebar controls in a sheet.
+  (The switch has been read only since PR 87.)
 - [x] Name the active general profile above Start and let the owner pick one there.
 
 Suggested commits:
@@ -292,7 +293,7 @@ See the [household plan](docs/implementation-plan-household-access-point-2026-09
 - [x] Keep bounded settings history with preview and concurrent-edit protection.
 - [x] Record named test sessions with settings, events, notes and measurement reports.
 - [x] Duplicate profiles and provide manual copying when clipboard access fails.
-- [x] Read router Wi-Fi state before presenting one verified switch.
+- [x] Read router Wi-Fi state before presenting one verified switch. (Read only since PR 87.)
 - [x] Install administrator-approved releases with progress, health checks and recovery.
 - [x] Exercise complete browser journeys in CI against an installed package.
 - [ ] Verify radio changes, release installation and recovery on the actual Pi.
@@ -486,9 +487,9 @@ The project is ready for presentation when it can:
 
 ## Current remaining work
 
-See the [2 October audit](docs/unfinished-work-audit-2026-10-02.md) for current
-test results and historical checkpoints that are already complete. The
-[remaining work plan](docs/implementation-plan-remaining-work-2026-10-02.md)
-covers deferred physical acceptance, the tested local homepage reference and
-the completed reboot design. Live homepage policy and reboot implementation
-remain follow-ups. Integration and remote commands are separate deliveries.
+The 2 October audit and the remaining-work plan that this section used to link
+are not in the repository. The open work is in
+[planned features](docs/planned-features.md) and
+[planned fixes](docs/planned-fixes.md). The physical checks that remain are in
+the [acceptance checklist](docs/pi-acceptance-checklist.md). The
+[documentation index](docs/README.md) lists the older plans.
