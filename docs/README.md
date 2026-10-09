@@ -1,9 +1,10 @@
 # Documentation index
 
 This page lists every file in `docs/` and the guides that live elsewhere in the
-repository. It groups them by status so you can tell what to trust. Nothing was
-moved or renamed to make this index. Checked against main at `add7c87` on
-2026-10-09.
+repository. It groups them by status so you can tell what to trust. The
+overview's detailed feature content now lives in user-guide.md. The rest of
+this index was checked at `add7c87` on 2026-10-09; its README entries were
+updated against main at `4a89f34` on 2026-10-09.
 
 ## What the status words mean
 
@@ -25,7 +26,8 @@ a month (for example `2026-09`) was written in that month.
 
 | Document | Use it for |
 | --- | --- |
-| [README.md](../README.md) | What JitterSim does, the dashboard, the terminal commands, how to set up and how to run the checks |
+| [README.md](../README.md) | A short overview, current features and the Pi quick start |
+| [user-guide.md](user-guide.md) | Detailed feature behavior, network boundaries, terminal commands and local development |
 | [deploy/raspberry-pi/README.md](../deploy/raspberry-pi/README.md) | Installing, updating, securing and recovering the Pi. It starts with a recovery quick reference |
 | [pi-acceptance-checklist.md](pi-acceptance-checklist.md) | The owner's list of physical checks on a real Pi |
 | [runbooks/dashboard-unreachable.md](runbooks/dashboard-unreachable.md) | The dashboard does not open. How to reach the Pi when only the test Wi-Fi is available |
