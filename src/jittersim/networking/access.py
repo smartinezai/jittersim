@@ -441,7 +441,15 @@ class AccessManager:
         except CommandExecutionError:
             LOGGER.warning("could not stop the unused filtered DNS service")
 
-    def _install(self, plan):
+    def _install(self, plan, *, release=False):
+        """Install the plan. A release (household rules off) is best effort.
+
+        A release only removes restrictions. A refused hostapd admission change or
+        a failed DNS connection refresh must not keep the rules that it removes,
+        because in Pi-only mode the whole household is on the test Wi-Fi. Those
+        steps are logged and returned as problems instead.
+        """
+        problems = []
         atomic_write(self.directory / "unbound.conf", render_dns(plan))
         # Only DNS rules need the resolver. MAC lists and the release path must
         # work even when it is broken or missing.
@@ -459,22 +467,61 @@ class AccessManager:
                 raise
         else:
             self._stop_dns()
-        self._admission(plan)
+        try:
+            self._admission(plan)
+        except (CommandExecutionError, ValueError, OSError):
+            if not release:
+                raise
+            LOGGER.warning("Wi-Fi join limits could not be cleared while household rules were switched off")
+            problems.append("admission")
         self._nft(render_access_firewall(plan, self.topology))
         # Existing NAT decisions outlive nft rule replacement. Drop only test
         # clients' DNS mappings so reused sockets pick up the new policy too.
         for protocol in ("udp", "tcp"):
-            result = self.executor.run(
-                Command(
-                    executable="conntrack",
-                    arguments=("-D", "-s", "192.168.50.0/24", "-p", protocol, "--dport", "53"),
-                    ignore_failure=True,
-                    timeout_seconds=2,
-                    purpose="refresh test-network DNS routes",
+            try:
+                result = self.executor.run(
+                    Command(
+                        executable="conntrack",
+                        arguments=("-D", "-s", "192.168.50.0/24", "-p", protocol, "--dport", "53"),
+                        ignore_failure=True,
+                        timeout_seconds=2,
+                        purpose="refresh test-network DNS routes",
+                    )
                 )
+                if result.return_code and "0 flow entries have been deleted" not in result.stderr:
+                    raise CommandExecutionError("could not refresh DNS connection state")
+            except CommandExecutionError:
+                if not release:
+                    raise
+                # Old DNS mappings expire on their own within a minute.
+                LOGGER.warning("DNS connection state was not refreshed while household rules were switched off")
+        return problems
+
+    def _remove_after_failed_release(self, plan):
+        """Open the test Wi-Fi when the disabled rule set itself could not be loaded.
+
+        Rolling back would reinstall the restrictions that the release removes. A
+        plain table removal needs no new rules and is the least that can fail.
+        """
+        LOGGER.exception("household rules could not be replaced. Removing them instead")
+        try:
+            self._nft(
+                "\n".join(
+                    _table("jittersim_access") + ["delete table inet jittersim_access"]
+                    + _table("jittersim_access", "netdev")
+                    + ["delete table netdev jittersim_access"]
+                ) + "\n" + transition_firewall(self.topology, clear=True)
             )
-            if result.return_code and "0 flow entries have been deleted" not in result.stderr:
-                raise CommandExecutionError("could not refresh DNS connection state")
+            content = json.dumps(plan.payload(), sort_keys=True) + "\n"
+            atomic_write(self.directory / "policy.json", content)
+            atomic_write(self.runtime_path, content)
+        except Exception:
+            self.error = (
+                "Household rules could not be switched off. "
+                "The test network is closed until recovery succeeds."
+            )
+            LOGGER.exception("household rules could not be removed")
+            raise
 
     def _probe(self, plan):
         try:
@@ -512,7 +559,13 @@ class AccessManager:
                 replace(plan, options=replace(plan.options, enabled=False)), force=True
             )
 
-    def apply(self, plan: AccessPlan, *, force=False):
+    def apply(self, plan: AccessPlan, *, force=False, guard=True):
+        """Replace the access policy.
+
+        ``guard`` closes test Wi-Fi forwarding while the rules change. An address
+        refresh does not need it: nft swaps its table atomically and DNS for the
+        listed clients fails closed while the resolver restarts.
+        """
         with self.transaction():
             self.dns_failed = False
             if (
@@ -543,25 +596,41 @@ class AccessManager:
                 and not self.admission_supported()
             ):
                 raise ValueError("Wi-Fi admission is unavailable with the current access point")
+            release = not plan.options.enabled
+            problems = []
             candidate = self.directory / "candidate.conf"
             atomic_write(candidate, render_dns(plan))
             try:
                 if plan.has_dns_rules:
                     self._run("unbound-checkconf", str(candidate))
                 self._nft(render_access_firewall(plan, self.topology), check=True)
+            except CommandExecutionError:
+                # A release goes on: if the rules cannot load, they are removed below.
+                if not release:
+                    raise
+                LOGGER.warning("the switched-off household rules did not pass nft --check")
             finally:
                 candidate.unlink(missing_ok=True)
             transition = (self.ad_blocking_store.access_transition()
                           if self.ad_blocking_store is not None else nullcontext())
             with transition:
-                self._nft(transition_firewall(self.topology))
+                if guard:
+                    self._nft(transition_firewall(self.topology))
                 try:
-                    self._install(plan)
+                    problems = self._install(plan, release=release)
                     content = json.dumps(plan.payload(), sort_keys=True) + "\n"
                     atomic_write(self.directory / "policy.json", content)
                     atomic_write(self.runtime_path, content)
                     self._nft(transition_firewall(self.topology, clear=True))
                 except Exception:
+                    if release:
+                        # Never fall back to the restrictions a release removes.
+                        self._remove_after_failed_release(plan)
+                        self.applied = plan
+                        self.generation = self._generation()
+                        self.error = None
+                        self.health_error = None
+                        return self.status()
                     self.error = "Access update failed. Previous rules were restored."
                     try:
                         if old is None:
@@ -576,6 +645,9 @@ class AccessManager:
                         self.error = (
                             "Access recovery failed. "
                             "The test network is closed until recovery succeeds."
+                            if guard else
+                            "Access recovery failed. "
+                            "Filtered DNS may be unavailable until recovery succeeds."
                         )
                         LOGGER.exception("persistent access recovery failed")
                     raise
@@ -583,6 +655,12 @@ class AccessManager:
                 self.generation = self._generation()
                 self.error = None
                 self.health_error = None
+                if "admission" in problems:
+                    self.error = (
+                        "Household rules are off, but the Wi-Fi join limits could not be "
+                        "cleared. Devices refused before may still be unable to join."
+                    )
+                    raise ValueError("Wi-Fi join limits could not be cleared")
                 return self.status()
 
 
@@ -621,7 +699,7 @@ class AccessManager:
             except ValueError:
                 return
             if candidate != self.applied:
-                self.apply(candidate)
+                self.apply(candidate, guard=False)
 
 
 def main(argv=None):
