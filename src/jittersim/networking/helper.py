@@ -635,6 +635,7 @@ class HelperService:
                        if confirmed is not None else self._applier)
             identity = identify_peer(applier, peer, require_reachable=False)
             allowed = identity["network"] == "management"
+            synced = store.protected_synced
             if not allowed and identity["mac_address"] is not None:
                 # A grant write holds the store lock through fsync, which can stall.
                 # Wait a bounded time for it; without the current list there is no
@@ -645,7 +646,11 @@ class HelperService:
                     return {"ok": False, "error": "Device verification is busy. Try again.",
                             "reason": "helper-busy"}
                 try:
+                    # One snapshot: the grants and whether they include protection. A
+                    # startup sync after this point must not turn a refusal decided
+                    # from the unsynced grants into a final one (review N2).
                     devices = store.list_devices()
+                    synced = store.protected_synced
                 finally:
                     store._lock.release()
                 allowed = any(device["mac_address"] == identity["mac_address"]
@@ -653,7 +658,7 @@ class HelperService:
             # protected_synced lets the dashboard tell a restarted helper, which has not
             # received the protection grants yet, from a final refusal.
             return {"ok": True, **identity, "can_register": False, "allowed": allowed,
-                    "protected_synced": store.protected_synced}
+                    "protected_synced": synced}
         except AccessError as error:
             return {"ok": False, "error": str(error)}
         except (ValueError, TypeError, OSError, CommandExecutionError):
