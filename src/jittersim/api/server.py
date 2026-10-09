@@ -889,6 +889,12 @@ def _runtime_state_payload(state: RuntimeState) -> Dict[str, Any]:
     }
 
 
+_RESET_SAVED_ONLY = {
+    "live_applied": False,
+    "message": "saved; the network is reset, so choose Start to use it",
+}
+
+
 def _json_bytes(payload: Dict[str, Any]) -> bytes:
     return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
 
@@ -900,6 +906,9 @@ class _PendingConnection:
     handshake: bool
     expires_at: float
     want_write: bool = False
+
+
+_RESET_REQUESTS_LOCK = threading.Lock()
 
 
 class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
@@ -1253,6 +1262,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             self.repository.get_runtime_state() if state is None else state
         )
         payload["running"] = self.scheduler is not None and self.scheduler.is_active
+        # The saved devices of a device-only start. Everything else stays reset.
+        payload["device_only"] = sorted(self.repository.get_device_start_scope() or ())
         return payload
 
     def _applied_summary(self, plan: NetworkPlan) -> Dict[str, Any]:
@@ -1968,7 +1979,11 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         live_global = path in ("/api/observations/add-global-block", "/api/observations/remove-global-block")
         live_general = path in ("/api/general-profile", "/api/general-profile/stop")
         live_ads = path == "/api/ad-blocking"
-        if path == "/api/apply" or live_access or live_global or live_general or live_ads:
+        device_apply = path == "/api/connected-devices/apply-profile"
+        if path in ("/api/reset", "/api/normal-access"):
+            self.note_reset_request()
+        resets_at_entry = self._reset_requests
+        if path == "/api/apply" or live_access or live_global or live_general or live_ads or device_apply:
             generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
             refused, revision = self._capture_control_intent(generation)
             if refused is not None:
@@ -1992,6 +2007,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 workflow = write_workflow(self, path, payload, _settings_from_payload)
                 if workflow is not None:
                     return workflow
+                if device_apply:
+                    return self._apply_profile_to_connected_device(
+                        payload, control_intent=control_intent, resets_at_entry=resets_at_entry)
                 return (self._write_response_for(path, payload, control_intent=control_intent)
                         if path == "/api/apply" or live_global or live_general or live_ads
                         else self._write_response_for(path, payload))
@@ -3040,7 +3058,25 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             return status, "application/json", _json_bytes(data)
         if path == "/api/router/sync-ap":
             return self._router_execute(path, {**payload, "background": False})
+        if path == "/api/router/check":
+            return self._router_check_now(path, payload)
         return self._router_response_for(path, payload)
+
+    def _router_check_now(self, path, payload):
+        """A password check that is not a background operation spends the same router budget.
+
+        Every check signs in to the router, so a direct API call may not repeat one early.
+        """
+        refused = self.router_operations.begin_check()
+        if refused is not None:
+            return refused[0], "application/json", _json_bytes(refused[1])
+        status = HTTPStatus.BAD_GATEWAY
+        try:
+            response = self._router_response_for(path, payload)
+            status = response[0]
+            return response
+        finally:
+            self.router_operations.end_check(status == HTTPStatus.OK)
 
     def _router_response_for(self, path, payload):
         if path == "/api/router/status":
@@ -3479,21 +3515,25 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     }
                 ),
             )
+        scoped = False
         if self.repository.get_runtime_state().last_action == "reset":
-            # Only an explicit Apply may undo a Reset.
-            return (
-                HTTPStatus.OK,
-                "application/json",
-                _json_bytes(
-                    {
-                        **fields,
-                        "live_applied": False,
-                        "message": "Saved. The network is reset, so choose Start to use it.",
-                    }
-                ),
-            )
+            # Only an explicit Apply may undo a Reset. A device-only start keeps
+            # applying its own devices and nothing else.
+            scoped = self.repository.get_device_start_scope() is not None
+            if not scoped:
+                return (
+                    HTTPStatus.OK,
+                    "application/json",
+                    _json_bytes(
+                        {
+                            **fields,
+                            "live_applied": False,
+                            "message": "Saved. The network is reset, so choose Start to use it.",
+                        }
+                    ),
+                )
         status, content_type, body = self._apply_configuration_locked(
-            connected_snapshot=snapshot, sample_usage=False
+            connected_snapshot=snapshot, sample_usage=False, device_scope=scoped
         )
         response = json.loads(body)
         response.update(fields)
@@ -3644,6 +3684,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 accepted, _ = self._publish_apply(generation, save_selection)
                 if not accepted:
                     return self._apply_refused(generation)
+                if stop and self.repository.get_runtime_state().last_action == "reset":
+                    # Everyone was not running. Stopping it starts nothing else.
+                    return HTTPStatus.OK, "application/json", _json_bytes({
+                        "general_profile": self._general_profile_status(),
+                        "live_applied": False,
+                        "message": "Everyone stopped. Nothing else started.",
+                    })
             except HelperClientError as error:
                 return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                     {"error": str(error)}
@@ -4414,10 +4461,10 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 snapshot,
             )
 
-    def _base_profile_feedback(self, device: Device) -> str:
+    def _base_profile_feedback(self, device: Device, *, everyone_paused: bool = False) -> str:
         saved_profile = self.repository.get_profile(device.profile_id)
         profile_label = saved_profile.name if saved_profile is not None else device.profile_id
-        general = self.repository.get_general_profile()
+        general = None if everyone_paused else self.repository.get_general_profile()
         if general is not None:
             return (
                 f"Profile {profile_label} saved for this device. Everyone uses {general.name}, which "
@@ -4473,15 +4520,46 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             current = "This is the current device profile."
         return f"Profile {profile_label} saved for this device. " + current
 
-    def _apply_profile_to_connected_device(self, payload: dict):
+    # Counts Reset and Panic requests, so an action queued before one can tell.
+    _reset_requests = 0
+
+    def note_reset_request(self) -> None:
+        with _RESET_REQUESTS_LOCK:
+            self._reset_requests += 1
+
+    def _apply_profile_to_connected_device(self, payload: dict, *, control_intent=None,
+                                           resets_at_entry=None):
+        """Save one device's profile and start it for that device.
+
+        A running saved plan is applied again as before. After a Reset only this
+        device starts: Everyone, other saved devices, everyone else, service
+        lists and ad-blocking stay stopped until Start or Apply to everyone.
+        """
+
         if self.helper_client is None:
             return (
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 "application/json",
                 _json_bytes({"error": "network helper is not configured"}),
             )
+        if control_intent is None:
+            generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
+            refused, revision = self._capture_control_intent(generation)
+            if refused is not None:
+                return refused
+            control_intent = (generation, revision)
+        if resets_at_entry is None:
+            resets_at_entry = self._reset_requests
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
+            refused = self._apply_refused(control_intent[0])
+            if refused is not None:
+                return refused
+            if self._reset_requests != resets_at_entry:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({
+                    "error": "Reset or Panic ran while this Apply waited. Nothing was saved or "
+                             "started. Apply the profile again if you still want it.",
+                })
             try:
                 snapshot = station_snapshot(self.helper_client)
                 device, existing = _connected_device_from_payload(
@@ -4496,24 +4574,86 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         "This device is protected from profiles. Stop protecting it before applying a profile."
                     )
                 self._verify_selected_client(device, snapshot)
+                stopped = self.repository.get_runtime_state().last_action == "reset"
+                general = self.repository.get_general_profile()
+                if general is not None and not stopped:
+                    raise ValueError(
+                        f"Everyone uses {general.name} right now, so this device cannot run its own "
+                        "profile yet. Nothing was saved. Stop Everyone first, or save the choice "
+                        "in the device form to use it later."
+                    )
+                if stopped and self._stop_latched():
+                    raise ValueError(
+                        "Panic or a router outage stopped profiles. Nothing was saved. Choose "
+                        "Start when it is safe, then apply this profile."
+                    )
                 if self.scheduler:
                     self.scheduler.sample_before_control_change(repository=self.repository)
+                if stopped:
+                    # Refuse a changed helper intent before saving, like Apply to everyone.
+                    refused, current_revision = self._capture_control_intent(control_intent[0])
+                    if refused is not None:
+                        return refused
+                    if control_intent[1] is not None and current_revision != control_intent[1]:
+                        return self._control_rejected(HelperClientError(
+                            "Network control changed before saving the device profile",
+                            reason="control-changed"))
                 with self.repository.transaction():
                     self.repository.save_device(
                         device, expected=existing, create_only=existing is None
                     )
                     self._validate_saved_plan()
+                    if stopped:
+                        self.repository.add_device_to_start_scope(device.id)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
-            return self._saved_control_response(
-                {
-                    "device": _device_payload(
-                        device, labels_by_mac=self.repository.list_connected_device_labels()
-                    ),
-                    "message": self._base_profile_feedback(device),
-                },
-                snapshot,
+            fields = {
+                "device": _device_payload(
+                    device, labels_by_mac=self.repository.list_connected_device_labels()
+                ),
+                "message": self._base_profile_feedback(device, everyone_paused=stopped),
+            }
+            if not stopped:
+                return self._saved_control_response(fields, snapshot)
+            return self._start_device_only(fields, snapshot, device, control_intent)
+
+    def _stop_latched(self) -> bool:
+        """Whether a Panic, outage or state error keeps profiles stopped in the helper."""
+
+        try:
+            gateway_status = self.helper_client.gateway_status()
+        except (HelperClientError, AttributeError):
+            return False
+        return any(gateway_status.get(name) is True for name in (
+            "outage_stop_latched", "panic_stop_latched", "state_error"))
+
+    def _start_device_only(self, fields, snapshot, device, control_intent):
+        """Start the device-only scope after a Reset. Everything else stays stopped."""
+
+        status, content_type, body = self._apply_configuration_locked(
+            connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
+            device_scope=True,
+        )
+        response = json.loads(body)
+        response.update(fields)
+        response["live_applied"] = status == HTTPStatus.OK
+        if status == HTTPStatus.OK:
+            others = len(self.repository.get_device_start_scope() or ()) - 1
+            started = (
+                f" Started for {device.name} only." if others <= 0 else
+                f" Started for {device.name} too, beside {others} "
+                f"{'device' if others == 1 else 'devices'} already started on their own."
             )
+            response["message"] = (
+                fields["message"] + started
+                + " Everyone and other saved settings stay paused. Start resumes all saved settings."
+            )
+        else:
+            response["error"] = (
+                "The profile is saved for this device but it did not start. Other saved "
+                "settings stay stopped. " + response.get("error", "")
+            ).strip()
+        return status, content_type, _json_bytes(response)
 
     def _quota_counter(self, kind: str, identifier: str) -> Optional[int]:
         """Read one current helper counter for a manual quota reset."""
@@ -4757,14 +4897,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
     def _apply_after_change(self) -> Tuple[int, str, bytes]:
         """Re-apply the plan for a saved change unless the network was reset."""
 
+        scoped = False
         if self.repository.get_runtime_state().last_action == "reset":
-            # Only an explicit Apply may undo a Reset.
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "live_applied": False,
-                    "message": "saved; the network is reset, so choose Start to use it",
-                }
-            )
+            # Only an explicit Apply may undo a Reset. A device-only start keeps
+            # applying its own devices; the scope is read again under the lock.
+            scoped = self.repository.get_device_start_scope() is not None
+            if not scoped:
+                return HTTPStatus.OK, "application/json", _json_bytes(_RESET_SAVED_ONLY)
         if self.helper_client is not None:
             try:
                 gateway_status = self.helper_client.gateway_status()
@@ -4784,9 +4923,10 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         ),
                     }
                 )
-        return self._apply_configuration()
+        return self._apply_configuration(device_scope=scoped)
 
-    def _apply_configuration(self, *, explicit_apply: bool = False, control_intent=None) -> Tuple[int, str, bytes]:
+    def _apply_configuration(self, *, explicit_apply: bool = False, control_intent=None,
+                             device_scope: bool = False) -> Tuple[int, str, bytes]:
         if control_intent is None:
             generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
             refused, revision = self._capture_control_intent(generation)
@@ -4796,12 +4936,19 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         # Scheduled applies, manual applies and resets never interleave.
         operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
         with operation:
-            return self._apply_configuration_locked(explicit_apply=explicit_apply, control_intent=control_intent)
+            return self._apply_configuration_locked(
+                explicit_apply=explicit_apply, control_intent=control_intent, device_scope=device_scope)
 
     @recorded("apply", "dashboard")
     def _apply_configuration_locked(
-        self, connected_snapshot=None, *, sample_usage=True, explicit_apply: bool = False, control_intent=None
+        self, connected_snapshot=None, *, sample_usage=True, explicit_apply: bool = False, control_intent=None,
+        device_scope: bool = False,
     ) -> Tuple[int, str, bytes]:
+        """Apply the whole saved plan, or with `device_scope` only a device-only start.
+
+        A device-only start is read here, under the shared lock, so a Reset that ran
+        while this call waited leaves nothing to start.
+        """
         if self.helper_client is None:
             return (
                 HTTPStatus.SERVICE_UNAVAILABLE,
@@ -4816,10 +4963,21 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             refused = self._apply_refused(halts_at_start)
         if refused is not None:
             return refused
+        scope = None
+        if device_scope:
+            if explicit_apply:
+                raise ValueError("a device-only start is never an explicit Start")
+            scope = self.repository.get_device_start_scope()
+            if scope is None:
+                return HTTPStatus.OK, "application/json", _json_bytes(_RESET_SAVED_ONLY)
+        # A device-only start stays a Reset for everything outside its devices.
+        runtime_action = "reset" if scope is not None else "apply"
+        keep = {"keep_device_scope": True} if scope is not None else {}
         try:
             prepared = (
                 self.scheduler.prepare_plan(
-                    repository=self.repository, connected_snapshot=connected_snapshot
+                    repository=self.repository, connected_snapshot=connected_snapshot,
+                    **({"device_scope": scope} if scope is not None else {}),
                 )
                 if self.scheduler is not None else None
             )
@@ -4833,6 +4991,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         if connected_snapshot is not None
                         else station_snapshot(self.helper_client)
                     ),
+                    device_scope=scope,
                 )
             )
         except (PlanError, StorageError):
@@ -4842,7 +5001,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 _json_bytes({"error": "stored configuration cannot be applied"}),
             )
         accepted, _ = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
-            observed_state="applying", last_action="apply", last_result=None, last_error=None,
+            observed_state="applying", last_action=runtime_action, last_result=None, last_error=None,
+            **keep,
         ))
         if not accepted:
             return self._apply_refused(halts_at_start)
@@ -4867,8 +5027,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             LOGGER.error("network helper apply failed: %s", error)
             if self.scheduler is not None:
                 self.scheduler.invalidate_applied_plan()
+            # A failed device-only start ends its scope: the rest was never started.
             accepted, state = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
-                observed_state="error", last_action="apply", last_result="failure",
+                observed_state="error", last_action=runtime_action, last_result="failure",
                 last_error="network helper apply failed",
             ))
             if not accepted:
@@ -4892,7 +5053,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             if result.get("counters_preserved") is not True:
                 self.repository.rebase_quota_counters(now=int(time.time()))
             state = self.repository.update_runtime_state(
-                observed_state="applied", last_action="apply", last_result="success", last_error=None,
+                observed_state="applied", last_action=runtime_action, last_result="success",
+                last_error=None, **keep,
             )
             if self.scheduler is not None:
                 self.scheduler.activate_plan(repository=self.repository, prepared=prepared,
@@ -5105,8 +5267,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     self.scheduler.require_recovery()
                 LOGGER.error("saved recovery remains unconfirmed. Retry Panic before Start")
                 return
-            status, _, _ = self._reset_network(automatic_recovery=True)
-            kind, message = "reset", "Network reset again after the dashboard restarted"
+            if self.repository.get_device_start_scope() is not None:
+                # Only the devices of a device-only start run again.
+                status, _, _ = self._apply_configuration(device_scope=True)
+                kind, message = "apply", "Device-only start applied again after the dashboard restarted"
+            else:
+                status, _, _ = self._reset_network(automatic_recovery=True)
+                kind, message = "reset", "Network reset again after the dashboard restarted"
         else:
             status, _, _ = self._apply_configuration()
             kind, message = "apply", "Configuration applied again after the dashboard restarted"

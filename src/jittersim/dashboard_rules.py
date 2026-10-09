@@ -44,9 +44,12 @@ def sidebar_status(
     clients = data.get("clients") or []
     service_lists = data.get("serviceLists") or []
     steady = running and state in ("applied", "unknown")
+    # A device-only start runs its own devices. Everyone and the rest stay paused.
+    device_only = data.get("deviceOnly") if isinstance(data.get("deviceOnly"), list) else []
     general_in_effect = (
         general_profile is not None
         and steady
+        and not device_only
         and (general_state.get("active") is True or state == "unknown")
     )
     general_name = (
@@ -60,7 +63,7 @@ def sidebar_status(
         else:
             general = {
                 "text": "Everyone: " + general_name + " · "
-                + ("paused" if state == "reset" else "saved, not applied"),
+                + ("paused" if state == "reset" or device_only else "saved, not applied"),
                 "tone": "muted",
             }
 
@@ -107,6 +110,8 @@ def sidebar_status(
                 }
                 for client in clients
                 if not client.get("unaffected") and client.get("assigned_device_id")
+                and client.get("assigned_effective_state") not in ("unverified", "protected")
+                and (not device_only or client.get("assigned_device_id") in device_only)
             ]
         unassigned = (
             not general_in_effect
@@ -125,7 +130,8 @@ def sidebar_status(
         devices = {"summary": summary, "items": shown, "more": len(affected) - len(shown)}
 
     enabled_lists = (
-        [item.get("name") for item in service_lists if item.get("enabled")] if steady else []
+        [item.get("name") for item in service_lists if item.get("enabled")]
+        if steady and not device_only else []
     )
     return {
         "visible": visible,
@@ -152,6 +158,14 @@ def runtime_status_text(
         return {"text": "Applying…", "tone": "working"}
     if state == "resetting":
         return {"text": "Resetting…", "tone": "working"}
+    device_only = options.get("deviceOnly")
+    count = len(device_only) if isinstance(device_only, list) else 0
+    if running is True and count > 0 and state in ("applied", "unknown"):
+        return {
+            "text": "Running for " + str(count) + (" device" if count == 1 else " devices")
+            + " only. Everyone and other saved settings stay paused. Start resumes them all.",
+            "tone": "ok",
+        }
     if running is True:
         if state == "applied":
             return {

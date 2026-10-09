@@ -1,5 +1,9 @@
 # Releasing JitterSim
 
+`scripts/release.sh X.Y.Z` runs every step below in order and stops only where
+a person must act. See [docs/releasing.md](../releasing.md). This page keeps the
+rules and the manual commands behind it.
+
 Main changes produce automatic unsigned development candidates after all required
 checks pass. A stable release is a retained signed package with owner approval
 and evidence from the supported Pi. Publication uploads exactly that package.
@@ -13,11 +17,13 @@ supported Pi model, operating system, architecture and Python version. Test the
 first upgrade from the current installed Pi release and recovery to that release.
 Record the supported starting version explicitly in the release notes.
 
-Before initializing the release registry inspect the highest installed, staged
-and remembered release order on every supported Pi. Use the largest value as the
-floor. Existing development archives used time-based orders. Guessing zero could
-make official releases impossible to install. Do not change an installed Pi's
-high-water mark to make a package appear newer.
+Development archives use their build time as release order. A reserved stable
+order is never lower than the time of the reservation, so it is newer than every
+development build made before it. `scripts/release.sh` initializes an empty
+registry with the current time for that reason. When initializing by hand,
+inspect the highest installed, staged and remembered release order on every
+supported Pi if any Pi clock may have been ahead. Do not change an installed
+Pi's high-water mark to make a package appear newer.
 
 The signing key stays on the owner's Mac. Its public key must already be trusted
 on every tested Pi. The key never goes into CI or the repository. The first
@@ -150,9 +156,32 @@ approved source merge can use the configured checks run locally when GitHub limi
 prevent hosted execution. Record the actual commands, source identity and results
 as local evidence. Do not describe them as green hosted runs.
 
-Automatic candidates and the stable publication gate currently require successful
-hosted main workflow evidence. There is no local-evidence override in this tool.
-A future manual stable route would need its own reviewed acceptance contract.
+Automatic candidates require successful hosted main workflow evidence. The
+stable gate accepts a local verification record instead, but only when:
+
+- `local_verification.allowed` is `true` in `release-policy.json` at the release
+  commit (owner decision of 2026-10-09; set it to `false` to turn this off),
+- a required workflow never ran for the commit: no run at all, or a run whose
+  jobs all ended before executing a single step (what a billing block looks like),
+- the record names exactly that commit, lists every check in
+  `required_checks` as passed with its command and log hash, and
+- the owner's release key signed it in the `jittersim-local-verification`
+  namespace.
+
+A hosted job that ran and failed always blocks. Write the record with:
+
+```sh
+python3 deploy/raspberry-pi/release-system.py record-local --ref FULL_MAIN_COMMIT \
+  --results results.json --key "$HOME/.ssh/jittersim_release_ed25519" \
+  --output /absolute/private/evidence/local-verification.json
+```
+
+`results.json` is `{"runner": "...", "checks": [{"name", "command", "exit_code",
+"log_sha256"}]}`. Pass it to `prepare --local-evidence`. The package folder keeps
+a copy so approval and publication check it again. The GitHub release body then
+says the checks were local and that hosted Actions did not run.
+
 Source merge approval never supplies physical Pi acceptance or approval of an
-untested final package. The inspected Pi order floor and owner-signed exact-package
-acceptance remain required before stable publication.
+untested final package. Owner-signed exact-package acceptance remains required
+before stable publication. `release-system.py accept` fills `acceptance.json`
+from plain answers and checks it the way approval does.
