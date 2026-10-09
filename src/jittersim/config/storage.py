@@ -629,6 +629,10 @@ class ConfigRepository:
             )
         self._prune_run_history()
         self._commit()
+        # Device speed test results (config/speed_tests.py) get their table on every open.
+        from .speed_tests import ensure_speed_test_schema
+
+        ensure_speed_test_schema(self._connection)
         self._migrate_domain_observations()
         self._commit()
         self._prune_random_website_analytics(now=int(time.time()))

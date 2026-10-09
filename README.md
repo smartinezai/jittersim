@@ -249,6 +249,9 @@ See
 - Optional DNS ad blocking for each protected device without saved browsing history.
 - An impact check in Diagnostics that shows packet loss and speed limits
   actually happening to each device.
+- A **Test speed** button on each connected device that measures its real speed
+  through the Pi while it runs a public speed test, keeps the results and compares
+  a result before a profile with one after it.
 
 ### Data quotas
 
@@ -767,6 +770,53 @@ Protected devices are listed on one muted line and never get a row. Applying a
 plan restarts the history. A busy helper keeps the rows and shows `Update
 paused`. Counters describe packets and drops. They cannot prove how much delay
 a device saw. An older helper makes the card ask for an update.
+
+### Device speed test
+
+**Test speed** on a connected device in **Devices** compares the device's speed
+before and after a profile. The Pi cannot run a speed test as the phone, so:
+
+1. Choose the speed test site (Cloudflare by default, or LibreSpeed), a length
+   (45 seconds by default, 15 to 90) and an optional label, then **Start measuring**.
+2. On the device, open the link or scan the QR code and run the test there.
+3. The Pi reads the device's queue counters once per second (the counters the
+   Impact check uses) and saves download and upload speed: average while busy,
+   median, 90th percentile, peak, bytes and drops. It also sends one ping per
+   second from the Pi to the device for the round trip and loss over the test
+   Wi-Fi. That round trip includes the profile's download delay and the waiting
+   the running speed test causes. A device that blocks ping shows `No answer`.
+4. **Finish now** saves early, **Cancel test** saves nothing, and closing the
+   window keeps the measurement running. A new apply during the window ends it
+   and marks the result `changed`.
+
+Each result keeps the time, the profile in force and its values, the label and
+the numbers you type in from the device's own speed test page. **Compare**
+shows the change in each number between two results and whether the speed
+matches the profile's cap (`Matches the cap`, `Faster than the cap`, `Slower
+than the cap`, `No speed limit set`). **Export CSV** and **Export JSON** download
+the device's results without any token or password. The Pi keeps the newest 50
+results per device and 500 in total.
+
+Limits:
+
+- The Pi only has a counter for a device while a profile applies to it. A
+  device with no profile is `Not measured on the Pi`: type in the numbers the
+  speed test page showed. For a measured baseline without limits, save a
+  profile with nothing set (for example `No limits`), apply it and test, then
+  apply the real profile and test again.
+- With **Same as everyone** or **Everyone else** the counters are shared with
+  other devices and the result says so.
+- Protected devices cannot be tested: they are never shaped and their traffic
+  is not measured.
+- At most two tests run at once, one per device. A dashboard restart drops a
+  running test.
+- Cloudflare's speed test is free and needs no account. Cloudflare keeps each
+  result for its own statistics. JitterSim only links to the page; it does not
+  call Cloudflare itself. M-Lab is not offered because it publishes every
+  result with the tester's IP address.
+
+The design and the open decisions are in
+[docs/implementation-plan-device-speed-test-2026-10-09.md](docs/implementation-plan-device-speed-test-2026-10-09.md).
 
 ## Network layout
 
