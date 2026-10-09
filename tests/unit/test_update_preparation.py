@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from jittersim import updates
+from tests.marker_support import PUBLISH_MARKER
 from tests.release_support import have_ssh_keygen
 from tests.unit import test_updates as fixture_support
 
@@ -238,7 +239,7 @@ def test_command_group_is_only_signalled_while_its_leader_is_owned(monkeypatch):
 
 def test_timeout_ends_a_child_that_retains_the_output_pipe(tmp_path):
     pid_file = tmp_path / "child.pid"
-    child = "import os, pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)"
+    child = PUBLISH_MARKER + "import os, sys, time; publish_marker(sys.argv[1], str(os.getpid())); time.sleep(60)"
     parent = ("import pathlib, subprocess, sys, time; "
               "subprocess.Popen([sys.executable, '-c', " + json.dumps(child) + ", "
               + json.dumps(str(pid_file)) + "]); "
@@ -762,7 +763,7 @@ def test_an_unconfirmed_descendant_keeps_command_ownership(monkeypatch):
 @pytest.mark.skipif(not hasattr(os, "waitid"), reason="Linux retains the waitable group leader")
 def test_cancelled_leader_does_not_hide_a_live_owned_child(tmp_path, monkeypatch):
     pid_file = tmp_path / "descendant.pid"
-    child = "import os, pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)"
+    child = PUBLISH_MARKER + "import os, sys, time; publish_marker(sys.argv[1], str(os.getpid())); time.sleep(60)"
     parent = ("import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', "
               + json.dumps(child) + ", " + json.dumps(str(pid_file)) + "]); time.sleep(60)")
     real_killpg = os.killpg
