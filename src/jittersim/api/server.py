@@ -904,6 +904,9 @@ class _PendingConnection:
     want_write: bool = False
 
 
+_RESET_REQUESTS_LOCK = threading.Lock()
+
+
 class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     """Serve configuration and plan data from one repository.
 
@@ -986,9 +989,6 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         self._pending_connections: Dict[socket.socket, _PendingConnection] = {}
         self._request_inputs: Dict[socket.socket, Tuple[bytes, float]] = {}
         self._stop_connections = threading.Event()
-        # Counts Reset and Panic requests, so an action queued before one can tell.
-        self._reset_requests = 0
-        self._reset_requests_lock = threading.Lock()
         self._workers_lock = threading.Lock()
         self._active_workers = 0
         self._request_workers = RequestWorkers("jittersim-request", self._uncertain_worker_start)
@@ -4477,8 +4477,11 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             current = "This is the current device profile."
         return f"Profile {profile_label} saved for this device. " + current
 
+    # Counts Reset and Panic requests, so an action queued before one can tell.
+    _reset_requests = 0
+
     def note_reset_request(self) -> None:
-        with self._reset_requests_lock:
+        with _RESET_REQUESTS_LOCK:
             self._reset_requests += 1
 
     def _apply_profile_to_connected_device(self, payload: dict, *, control_intent=None,
