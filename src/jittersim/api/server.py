@@ -1384,6 +1384,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         if self.helper_client is None:
             raise HelperClientError("Device verification needs the Pi networking helper.")
         result = self._checked_access(operation, peer, values)
+        if operation == "emergency-status":
+            # Panic and Reset never wait for the routine protection retry.
+            return result
         if self._protected_access_due(result):
             # The helper restarted or an earlier sync failed: reconcile, then answer again.
             state = self.sync_protected_access(blocking=False)

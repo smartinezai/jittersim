@@ -400,6 +400,20 @@ class ProtectedAccessServerTests(unittest.TestCase):
         self.assertTrue(self.allowed())
         self.assertEqual(len(self.helper.sync_payloads), syncs + 1)
 
+    def test_panic_never_waits_for_the_routine_protection_retry(self):
+        # O2: the periodic retry of a failed sync runs on ordinary checks, never in
+        # front of Panic's emergency device check.
+        self.store.add(MAC, "Phone")
+        self.helper.fail_sync = 1
+        self.protect(OTHER)
+        self.assertFalse(self.server.protected_access_status()["synced"])
+        self.server._protected_access_attempted = float("-inf")
+        syncs = len(self.helper.sync_payloads)
+        self.assertTrue(self.server.dashboard_access(PEER, "emergency-status")["allowed"])
+        self.assertEqual(len(self.helper.sync_payloads), syncs)
+        self.assertTrue(self.allowed())
+        self.assertEqual(len(self.helper.sync_payloads), syncs + 1)
+
     def test_existing_protected_devices_are_upgraded_once_and_repeatably(self):
         self.store.add(OTHER, "Saved Mac")
         saved = self.store.path.read_bytes()
