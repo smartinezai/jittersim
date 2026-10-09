@@ -6432,7 +6432,17 @@
         + (unit === "%" ? "%" : " " + unit);
     }
 
+    // Uploads never duplicate or reorder toward the household router (see the
+    // renderer's upstream_safe_impairment), so say so while those are set.
+    function updateUpstreamNote() {
+      const value = (feature) => Number(element("upload-" + feature).value) > 0 ||
+        (element("upload-" + feature + "-random-mode").value === "range" &&
+         Number(element("upload-" + feature + "-random-maximum").value) > 0);
+      element("upload-upstream-note").hidden = !["reorder", "duplicate"].some(value);
+    }
+
     function updateProfileRangeControls() {
+      updateUpstreamNote();
       const off = Number(element("profile-reroll").value) <= 0;
       element("profile-reroll-variation").disabled = off;
       element("profile-website-enabled").disabled = off;
