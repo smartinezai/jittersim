@@ -1418,7 +1418,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         if (result["allowed"] or result.get("protected_synced") is not False
                 or not self._may_be_protected(result.get("mac_address"))):
             return result
-        if self.sync_protected_access(blocking=False).get("synced"):
+        if self.sync_protected_access(blocking=False, emergency=True).get("synced"):
             result = self._checked_access("emergency-status", peer, values)
         if not result["allowed"] and result.get("protected_synced") is False:
             raise HelperClientError(
@@ -1475,13 +1475,25 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             targets.append({"mac_address": mac, "name": name})
         return targets, not_eligible
 
-    def sync_protected_access(self, *, blocking: bool = True) -> Dict[str, Any]:
+    def sync_protected_access(self, *, blocking: bool = True, emergency: bool = False) -> Dict[str, Any]:
         """Replace the helper's protection grants with saved protection. Safe to repeat.
 
         Syncs run one at a time and each reads the protected list inside the lock, so an
-        older request can never overwrite the result of a newer change.
+        older request can never overwrite the result of a newer change. `emergency` is
+        Panic's device check: the helper serves that sync from its Panic reserve without
+        waiting for its access lock (review N1).
         """
-        sync = getattr(self.helper_client, "dashboard_access_protected_sync", None)
+        sync = ordinary = getattr(self.helper_client, "dashboard_access_protected_sync", None)
+        urgent = getattr(self.helper_client, "dashboard_access_emergency_protected_sync", None)
+        if emergency and ordinary is not None and urgent is not None:
+            def sync(targets):
+                try:
+                    return urgent(targets)
+                except HelperClientError as failure:
+                    if failure.reason == "helper-busy":
+                        raise
+                    # An older helper does not know the emergency sync.
+                    return ordinary(targets)
         if sync is None or not self._protected_access_lock.acquire(blocking=blocking):
             return self.protected_access_status()
         try:
