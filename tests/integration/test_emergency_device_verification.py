@@ -214,3 +214,122 @@ def test_panic_from_a_protection_only_device_resyncs_through_the_panic_reserve(t
         assert status == 200, body
         assert service._panic_stop_latched is True
         assert service._access_store.protected_synced is True
+
+
+def hold_repository_lock(repository):
+    """A database backup: it holds the repository lock for its whole duration."""
+    held, stop = threading.Event(), threading.Event()
+
+    def backup():
+        with repository._lock:
+            held.set()
+            stop.wait(30)
+
+    thread = threading.Thread(target=backup, daemon=True)
+    thread.start()
+    assert held.wait(5)
+    return thread, stop
+
+
+def test_panic_reaches_the_helper_while_a_backup_holds_the_repository(tmp_path):
+    # N3: Panic's bookkeeping waits a bounded time for the repository, then the
+    # helper still stops everything and the answer says the stop was not saved.
+    from jittersim.api import server as server_module
+    from jittersim.engine.runtime import RuntimeScheduler
+
+    created, schedulers = [], []
+
+    def configure(server):
+        scheduler = RuntimeScheduler(database_path=tmp_path / "config.db",
+                                     helper_client=server.helper_client)
+        server.scheduler = scheduler
+        schedulers.append(scheduler)
+
+    with dashboard(tmp_path, configure=configure,
+                   service_class=panic_service(tmp_path, created)) as (request, store, _):
+        service = created[0]
+        scheduler = schedulers[0]
+        repository = request.server.repository
+        assert request("/api/dashboard-access/register-self", "POST", {"name": "Phone"})[0] == 200
+        backup, stop = hold_repository_lock(repository)
+        try:
+            started = time.monotonic()
+            status, body = request("/api/normal-access", "POST", {})
+            elapsed = time.monotonic() - started
+            # The physical stop happened while the repository was still held.
+            assert service._panic_stop_latched is True
+        finally:
+            stop.set()
+            backup.join(10)
+        assert status == 503, body
+        assert b"could not be saved" in body
+        assert elapsed < server_module.PANIC_DATABASE_ALLOWANCE_SECONDS + 2
+        # Recovery stays unconfirmed until a Panic saves its result.
+        assert scheduler._recovery_required is True
+        assert scheduler.can_apply(scheduler.apply_generation) is False
+        status, body = request("/api/normal-access", "POST", {})
+        assert status == 200, body
+        assert scheduler._recovery_required is False
+        assert repository.access_settings().access_options.enabled is False
+        assert repository.get_runtime_state().observed_state == "reset"
+    for scheduler in schedulers:
+        scheduler.stop()
+
+
+def test_panic_saves_its_stop_after_the_helper_when_the_backup_ends_in_time(tmp_path):
+    # N3: the stop intent could not be saved first, so it is saved with the result
+    # after the helper call. A backup that ends meanwhile costs nothing.
+    created = []
+    with dashboard(tmp_path, service_class=panic_service(tmp_path, created)) as (request, store, _):
+        service = created[0]
+        repository = request.server.repository
+        assert request("/api/dashboard-access/register-self", "POST", {"name": "Phone"})[0] == 200
+        backup, stop = hold_repository_lock(repository)
+        original = service.handle_payload
+
+        def end_backup_during_cleanup(payload):
+            if isinstance(payload, dict) and payload.get("action") == "normal-access":
+                stop.set()
+                backup.join(5)
+            return original(payload)
+
+        service.handle_payload = end_backup_during_cleanup
+        try:
+            status, body = request("/api/normal-access", "POST", {})
+        finally:
+            stop.set()
+            backup.join(10)
+        assert status == 200, body
+        assert service._panic_stop_latched is True
+        assert repository.access_settings().access_options.enabled is False
+        assert repository.get_runtime_state().observed_state == "reset"
+
+
+def test_panic_protection_lookup_is_retryable_while_a_backup_holds_the_repository(tmp_path):
+    # N3: a protection-only device after a helper restart needs saved protection.
+    # Without a snapshot inside the emergency budget the answer is a retryable 503,
+    # never access and never an unbounded wait.
+    from jittersim.config.exemptions import UnaffectedDevice
+    from jittersim.networking.dashboard_access import AccessStore
+
+    created = []
+    with dashboard(tmp_path, service_class=panic_service(tmp_path, created)) as (request, store, _):
+        service = created[0]
+        server = request.server
+        server.repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))
+        assert server.sync_protected_access()["synced"] is True
+        service._access_store = AccessStore(store.path)  # the helper restarted
+        backup, stop = hold_repository_lock(server.repository)
+        try:
+            started = time.monotonic()
+            status, body = request("/api/normal-access", "POST", {})
+            elapsed = time.monotonic() - started
+        finally:
+            stop.set()
+            backup.join(10)
+        assert status == 503, body
+        assert elapsed < 4.0
+        assert service._panic_stop_latched is False
+        status, body = request("/api/normal-access", "POST", {})
+        assert status == 200, body
+        assert service._panic_stop_latched is True
