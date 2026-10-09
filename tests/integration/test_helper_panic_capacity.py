@@ -88,7 +88,8 @@ def test_one_operation_slot_stays_for_panic_when_all_others_are_busy(helper_dir,
             worker.start()
         try:
             for _ in workers:
-                assert entered.acquire(timeout=5)
+                # A loaded machine can take a while to start eight client threads.
+                assert entered.acquire(timeout=30)
             assert server._request_slots._value == 0
             started = time.monotonic()
             with pytest.raises(HelperClientError) as busy:
