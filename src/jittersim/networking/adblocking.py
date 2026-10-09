@@ -53,6 +53,8 @@ BLOCKLIST_URL = "https://raw.githubusercontent.com/StevenBlack/hosts/master/host
 ADS_TABLE = "jittersim_adblocking"
 DNS_PORT = 5354
 LEASE_SECONDS = 5
+# The end of a household access transition waits at least this long for the settings lock.
+TRANSITION_END_WAIT_SECONDS = 3.0
 REFRESH_SECONDS = 1
 MAX_DOWNLOAD_SECONDS = 20
 
@@ -304,7 +306,9 @@ class AdStore:
     def access_transition(self, *, wait=3.0):
         """Bypass ads while household DNS rules change without losing saved switches.
 
-        `wait` bounds each wait for the settings lock. Panic's release passes a short one.
+        `wait` bounds the wait for the settings lock on entry. Panic's release passes a
+        short one. The end waits at least TRANSITION_END_WAIT_SECONDS: it only clears
+        the suspension, and giving up there would leave ads bypassed for good (review O-c).
         """
 
         with self.lock(wait):
@@ -322,7 +326,7 @@ class AdStore:
             yield
         finally:
             if suspended:
-                with self.lock(wait):
+                with self.lock(max(wait, TRANSITION_END_WAIT_SECONDS)):
                     try:
                         state = self.read()
                     except (OSError, ValueError):
