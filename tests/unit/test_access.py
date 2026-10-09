@@ -22,6 +22,8 @@ from jittersim.config.storage import ConfigRepository, DeviceConflictError, Stor
 from jittersim.config.transfer import settings_to_payload
 from jittersim.engine.access import AccessClient, AccessPlan, access_from_payload, build_access_plan
 from jittersim.networking.access import (
+    DNS_CLEANUP_ATTEMPTS,
+    DNS_CLEANUP_BUDGET_SECONDS,
     AccessManager,
     read_access,
     render_access_firewall,
@@ -354,20 +356,87 @@ class AccessRecoveryTests(unittest.TestCase):
         self.assertFalse(self.manager.release_incomplete)
         self.assertIsNone(self.manager.status()["error"])
 
-    def test_a_release_ignores_a_failed_dns_connection_refresh(self):
-        self.manager.apply(self.plan)
+    def failing_conntrack(self, failures):
+        """Fail the next `failures` conntrack calls, like a missing kernel module."""
+
         original = self.executor.run
+        remaining = [failures]
 
         def run(command):
-            if command.executable == "conntrack":
-                original(command)
+            result = original(command)
+            if command.executable == "conntrack" and remaining[0] > 0:
+                remaining[0] -= 1
                 return CommandResult(return_code=1, stderr="conntrack v1.4.7: module missing\n")
-            return original(command)
+            return result
 
-        with patch.object(self.executor, "run", run):
+        return patch.object(self.executor, "run", run)
+
+    def resolver_commands(self):
+        return [(index, c.arguments[0]) for index, c in enumerate(self.executor.commands)
+                if c.executable == "systemctl" and "jittersim-dns.service" in c.arguments]
+
+    def test_a_release_keeps_a_permissive_resolver_while_old_dns_flows_remain(self):
+        # G3: old DNS flows still point at the resolver port. Stopping the
+        # resolver before they are cleared would leave those clients without DNS.
+        self.manager.apply(self.plan)
+        before = len(self.executor.commands)
+        with self.failing_conntrack(100), patch("jittersim.networking.access.time.sleep"), \
+                self.assertLogs(level="WARNING"):
             self.manager.disable()
         self.assert_released_and_open()
+        self.assertTrue(self.manager.release_incomplete)
+        self.assertIn("DNS", self.manager.status()["error"])
+        # The cleanup was retried a bounded number of times.
+        attempts = [c for c in self.executor.commands[before:] if c.executable == "conntrack"]
+        self.assertEqual(len(attempts), 2 * DNS_CLEANUP_ATTEMPTS)
+        # The resolver was restarted with the permissive configuration, never stopped.
+        actions = [action for index, action in self.resolver_commands() if index >= before]
+        self.assertEqual(actions, ["restart"])
+        disabled = replace(self.plan, options=replace(self.plan.options, enabled=False))
+        self.assertEqual((self.directory / "unbound.conf").read_text(), render_dns(disabled))
+        # A retried Panic still has the old flows to clear, even though the
+        # saved rules are already off.
+        with self.failing_conntrack(100), patch("jittersim.networking.access.time.sleep"), \
+                self.assertLogs(level="WARNING"):
+            self.manager.disable()
+        self.assertTrue(self.manager.release_incomplete)
+        # Once the old flows are cleared the resolver stops and recovery is complete.
+        before = len(self.executor.commands)
+        self.manager.disable()
+        self.assertFalse(self.manager.release_incomplete)
         self.assertIsNone(self.manager.status()["error"])
+        self.assertEqual([action for index, action in self.resolver_commands() if index >= before],
+                         ["stop"])
+
+    def test_a_release_retries_the_dns_cleanup_before_stopping_the_resolver(self):
+        self.manager.apply(self.plan)
+        before = len(self.executor.commands)
+        with self.failing_conntrack(1), patch("jittersim.networking.access.time.sleep"):
+            self.manager.disable()
+        self.assert_released_and_open()
+        self.assertFalse(self.manager.release_incomplete)
+        self.assertIsNone(self.manager.status()["error"])
+        cleared = max(index for index, c in enumerate(self.executor.commands)
+                      if c.executable == "conntrack")
+        stops = [index for index, action in self.resolver_commands()
+                 if index >= before and action == "stop"]
+        self.assertEqual(len(stops), 1)
+        self.assertGreater(stops[0], cleared)
+
+    def test_a_failed_dns_cleanup_without_earlier_dns_rules_is_only_logged(self):
+        # Nothing was redirected to the resolver, so no DNS flow depends on it.
+        mac_only = AccessPlan(mac=MacPolicy("denylist", (), ("02:00:00:00:00:02",)))
+        self.manager.apply(mac_only)
+        with self.failing_conntrack(100), patch("jittersim.networking.access.time.sleep"), \
+                self.assertLogs(level="WARNING"):
+            self.manager.disable()
+        self.assert_released_and_open()
+        self.assertFalse(self.manager.release_incomplete)
+        self.assertIsNone(self.manager.status()["error"])
+
+    def test_the_dns_cleanup_retries_stay_within_their_budget(self):
+        self.assertLessEqual(DNS_CLEANUP_ATTEMPTS, 3)
+        self.assertLess(DNS_CLEANUP_BUDGET_SECONDS, 5)
 
     def test_a_release_never_falls_back_to_the_previous_restrictive_rules(self):
         self.manager.apply(self.plan)
