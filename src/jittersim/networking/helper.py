@@ -944,6 +944,33 @@ class HelperService:
         finally:
             self._network_lock.release()
 
+    def refresh_access_addresses(self) -> None:
+        """Follow new DHCP addresses of devices with household DNS rules.
+
+        The refresh changes household rules, so it takes turns with Panic, Apply
+        and access changes on the network lock. It skips a round when that lock
+        is busy and never runs after a household stop. The client scan runs
+        before the lock is taken so the lock is held only for the change itself.
+        """
+
+        access = self._access_manager
+        if access is None:
+            return
+        access.check_health()
+        if access.applied is None or not access.applied.has_dns_rules or self._household_stop_latched:
+            return
+        clients = self._handle_clients()
+        if not clients.get("ok"):
+            return
+        if not self._network_lock.acquire(blocking=False):
+            return
+        try:
+            if self._household_stop_latched:
+                return
+            access.refresh_addresses(clients["devices"])
+        finally:
+            self._network_lock.release()
+
     def monitor_gateway_once(self) -> None:
         """Update bounded gateway state and perform any required transition."""
 
@@ -2668,11 +2695,7 @@ def run_helper(
     def maintain_access():
         while not stopped.wait(15):
             try:
-                access.check_health()
-                if access.applied is not None and access.applied.has_dns_rules:
-                    clients = service._handle_clients()
-                    if clients.get("ok"):
-                        access.refresh_addresses(clients["devices"])
+                service.refresh_access_addresses()
             except Exception:
                 LOGGER.exception("could not refresh access device addresses")
 
