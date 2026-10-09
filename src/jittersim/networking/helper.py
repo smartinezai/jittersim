@@ -867,45 +867,15 @@ class HelperService:
         if path is None or not path.exists():
             return
         try:
-            with path.open("rb") as state_file:
-                contents = state_file.read(MAX_GATEWAY_STATE_BYTES + 1)
-            if len(contents) > MAX_GATEWAY_STATE_BYTES:
-                raise ValueError("gateway state is too large")
-            state = json.loads(contents.decode("utf-8"))
-            if not isinstance(state, dict) or state.get("version") != 1:
-                raise ValueError("gateway state has an unsupported format")
-            if not isinstance(state.get("persistence_enabled"), bool):
-                raise ValueError("gateway persistence setting is invalid")
-            if state.get("gateway_state") not in ("unknown", "available", "unavailable"):
-                raise ValueError("gateway health state is invalid")
-            for field in (
-                "outage_observed",
-                "outage_stop_latched",
-                "reset_pending",
-                "recovery_pending",
-            ):
-                if not isinstance(state.get(field), bool):
-                    raise ValueError("gateway recovery state is invalid")
-            failures = state.get("consecutive_failures")
-            successes = state.get("consecutive_successes")
-            if (
-                type(failures) is not int
-                or not 0 <= failures <= GATEWAY_FAILURES_TO_DOWN
-                or type(successes) is not int
-                or not 0 <= successes <= GATEWAY_SUCCESSES_TO_UP
-            ):
-                raise ValueError("gateway probe count is invalid")
-            for field in ("panic_stop_latched", "household_stop_latched", "panic_recovery_failed", "control_revision_required"):
-                if field in state and not isinstance(state[field], bool):
-                    raise ValueError("Panic recovery state is invalid")
+            state = read_gateway_state(path)
             self._panic_stop_latched = state.get("panic_stop_latched", False)
             self._household_stop_latched = state.get("household_stop_latched", self._panic_stop_latched)
             self._panic_recovery_failed = state.get("panic_recovery_failed", False)
             self._control_revision_required = state.get("control_revision_required", self._panic_stop_latched)
             if self._panic_stop_latched or self._household_stop_latched:
                 self._control_revision_required = True
-            if self._panic_recovery_failed and not (self._panic_stop_latched and self._household_stop_latched):
-                raise ValueError("Panic recovery state is inconsistent")
+            failures = state["consecutive_failures"]
+            successes = state["consecutive_successes"]
             self._persistence_enabled = state["persistence_enabled"]
             self._persistence_mode_initialized = True
             self._gateway_state = state["gateway_state"]
@@ -2888,6 +2858,64 @@ def _clean_queue_impairment(raw: Any) -> Dict[str, Any]:
         raise HelperClientError(QUEUE_STATS_INVALID_MESSAGE)
     clean["bandwidth_kbit"] = bandwidth
     return clean
+
+
+def read_gateway_state(path: Path) -> Dict[str, Any]:
+    """Read and check the helper's gateway.json. Raise ValueError or OSError when invalid.
+
+    The helper and the access-boot unit both decide the household stop from this.
+    """
+
+    with path.open("rb") as state_file:
+        contents = state_file.read(MAX_GATEWAY_STATE_BYTES + 1)
+    if len(contents) > MAX_GATEWAY_STATE_BYTES:
+        raise ValueError("gateway state is too large")
+    state = json.loads(contents.decode("utf-8"))
+    if not isinstance(state, dict) or state.get("version") != 1:
+        raise ValueError("gateway state has an unsupported format")
+    if not isinstance(state.get("persistence_enabled"), bool):
+        raise ValueError("gateway persistence setting is invalid")
+    if state.get("gateway_state") not in ("unknown", "available", "unavailable"):
+        raise ValueError("gateway health state is invalid")
+    for field in (
+        "outage_observed",
+        "outage_stop_latched",
+        "reset_pending",
+        "recovery_pending",
+    ):
+        if not isinstance(state.get(field), bool):
+            raise ValueError("gateway recovery state is invalid")
+    failures = state.get("consecutive_failures")
+    successes = state.get("consecutive_successes")
+    if (
+        type(failures) is not int
+        or not 0 <= failures <= GATEWAY_FAILURES_TO_DOWN
+        or type(successes) is not int
+        or not 0 <= successes <= GATEWAY_SUCCESSES_TO_UP
+    ):
+        raise ValueError("gateway probe count is invalid")
+    for field in ("panic_stop_latched", "household_stop_latched", "panic_recovery_failed", "control_revision_required"):
+        if field in state and not isinstance(state[field], bool):
+            raise ValueError("Panic recovery state is invalid")
+    panic = state.get("panic_stop_latched", False)
+    if state.get("panic_recovery_failed", False) and not (panic and state.get("household_stop_latched", panic)):
+        raise ValueError("Panic recovery state is inconsistent")
+    return state
+
+
+def gateway_household_stopped(path: Path) -> bool:
+    """Return whether gateway.json keeps household rules stopped, as the helper reads it.
+
+    A missing file stops nothing. An unreadable or invalid one counts as stopped.
+    """
+
+    if not path.exists():
+        return False
+    try:
+        state = read_gateway_state(path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return True
+    return state.get("household_stop_latched", state.get("panic_stop_latched", False))
 
 
 def restore_access_at_start(access: AccessManager, *, panic_stopped=False) -> bool:
