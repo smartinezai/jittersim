@@ -37,7 +37,8 @@ def check_diagnostics_keyboard(page):
             refresh.focus()
             page.keyboard.press("Tab")
             expect(raw).to_be_focused()
-            expect(raw).to_have_accessible_name("Diagnostics")
+            # The page region is named Diagnostics, so the data needs its own name to keep landmarks unique.
+            expect(raw).to_have_accessible_name("Diagnostics data")
             expect(raw).to_be_in_viewport(ratio=1)
             assert raw.evaluate("node => getComputedStyle(node).outlineStyle") == "solid"
             assert raw.evaluate("node => getComputedStyle(node).outlineWidth") == "2px"

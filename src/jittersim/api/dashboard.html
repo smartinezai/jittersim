@@ -8,6 +8,7 @@
   <style>__JITTERSIM_DASHBOARD_STYLE__</style>
 </head>
 <body class="dashboard-locked">
+  <a class="skip-link" href="#content">Skip to main content</a>
   <div id="action-announcer" class="action-announcer" role="status" aria-live="polite" aria-atomic="true"></div>
   <div id="toast" class="toast" hidden>
     <span id="toast-icon" class="toast-icon" aria-hidden="true"></span>
@@ -166,7 +167,7 @@
       </div>
     </div>
   </aside>
-  <main class="content" id="content">
+  <main class="content" id="content" tabindex="-1">
   <section class="notice address-move" id="address-move-card" aria-label="New address for one of your devices" hidden>
     <p id="address-move-text" role="status"></p>
     <label>Which device was it?
@@ -1307,7 +1308,7 @@
     </section>
   </section><!-- /page:traffic -->
   <section class="page" id="page-measurements" data-page="measurements" aria-label="Measurements" tabindex="-1" hidden>
-  <section class="card" aria-labelledby="measurement-title">
+  <section class="card" aria-label="Measurement comparison">
     <div class="section-heading">
       <div>
         <h2 id="measurement-title">Measurements</h2>
@@ -1456,7 +1457,7 @@
         <div><h2 id="diagnostics-title">Diagnostics</h2><p>Runtime state and available traffic counters</p></div>
         <button id="refresh-diagnostics" type="button">Refresh</button>
       </div>
-      <pre id="diagnostics-json" tabindex="0" role="region" aria-labelledby="diagnostics-title">Enter the admin token to inspect diagnostics.</pre>
+      <pre id="diagnostics-json" tabindex="0" role="region" aria-label="Diagnostics data">Enter the admin token to inspect diagnostics.</pre>
     </section>
     <section class="card" data-collapse="closed">
       <div class="section-heading">
