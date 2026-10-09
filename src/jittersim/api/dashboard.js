@@ -186,7 +186,15 @@
       });
     });
 
-    syncScheduleDays();
+    const defaultScheduleDays = syncScheduleDays();
+
+    // Resetting the form sets its fields back but not the day buttons, which are not fields.
+    element("schedule-form").addEventListener("reset", () => {
+      document.querySelectorAll(".day-toggle").forEach((button) => {
+        button.setAttribute("aria-pressed", String(defaultScheduleDays.includes(Number(button.dataset.day))));
+      });
+      syncScheduleDays();
+    });
 
     // True while a person is using something inside the container, a focused button, field or
     // link or an open menu. Drawing it again then would take the focus away or swallow a click.
@@ -1157,6 +1165,10 @@
     const clearConnectedDrafts = new Set();
 
     let observedDomainsByDevice = {};
+    // The names a service or time limit was saved with, by form. The Pi keeps them for that limit after
+    // their observations expire, so the picker has to keep offering them or an edit would drop them.
+    let savedQuotaDomains = {};
+    privateDataLockHooks.push(() => { savedQuotaDomains = {}; });
 
     let observedNames = new Set();
 
@@ -4350,7 +4362,8 @@
 
     function quotaResetText(quota) {
       if (quota.reset_mode === "interval") {
-        return "resets every " + Math.round(quota.reset_interval_seconds / 60) + " minutes";
+        const minutes = Math.round(quota.reset_interval_seconds / 60);
+        return "resets every " + minutes + (minutes === 1 ? " minute" : " minutes");
       }
       if (quota.reset_mode === "daily") {
         return "resets daily at " + (quota.reset_times || []).map((minute) =>
@@ -4391,6 +4404,10 @@
       const mode = element(prefix + "-reset-mode").value;
       element(prefix + "-interval-field").hidden = mode !== "interval";
       element(prefix + "-times-field").hidden = mode !== "daily";
+      // The browser skips a disabled field when it checks the form. An out-of-range value left
+      // in a hidden field would otherwise stop the save without a word.
+      element(prefix + "-interval").disabled = mode !== "interval";
+      element(prefix + "-times").disabled = mode !== "daily";
     }
 
     function setQuotaAmount(prefix, bytes) {
@@ -4423,7 +4440,7 @@
       const detail = document.createElement("span");
       detail.textContent = formatQuotaBytes(quota.used_bytes) + " used of " +
         formatQuotaBytes(quota.limit_bytes) + " · " + formatQuotaBytes(quota.remaining_bytes) + " left" +
-        (service ? " · weight " + (quota.weight_percent / 100).toFixed(1) + "×" : "");
+        (service === true ? " · weight " + (quota.weight_percent / 100).toFixed(1) + "×" : "");
       const meter = document.createElement("div");
       meter.className = "quota-meter";
       const meterValue = document.createElement("span");
@@ -4459,7 +4476,8 @@
         }
       });
       actions.append(editButton, resetButton, deleteButton);
-      if (service) {
+      // Only a service limit has website names. A shared group limit would stop the whole list here.
+      if (service === true) {
         const domains = document.createElement("span");
         domains.textContent = "Domains: " + quota.domains.join(", ");
         actions.append(domains);
@@ -4756,7 +4774,13 @@
 
     function populateQuotaDomains(prefix, selectedDomains) {
       const select = element(prefix + "-domains");
-      const domains = observedDomainsByDevice[element(prefix + "-device").value] || [];
+      const device = element(prefix + "-device").value;
+      const observed = observedDomainsByDevice[device] || [];
+      if (selectedDomains) savedQuotaDomains[prefix] = { device: device, domains: selectedDomains };
+      // A limit being edited keeps the names it was saved with while its device is chosen.
+      const saved = savedQuotaDomains[prefix] && savedQuotaDomains[prefix].device === device
+        ? savedQuotaDomains[prefix].domains : [];
+      const domains = observed.concat(saved.filter((domain) => !observed.includes(domain)));
       select.replaceChildren();
       if (!domains.length) {
         const option = document.createElement("option");
@@ -4768,8 +4792,8 @@
       domains.forEach((domain) => {
         const option = document.createElement("option");
         option.value = domain;
-        option.textContent = domain;
-        option.selected = (selectedDomains || []).includes(domain);
+        option.textContent = observed.includes(domain) ? domain : domain + " (saved, not seen lately)";
+        option.selected = saved.includes(domain);
         select.appendChild(option);
       });
     }
@@ -4880,9 +4904,9 @@
     }
 
     function formatQuotaDuration(seconds) {
-      if (seconds >= 3600 && seconds % 3600 === 0) return Math.floor(seconds / 3600) + " hours";
-      if (seconds >= 60 && seconds % 60 === 0) return Math.floor(seconds / 60) + " minutes";
-      return seconds + " seconds";
+      if (seconds >= 3600 && seconds % 3600 === 0) return Math.floor(seconds / 3600) + (seconds === 3600 ? " hour" : " hours");
+      if (seconds >= 60 && seconds % 60 === 0) return Math.floor(seconds / 60) + (seconds === 60 ? " minute" : " minutes");
+      return seconds + (seconds === 1 ? " second" : " seconds");
     }
 
     function editTimeQuota(quota) {
@@ -5246,7 +5270,8 @@
         groups.forEach((group) => {
           const option = document.createElement("option");
           option.value = group.id;
-          option.textContent = group.name + " (" + group.device_ids.length + " devices)";
+          option.textContent = group.name + " (" + group.device_ids.length +
+            (group.device_ids.length === 1 ? " device)" : " devices)");
           option.selected = group.id === selectedGroup;
           groupSelect.appendChild(option);
         });
@@ -5308,8 +5333,8 @@
     function formatTimerRemaining(seconds) {
       const minutes = Math.floor(seconds / 60);
       const remainingSeconds = seconds % 60;
-      if (minutes === 0) return remainingSeconds + " seconds";
-      if (remainingSeconds === 0) return minutes + " minutes";
+      if (minutes === 0) return remainingSeconds + (remainingSeconds === 1 ? " second" : " seconds");
+      if (remainingSeconds === 0) return minutes + (minutes === 1 ? " minute" : " minutes");
       return minutes + "m " + remainingSeconds + "s";
     }
 
@@ -5440,6 +5465,10 @@
       element("progression-bytes-field").hidden = !bytesMode;
       element("progression-traffic-target").required = trafficMode;
       element("progression-bytes-target").required = bytesMode;
+      // A disabled field is skipped when the browser checks the form, so a hidden target that is
+      // out of range cannot stop the save without a word.
+      element("progression-traffic-target").disabled = !trafficMode;
+      element("progression-bytes-target").disabled = !bytesMode;
     }
 
     async function loadPolicies() {
@@ -6787,6 +6816,8 @@
           ? "Schedule saved. It follows the Pi clock while the configuration is applied."
           : "Schedule saved as disabled.");
       } catch (error) {
+        // The preview runs apart from the Save button, so its refusal has no note in the form yet.
+        if (typeof formError === "function") formError(element("schedule-form"), error.message);
         showMessage(error.message, "error");
       } finally {
         if (event.submitter) setButtonBusy(event.submitter, false);
@@ -6812,6 +6843,9 @@
     });
 
     element("progression-mode").addEventListener("change", syncProgressionMode);
+
+    // A reset puts the menu back after this event, so the fields follow it a moment later.
+    element("progression-form").addEventListener("reset", () => window.setTimeout(syncProgressionMode, 0));
 
     syncProgressionMode();
 
@@ -6850,6 +6884,16 @@
     element("service-quota-reset-mode").addEventListener("change", () => syncQuotaReset("service-quota"));
 
     element("time-quota-reset-mode").addEventListener("change", () => syncQuotaReset("time-quota"));
+
+    ["data-limit", "group-data-limit", "service-quota", "time-quota"].forEach((prefix) => {
+      element(prefix + "-form").addEventListener("reset", () => window.setTimeout(() => {
+        syncQuotaReset(prefix);
+        if (savedQuotaDomains[prefix]) {
+          delete savedQuotaDomains[prefix];
+          populateQuotaDomains(prefix);
+        }
+      }, 0));
+    });
 
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
 
@@ -7103,6 +7147,7 @@
         const domains = Array.from(element("service-quota-domains").selectedOptions)
           .map((option) => option.value);
         if (!domains.length) throw new Error("Select at least one observed domain.");
+        const device = element("service-quota-device").value;
         const result = await request("/api/service-quotas", "POST", {
           id: element("service-quota-id").value,
           name: element("service-quota-name").value,
@@ -7114,6 +7159,7 @@
           enabled: element("service-quota-enabled").checked,
           ...quotaSchedulePayload("service-quota")
         });
+        savedQuotaDomains["service-quota"] = { device: device, domains: domains };
         refreshAfterSuccess(
           result.live_applied ? "Service limit saved and applied." : "Service limit saved.",
         );
@@ -7128,6 +7174,7 @@
         const domains = Array.from(element("time-quota-domains").selectedOptions)
           .map((option) => option.value);
         if (!domains.length) throw new Error("Select at least one observed domain.");
+        const device = element("time-quota-device").value;
         const result = await request("/api/time-quotas", "POST", {
           id: element("time-quota-id").value,
           name: element("time-quota-name").value,
@@ -7139,6 +7186,7 @@
           enabled: element("time-quota-enabled").checked,
           ...quotaSchedulePayload("time-quota")
         });
+        savedQuotaDomains["time-quota"] = { device: device, domains: domains };
         refreshAfterSuccess(
           result.live_applied ? "Time limit saved and applied." : "Time limit saved. Start its timer from the saved row.",
         );

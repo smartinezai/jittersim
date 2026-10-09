@@ -56,6 +56,8 @@ PI_BROWSER_MODULES=(
   general_profile
   device_apply_start
   saved_profiles
+  schedules_timers
+  limits_quotas
   patterns
   random_value_ranges
   dashboard_navigation

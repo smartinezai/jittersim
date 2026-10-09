@@ -235,6 +235,12 @@ class ConfigRepository:
         pi_line_policies = self._connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'network_policies'"
         ).fetchone() is not None
+        # A scope table without its trigger comes from before the trigger existed. Writes
+        # from an older dashboard may have left rows behind a Reset that no trigger saw.
+        names = {row[0] for row in self._connection.execute(
+            "SELECT name FROM sqlite_master WHERE name IN ('device_start_scope', 'end_device_start_scope')"
+        )}
+        scope_before_trigger = names == {"device_start_scope"}
         self._connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS settings_history (
@@ -615,6 +621,10 @@ class ConfigRepository:
                 CHECK (device_id IS NULL OR group_id IS NULL)
             )
         """)
+        if scope_before_trigger:
+            # Nothing tells a live scope from a stale one here, so none starts again. The
+            # network stays a Reset and restart recovery resets it before anything else.
+            self._connection.execute("DELETE FROM device_start_scope")
         if self._add_column_if_missing(
             "network_policies", "access_options_json", "TEXT NOT NULL DEFAULT '{}'"
         ) and pi_line_policies:

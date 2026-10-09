@@ -3360,6 +3360,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         # The listener can close at once. Shared state must outlive every owner.
         super().server_close()
         unresolved = []
+        cleanup = self._cleanup_worker
+        if cleanup is not None and cleanup is not threading.current_thread():
+            cleanup.join(timeout=max(0.0, deadline - time.monotonic()))
+            if cleanup.is_alive():
+                unresolved.append(WorkersStillRunning(
+                    "The device-only cleanup did not stop. Its state remains owned."))
         for owner in (self._request_workers, self.router_operations, self.wifi_operations):
             try:
                 owner.close(timeout=max(0.0, deadline - time.monotonic()))
@@ -5651,9 +5657,25 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         ))
 
     def _cleanup_is_pending(self) -> bool:
+        # A settings save marks the state unknown but keeps the marker, so the
+        # marker alone says the cleanup is still owed.
         state = self.repository.get_runtime_state()
-        return (state.last_action == "reset" and state.observed_state == "error"
-                and state.last_error == DEVICE_CLEANUP_ERROR)
+        return state.last_action == "reset" and state.last_error == DEVICE_CLEANUP_ERROR
+
+    def _finish_device_cleanup(self, generation) -> bool:
+        """Record a finished cleanup unless Panic or anything newer decided the state."""
+
+        def publish():
+            if not self._cleanup_is_pending():
+                return False
+            self.repository.update_runtime_state(
+                observed_state="reset", last_action="reset", last_result="success",
+                last_error=None,
+            )
+            return True
+
+        accepted, recorded = self._publish_apply(generation, publish)
+        return bool(accepted and recorded)
 
     def _retry_device_cleanup(self) -> None:
         """Retry the reset of a failed device-only start a bounded number of times."""
@@ -5668,14 +5690,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     return
                 operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
                 with operation:
+                    generation = getattr(self.scheduler, "halt_count", 0)
                     try:
                         if not self._cleanup_is_pending():
                             return  # Something newer decided the state.
                         self.helper_client.reset()
-                        self.repository.update_runtime_state(
-                            observed_state="reset", last_action="reset", last_result="success",
-                            last_error=None,
-                        )
+                        if not self._finish_device_cleanup(generation):
+                            return  # Panic or a newer action owns the state now.
                     except HelperClientError:
                         LOGGER.warning("cleanup after a failed device-only start failed again")
                         continue
@@ -5877,8 +5898,18 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         if state.last_action == "reset":
             scoped = self.repository.get_device_start_scope() is not None
             if not scoped and self._cleanup_is_pending():
-                # A failed device-only cleanup is a reset still to finish.
-                state = replace(state, last_result="success")
+                # A failed device-only cleanup is a reset still to finish. A failure
+                # keeps the marker and the bounded retries carry on.
+                try:
+                    self.helper_client.reset()
+                except HelperClientError:
+                    LOGGER.error("device-only cleanup failed again after the dashboard restarted")
+                    self._retry_device_cleanup()
+                    return
+                if self._finish_device_cleanup(getattr(self.scheduler, "halt_count", 0)):
+                    self._record_activity(
+                        "reset", "Cleanup after a failed device-only start completed after a restart")
+                return
             if state.last_result != "success" and not scoped:
                 if self.scheduler is not None:
                     self.scheduler.require_recovery()
