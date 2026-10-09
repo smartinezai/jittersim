@@ -366,7 +366,10 @@ class HelperService:
                         except (OSError, ValueError):
                             LOGGER.warning("Ad permission could not be confirmed before household changes.")
                     result = self._access_manager.apply(access_from_payload(payload.get("policy")))
-                    self._household_stop_latched = False
+                    incomplete = self._release_incomplete()
+                    if incomplete is None:
+                        # A restriction that remains keeps an earlier stop in force.
+                        self._household_stop_latched = False
                     saved = self._write_gateway_state(durable=True)
                     saved = self._write_panic_guard() and saved
                     if not saved:
@@ -384,6 +387,9 @@ class HelperService:
                             self._ad_blocking_store.resume()
                         except (OSError, ValueError, CommandExecutionError):
                             LOGGER.warning("Household rules applied but ad permission could not be renewed.")
+                    if incomplete is not None:
+                        return {**result, "ok": False, "error": incomplete + " Retry.",
+                                "reason": "release-incomplete"}
                 return {"ok": True, **result}
             except (OSError, ValueError, CommandExecutionError):
                 LOGGER.exception("persistent access operation failed")
@@ -945,12 +951,8 @@ class HelperService:
             self._access_manager.disable(deadline=deadline)
             # The network is open, but a restriction such as the Wi-Fi
             # join limits may remain. That is not a confirmed recovery.
-            if getattr(self._access_manager, "release_incomplete", False) is True:
-                incomplete = (getattr(self._access_manager, "error", None)
-                              or "Some household restrictions could not be cleared.")
-                LOGGER.error("household release is incomplete: %s", incomplete)
-            else:
-                access_ok = True
+            incomplete = self._release_incomplete()
+            access_ok = incomplete is None
         except Exception:  # noqa: BLE001 - any failure is recorded and answered (review O4)
             LOGGER.exception("could not disable household restrictions")
         failed = not reset["ok"] or not access_ok
@@ -972,6 +974,11 @@ class HelperService:
             return {"ok": False, "error": error,
                     "experiments_stopped": reset["ok"], "access_disabled": access_ok}
         return {"ok": True, "action": "normal-access", "experiments_stopped": True, "access_disabled": True}
+
+    def _release_incomplete(self):
+        """The error of a household release that left a restriction in force, else None."""
+
+        return release_incomplete_error(self._access_manager)
 
     def _block_unconfirmed_intent(self):
         with self._revision_lock:
@@ -1358,6 +1365,12 @@ class HelperService:
             except (OSError, ValueError, CommandExecutionError):
                 LOGGER.exception("persistent access apply failed")
                 return {"ok": False, "error": self._access_failure_message()}
+            incomplete = self._release_incomplete()
+            if incomplete is not None:
+                # Profiles do not start and no stop is cleared while excluded
+                # household devices still cannot join.
+                return {"ok": False, "error": incomplete + " Retry before choosing Start.",
+                        "reason": "release-incomplete"}
         try:
             self._forget_changed_lists(plan)
             self._service_addresses.expire()
@@ -2913,7 +2926,8 @@ class HelperClient:
         if not decoded.get("ok", False):
             reason = decoded.get("reason")
             if reason not in ("control-changed", "update-retry-refused", "wifi-busy", "helper-busy", "wifi-failed",
-                              "wifi-restored", "wifi-restore-failed", "release-refused"):
+                              "wifi-restored", "wifi-restore-failed", "release-refused",
+                              "release-incomplete"):
                 reason = None
             raise HelperClientError(str(decoded.get("error", "helper request failed")), reason=reason)
         return decoded
@@ -2997,11 +3011,27 @@ def gateway_household_stopped(path: Path) -> bool:
     return state.get("household_stop_latched", state.get("panic_stop_latched", False))
 
 
+def release_incomplete_error(access) -> Optional[str]:
+    """The error of a household release that left a restriction in force, else None.
+
+    A release that opened the firewall but could not clear, say, the Wi-Fi join
+    limits is not a completed release: excluded devices still cannot join.
+    """
+
+    if getattr(access, "release_incomplete", False) is not True:
+        return None
+    incomplete = (getattr(access, "error", None)
+                  or "Some household restrictions could not be cleared.")
+    LOGGER.error("household release is incomplete: %s", incomplete)
+    return incomplete
+
+
 def restore_access_at_start(access: AccessManager, *, panic_stopped=False) -> bool:
     """Restore the saved access rules and keep the helper alive when that fails.
 
     A failed restore leaves the test network closed behind the guard table. The
-    helper must still run so that Normal access and Panic can open it again.
+    helper must still run so that Normal access and Panic can open it again. A
+    release that left a restriction in force is not a successful restore either.
     """
 
     try:
@@ -3014,6 +3044,9 @@ def restore_access_at_start(access: AccessManager, *, panic_stopped=False) -> bo
             "Saved access rules were not restored. The test network stays closed. "
             "Use Normal access to open it."
         )
+        return False
+    if release_incomplete_error(access) is not None:
+        LOGGER.error("Household rules are off, but a restriction remains. Retry Panic to clear it.")
         return False
     return True
 

@@ -307,6 +307,10 @@ def write_access_api(server, path, payload, *, control_intent=None):
         refused = server._apply_refused(generation, undo=True)
         if refused is not None:
             return refused
+        if error.reason == "release-incomplete":
+            # The rules are off but a restriction such as the Wi-Fi join limits
+            # remains, so this is neither a completed disable nor a plain failure.
+            return response({"error": str(error)}, 503)
         return response(
             {"error": "Access update failed. Check access status before retrying."}, 503
         )
