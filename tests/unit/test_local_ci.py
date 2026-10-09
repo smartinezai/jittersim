@@ -251,6 +251,21 @@ def test_a_dry_run_writes_nothing(scratch_repository):
     assert result.stdout.count("would run release-") == 2 + len(script_array("RELEASE_DOCKER_RUNS"))
 
 
+def test_lint_plans_the_advisory_checks_unless_they_are_switched_off(scratch_repository):
+    repository, _git = scratch_repository
+    script = repository / "scripts" / "local-ci.sh"
+    with_checks = run_script("--dry-run", "lint", cwd=repository, script=script)
+    assert with_checks.returncode == 0, with_checks.stderr
+    assert "advisory checks (counts only, they never fail the run)" in with_checks.stdout
+    assert "would run advisory-ruff-full" in with_checks.stdout
+    assert "--select E,F,I,S,B,UP,SIM,RUF".replace(",", "\\,") in with_checks.stdout
+    assert "would run lint" in with_checks.stdout
+    without = run_script("--dry-run", "--no-advisory", "lint", cwd=repository, script=script)
+    assert without.returncode == 0, without.stderr
+    assert "advisory-" not in without.stdout and "advisory checks" not in without.stdout
+    assert "would run lint" in without.stdout
+
+
 # -- the exec helper ---------------------------------------------------------------------------
 
 
@@ -378,3 +393,28 @@ def test_the_docs_name_every_command():
     text = (ROOT / "docs" / "local-ci.md").read_text()
     for command in ("lint", "unit", "browser", "gui", "homepage", "kernel", "release-checks", "all", "rerun"):
         assert "local-ci.sh " + command in text, command
+
+
+ADVISORY_STEPS = [
+    ("lint", "PASS", "0", "1", "lint.log", "-", "ruff", ""),
+    ("advisory-ruff-full", "ADVISORY", "0", "2", "r.log", "-", "ruff", "10757 findings"),
+    ("advisory-zizmor", "ADVISORY", "14", "1", "z.log", "-", "zizmor", "13 findings (4 suppressed)"),
+    ("advisory-install-actionlint", "INSTALLED", "0", "9", "i.log", "-", "brew install actionlint", ""),
+    ("advisory-pip-audit", "UNAVAILABLE", "0", "0", "-", "-", "tool not available", "pip-audit is not installed"),
+]
+
+
+def test_advisory_steps_report_counts_and_never_count_as_failures(tmp_path):
+    (tmp_path / "steps.tsv").write_text("\n".join("\t".join(row) for row in ADVISORY_STEPS) + "\n")
+    (tmp_path / "meta.tsv").write_text("run_id\tlocal-ci-test\n")
+    report = load_helper("local_ci_report")
+    assert report.main(["summary", str(tmp_path)]) == 0
+    text = (tmp_path / "summary.md").read_text()
+    assert "| advisory-ruff-full | ADVISORY | 0 | 2 | 10757 findings | r.log |" in text
+    assert "| advisory-zizmor | ADVISORY | 14 | 1 | 13 findings (4 suppressed) | z.log |" in text
+    assert "| advisory-pip-audit | UNAVAILABLE |" in text
+    assert "Totals: 1 steps, 1 passed, 0 not passed (none)." in text
+    assert "Advisory steps (they never gate and are not counted above): 4." in text
+    suite = (tmp_path / "junit.xml").read_text()
+    assert 'failures="0"' in suite and 'skipped="1"' in suite
+    assert report.failed_targets(str(tmp_path), root=str(ROOT)) == []

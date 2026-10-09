@@ -6,6 +6,8 @@
 #
 # It works with the bash 3.2 that macOS ships. It never retries a step, and it never
 # stops, removes or prunes a Docker container or image that it did not start with --rm.
+# `lint` also runs advisory checks (full Ruff rules, shellcheck, actionlint, zizmor, pip-audit).
+# They print counts and never fail the run.
 
 # The functions the traps call are not seen as called by shellcheck.
 # shellcheck disable=SC2329
@@ -116,6 +118,15 @@ RELEASE_DOCKER_RUNS=(
 
 LINT_ARGS=(check --select "E9,F63,F7,F82,F811" src tests)
 
+# Advisory checks that `lint` adds after the gating ruff step. They only report counts.
+ADVISORY_RUFF_RULES="E,F,I,S,B,UP,SIM,RUF"
+ADVISORY_WORKFLOWS=".github/workflows"
+PIP_AUDIT_LOCKS=(
+  deploy/raspberry-pi/release-locks/runtime.txt
+  deploy/raspberry-pi/release-locks/runtime-py39.txt
+  deploy/raspberry-pi/release-locks/build.txt
+)
+
 # Time limits in seconds. The workflows give a whole job 5 to 30 minutes on a hosted runner.
 # A loaded Mac is slower, so these are looser. --step-timeout replaces them all.
 TIMEOUT_LINT=300
@@ -143,6 +154,8 @@ ECHO=0
 STEP_TIMEOUT=
 FAILED_MODE=0
 IGNORE_DOCKER_MEMORY=0
+ADVISORY=1
+NO_INSTALL=0
 NICE_LEVEL=${JITTERSIM_CI_NICE:-10}
 DOCKER_MEMORY=${JITTERSIM_CI_DOCKER_MEMORY:-1g}
 DOCKER_MIN_FREE_MB=${JITTERSIM_CI_DOCKER_MIN_FREE_MB:-512}
@@ -156,7 +169,7 @@ usage() {
 Usage: scripts/local-ci.sh [options] COMMAND [TARGET...] [-- EXTRA ARGUMENTS]
 
 Commands (each one is one workflow job, or a few):
-  lint            ruff, as the Lint job does
+  lint            ruff as the Lint job does, then advisory checks that only print counts
   unit            the whole pytest suite on one Python (the Python matrix job, one version)
   browser         tests.browser.journeys and the 27 Pi browser modules
   gui             the GUI baseline job: its pytest files, gui_baseline and a11y_axe
@@ -184,6 +197,8 @@ Options:
   --echo               also print each step's output while it runs
   --dry-run            print the commands and run nothing
   --ignore-docker-memory   run Docker steps although the Docker VM looks short of memory
+  --no-advisory        lint: skip the advisory checks (full Ruff, shellcheck, actionlint, zizmor, pip-audit)
+  --no-install         lint: do not install a missing advisory tool (brew, pip into .venv-local-ci-tools)
   -h, --help           show this text
 
 Exit status: 0 all steps passed, 1 a step did not pass, 2 refused or bad usage, 130 interrupted.
@@ -215,6 +230,8 @@ while [ $# -gt 0 ]; do
     --echo) ECHO=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --ignore-docker-memory) IGNORE_DOCKER_MEMORY=1 ;;
+    --no-advisory) ADVISORY=0 ;;
+    --no-install) NO_INSTALL=1 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; EXTRA=("$@"); break ;;
     -*) die "unknown option $1 (see --help)" ;;
@@ -418,6 +435,9 @@ PY_VERSION=
 PY_STATE=
 CHROMIUM_STATE=
 LAST_RESULT=
+ADVISORY_COUNTER=
+ADVISORY_RESULT=
+STEP_NOTE=
 
 HELPER_PYTHON=$(command -v python3 || command -v python || true)
 [ -n "$HELPER_PYTHON" ] || die "python3 is needed to run the helpers in scripts/"
@@ -464,12 +484,12 @@ warn() {
   printf 'local-ci: warning: %s\n' "$1" >&2
 }
 
-record_step() {  # id result exit seconds log junit command
+record_step() {  # id result exit seconds log junit command [note]
   [ "$DRY_RUN" = 1 ] && return 0
   local command_line
   # One line per step: fold white space and cut long commands (the log has the full text).
   command_line=$(printf '%s' "$7" | tr '\n\t' '  ' | tr -s ' ' | cut -c1-300)
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$command_line" >> "$STEPS_FILE"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$command_line" "${8:-}" >> "$STEPS_FILE"
 }
 
 record_blocked() {  # id message
@@ -522,11 +542,19 @@ run_step() {
     124) result=TIMEOUT ;;
     *) result=FAIL ;;
   esac
-  [ "$INTERRUPTED" = 1 ] && [ "$result" != PASS ] && result=INTERRUPTED
+  STEP_NOTE=
+  if [ -n "$ADVISORY_COUNTER" ]; then
+    advisory_result "$ADVISORY_COUNTER" "$RUN_DIR/$log" "$code"
+    result=$ADVISORY_RESULT
+  elif [ "$INTERRUPTED" = 1 ] && [ "$result" != PASS ]; then
+    result=INTERRUPTED
+  fi
   LAST_RESULT=$result
-  record_step "$id" "$result" "$code" "$elapsed" "$log" "$junit" "$*"
-  printf '  %-44s %-11s exit %-3s %5ss\n' "$id" "$result" "$code" "$elapsed"
-  if [ "$result" != PASS ]; then
+  record_step "$id" "$result" "$code" "$elapsed" "$log" "$junit" "$*" "$STEP_NOTE"
+  printf '  %-44s %-11s exit %-3s %5ss  %s\n' "$id" "$result" "$code" "$elapsed" "$STEP_NOTE"
+  if [ -n "$ADVISORY_COUNTER" ]; then
+    :  # an advisory step never fails the run
+  elif [ "$result" != PASS ]; then
     FAILED_STEPS=$((FAILED_STEPS + 1))
     if [ "$ECHO" != 1 ]; then
       printf '    last lines of %s:\n' "$log"
@@ -676,6 +704,182 @@ docker_ready() {  # id
 cmd_lint() {
   prepare_python || return 0
   run_step lint "$TIMEOUT_LINT" - -- "$VENV_PY" -m ruff "${LINT_ARGS[@]}"
+  run_advisories
+}
+
+# ---------------------------------------------------------------------------------------------
+# Advisory checks. They run after the gating ruff step, print how many findings they see and
+# never fail the run. A missing tool is installed once (brew, or pip into .venv-local-ci-tools)
+# unless --no-install is given. A tool that cannot run is reported as UNAVAILABLE.
+# ---------------------------------------------------------------------------------------------
+
+# advisory_result COUNTER LOG EXIT: set ADVISORY_RESULT and STEP_NOTE from the tool's own summary.
+advisory_result() {
+  local counter=$1 log=$2 code=$3 found=
+  ADVISORY_RESULT=ADVISORY
+  STEP_NOTE=
+  if [ "$code" = 124 ] || [ "$code" = 126 ] || [ "$code" = 127 ]; then
+    ADVISORY_RESULT=UNAVAILABLE
+    STEP_NOTE="the tool did not finish (exit $code)"
+    return
+  fi
+  case "$counter" in
+    install)
+      if [ "$code" = 0 ]; then
+        ADVISORY_RESULT=INSTALLED
+      else
+        ADVISORY_RESULT=UNAVAILABLE
+        STEP_NOTE="the install failed"
+      fi
+      return
+      ;;
+    ruff)
+      if grep -q 'All checks passed' "$log"; then
+        found=0
+      else
+        found=$(sed -n 's/^Found \([0-9][0-9]*\) error.*/\1/p' "$log" | tail -n 1)
+      fi
+      ;;
+    lines)  # the output of shellcheck and actionlint: exit 0 is clean, exit 1 has one finding on each matching line
+      if [ "$code" = 0 ]; then
+        found=0
+      elif [ "$code" = 1 ]; then
+        found=$(grep -cE '^[^ ]+:[0-9]+:[0-9]+: ' "$log")
+      fi
+      ;;
+    zizmor)
+      if grep -q 'No findings to report' "$log"; then
+        found=0
+      else
+        STEP_NOTE=$(grep -E '^[0-9]+ findings?' "$log" | tail -n 1)
+        found=$(printf '%s' "$STEP_NOTE" | sed -n 's/^\([0-9][0-9]*\) finding.*/\1/p')
+      fi
+      ;;
+    audit)  # pip-audit, one or more runs in one log
+      if grep -q 'Found [0-9]* known vulnerabilit' "$log"; then
+        found=$(sed -n 's/^Found \([0-9][0-9]*\) known vulnerabilit.*/\1/p' "$log" | awk '{ s += $1 } END { print s + 0 }')
+      elif grep -q 'No known vulnerabilities found' "$log" && [ "$code" = 0 ]; then
+        found=0
+      fi
+      ;;
+  esac
+  if [ -z "$found" ]; then
+    ADVISORY_RESULT=UNAVAILABLE
+    STEP_NOTE="no result in the log (exit $code)"
+    return
+  fi
+  if [ -z "$STEP_NOTE" ]; then STEP_NOTE="$found findings"; fi
+}
+
+# run_advisory ID COUNTER TIMEOUT -- COMMAND...
+run_advisory() {
+  local id=$1 counter=$2 limit=$3
+  shift 4
+  ADVISORY_COUNTER=$counter
+  run_step "$id" "$limit" - -- "$@"
+  ADVISORY_COUNTER=
+}
+
+record_unavailable() {  # id note
+  STEP_COUNT=$((STEP_COUNT + 1))
+  if [ "$DRY_RUN" = 1 ]; then
+    printf 'would skip %s: %s\n' "$1" "$2"
+    return 0
+  fi
+  record_step "$1" UNAVAILABLE - 0 - - "tool not available" "$2"
+  printf '  %-44s %-11s %s\n' "$1" UNAVAILABLE "$2"
+}
+
+# ensure_brew_tool COMMAND FORMULA: true when COMMAND exists afterwards.
+ensure_brew_tool() {
+  command -v "$1" >/dev/null 2>&1 && return 0
+  if [ "$DRY_RUN" = 1 ]; then
+    printf 'would install %s with: brew install %s (only when missing and without --no-install)\n' "$1" "$2"
+    return 0
+  fi
+  [ "$NO_INSTALL" = 1 ] && return 1
+  command -v brew >/dev/null 2>&1 || return 1
+  ADVISORY_COUNTER=install
+  run_step "advisory-install-$1" "$TIMEOUT_SETUP" - -- brew install "$2"
+  ADVISORY_COUNTER=
+  command -v "$1" >/dev/null 2>&1
+}
+
+AUDIT_TOOL=
+ensure_pip_audit() {
+  AUDIT_TOOL=$(command -v pip-audit 2>/dev/null || true)
+  [ -n "$AUDIT_TOOL" ] && return 0
+  AUDIT_TOOL=$ROOT/.venv-local-ci-tools/bin/pip-audit
+  [ -x "$AUDIT_TOOL" ] && return 0
+  if [ "$DRY_RUN" = 1 ]; then
+    printf 'would install pip-audit into %s (only when missing and without --no-install)\n' "$ROOT/.venv-local-ci-tools"
+    return 0
+  fi
+  [ "$NO_INSTALL" = 1 ] && return 1
+  local tools_python
+  tools_python=$(find_python "") || return 1
+  ADVISORY_COUNTER=install
+  # The program in single quotes runs in its own shell, where its variables are expanded.
+  # shellcheck disable=SC2016
+  run_step "advisory-install-pip-audit" "$TIMEOUT_SETUP" - -- bash -c '
+    set -eu
+    "$1" -m venv "$2"
+    "$2/bin/python" -m pip install --quiet pip-audit
+  ' install "$tools_python" "$ROOT/.venv-local-ci-tools"
+  ADVISORY_COUNTER=
+  [ -x "$AUDIT_TOOL" ]
+}
+
+# The tracked files that are shell scripts, found by the first line so a script without .sh counts.
+shell_scripts() {
+  # The awk program is in single quotes on purpose. LC_ALL=C lets awk read binary files.
+  # shellcheck disable=SC2016
+  git ls-files -z | LC_ALL=C xargs -0 awk 'FNR == 1 { if ($0 ~ /^#!.*[ \/](ba|da|k)?sh( |$)/) print FILENAME; nextfile }' 2>/dev/null
+}
+
+run_advisories() {
+  [ "$ADVISORY" = 1 ] || return 0
+  [ "$STOP" = 1 ] && return 0
+  printf '  advisory checks (counts only, they never fail the run)\n'
+  run_advisory advisory-ruff-full ruff "$TIMEOUT_LINT" -- \
+    "$VENV_PY" -m ruff check --statistics --exit-zero --select "$ADVISORY_RUFF_RULES" src tests
+  local scripts=() file
+  while IFS= read -r file; do
+    [ -n "$file" ] && scripts+=("$file")
+  done < <(shell_scripts)
+  if [ ${#scripts[@]} -eq 0 ]; then
+    record_unavailable advisory-shellcheck "no shell scripts found"
+  elif ensure_brew_tool shellcheck shellcheck; then
+    run_advisory advisory-shellcheck lines "$TIMEOUT_LINT" -- shellcheck -x -f gcc "${scripts[@]}"
+  else
+    record_unavailable advisory-shellcheck "shellcheck is not installed (brew install shellcheck)"
+  fi
+  if ensure_brew_tool actionlint actionlint; then
+    run_advisory advisory-actionlint lines "$TIMEOUT_LINT" -- actionlint -oneline "$ADVISORY_WORKFLOWS"/*.yml
+  else
+    record_unavailable advisory-actionlint "actionlint is not installed (brew install actionlint)"
+  fi
+  if ensure_brew_tool zizmor zizmor; then
+    run_advisory advisory-zizmor zizmor "$TIMEOUT_LINT" -- zizmor --offline --no-progress "$ADVISORY_WORKFLOWS"
+  else
+    record_unavailable advisory-zizmor "zizmor is not installed (brew install zizmor)"
+  fi
+  if ensure_pip_audit; then
+    # The program in single quotes runs in its own shell, where its variables are expanded.
+    # shellcheck disable=SC2016
+    run_advisory advisory-pip-audit audit "$TIMEOUT_LINT" -- bash -c '
+      tool=$1
+      shift
+      status=0
+      for lock in "$@"; do
+        printf "== %s\n" "$lock"
+        "$tool" --require-hashes --disable-pip -r "$lock" || status=$?
+      done
+      exit "$status"
+    ' pip-audit "$AUDIT_TOOL" "${PIP_AUDIT_LOCKS[@]}"
+  else
+    record_unavailable advisory-pip-audit "pip-audit is not installed (pip install pip-audit in a tools environment)"
+  fi
 }
 
 cmd_unit() {
