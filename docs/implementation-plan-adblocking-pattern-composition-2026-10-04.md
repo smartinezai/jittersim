@@ -37,7 +37,7 @@ this composition.
   both original feature heads before merging the reviewed maintenance source
   then the intended ad changes. The coordinator owns Docker and remote writes
   until the combined source has been reviewed and a release slot is assigned.
-- Composition checkout: `/Users/samantha.martinez/.codex/worktrees/neutral-sign-in/jittersim`
+- Composition checkout: `<home>/.codex/worktrees/neutral-sign-in/jittersim`
   on `codex/feature-composition`. The original pattern and ad heads remain
   reachable through their original feature branches.
 - Ten overlapping feature files were inspected: Wi-Fi workflow, README,

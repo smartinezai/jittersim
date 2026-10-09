@@ -28,7 +28,7 @@ GitHub jobs while billing prevents them from running.
 
 These are separate source snapshots rather than one verified release:
 
-| Component | Head | Worktree under `/Users/samantha.martinez/Github repos/jittersim.worktrees` |
+| Component | Head | Worktree under `<home>/Github repos/jittersim.worktrees` |
 | --- | --- | --- |
 | Online check, PR 68 | `1817898a298a45eefd813119a5d692910d272cdd` | `claude-online-check` |
 | Upload and Mac command, PR 66 | `f8f4b393d7925889cece7ddb383d7d1b00e4e136` | `claude-mac-publish` |

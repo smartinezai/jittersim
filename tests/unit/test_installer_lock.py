@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.marker_support import PUBLISH_MARKER
+
 SCRIPT = Path(__file__).resolve().parents[2] / "deploy/raspberry-pi/install-lock.py"
 
 
@@ -190,7 +192,7 @@ def test_actual_installer_entry_fences_a_survivor_that_closes_descriptor_nine(tm
     (package / "updates.py").write_text(manager)
     ready, overlap = tmp_path / "ready", tmp_path / "must-not-overlap"
     installer = tmp_path / "install.sh"
-    child = "import os,sys,time; from pathlib import Path; Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)"
+    child = PUBLISH_MARKER + "import os,sys,time; publish_marker(sys.argv[1], str(os.getpid())); time.sleep(30)"
     installer.write_text(shlex.quote(sys.executable) + " -c " + shlex.quote(child) + " "
                          + shlex.quote(str(ready)) + " 9>&- &\nwait\n")
     contender = tmp_path / "contender.sh"

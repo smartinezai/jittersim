@@ -13,22 +13,36 @@ from .service_lists import build_service_list_rules
 from .website import build_website_filters, lookup_session, resolve_domains
 
 
-def compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=None) -> NetworkPlan:
+def compile_stored_plan(
+    *, repository: ConfigRepository, connected_snapshot=None, device_scope=None
+) -> NetworkPlan:
     """Compile every stored device assignment into one deterministic plan.
+
+    With `device_scope` only those saved devices run: the saved Everyone and
+    everyone-else profiles, service lists and every other device stay stopped.
 
     The website lookups share one deadline, so a DNS server that does not answer
     delays the plan by seconds and not for good.
     """
 
     with lookup_session():
-        return _compile_stored_plan(repository=repository, connected_snapshot=connected_snapshot)
+        return _compile_stored_plan(
+            repository=repository, connected_snapshot=connected_snapshot, device_scope=device_scope
+        )
 
 
-def _compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=None) -> NetworkPlan:
-    general_profile = repository.get_general_profile()
+def _compile_stored_plan(
+    *, repository: ConfigRepository, connected_snapshot=None, device_scope=None
+) -> NetworkPlan:
+    scoped = device_scope is not None
+    general_profile = None if scoped else repository.get_general_profile()
     if general_profile is not None:
         return compile_general_plan(repository=repository, profile=general_profile)
     clients = eligible_clients(repository, connected_snapshot)
+    if scoped:
+        clients = replace(
+            clients, devices=tuple(device for device in clients.devices if device.id in device_scope)
+        )
     profiles = {profile.id: profile for profile in repository.list_profiles()}
     devices = []
     data_limits = {
@@ -107,6 +121,8 @@ def _compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=Non
     for assignment in repository.list_service_assignments():
         if not assignment.enabled or assignment.device_id in clients.excluded_ids:
             continue
+        if scoped and assignment.device_id not in devices_by_id:
+            continue
         device = devices_by_id.get(assignment.device_id)
         profile = profiles.get(assignment.profile_id)
         if device is None or profile is None:
@@ -124,7 +140,7 @@ def _compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=Non
             )
         )
     everyone_else = None
-    everyone_else_profile_id = repository.get_everyone_else_profile_id()
+    everyone_else_profile_id = None if scoped else repository.get_everyone_else_profile_id()
     if everyone_else_profile_id is not None:
         profile = profiles.get(everyone_else_profile_id)
         if profile is None:
@@ -154,6 +170,6 @@ def _compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=Non
         website_filters=website_filters,
         service_quota_rules=service_quota_rules,
         service_assignment_rules=service_assignment_rules,
-        service_list_rules=build_service_list_rules(repository, profiles),
+        service_list_rules=() if scoped else build_service_list_rules(repository, profiles),
         everyone_else=everyone_else,
     )

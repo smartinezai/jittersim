@@ -505,6 +505,11 @@ class ConfigRepository:
                 last_result TEXT,
                 last_error TEXT
             );
+            -- Devices started on their own after a Reset while everything else
+            -- stays stopped. Runtime state, not a setting: never exported.
+            CREATE TABLE IF NOT EXISTS device_start_scope (
+                device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS activity_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 happened_at INTEGER NOT NULL,
@@ -923,9 +928,16 @@ class ConfigRepository:
         last_action: Optional[str],
         last_result: Optional[str],
         last_error: Optional[str],
+        keep_device_scope: bool = False,
     ) -> RuntimeState:
-        """Persist one observed helper state without changing desired configuration."""
+        """Persist one observed helper state without changing desired configuration.
 
+        Every state change ends a device-only start unless it belongs to one, so
+        Reset, Panic, Start and Apply to everyone never leave a scope behind.
+        """
+
+        if keep_device_scope and last_action != "reset":
+            raise ValueError("a device-only start keeps the network reset")
         current = self.get_runtime_state()
         updated = RuntimeState(
             configuration_version=current.configuration_version,
@@ -947,8 +959,36 @@ class ConfigRepository:
                 updated.last_error,
             ),
         )
+        if not keep_device_scope:
+            self._connection.execute("DELETE FROM device_start_scope")
         self._commit()
         return updated
+
+    def get_device_start_scope(self) -> Optional[frozenset]:
+        """Return the devices of a device-only start, or None when there is none.
+
+        A scope counts only while the network is otherwise reset.
+        """
+
+        state = self.get_runtime_state()
+        if state.last_action != "reset":
+            return None
+        rows = self._connection.execute(
+            "SELECT device_id FROM device_start_scope ORDER BY device_id"
+        ).fetchall()
+        return frozenset(row["device_id"] for row in rows) or None
+
+    def add_device_to_start_scope(self, device_id: str) -> None:
+        """Add one saved device to the devices that run while the rest stays reset."""
+
+        self._connection.execute(
+            "INSERT OR IGNORE INTO device_start_scope (device_id) VALUES (?)", (device_id,)
+        )
+        self._commit()
+
+    def clear_device_start_scope(self) -> None:
+        self._connection.execute("DELETE FROM device_start_scope")
+        self._commit()
 
     def record_action(self, *, action: str, status_code: int) -> None:
         """Store a bounded action name and outcome without request contents."""
@@ -1106,13 +1146,19 @@ class ConfigRepository:
 
         The check and the write are one statement, so a reset made from
         another process, such as `jittersim reset`, is never overwritten.
+        A device-only start stays a reset with its scope, so it never widens.
         """
 
         cursor = self._connection.execute(
             """
             UPDATE runtime_state
-            SET observed_state = ?, last_action = 'schedule', last_result = ?, last_error = ?
-            WHERE id = 1 AND (last_action IS NULL OR last_action != 'reset')
+            SET observed_state = ?,
+                last_action = CASE WHEN last_action = 'reset' THEN 'reset' ELSE 'schedule' END,
+                last_result = ?, last_error = ?
+            WHERE id = 1 AND (
+                last_action IS NULL OR last_action != 'reset'
+                OR EXISTS (SELECT 1 FROM device_start_scope)
+            )
             """,
             (
                 "applied" if success else "error",
