@@ -101,6 +101,15 @@ def check_router_switch(page):
             if request.url.endswith("/api/router/status") else None)
     expect(button).to_be_disabled()
     page.locator("#refresh-router-wifi").click()
+    # The password check a moment ago used the router budget, so the Pi does not ask the router
+    # again yet. The page says how long to wait and shows no state it does not have.
+    expect(page.locator("#message")).to_contain_text("choose Check router Wi-Fi again")
+    wait = int(re.search(r"Wait (\d+) second", page.locator("#message").inner_text()).group(1))
+    assert 1 <= wait <= 15 and checks == [True], (wait, checks)
+    expect(button).to_have_attribute("data-unknown", "true")
+    page.wait_for_timeout((wait + 1) * 1000)
+    checks.clear()
+    page.locator("#refresh-router-wifi").click()
     # Router Wi-Fi switching is refused for recovery safety. The switch only shows the state.
     expect(button).to_have_attribute("aria-checked", "true", timeout=10000)
     assert checks and checks[0] is True and all(refresh is False for refresh in checks[1:])

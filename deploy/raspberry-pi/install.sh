@@ -193,7 +193,7 @@ if [ "$ap_profile_state" = absent ]; then
         create --interface "$JITTERSIM_TEST_INTERFACE" --ssid "$JITTERSIM_AP_SSID"
 elif [ "$ap_profile_state" = present ]; then
     ap_settings_before=$(nmcli -g \
-        connection.interface-name,connection.autoconnect,802-11-wireless.mode,802-11-wireless.ap-isolation,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,802-11-wireless-security.pmf \
+        connection.interface-name,connection.autoconnect,802-11-wireless.mode,802-11-wireless.ap-isolation,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv4.shared-dhcp-lease-time,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,802-11-wireless-security.pmf \
         connection show jittersim-ap 9>&-)
 else
     echo "The initial Wi-Fi profile could not be confirmed." >&2
@@ -205,6 +205,11 @@ if ! nmcli -g ipv4.shared-dhcp-range connection show jittersim-ap 9>&- >/dev/nul
     exit 1
 fi
 # Security settings are set when the connection is created and kept on upgrades.
+# Leases last 5 minutes instead of NetworkManager's hour. A device that moves
+# from the Pi back to the router under the same Wi-Fi name keeps its test Wi-Fi
+# address until it rebinds at 7/8 of the lease, so this bounds how long it stays
+# without internet after a copied-name trial ends (see
+# docs/pi-only-datapath-audit-2026-10-09.md).
 nmcli connection modify jittersim-ap \
     connection.interface-name "$JITTERSIM_TEST_INTERFACE" \
     connection.autoconnect no \
@@ -213,9 +218,10 @@ nmcli connection modify jittersim-ap \
     ipv4.method shared \
     ipv4.addresses 192.168.50.1/24 \
     ipv4.shared-dhcp-range 192.168.50.100,192.168.50.199 \
+    ipv4.shared-dhcp-lease-time 300 \
     ipv6.method disabled 9>&-
 ap_settings_after=$(nmcli -g \
-    connection.interface-name,connection.autoconnect,802-11-wireless.mode,802-11-wireless.ap-isolation,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,802-11-wireless-security.pmf \
+    connection.interface-name,connection.autoconnect,802-11-wireless.mode,802-11-wireless.ap-isolation,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv4.shared-dhcp-lease-time,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,802-11-wireless-security.pmf \
     connection show jittersim-ap 9>&-)
 
 dashboard_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (p = 1; p <= NF; p++) if ($p == "src") {print $(p + 1); exit}}' || true)
