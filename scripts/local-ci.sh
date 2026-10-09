@@ -54,6 +54,8 @@ PI_BROWSER_MODULES=(
   address_move_privacy
   general_profile
   saved_profiles
+  schedules_timers
+  limits_quotas
   patterns
   random_value_ranges
   dashboard_navigation
