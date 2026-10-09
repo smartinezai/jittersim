@@ -178,6 +178,26 @@ class WifiInstallationTests(unittest.TestCase):
         self.assertEqual(state["settings"]["802-11-wireless-security.pairwise"], "tkip,ccmp")
         self.assertFalse(any("up" in command or "down" in command for command in state["commands"]))
 
+    def test_test_wifi_leases_are_short_so_a_device_back_on_the_router_recovers_soon(self):
+        # A device that roams from the Pi back to the router (same name) keeps
+        # its 192.168.50.x lease and only asks the router again when it rebinds
+        # at 7/8 of the lease. NetworkManager's default of one hour can leave it
+        # without internet for about 50 minutes after the router Wi-Fi returns.
+        for exists in (False, True):
+            with self.subTest(exists=exists):
+                result, state = self.run_setup(exists=exists)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state["settings"]["ipv4.shared-dhcp-lease-time"], "300")
+                self.assertEqual(state["settings"]["ipv4.shared-dhcp-range"],
+                                 "192.168.50.100,192.168.50.199")
+                if exists:
+                    # The running Wi-Fi is not restarted. install.sh tells the
+                    # owner because the compared settings now include the lease.
+                    self.assertFalse(any("up" in command or "down" in command
+                                         for command in state["commands"]))
+        installer = (Path(__file__).resolve().parents[2] / "deploy/raspberry-pi/install.sh").read_text()
+        self.assertEqual(installer.count("ipv4.shared-dhcp-range,ipv4.shared-dhcp-lease-time,"), 2)
+
     def test_unsupported_security_fails_without_trying_weaker_settings(self):
         result, state = self.run_setup(exists=False, reject_security=True)
         self.assertNotEqual(result.returncode, 0)
