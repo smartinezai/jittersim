@@ -45,6 +45,17 @@ class DeploymentFirewallTests(unittest.TestCase):
         self.assertIn("-m jittersim.localca ensure", installer)
         self.assertIn("--group jittersim", installer)
 
+    def test_the_helper_starts_after_boot_restoration_has_finished(self) -> None:
+        # O5: the helper's startup decision is applied last and Panic is only
+        # served once access-boot can no longer restore rules behind it.
+        def ordered_after(unit):
+            text = (REPOSITORY_ROOT / "deploy" / "raspberry-pi" / unit).read_text()
+            return {name for line in text.splitlines() if line.startswith("After=")
+                    for name in line[len("After="):].split()}
+
+        self.assertIn("jittersim-access-boot.service", ordered_after("jittersim-helper.service"))
+        self.assertNotIn("jittersim-helper.service", ordered_after("jittersim-access-boot.service"))
+
     def test_dns_watcher_runs_unprivileged_with_only_packet_capture(self) -> None:
         service = (
             REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-service-watch.service"
