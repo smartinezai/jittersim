@@ -349,11 +349,11 @@ def _certificate_section(text, title):
     return match.group(0) if match else ""
 
 
-def _certificate_names(text):
+def _certificate_names(text, *, allow_legacy_repeated_names=False):
     section = _certificate_section(text, "Subject Alternative Name")
     names = tuple(re.findall(r"DNS:([^,\s]+)", section))
     label = r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
-    if (len(names) > 32 or len(set(names)) != len(names) or
+    if (len(names) > 32 or (not allow_legacy_repeated_names and len(set(names)) != len(names)) or
             any(len(name) > 253 or not re.fullmatch(label + r"(?:\." + label + r")*", name)
                 for name in names)):
         raise UpdateError("dashboard certificate names are invalid")
@@ -367,7 +367,7 @@ def _certificate_names(text):
         raise UpdateError("dashboard certificate addresses are invalid") from error
     if not names and not addresses:
         raise UpdateError("the dashboard certificate has no usable names or addresses")
-    return names
+    return tuple(dict.fromkeys(names))
 
 
 def _certificate_settings(content):
@@ -471,7 +471,7 @@ def verify_certificate_identity(files, *, authority_only=False, deadline=None, b
                 if name not in files:
                     continue
                 cert_text = text(name)
-                names = _certificate_names(cert_text)
+                names = _certificate_names(cert_text, allow_legacy_repeated_names=not ca_present)
                 if public(name, True) != key:
                     raise UpdateError("the dashboard certificate does not match the retained key")
                 _certificate_command(["verify", *anchor, "-purpose", "sslserver",
@@ -979,6 +979,16 @@ PANIC_APPROVED_SOURCES = ({
     # See docs/review-results-final-panic-consumers-2026-10-04.json.
     "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
     "src/jittersim/networking/helper.py": "84683fdeb036d0b4872ab32d8f1539bbeb32f8f8879af3caf507f23bc4205e7e",
+    "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
+}, {
+    # See docs/review-results-router-recovery-consumers-2026-10-05.json.
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "e940fc8f8da5149cf18fd25f230c1702110f1c3445362be9209a4d8f382e0499",
+    "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
+}, {
+    # See docs/review-results-router-recovery-optin-removal-2026-10-05.json.
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "1cbc5dd4eb2e93f6205035f38218fe4ca11b34281a23e2c998ccb6e8b76c4228",
     "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
 },)
 

@@ -414,7 +414,7 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(response["error"], ROUTER_IMPORT_MESSAGES["restore-failed"])
         self.assertNotIn("router-wifi-password", "\n".join(logs.output) + str(response))
 
-    def test_changes_router_wifi_through_the_helper(self) -> None:
+    def test_router_wifi_changes_are_rejected_before_router_access(self) -> None:
         executor = UplinkOutputExecutor()
         routers = []
 
@@ -439,19 +439,14 @@ class HelperServiceTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(response, {"ok": True, "action": "router-wifi", "enabled": False})
-        self.assertTrue(routers[0].logged_in)
-        self.assertTrue(routers[0].closed)
+        self.assertEqual(response["reason"], "router-control-disabled")
+        self.assertEqual(routers, [])
 
-    def test_router_toggle_returns_safe_guidance_and_always_closes_the_session(self):
-        class RejectedRouter(FakeRouter):
-            def set_wifi_enabled(self, *, enabled):
-                raise RouterError("router-secret wifi-secret response contents", reason="uncertain")
-
+    def test_router_wifi_rejection_does_not_expose_request_values(self) -> None:
         routers = []
 
         def router_factory(address, password):
-            router = RejectedRouter(address, password)
+            router = FakeRouter(address, password)
             routers.append(router)
             return router
 
@@ -462,19 +457,12 @@ class HelperServiceTests(unittest.TestCase):
             ),
             router_factory=router_factory,
         )
-        with self.assertLogs("jittersim.networking.helper", level="WARNING") as logs:
-            response = service.handle_payload(
-                {
-                    "action": "router-wifi",
-                    "admin_password": "router-secret",
-                    "enabled": False,
-                }
-            )
-        self.assertEqual(response["error"], ROUTER_WIFI_MESSAGES["uncertain"])
-        self.assertTrue(routers[0].closed)
-        recorded = str(response) + "\n".join(logs.output)
-        for secret in ("router-secret", "wifi-secret", "response contents"):
-            self.assertNotIn(secret, recorded)
+        response = service.handle_payload(
+            {"action": "router-wifi", "admin_password": "router-secret", "enabled": False}
+        )
+        self.assertEqual(response["reason"], "router-control-disabled")
+        self.assertNotIn("router-secret", str(response))
+        self.assertEqual(routers, [])
 
     def _router_check_service(self, router_class=FakeRouter):
         routers = []
