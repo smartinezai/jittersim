@@ -471,3 +471,43 @@ def test_a_client_whose_saved_profile_is_paused_is_never_listed_as_affected():
     assert result["devices"]["items"] == [{"name": "Laptop", "profile": "Slow network"}]
     assert "Unchecked phone" not in json.dumps(result)
     assert "Protected tablet" not in json.dumps(result)
+
+
+def test_a_device_only_start_lists_only_its_devices_and_pauses_everyone():
+    # After a Reset one device was started on its own. Everyone stays saved but paused,
+    # other saved devices stay stopped and service lists are not running.
+    result = status(
+        deviceOnly=["air"],
+        generalState=general(active=False, observed="applied"),
+        profiles=[{"id": "slow-test", "name": "Slow test"}, {"id": "low", "name": "Low"}],
+        clients=[
+            client("Air", "02:00:00:00:00:01", assigned_device_id="air",
+                   assigned_profile_id="slow-test"),
+            client("TV", "02:00:00:00:00:02", assigned_device_id="tv", assigned_profile_id="low"),
+        ],
+        serviceLists=[{"name": "Video", "enabled": True}],
+    )
+    assert result["general"] == {"text": "Everyone: Shared slow · paused", "tone": "muted"}
+    assert result["devices"]["items"] == [{"name": "Air", "profile": "Slow test"}]
+    assert result["lists"]["text"] == ""
+
+
+def test_the_runtime_line_names_a_device_only_start():
+    script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
+    start = script.index("function runtimeStatusText(")
+    source = script[start : script.index("function applyButtonLabel(", start)]
+    program = source + (
+        "\nconsole.log(JSON.stringify(["
+        "runtimeStatusText('applied', true, {deviceOnly: ['air']}),"
+        "runtimeStatusText('unknown', true, {deviceOnly: ['air', 'tv']}),"
+        "runtimeStatusText('applied', true, {deviceOnly: []})]));"
+    )
+    result = subprocess.run([NODE, "-"], input=program, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    one, two, normal = json.loads(result.stdout)
+    assert one["text"] == (
+        "Running for 1 device only. Everyone and other saved settings stay paused. "
+        "Start resumes them all."
+    )
+    assert two["text"].startswith("Running for 2 devices only.")
+    assert normal["text"].startswith("Running. Your saved settings are applied.")

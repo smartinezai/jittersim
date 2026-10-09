@@ -47,8 +47,8 @@ Rollback compatibility: an older dashboard ignores the new table and sees a
 normal Reset. On restart it resets the network again and its scheduler never
 resumes saved settings. A rollback therefore stops the device-only start and
 never resumes Everyone or other devices. The table is runtime state, not a
-setting: export and import do not carry it, and an import keeps only rows whose
-device ids still exist.
+setting: export does not carry it. An import replaces the saved devices, so its
+rows go with them and the next tick ends the device-only start.
 
 ## Compiler precedence and shared limits
 
@@ -73,8 +73,9 @@ The plan builders take an explicit `device_scope`. With a scope:
   `record_schedule_result` keeps `last_action = reset` while a scope exists.
   A scheduled apply never widens the scope.
 - Intent is captured before the shared lock: the Panic generation, the helper
-  control revision and a Reset counter. A device Apply queued behind a Reset
-  or a Panic is refused after the lock and starts nothing.
+  control revision and a Reset and Panic request counter. A device Apply queued
+  behind a Reset or a Panic is refused after the lock, saves nothing and starts
+  nothing. A changed helper revision is refused before saving too.
 - The helper apply is non-explicit. It never clears a Panic or outage latch
   and never resumes paused ad-blocking.
 - Failure: the assignment stays saved, the scope is cleared, state becomes

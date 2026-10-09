@@ -2882,7 +2882,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(self.server.helper_client.applied_plan.mark_rules[0].device_id, "alice")
         self.assertEqual(len(self.server.helper_client.applied_plan.mark_rules), 2)
 
-    def test_connected_device_profile_assignment_keeps_a_reset_network_reset(self) -> None:
+    def test_connected_device_profile_assignment_after_a_reset_starts_only_that_device(self) -> None:
         self.server.helper_client = FakeHelper()
         self.repository.update_runtime_state(
             observed_state="reset", last_action="reset", last_result="success", last_error=None
@@ -2898,16 +2898,20 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 200)
-        self.assertFalse(json.loads(body)["live_applied"])
-        self.assertIsNone(self.server.helper_client.applied_plan)
+        self.assertTrue(json.loads(body)["live_applied"])
+        # The other saved device stays stopped: only the chosen one starts.
+        self.assertEqual(
+            [rule.device_id for rule in self.server.helper_client.applied_plan.mark_rules],
+            ["client-dc1ed53e974c"],
+        )
         self.assertEqual(
             self.repository.get_device_by_ipv4_address("192.168.50.178").profile_id, "slow"
         )
-        # Only an explicit Apply may undo a Reset. The dashboard relays the server's
-        # message, which says so.
+        self.assertEqual(self.repository.get_runtime_state().last_action, "reset")
+        # The dashboard relays the server's message, which names Start for the rest.
         assign = DASHBOARD_HTML.split("async function applyProfileToDevice(", 1)[1]
         self.assertIn("result.message", assign.split("\n    }\n", 1)[0])
-        self.assertIn("Start", json.loads(body)["message"])
+        self.assertIn("Start resumes all saved settings", json.loads(body)["message"])
 
     def test_profile_assignment_rejects_a_neighbor_without_verified_association(self) -> None:
         class UnverifiedHelper(FakeHelper):
@@ -4549,6 +4553,7 @@ class ControlServerTests(unittest.TestCase):
             json.loads(body)["state"],
             {
                 "configuration_version": 2,
+                "device_only": [],
                 "last_action": None,
                 "last_error": None,
                 "last_result": None,
