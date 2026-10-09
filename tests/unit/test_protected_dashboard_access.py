@@ -170,6 +170,48 @@ def make_service(tmp_path):
     return HelperService(applier, access_store=store), store, applier
 
 
+def test_a_claimed_grant_is_removed_only_by_its_own_claim(tmp_path):
+    service, store, _ = make_service(tmp_path)
+    sync(service, protected(MAC))
+    claim = "c" * 32
+    created = status(service, "register-self", claim_id=claim)
+    assert created["ok"] and created["claimed"] is True
+    wrong = status(service, "remove-claimed", mac_address=MAC, claim_id="d" * 32)
+    assert wrong["ok"] and wrong["removed"] is False
+    assert [item["mac_address"] for item in store.saved_devices()] == [MAC]
+    right = status(service, "remove-claimed", mac_address=MAC, claim_id=claim)
+    assert right["ok"] and right["removed"] is True
+    assert store.saved_devices() == []
+
+
+def test_an_existing_or_adopted_grant_is_never_removed_by_a_claim(tmp_path):
+    service, store, _ = make_service(tmp_path)
+    sync(service, protected(MAC))
+    store.add(MAC, "Manual")
+    existing = status(service, "register-self", claim_id="c" * 32)
+    assert existing["ok"] and existing["claimed"] is False
+    assert status(service, "remove-claimed", mac_address=MAC, claim_id="c" * 32)["removed"] is False
+    store.remove(MAC)
+    assert status(service, "register-self", claim_id="e" * 32)["claimed"] is True
+    # A second registration of the same device adopts the grant as its own.
+    assert status(service, "register-self")["ok"]
+    assert status(service, "remove-claimed", mac_address=MAC, claim_id="e" * 32)["removed"] is False
+    assert [item["mac_address"] for item in store.saved_devices()] == [MAC]
+
+
+def test_a_claim_is_forgotten_by_a_restarted_helper_and_never_widens_removal(tmp_path):
+    service, store, applier = make_service(tmp_path)
+    sync(service, protected(MAC))
+    assert status(service, "register-self", claim_id="c" * 32)["claimed"] is True
+    restarted = HelperService(applier, access_store=AccessStore(store.path))
+    sync(restarted, protected(MAC))
+    result = status(restarted, "remove-claimed", mac_address=MAC, claim_id="c" * 32)
+    assert result["ok"] and result["removed"] is False
+    assert [item["mac_address"] for item in store.saved_devices()] == [MAC]
+    bad = status(service, "remove-claimed", mac_address=MAC, claim_id="not-a-claim")
+    assert bad["ok"] is False
+
+
 def test_a_protected_device_is_allowed_and_told_why(tmp_path):
     service, _, _ = make_service(tmp_path)
     before = status(service)
@@ -265,6 +307,9 @@ class BridgeHelper(PlanRecordingHelper):
         self.fail_sync = 0
         self.sync_payloads = []
         self.operations = []
+        # Simulate another browser tab acting right before or after one operation.
+        self.before = {}
+        self.after = {}
 
     def _call(self, payload):
         result = self.service.handle_payload(payload)
@@ -274,7 +319,12 @@ class BridgeHelper(PlanRecordingHelper):
 
     def dashboard_access(self, operation="status", **values):
         self.operations.append(operation)
-        return self._call({"action": "dashboard-access", "operation": operation, **values})
+        if operation in self.before:
+            self.before.pop(operation)()
+        result = self._call({"action": "dashboard-access", "operation": operation, **values})
+        if operation in self.after:
+            self.after.pop(operation)()
+        return result
 
     def dashboard_access_protected_sync(self, devices):
         self.sync_payloads.append(list(devices))
@@ -669,6 +719,35 @@ class ProtectedAccessServerTests(unittest.TestCase):
         self.assertEqual(len(self.repository.list_unaffected_devices()), 1)
         self.assertEqual(self.helper.operations.count("register-self"), 1)
         self.assertEqual(self.server.dashboard_access(PEER)["grants"], ["protection"])
+
+    def refuse_stale_restore(self):
+        first = min(item["id"] for item in
+                    json.loads(self.server.response_for("/api/history")[2])["versions"])
+        stale = self.repository.get_runtime_state().configuration_version - 1
+        status, _, body = self.server.history_restore_for_peer(
+            {"id": first, "current_version": stale}, PEER)
+        self.assertEqual(status, 409, body)
+        self.assertEqual(len(self.repository.list_unaffected_devices()), 1)
+
+    def other_tab_saves_a_grant(self):
+        result = self.service.handle_payload({"action": "dashboard-access",
+                                              "operation": "register-self", "peer": PEER,
+                                              "name": "Other tab"})
+        self.assertTrue(result["ok"], result)
+
+    def test_a_refused_restore_keeps_a_grant_another_tab_saved_first(self):
+        self.protect()
+        self.helper.before["register-self"] = self.other_tab_saves_a_grant
+        self.refuse_stale_restore()
+        self.assertEqual([item["mac_address"] for item in self.store.saved_devices()], [MAC])
+        self.assertEqual(self.server.dashboard_access(PEER)["grants"], ["manual", "protection"])
+
+    def test_a_refused_restore_keeps_a_grant_another_tab_saved_after_it(self):
+        self.protect()
+        self.helper.after["register-self"] = self.other_tab_saves_a_grant
+        self.refuse_stale_restore()
+        self.assertEqual([item["mac_address"] for item in self.store.saved_devices()], [MAC])
+        self.assertEqual(self.server.dashboard_access(PEER)["grants"], ["manual", "protection"])
 
     def test_an_invalid_import_is_refused_before_any_grant_is_saved(self):
         self.protect()
