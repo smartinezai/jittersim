@@ -920,6 +920,24 @@ JitterSim therefore shapes uploads like this:
   rate only. Test Wi-Fi traffic that the Pi's connection
   tracking cannot follow is dropped instead of reaching the router without NAT.
 
+### Router health canary
+
+While hardware control is on, the dashboard checks the household router once a
+minute through the Pi's Ethernet port. It reads the router's ARP entry, sends
+one ping and asks the router's DNS for one name. It makes no login and changes
+nothing. A router that never answers pings or DNS is not counted as down for
+that check.
+
+When two checks in a row fail, the Pi's journal gets one record. It says what
+failed, which profiles were running, whether upload corruption was active and
+how many connections were tracked. Another record follows every ten minutes
+while the failure lasts, and one when it ends. Router addresses and device
+names are not written. Read the records on the Pi with
+`journalctl -t jittersim | grep "router health"`. `jittersim diagnostics
+export` lists them as service warnings with their times. The records stay in
+the journal across restarts, so an outage leaves evidence from before the
+router is power-cycled.
+
 ## Dashboard modes
 
 - **Configuration only** saves settings and builds plans without changing live

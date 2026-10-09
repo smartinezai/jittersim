@@ -39,6 +39,7 @@ from jittersim.config.storage import (
 )
 from jittersim.networking.helper import HelperClient, HelperClientError
 from jittersim.request_workers import WorkersStillRunning
+from jittersim.router_canary import RouterCanary
 
 from .access import build_access_plan
 from .activity import Source, TargetState, activity_records
@@ -247,6 +248,11 @@ class RuntimeScheduler:
         self._unresolved_names: Tuple[str, ...] = ()
         # The last reason logged for each kind of failure, so a repeat is not logged again.
         self._reported_failures: Dict[str, Tuple[str, str]] = {}
+        # Read-only router health checks for the persistent outage log. Only
+        # with hardware control, like the other workers.
+        self._router_canary = (
+            None if helper_client is None else RouterCanary(profiles=self._active_profile_names)
+        )
         self._service_addresses = (
             None
             if helper_client is None
@@ -282,6 +288,15 @@ class RuntimeScheduler:
                 raise
             if self._service_addresses is not None:
                 self._service_addresses.start()
+            if self._router_canary is not None:
+                self._router_canary.start()
+
+    def _active_profile_names(self):
+        """Name the profiles of the last applied plan for the router canary's records."""
+
+        with self._lock:
+            states = dict(self._applied_states or {})
+        return [state.source.profile for state in states.values() if state.source.profile]
 
     def begin_shutdown(self) -> None:
         """Permanently stop admission before draining any shared-state owner."""
@@ -292,6 +307,8 @@ class RuntimeScheduler:
             self._stop_event.set()
         if self._service_addresses is not None:
             self._service_addresses.begin_shutdown()
+        if self._router_canary is not None:
+            self._router_canary.begin_shutdown()
 
     def stop(self, timeout: float = 5.0) -> None:
         """Drain actual workers or keep their handles and report incomplete shutdown."""
@@ -313,6 +330,8 @@ class RuntimeScheduler:
                 self._service_addresses.stop(timeout=max(0.0, deadline - time.monotonic()))
             except WorkersStillRunning:
                 unresolved = True
+        if self._router_canary is not None:
+            self._router_canary.stop(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
         if unresolved:
             raise WorkersStillRunning("Scheduler workers did not stop. Their state remains owned.")
 
