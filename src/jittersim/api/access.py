@@ -114,9 +114,13 @@ def normal_access(server):
     error = None
     try:
         result = server.helper_client.normal_access()
-    except HelperClientError:
+    except HelperClientError as helper_error:
         result = None
         error = "Normal access was not fully restored. Automation is paused. Retry the panic button."
+        # The helper's own reason (fixed wording, never command output) says what is left.
+        detail = str(helper_error).strip()[:300]
+        if detail:
+            error += " Pi helper: " + detail
     except BaseException:
         if ticket:
             server.scheduler.abandon_recovery(ticket)
