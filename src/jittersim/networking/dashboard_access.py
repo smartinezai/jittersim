@@ -16,7 +16,7 @@ import time
 import uuid
 from ipaddress import IPv4Address
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 ACCESS_FILE = Path("/etc/jittersim/dashboard-access.json")
 MAX_ACCESS_DEVICES = 64
@@ -67,6 +67,9 @@ class AccessStore:
         self._lock = threading.RLock()
         # None until the dashboard sends the protected set in this process lifetime.
         self._protected: Optional[Dict[str, Dict[str, Any]]] = None
+        # Saved grants a dashboard request created and may still take back, by address.
+        # Only in memory: after a restart nothing can be taken back, so access is kept.
+        self._claims: Dict[str, str] = {}
 
     @property
     def protected_synced(self) -> bool:
@@ -229,12 +232,17 @@ class AccessStore:
             if not self.path.exists():
                 self._save([])
 
-    def add(self, mac_address: str, name: str = "") -> List[Dict[str, Any]]:
+    def add(
+        self, mac_address: str, name: str = "", *, claim_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Save a grant. With claim_id, only the request that created it may take it back."""
         mac = normalize_mac(mac_address)
         name = validate_label(name)
         with self._lock:
             devices = self._read_saved()
             if any(device["mac_address"] == mac and is_active(device) for device in devices):
+                # Someone else saved or registered it too: it is no longer one request's.
+                self._claims.pop(mac, None)
                 return self._effective(devices)
             # Registering a replaced address again supersedes its old entry.
             devices = [device for device in devices if device["mac_address"] != mac]
@@ -244,7 +252,29 @@ class AccessStore:
                 )
             devices.append({"mac_address": mac, "name": name, "added_at": int(time.time())})
             self._save(devices)
+            if claim_id is None:
+                self._claims.pop(mac, None)
+            else:
+                self._claims[mac] = claim_id
             return self._effective(devices)
+
+    def holds_claim(self, mac_address: str, claim_id: str) -> bool:
+        with self._lock:
+            return self._claims.get(normalize_mac(mac_address)) == claim_id
+
+    def remove_claimed(self, mac_address: str, claim_id: str) -> Tuple[List[Dict[str, Any]], bool]:
+        """Take back only the exact grant this claim created and nobody else adopted."""
+        mac = normalize_mac(mac_address)
+        with self._lock:
+            devices = self._read_saved()
+            if self._claims.get(mac) != claim_id or not any(
+                device["mac_address"] == mac and is_active(device) for device in devices
+            ):
+                return self._effective(devices), False
+            remaining = [device for device in devices if device["mac_address"] != mac]
+            self._save(remaining)
+            self._claims.pop(mac, None)
+            return self._effective(remaining), True
 
     def move(
         self, old_address: str, new_address: str, *, move_id: Optional[str] = None
@@ -261,6 +291,8 @@ class AccessStore:
             entry = next((item for item in devices if item["mac_address"] == old), None)
             if entry is None or not is_active(entry) or old == new:
                 raise AccessError("That device is not on the allowed list.")
+            self._claims.pop(old, None)
+            self._claims.pop(new, None)
             if any(item["mac_address"] == new and is_active(item) for item in devices):
                 raise AccessError("This device is already allowed.")
             # An earlier replaced entry for the new address is superseded by the new one.
@@ -296,6 +328,8 @@ class AccessStore:
             if entry is None or is_active(entry):
                 raise AccessError("There is no move to undo for that device.")
             new = entry["replaced_by"]
+            self._claims.pop(old, None)
+            self._claims.pop(new, None)
             successor = next((item for item in devices if item["mac_address"] == new), None)
             if successor is not None and not is_active(successor):
                 raise AccessError("That device moved again. Undo the latest move first.")
@@ -332,6 +366,7 @@ class AccessStore:
         with self._lock:
             # Removing a saved grant leaves a protection grant in place.
             devices = self._read_saved()
+            self._claims.pop(mac, None)
             remaining = [device for device in devices if device["mac_address"] != mac]
             if remaining != devices:
                 self._save(remaining)

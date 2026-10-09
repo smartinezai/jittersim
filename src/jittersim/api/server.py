@@ -1618,15 +1618,21 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             return identity
         return None
 
-    def _keep_access_as_saved_grant(self, peer: str, mac: str) -> bool:
+    def _keep_access_as_saved_grant(self, peer: str, mac: str,
+                                    claim_id: Optional[str] = None) -> Tuple[bool, bool]:
+        """Return whether access is kept and whether this call's claim created the grant."""
         name = next((item.display_name for item in self.repository.list_unaffected_devices()
                      if item.mac_address == mac), "")
         try:
             name = validate_access_label(name)
         except DashboardAccessError:
             name = ""
-        data = self.dashboard_access(peer, "register-self", name=name)
-        return data.get("mac_address") == mac and data.get("allowed") is True
+        values: Dict[str, Any] = {"name": name}
+        if claim_id is not None:
+            values["claim_id"] = claim_id
+        data = self.dashboard_access(peer, "register-self", **values)
+        kept = data.get("mac_address") == mac and data.get("allowed") is True
+        return kept, kept and claim_id is not None and data.get("claimed") is True
 
     def remove_protection_for_peer(self, payload: Any, peer: str) -> Tuple[int, str, bytes]:
         """Never silently remove the requester's only verified control route."""
@@ -1653,7 +1659,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         kept = False
         if own is not None and choice == "keep":
             try:
-                kept = self._keep_access_as_saved_grant(peer, mac)
+                kept, _ = self._keep_access_as_saved_grant(peer, mac)
             except HelperClientError as error:
                 return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                     {"error": "Nothing changed. Dashboard access could not be saved for this "
@@ -1683,15 +1689,18 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 and identity.get("grants") == ["protection"]):
             return self.write_response_for(path, payload)
         mac = identity["mac_address"]
-        granted: List[bool] = []
+        # One entry once access is kept: this request's claim when it created the grant,
+        # None when the grant already existed and so is never this request's to take back.
+        granted: List[Optional[str]] = []
 
         def keep_route_first(settings: SavedSettings) -> Optional[Tuple[int, str, bytes]]:
             # Runs after validation and before the replacement is saved: the requester's only
             # control route becomes a saved grant first, or nothing changes at all.
             if any(item.mac_address == mac for item in settings.unaffected_devices):
                 return None
+            claim = uuid.uuid4().hex
             try:
-                kept = self._keep_access_as_saved_grant(peer, mac)
+                kept, created = self._keep_access_as_saved_grant(peer, mac, claim)
             except HelperClientError as error:
                 return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                     {"error": "Nothing changed. These settings no longer protect this device "
@@ -1700,7 +1709,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes(
                     {"error": "Nothing changed. These settings no longer protect this device "
                               "and its dashboard access could not be saved. Try again."})
-            granted.append(True)
+            granted.append(claim if created else None)
             return None
 
         response = self.write_response_for(path, payload, before_replace=keep_route_first)
@@ -1708,10 +1717,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             return response
         if any(item.mac_address == mac for item in self.repository.list_unaffected_devices()):
             # The replacement was refused after the grant was saved: put access back as it was.
-            try:
-                self.dashboard_access(peer, "remove", mac_address=mac)
-            except HelperClientError:
-                LOGGER.warning("could not remove a saved grant for a refused settings change")
+            # Only the exact grant this request created, and only while nobody else saved it.
+            if granted[0] is not None:
+                try:
+                    self.dashboard_access(peer, "remove-claimed", mac_address=mac,
+                                          claim_id=granted[0])
+                except HelperClientError:
+                    LOGGER.warning("could not remove a saved grant for a refused settings change")
             return response
         # The grant stays even when the live apply of the saved replacement failed.
         self.reconcile_protected_access()

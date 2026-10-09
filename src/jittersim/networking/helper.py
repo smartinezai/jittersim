@@ -727,8 +727,14 @@ class HelperService:
                 "undo-move",
                 "move-address-owned",
                 "undo-move-owned",
+                "remove-claimed",
             ):
                 raise AccessError("Unknown dashboard access action.")
+            claim_id = payload.get("claim_id")
+            if (operation == "remove-claimed" or claim_id is not None) and (
+                not isinstance(claim_id, str) or not re.fullmatch(r"[0-9a-f]{32}", claim_id)
+            ):
+                raise AccessError("A saved grant claim requires its exact identifier.")
             owned = operation in ("move-address-owned", "undo-move-owned")
             if owned:
                 move_id = payload.get("move_id")
@@ -804,14 +810,19 @@ class HelperService:
                         "This device could not be verified. Connect directly to Pi Wi-Fi "
                         "and try again or use the Pi recovery command."
                     )
-                store.add(identity["mac_address"], payload.get("name", ""))
+                store.add(identity["mac_address"], payload.get("name", ""), claim_id=claim_id)
+                claimed = claim_id is not None and store.holds_claim(
+                    identity["mac_address"], claim_id
+                )
                 allowed = True
-            if operation in ("list", "remove"):
+            removed = False
+            if operation in ("list", "remove", "remove-claimed"):
                 if not allowed:
                     raise AccessError("Allow this device before using dashboard controls.")
-                devices = (
-                    store.remove(payload.get("mac_address")) if operation == "remove" else devices
-                )
+                if operation == "remove-claimed":
+                    devices, removed = store.remove_claimed(payload.get("mac_address"), claim_id)
+                elif operation == "remove":
+                    devices = store.remove(payload.get("mac_address"))
                 allowed = identity["network"] == "management" or any(
                     device["mac_address"] == identity["mac_address"] and is_active(device)
                     for device in devices
@@ -822,7 +833,11 @@ class HelperService:
                       **store.access_details(devices, identity)}
             if operation in ("move-address", "move-address-owned"):
                 result["moved"] = moved
-            if operation in ("list", "remove", "undo-move", "undo-move-owned"):
+            if operation == "register-self" and claim_id is not None:
+                result["claimed"] = claimed
+            if operation == "remove-claimed":
+                result["removed"] = removed
+            if operation in ("list", "remove", "remove-claimed", "undo-move", "undo-move-owned"):
                 result["devices"] = devices
             return result
         except AccessError as error:
@@ -2245,12 +2260,16 @@ class HelperClient:
                          mac_address: Optional[str] = None, name: str = "",
                          move_id: Optional[str] = None,
                          expected_mac: Optional[str] = None,
-                         move_access: Optional[bool] = None) -> Dict[str, Any]:
+                         move_access: Optional[bool] = None,
+                         claim_id: Optional[str] = None) -> Dict[str, Any]:
         """Use the saved access list without supplying command arguments."""
-        return self._request({"action": "dashboard-access", "operation": operation,
-                              "peer": peer, "mac_address": mac_address, "name": name,
-                              "move_id": move_id, "expected_mac": expected_mac,
-                              "move_access": move_access})
+        payload = {"action": "dashboard-access", "operation": operation,
+                   "peer": peer, "mac_address": mac_address, "name": name,
+                   "move_id": move_id, "expected_mac": expected_mac,
+                   "move_access": move_access}
+        if claim_id is not None:
+            payload["claim_id"] = claim_id
+        return self._request(payload)
 
     def dashboard_access_protected_sync(self, devices: Sequence[Dict[str, str]]) -> Dict[str, Any]:
         """Replace the helper's protection-derived grants with the saved protected list."""
