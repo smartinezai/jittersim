@@ -1,0 +1,264 @@
+/* Visual refresh layer. The server adds this file last so that it can refine the earlier rules
+   without changing their structure. Colours come from the tokens at the top of dashboard.css.
+   Sizes, spacing, radii, shadows and motion come from the scales below. The phone rules in
+   phone.css own the layout up to 48rem, so the sidebar refinements here stay inside the
+   desktop media query and the rest only changes paint, never position or size of touch targets. */
+:root {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --fs-2xs: 0.6875rem;
+  --fs-xs: 0.75rem;
+  --fs-sm: 0.8125rem;
+  --fs-md: 0.9375rem;
+  --fs-lg: 1.125rem;
+  --fs-xl: 1.3125rem;
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+  --radius: 0.6rem;
+  --radius-sm: 0.45rem;
+  --radius-lg: 0.9rem;
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.035) inset, 0 0.6rem 1.6rem rgba(2, 6, 14, 0.28);
+  --shadow-pop: 0 0.9rem 2.2rem rgba(2, 6, 14, 0.5);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur: 160ms;
+  --ring: 0 0 0 3px rgba(90, 169, 255, 0.28);
+  --card-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0) 3.5rem);
+}
+
+html { -webkit-text-size-adjust: 100%; }
+:root { font-family: var(--font-sans); }
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  background:
+    radial-gradient(60rem 28rem at 85% -10%, rgba(60, 120, 200, 0.10), transparent 70%),
+    var(--bg-page);
+  background-attachment: fixed;
+}
+::selection { background: rgba(90, 169, 255, 0.35); color: #fff; }
+code, pre, .saved-profile-id, .analytics-domain { font-family: var(--font-mono); }
+.content input[type="number"], .analytics-table td, .traffic-metric strong, .uplink-value strong { font-variant-numeric: tabular-nums; }
+
+/* Type scale: one display size, one section size, one label size. */
+h1 { letter-spacing: -0.03em; }
+h2 { font-size: var(--fs-xl); font-weight: 650; letter-spacing: -0.015em; line-height: 1.25; }
+.card h2 { font-size: var(--fs-xl); }
+h3 { font-size: var(--fs-xs); font-weight: 650; letter-spacing: 0.07em; }
+.card > p, .card > label { color: var(--tx); }
+.card p:not([class]) { line-height: 1.55; }
+.form-note, .policy-note, .section-heading p, .device-empty { line-height: 1.5; }
+
+/* Cards: hairline border, soft sheen and a deeper shadow, so the page reads as layers. */
+.card, .notice, .credentials-panel, .toast, dialog {
+  border-radius: var(--radius-lg);
+}
+.card {
+  border-color: var(--bd-card);
+  background: var(--card-sheen), var(--bg-card);
+  box-shadow: var(--shadow-card);
+  padding: 1.35rem 1.4rem;
+}
+.page > .card { transition: border-color var(--dur) var(--ease); }
+.page > .card:hover { border-color: var(--bd-subtle); }
+.notice {
+  border-color: var(--bd-info);
+  border-left-width: 0.25rem;
+  background: linear-gradient(90deg, rgba(90, 169, 255, 0.10), rgba(90, 169, 255, 0.03));
+  color: var(--tx-notice);
+}
+.credentials-panel, .toast, dialog { box-shadow: var(--shadow-pop); }
+.credentials-panel { background: var(--bg-raised); }
+
+/* Nested rows share one inset surface style. */
+.connected-row, .impact-row, .saved-profile-row, .traffic-metric, .uplink-value,
+.observation-device, .quota-row, .randomness-field, .traffic-rate-form {
+  border-color: var(--bd-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.connected-row:hover, .saved-profile-row:hover, .quota-row:hover { border-color: var(--bd-strong); }
+.traffic-metric span, .uplink-value span { text-transform: uppercase; letter-spacing: 0.06em; font-size: var(--fs-2xs); }
+.traffic-metric strong, .uplink-value strong { font-size: 1.15rem; font-weight: 650; letter-spacing: -0.01em; }
+
+/* Buttons: one height, one radius, a soft top highlight and a short press. */
+button, .button-link {
+  font-family: inherit;
+  letter-spacing: 0.005em;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0)), var(--bg-control);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 1px 2px rgba(2, 6, 14, 0.35);
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease), transform 90ms var(--ease), opacity var(--dur) var(--ease);
+}
+button:hover:not(:disabled), .button-link:hover {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0)), var(--bg-control-hover);
+  border-color: var(--bd-control-hover);
+}
+button:active:not(:disabled) { transform: translateY(1px); box-shadow: 0 0 0 rgba(0, 0, 0, 0); }
+button.primary {
+  border-color: var(--bd-primary);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0)), var(--bg-primary);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset, 0 0.4rem 1rem rgba(37, 99, 170, 0.28);
+}
+button.primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0)), var(--bg-primary-hover);
+  border-color: var(--accent);
+}
+button.danger {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0)), var(--bad-bg-2);
+}
+button.danger:hover:not(:disabled) {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0)), var(--bad-bg-hover);
+  border-color: var(--bad-border-hover);
+}
+button:disabled { box-shadow: none; opacity: 0.5; }
+.card-toggle, .observation-group-header .observation-group-toggle, .traffic-legend button, .sidebar .router-wifi-toggle {
+  background: none; box-shadow: none;
+}
+.card-toggle:hover:not(:disabled), .traffic-legend button:hover:not(:disabled) { background: none; }
+.card-toggle:active:not(:disabled) { transform: none; }
+
+/* Focus: a clear ring for the keyboard and a soft halo on fields. */
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible,
+.help-icon:focus-visible, a:focus-visible, #diagnostics-json:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: var(--ring);
+}
+.sidebar-nav a:focus-visible { box-shadow: none; }
+
+/* Fields */
+input, select, textarea {
+  border-color: var(--bd-field);
+  border-radius: var(--radius-sm);
+  background: var(--bg-field);
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+textarea { width: 100%; max-width: 100%; padding: 0.6rem 0.7rem; border: 1px solid var(--bd-field); color: var(--tx-strong); font: inherit; background: var(--bg-field); }
+input:hover:not(:disabled):not(:focus), select:hover:not(:disabled):not(:focus), textarea:hover:not(:disabled):not(:focus) { border-color: var(--bd-strong); }
+input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+input::placeholder, textarea::placeholder { color: var(--tx-disabled); }
+input:disabled, select:disabled, textarea:disabled { opacity: 0.6; cursor: not-allowed; }
+select { appearance: none; padding-right: 2rem; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--tx-muted) 50%), linear-gradient(135deg, var(--tx-muted) 50%, transparent 50%);
+  background-position: calc(100% - 1.05rem) 52%, calc(100% - 0.75rem) 52%;
+  background-size: 0.3rem 0.3rem, 0.3rem 0.3rem; background-repeat: no-repeat; }
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+label { color: var(--tx); font-weight: 520; }
+label > input, label > select, label > textarea { font-weight: 400; }
+
+/* Status badges */
+.badge, .count-badge, .impact-chip, .observation-category, .protected-badge, .update-badge, .nav-chip, .observation-badge {
+  letter-spacing: 0.02em;
+}
+.badge { display: inline-flex; align-items: center; gap: 0.4rem; }
+.badge::before {
+  content: ""; width: 0.45rem; height: 0.45rem; border-radius: 50%; background: currentColor; opacity: 0.9;
+}
+.badge.pending::before { animation: pulse-dot 1.4s var(--ease) infinite; }
+.badge.hardware { box-shadow: 0 0 0 0.2rem rgba(76, 199, 144, 0.10); }
+.connected-dot { box-shadow: 0 0 0 0.2rem rgba(76, 199, 144, 0.16), 0 0 0.8rem rgba(76, 199, 144, 0.35); }
+.connected-row.protected .connected-dot { box-shadow: 0 0 0 0.2rem rgba(123, 135, 151, 0.18); }
+.connected-address { font-weight: 650; letter-spacing: -0.005em; }
+.connected-state { padding: 0.15rem 0.55rem; border-radius: 999px; background: var(--ok-bg); }
+
+/* Messages and states */
+.action-message { border: 1px solid transparent; border-radius: var(--radius); }
+.action-message.success { border-color: var(--ok-border); }
+.action-message.error { border-color: var(--bad-border); }
+.action-message.working { border-color: var(--warn-border); }
+.toast { animation: toast-in 240ms var(--ease) both; border-left-width: 0.25rem; }
+.device-empty:not(:empty) {
+  display: block; padding: 1.1rem 1rem; border: 1px dashed var(--bd-strong); border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.015); color: var(--tx-muted); text-align: center;
+}
+.edit-bar { border-radius: var(--radius); }
+.getting-started-steps li { padding: 0.4rem 0; }
+.getting-started-steps .step-mark {
+  display: inline-grid; place-items: center; flex: 0 0 1.4rem; min-width: 1.4rem; height: 1.4rem;
+  border: 1px solid var(--bd-strong); border-radius: 50%; background: var(--bg-chip);
+  font-size: var(--fs-xs); line-height: 1;
+}
+.getting-started-steps li.done .step-mark { border-color: var(--ok-border); background: var(--ok-bg); }
+.progression-meter, .quota-meter { height: 0.5rem; background: var(--bg-meter); }
+.progression-meter span, .quota-meter span { transition: width 400ms var(--ease); }
+
+/* Tables */
+.data-table th, .analytics-table th {
+  padding-block: 0.6rem; border-bottom-color: var(--bd-subtle); background: rgba(255, 255, 255, 0.02);
+  color: var(--tx-muted); font-size: var(--fs-2xs); font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase;
+}
+.data-table tbody tr, .analytics-table tbody tr { transition: background var(--dur) var(--ease); }
+.data-table tbody tr:hover td, .analytics-table tbody tr:hover td { background: rgba(255, 255, 255, 0.025); }
+.data-table td, .analytics-table td { border-bottom-color: var(--bd-divider); }
+.table-wrap, .analytics-table-wrap { border: 1px solid var(--bd-subtle); border-radius: var(--radius); }
+.data-table tr:last-child td, .analytics-table tr:last-child td { border-bottom: 0; }
+
+/* Details and summaries */
+details { border-top-color: var(--bd-subtle); }
+summary { border-radius: var(--radius-sm); }
+summary::marker { color: var(--tx-muted); }
+
+/* Charts keep a dark plate so the series colours stay readable. */
+.traffic-chart-wrap { border-color: var(--bd-subtle); border-radius: var(--radius); background: var(--bg-deep); }
+
+/* Icons */
+.icon { width: 1.05rem; height: 1.05rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+.brand-mark { flex: none; width: 1.6rem; height: 1.6rem; }
+.sidebar-brand { flex-wrap: nowrap; gap: 0.5rem; }
+.sidebar-brand h1 { min-width: 0; font-size: 1.2rem; font-weight: 700; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.sidebar-brand .badge { margin-left: auto; font-size: 0.68rem; }
+.sidebar-nav .nav-text { flex: 1 1 auto; min-width: 0; }
+.sidebar-nav a { gap: 0.6rem; justify-content: flex-start; font-weight: 560; transition: background var(--dur) var(--ease), color var(--dur) var(--ease); }
+.sidebar-nav a .nav-chip { margin-left: auto; }
+.sidebar-nav a .icon { opacity: 0.8; }
+.sidebar-nav a[aria-current="page"] .icon { opacity: 1; color: var(--accent); }
+
+@media (min-width: 48.01rem) {
+  .sidebar { background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0) 12rem), var(--bg-sidebar); }
+  .sidebar-nav a { position: relative; border: 1px solid transparent; border-radius: var(--radius-sm); }
+  .sidebar-nav a:hover { background: var(--bg-nav-hover); color: var(--tx-bright); }
+  .sidebar-nav a[aria-current="page"] {
+    border-color: rgba(90, 169, 255, 0.22);
+    background: linear-gradient(90deg, rgba(90, 169, 255, 0.20), rgba(90, 169, 255, 0.07));
+    color: #fff;
+  }
+  .sidebar-nav a[aria-current="page"]::before {
+    content: ""; position: absolute; left: -0.5rem; top: 22%; bottom: 22%; width: 0.2rem;
+    border-radius: 0 0.2rem 0.2rem 0; background: var(--accent);
+  }
+  .sidebar-status { border-radius: var(--radius); background: rgba(255, 255, 255, 0.02); }
+  .content { padding-top: 1.75rem; }
+}
+
+/* Panic stays unmistakable. The orange of access.css keeps its meaning. */
+.panic-button { box-shadow: 0 1px 0 rgba(255, 255, 255, 0.12) inset, 0 0.4rem 1rem rgba(160, 90, 20, 0.22); }
+.panic-button:hover:not(:disabled) { background: #85541d; border-color: #d9a066; }
+
+/* Switch */
+.switch-track { box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35); }
+.switch-thumb { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45); transition: transform var(--dur) var(--ease); }
+
+/* Page change: the cards of the opened page rise in. Static screenshots use the end state. */
+@keyframes card-in { from { opacity: 0; transform: translateY(0.4rem); } to { opacity: 1; transform: none; } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(0.5rem) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes pulse-dot { 50% { opacity: 0.25; } }
+.page:not([hidden]) > .card { animation: card-in 280ms var(--ease) both; }
+.page:not([hidden]) > .card:nth-child(2) { animation-delay: 30ms; }
+.page:not([hidden]) > .card:nth-child(3) { animation-delay: 60ms; }
+.page:not([hidden]) > .card:nth-child(n + 4) { animation-delay: 90ms; }
+
+/* Scrollbars follow the theme. */
+* { scrollbar-width: thin; scrollbar-color: var(--bd-strong) transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }
+  button:active:not(:disabled) { transform: none; }
+}
