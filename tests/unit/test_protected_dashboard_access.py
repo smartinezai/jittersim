@@ -239,6 +239,51 @@ def test_an_owned_move_without_saved_access_leaves_the_saved_file_alone(tmp_path
     assert not store.path.exists()
 
 
+class _SyncOnReleaseLock:
+    """The store's lock, which lets a startup sync run right after Panic's check releases it."""
+
+    def __init__(self, store, devices):
+        self._real, self._store, self._devices = store._lock, store, devices
+        self.armed = True
+
+    def acquire(self, *args, **kwargs):
+        return self._real.acquire(*args, **kwargs)
+
+    def __enter__(self):
+        return self._real.__enter__()
+
+    def __exit__(self, *exc):
+        return self._real.__exit__(*exc)
+
+    def release(self):
+        self._real.release()
+        if self.armed:
+            self.armed = False
+            # Another thread: the startup sync from the dashboard, between the check's
+            # release of the store lock and its answer.
+            thread = threading.Thread(target=self._store.sync_protected, args=(self._devices,))
+            thread.start()
+            thread.join(5)
+            assert not thread.is_alive()
+
+
+def test_the_emergency_check_answers_from_one_snapshot_of_grants_and_sync_state(tmp_path):
+    # N2: grants read before a startup sync and protected_synced read after it gave
+    # allowed=False with protected_synced=True, a final 403 the page never retries.
+    service, store, _ = make_service(tmp_path)
+    store._lock = _SyncOnReleaseLock(store, protected(MAC))
+    result = status(service, "emergency-status")
+    assert store._lock.armed is False  # the sync ran in the window
+    assert store.protected_synced is True
+    assert result["ok"] is True
+    # The answer describes the grants it was decided from: not yet synced, so retryable.
+    assert result["allowed"] is False
+    assert result["protected_synced"] is False
+    # The next check sees the synced grants.
+    store._lock = store._lock._real
+    assert status(service, "emergency-status")["allowed"] is True
+
+
 def test_the_client_sends_only_addresses_and_names(tmp_path):
     sent = []
 
