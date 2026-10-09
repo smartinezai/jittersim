@@ -543,3 +543,220 @@ Capture and testing:
 - [S] https://netbeez.net/blog/flent/
 - [S] https://developer.apple.com/forums/thread/690358
 - [Blocked, not used for claims] https://git.w1.fi/cgit/hostap/plain/hostapd/hostapd.conf
+
+## Addendum A (evening of 9 October): PHONE light, Wi-Fi button, topologies
+
+Same labels as above: Repo fact, Reported, Documented, Speculation. Source tags
+[R], [S] and [Blocked] mean the same as in the Sources list. I did not repeat the
+code audit, lab work or timeline that other investigators are doing.
+
+### A1. What the PHONE light states mean
+
+- Documented (Vodafone help page, [R]): Phone LED blinking red with no internet
+  can mean a phone line problem. Vodafone says to check for a dial tone, restart
+  the router, then call support. The page does not describe a Phone LED that is
+  off.
+- Reported (Vodafone community LED blog, [S, Blocked]): slow red blink means the
+  phone is registering. Steady red means a line fault. Other community answers
+  say fast red blinking means overheating and two short red blinks mean a
+  software update. These last two are community guesses, not Vodafone text.
+- Reported: steady red usually comes with "not registered" next to the phone
+  number on the router status page. Causes people report: not yet provisioned
+  (new contract, new box), device not assigned to the line at Vodafone, or a
+  fault on Vodafone's side that Vodafone later confirmed for other customers
+  [forum threads below]. Factory resets often did not help.
+- Reported: **off** can be normal. Internet-only tariffs have no landline
+  number, so the Phone LED may never light. A fully working box with a phone
+  number shows Power, Wi-Fi, Phone and Internet all lit [S].
+- Reported: telephony stays on the Station's own `TEL1` port even in bridge
+  mode and uses Vodafone's own voice service, not SIP you can move to another
+  router [S, bridge-mode threads].
+- Speculation (my general knowledge, no source found): boot order is cable
+  sync, then DOCSIS ranging and registration, then config download, then the
+  built-in phone adapter registers its line. So a red Phone LED right after a
+  restart can just mean the last step has not finished or failed. One source
+  says to wait 10 to 15 minutes after a restart before calling it a fault [S].
+- What to read on the router: phone status text, DOCSIS status, and the router
+  event log for ranging, T3 and T4 timeouts and phone-registration lines.
+
+**Links between LAN-side or Wi-Fi changes and the PHONE light.** I found none.
+No source ties a Wi-Fi change, a Wi-Fi button press, client kicking, MAC
+filtering or an extra access point to the PHONE light. What does appear, in
+user reports without any Pi:
+
+- Router restarts and `KickAssocDevices` bursts that took down LAN and internet
+  together (so the kick entries sit next to a wider router fault) [V5 (R)].
+- TG3442DE and CGA4233 boxes that restart several times a day, drop clients,
+  or need a hard power cycle before login works again [S: forum threads in the
+  Sources list].
+- A TG3442DE web page that freezes while internet still works [S].
+- Wi-Fi MAC filter oddities: allow and deny modes behaving backwards, entries
+  vanishing, phones with private (random) addresses locked out, devices
+  blocked while the filter was "off", one user also with daily crashes. There
+  are two separate MAC lists in the menus (general and Wi-Fi) [S].
+
+**Web page sessions (relevant to JitterSim's router logins).**
+
+- Reported: the TG3442DE page shows "user already logged in" and offers to end
+  the other session. It also shows "session disconnected" pop-ups [S].
+- Documented (Home Assistant, [R]): its Vodafone Station integration fails with
+  "User already logged-in" if another session exists. Wait about 60 seconds if
+  a session closed badly. It polls every 30 seconds by default. That
+  integration lists Sercomm, Technicolor and UltraHub models, not the
+  TG3442DE, so it is a hint about similar boxes, not proof for ours.
+- Not found: any source saying a login collision restarts a router or turns on
+  the PHONE light. The `vodafone-station-cli` project page could not be
+  retrieved (tool permission denied), so I did not check its issue list.
+  Someone should read it by hand.
+
+### A2. The Wi-Fi button
+
+- Not found: any official Vodafone or Arris text for the TG3442DE button. The
+  only explicit statement I found is a Vodafone forum answer that Wi-Fi can be
+  switched only on the web page or with the button [S]. A Quick Start Guide PDF
+  for the TG3442 (from a regional provider) did not extract as text.
+- No source says the button also switches WPS, DECT or the guest network, and
+  none says a restart is needed after pressing it. **Unknown.** WPS is a
+  separate button on some units [S].
+- Repo fact: the owner tested the button earlier and router Wi-Fi came back.
+- Repo fact and Speculation: the router log shows `AP-DISABLED` at 22:29:40 and
+  22:29:51, eleven seconds apart. That looks like one entry per band. If the
+  owner pressed the button around 22:24 and 22:29, these entries may be the
+  button. The notes do not record presses. Ask the owner for any press times.
+  Then the "unexplained shutdowns" may have a boring explanation, and the real
+  question becomes why Wi-Fi did not serve clients properly afterwards.
+- Reported: TG3442DE units whose Wi-Fi stays visible but refuses clients until
+  a restart [V10]. That is the closest match to "back on but not working".
+- Test (safe): press the button once with the Pi off, note the second, then read
+  the log, and test a phone. Do it with the household told first.
+
+### A3. What Pi-AP-behind-a-cable-router users report
+
+Little. Searches for Reddit, Heise and Computerbase returned nothing usable.
+What exists is tutorials and forum posts:
+
+- Reported: a Pi that routes behind an ISP router double-NATs its clients. That
+  breaks UPnP and stops wired LAN devices starting connections to Wi-Fi clients
+  [Pi-hole forum, S]. The same poster found bridging the Pi's radio to Ethernet
+  "much more flaky" than routing. A single report.
+- Reported: one Kodi forum user's Pi hotspot worked "a minute or two" and then
+  lost internet, 2020, moved off topic [S].
+- Reported: built-in Pi radio plus Wi-Fi uplink halves speed. We use Ethernet
+  uplink, so this does not apply [S].
+- Reported: a Pi or a USB dongle "will most likely not" handle as much traffic
+  as a regular router [S].
+- Reported: Vodafone users who switched the Station's Wi-Fi off and used a
+  separate access point (a FRITZ!Box) saw months without trouble before the
+  fault came back with fewer entries [V5, S]. So "router Wi-Fi off, own access
+  point on" is a common workaround on its own. It is not proof that the Pi is
+  right for it.
+- No source describes anyone copying the router name onto a Pi and then
+  switching router Wi-Fi off. I found no precedent for the incident either way.
+
+### A4. Topologies and their trade-offs for JitterSim
+
+JitterSim needs to shape chosen devices (KPMac, KPiPhone) and the owner cannot
+move those devices to another name by hand.
+
+| Option | Router Wi-Fi | Duplicate name | Hardware | Main trade-off |
+| --- | --- | --- | --- | --- |
+| A. Today: Pi routed AP (NAT) behind router in router mode | Off after copy | Yes during cutover | Pi 3B+ | Double NAT, split subnet, Pi radio limits (about 8 clients reported), the incident |
+| B. Pi as bridged AP on the router LAN (same subnet, router's DHCP) | Off | Yes unless router Wi-Fi is off first | Pi 3B+ | No NAT. Clients keep 192.168.0.x leases, so the split-state risk drops. Router sees real client MACs. JitterSim code assumes routed AP, big change. NetworkManager and brcmfmac bridge behaviour unverified. `tc netem` on a bridge may not shape each port the way it does today (my search could not confirm) |
+| C. Station in bridge mode, Pi is the router | Off (Station is a modem) | No | Pi 3B+ (300 Mbit/s ceiling) or better | Whole house, wired too, depends on one Pi. Needs Mein Vodafone portal switch. IPv4 only reported. Only the Pi may sit on the Station LAN port. Phone stays on the Station [S]. Biggest change |
+| D. Separate name, one-time manual move | On | No | Pi 3B+ | Safest, but owner cannot move target devices by hand |
+| E. Pi inline on Ethernet, dedicated AP or mesh in AP mode with router Wi-Fi off | Off | No (one AP) | Pi 4 or Pi 5, or Pi 3B+ plus USB NIC, plus an AP | Takes the Pi radio and its limits out of the picture. OpenWrt documents a dumb or bridged AP as LAN-to-LAN, no DHCP, same subnet [OpenWrt, S]. Needs a second Ethernet port on the Pi and an AP |
+| F. VLAN | n/a | n/a | managed switch | Nothing found for the Station. Not worth it here (Speculation) |
+
+### A5. Ranked design alternatives that avoid the failure class
+
+"Failure class" = same name on two radios plus router Wi-Fi switched off, with the
+Pi as a NAT access point. Ranking weighs: does it avoid the duplicate name,
+does it avoid switching router Wi-Fi off, can it be undone in seconds,
+and how much JitterSim code it changes.
+
+1. **Rename swap (Speculation, untested).** Owner renames router Wi-Fi to a new
+   name by hand. The Pi takes the old name and password. Target devices rejoin
+   the old name, now served only by the Pi. No duplicate name, router Wi-Fi
+   never goes off (no `AP-DISABLED` from a button), fallback is joining the new
+   router name or renaming back. Small code change. Risks: it is still option A
+   for the devices that move, 2.4 GHz only unless the Pi also serves 5 GHz,
+   every household device that auto-rejoins loads the Pi 3B+, and the router
+   rename is the owner's manual router write.
+2. **Option E.** Cleanest long term. No Pi radio, no NAT surprises, no
+   duplicate name. Costs a second NIC (or a Pi 4/5) and an AP. Medium code
+   change, because shaping moves to bridged or routed Ethernet paths.
+3. **Option B.** Removes double NAT and split subnets. Large code change and
+   unverified tooling. Worth a small lab first.
+4. **Option D** for the devices that can move, plus rename swap for the rest.
+5. **Option C.** Highest risk and biggest change. Only if the Pi becomes the
+   house router on purpose.
+6. **Keep router Wi-Fi on and steer clients.** Not available: the Station gives
+   no controllable 802.11k/v steering, and its own `CLIENTTOOL` kick is
+   unexplained and unsafe to use. A MAC allow or deny list on the router could
+   push chosen devices to the Pi's same-name AP, but the router MAC filter is
+   reported as unreliable and Apple private addresses defeat it. Not
+   recommended.
+
+### A6. Could the Pi have caused the red PHONE light?
+
+**Plausibility: low, and only through one route.** The PHONE light follows
+line registration on the cable side. I found no mechanism by which a Pi on a LAN
+port or a second Wi-Fi radio changes it. The one route is indirect: something
+the Pi did made the router crash or restart, and the restarted router then
+registered its phone line slowly or not at all. A restart is the common thread in
+every report. I found no source where a LAN device caused such a crash. The notes
+also show a restart near 20:18 and failures with the Pi unplugged.
+
+**One observation that proves or disproves it.** Export the router's event log
+(and DOCSIS and phone status) as soon as the light is red, with uptime. Then
+compare the router's boot time and first phone-registration failure with the
+Pi's journal for the same minutes (Pi plug-in time, AP start, any
+`router-sync-ap`).
+
+- If the router's own log shows a cable-side cause first (ranging or sync loss,
+  T3 or T4 timeouts, DOCSIS re-registration) or the router reboots with the
+  Pi powered off, the Pi is cleared.
+- If the router stayed up (uptime continuous), the light turned red, and the
+  first router entry follows a Pi action by seconds, the Pi becomes a real
+  suspect.
+
+The cheapest version of this test is the router-only soak with the Pi off
+(Rung 1 above): if red PHONE, restarts or `AP-DISABLED` happen with no Pi, the
+question is settled.
+
+### Not found, for the next person
+
+- Vodafone text for the TG3442DE button and every LED state. Reading the paper
+  Quick Start Guide in the box is the quickest fix.
+- Any Reddit (r/de_EDV, r/VodafoneDE), Heise or Computerbase coverage. Searches
+  returned none.
+- The `vodafone-station-cli` and `aiovodafone` issue trackers. Read by hand.
+- Router firmware version. Record it at Rung 0.
+
+### Addendum sources
+
+- [R] https://www.vodafone.de/featured/service-hilfe/vodafone-kabel-router-blinkt-rot-hilfe/
+- [R] https://home-assistant.io/integrations/vodafone_station
+- [S, Blocked] https://forum.vodafone.de/t5/Community-Blog/Was-bedeuten-die-LEDs-Deiner-Vodafone-Station/ba-p/2695430
+- [S] https://forum.vodafone.de/t5/Ger%C3%A4te/Vodafone-Station-nur-Power-LED-leuchtet/td-p/2618797
+- [S] https://forum.vodafone.de/t5/Ger%C3%A4te/Telefonieren-mit-Vodafone-Station/m-p/3209656
+- [S] https://forum.vodafone.de/t5/Kabel-Tarife-Rechnung/Telefonnummer-nicht-registriert/td-p/3208109
+- [S] https://forum.vodafone.de/t5/St%C3%B6rungen-im-Kabel-Netz/Seit-einer-Woche-kein-Festnetz-rote-Phone-LED-blinkt-Router-sagt/m-p/3270723/highlight/true
+- [S] https://forum.vodafone.de/t5/Archiv-Internet-Ger%C3%A4te/Vodafone-Station-reboots-several-times-a-day-and-drops-client/td-p/2546237
+- [S] https://forum.vodafone.de/t5/Ger%C3%A4te/Router-restarts-itself/td-p/2885982
+- [S] https://forum.vodafone.de/t5/Ger%C3%A4te/Router-TG3442DE-Webinterface-nicht-mehr-erreichbar/m-p/2888726
+- [S] https://forum.vodafone.de/t5/Archiv-Internet-Ger%C3%A4te/Webinterface-funktioniert-nicht-richtig-Vodafone-Station/td-p/2495258
+- [S] https://forum.vodafone.de/t5/Ger%C3%A4te/Vodafone-Station-cga4233de-automatically-rebooting-daily/td-p/2644906
+- [S] https://forum.vodafone.de/t5/Ger%C3%A4te/Arris-TG3442DE-Weboberfl%C3%A4che-reagiert-nicht/td-p/2922968
+- [S] https://forum.vodafone.de/t5/Ger%C3%A4te/W-LAN-und-Internet-Probleme-mit-der-Vodafone-Station/td-p/2865752
+- [S] https://forum.vodafone.de/t5/Ger%C3%A4te/Router-wirft-Ger%C3%A4te-aus-dem-MAC-Filter/td-p/3058189
+- [S] https://forum.vodafone.de/t5/Kabel-Tarife-Rechnung/Vodafone-Station-Bridge-Mode-und-Telefonie/td-p/3163220
+- [S] https://forum.vodafone.de/t5/Ger%C3%A4te/Vodafone-Station-und-Fritzbox-7490-als-Mesh-Repeater/td-p/2662861
+- [S] https://forum.heimnetz.de/threads/fritz-box-6490-und-vodafone-station.7410/post-71199
+- [S] https://www.antwort.net/a/technologie/vodafone-station-wps-so-gehts.html
+- [S] https://www.swu.de/fileadmin/content/telekommunikation/installationshinweise/Arris-TG3442-Kurzanleitung.pdf (PDF did not extract)
+- [S] https://openwrt.org/docs/guide-user/network/wifi/dumbap (moved to the "Bridged AP over Ethernet" page)
+- [S] https://discourse.pi-hole.net/t/raspberry-pi-as-access-point-along-with-pihole/1435/2
+- [S] https://forum.kodi.tv/printthread.php?tid=355197
+- [S] https://thepihut.com/blogs/raspberry-pi-tutorials/setting-up-a-wireless-access-point-a-bridge-method-internet-over-wired-ethernet
+- [S] https://raspberrytips.com/raspberry-pi-wi-fi-extender/
