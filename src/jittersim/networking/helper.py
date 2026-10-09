@@ -89,8 +89,9 @@ WRITE_LOCK_WAIT_SECONDS = 3.0
 # Normal access (Panic) does not take the request operation lock: a read such as a
 # five second DNS sample may hold that. It serializes on the network lock instead
 # and waits longer there than any other request, because an access change can
-# hold it for several seconds.
-PANIC_NETWORK_LOCK_WAIT_SECONDS = 10.0
+# hold it for several seconds. The wait is set below so that the work after it
+# keeps PANIC_POST_LOCK_SECONDS of the deadline (review O-a). A longer hold makes
+# the answer helper-busy, which the client retries for NORMAL_ACCESS_BUSY_RETRY_SECONDS.
 # One Panic request has one deadline, this long after the helper takes it. Every
 # wait (network lock, Panic stop lock, ad pause, release lock, ad transition) and
 # every command uses only what is left of it. A step that opens the network or
@@ -99,6 +100,8 @@ PANIC_NETWORK_LOCK_WAIT_SECONDS = 10.0
 # Stacked at their bounds, the steps answer within PANIC_ANSWER_SECONDS
 # (tests/unit/test_panic_time_budget.py; docs/architecture.md, "Panic time budget").
 PANIC_DEADLINE_SECONDS = 12.0
+PANIC_POST_LOCK_SECONDS = 6.0
+PANIC_NETWORK_LOCK_WAIT_SECONDS = PANIC_DEADLINE_SECONDS - PANIC_POST_LOCK_SECONDS
 PANIC_STEP_FLOOR_SECONDS = 0.5
 PANIC_RELEASE_RESERVE_SECONDS = 4.0
 PANIC_ANSWER_SECONDS = 25.0

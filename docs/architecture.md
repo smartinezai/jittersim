@@ -56,7 +56,9 @@ a fake clock on which every wait lasts its whole allowance.
     busy timeout.
 - Helper (`networking/helper.py`): one deadline `PANIC_DEADLINE_SECONDS` (12 s) after it
   takes the request. Every wait uses only what is left of it:
-  - the network lock, at most 10 s;
+  - the network lock, at most 6 s (`PANIC_NETWORK_LOCK_WAIT_SECONDS`), so the work
+    after it always keeps `PANIC_POST_LOCK_SECONDS` (6 s) of the deadline. A longer
+    hold answers helper-busy, which the client retries for 5 s;
   - the Panic stop lock for each save, at most 2 s;
   - the ad-blocking pause, at most 8 s, and it leaves `PANIC_RELEASE_RESERVE_SECONDS`
     (4 s) for the household release;
@@ -66,7 +68,7 @@ a fake clock on which every wait lasts its whole allowance.
   Commands (`networking/deadlines.py`) get the same deadline as their timeout.
   Nothing that opens the network or records the result is skipped once the deadline
   has passed. Each such step is still tried with `PANIC_STEP_FLOOR_SECONDS` (0.5 s).
-  Stacked, the worst case is 23 s, below `PANIC_ANSWER_SECONDS` (25 s). A step that
+  Stacked, the worst case is 22 s, below `PANIC_ANSWER_SECONDS` (25 s). A step that
   ran short is reported as incomplete recovery and the owner retries Panic. The
   release never brings restrictions back. Stopping the unused filtered resolver
   after a release is only queued (`systemctl stop --no-block`), so it does not
