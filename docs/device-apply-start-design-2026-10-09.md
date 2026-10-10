@@ -40,15 +40,32 @@ A device-only start is "stopped except these devices":
   state write clears it unless the write is part of a device-only start. So
   Reset, Panic (normal access), the Panic undo of an overtaken apply, the CLI
   reset, Start and Apply to everyone all end the device-only start.
-- Deleting a scoped device removes its row. When the last row goes, the state
-  is a plain Reset and the next scheduler tick resets the helper.
+- The database enforces this too. A trigger on `runtime_state` deletes the
+  scope on any write that is not a reset, that records `resetting` or `reset`,
+  or that records a failure other than a scheduled one. That covers writes from
+  an older dashboard. At startup, rows paired with a completed plain Reset are
+  discarded before recovery.
+- The trigger only sees writes made after it exists. A database that has the
+  scope table but not yet the trigger may hold rows that an older dashboard left
+  behind a Reset, with the state later marked unknown by a save. On that first
+  upgrade every scope row is discarded. The network stays a Reset, so restart
+  recovery resets it before anything starts.
+- Deleting a scoped device removes its row. When the last row goes, the still
+  running scheduler resets the helper on its next tick. A failed reset stays
+  pending: the scheduler keeps retrying with growing waits, up to 8 tries, and
+  records `error` until it works.
 
 Rollback compatibility: an older dashboard ignores the new table and sees a
 normal Reset. On restart it resets the network again and its scheduler never
 resumes saved settings. A rollback therefore stops the device-only start and
-never resumes Everyone or other devices. The table is runtime state, not a
-setting: export does not carry it. An import replaces the saved devices, so its
-rows go with them and the next tick ends the device-only start.
+never resumes Everyone or other devices. When this version comes back after an
+older dashboard ran, the trigger, the first-upgrade discard and the startup
+check keep stale rows from starting again.
+
+The table is runtime state, not a setting. The settings export does not carry
+it, but a full database backup copies it like any other table. An import
+replaces the saved devices, so its rows go with them. The scheduler then ends
+the device-only start on its next tick.
 
 ## Compiler precedence and shared limits
 
@@ -73,16 +90,33 @@ The plan builders take an explicit `device_scope`. With a scope:
   `record_schedule_result` keeps `last_action = reset` while a scope exists.
   A scheduled apply never widens the scope.
 - Intent is captured before the shared lock: the Panic generation, the helper
-  control revision and a Reset and Panic request counter. A device Apply queued
-  behind a Reset or a Panic is refused after the lock, saves nothing and starts
-  nothing. A changed helper revision is refused before saving too.
+  control revision, a counter of Reset and Panic requests and how many are still
+  running. A device Apply that arrives while a Reset or Panic runs, or that waits
+  behind one, saves nothing and starts nothing. Panic generation and helper
+  revision are checked again just before saving on both paths. The save itself
+  commits under the same fence Panic uses, so Panic cannot land between the
+  last check and the commit.
 - The helper apply is non-explicit. It never clears a Panic or outage latch
   and never resumes paused ad-blocking.
-- Failure: the assignment stays saved, the scope is cleared, state becomes
-  `error` with `last_action = reset`, and the next tick repeats the reset.
+- Before the device joins, the scoped plan is compiled with the new device. A
+  plan that cannot run, for example a 16th device, is refused and nothing is
+  saved. A start refused before the helper ran puts the previous scope back.
+- Failure at the helper: the assignment stays saved, the scope ends and the
+  helper is reset at once. It records a clean Reset. If that reset fails, the
+  dashboard records `error` with the marker `device-only cleanup failed`. It
+  retries only the reset, with bounded waits, whether or not the scheduler runs.
   No other saved setting resumes.
-- Restart recovery with a scope applies the device-only plan again, not the
-  whole saved plan.
+- The marker alone means the cleanup is still owed. A settings save in between
+  marks the state unknown but does not cancel it. Each retry captures the Panic
+  generation first and records its result through the Panic fence, so a newer
+  Panic result is never overwritten. Shutdown waits for a running retry, up to
+  the shutdown time limit.
+- If the Pi does not answer whether Panic or an outage latched a stop, Apply is
+  refused before saving.
+- Restart recovery checks the scope before the last result. A scope applies the
+  device-only plan again, even after a scheduled failure. A pending cleanup
+  resets again at once. If that fails, the marker stays and the bounded retries
+  start. Otherwise the earlier rules apply.
 
 ## Dashboard
 

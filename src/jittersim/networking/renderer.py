@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 from ipaddress import IPv4Address
-from typing import List, Mapping, Optional, Sequence
+from typing import List, Mapping, Optional, Sequence, Tuple
 
 from jittersim.config.models import Impairment
 from jittersim.engine.plan import (
@@ -32,6 +32,15 @@ EVERYONE_DOWNLOAD_MARK = 0x10000000
 # until the download hook turns them back into the plain queue mark.
 SERVICE_DOWNLOAD_MARK_BASE = 0x20000000
 SERVICE_SET_SIZE = 2048
+# Upload corruption runs on this intermediate device, fed from the test
+# interface's ingress, so the Pi's own IP stack checks every damaged packet
+# before it forwards it. Delay, jitter, loss and rate stay on the uplink: they
+# never change or copy a frame.
+UPLOAD_DEVICE = "jittersim-ifb"
+INGRESS_HANDLE = "ffff:"
+# Upload class marks are 1 to 15. Only these bits are kept in the connection
+# mark, which the ingress hook copies back before the forward hook runs.
+UPLOAD_CLASS_MASK = 0xFF
 
 
 def queue_band(mark: int) -> str:
@@ -81,6 +90,33 @@ def queue_handle(mark: int, kind: str = "netem") -> str:
     return f"{CHILD_HANDLE_BASES[kind] + mark:x}:"
 
 
+def upstream_safe_impairment(impairment: Impairment) -> Impairment:
+    """Return the part of an upload impairment that may run toward the router.
+
+    netem on the uplink works on whole Ethernet frames after the Pi built them:
+    corruption can flip a bit in the router-facing MAC addresses, EtherType or
+    IP header, and the network card then adds a valid checksum. Duplicated or
+    reordered packets would reach the router as they are. Uploads therefore
+    never duplicate or reorder, and their corruption runs before the Pi
+    forwards (see `UPLOAD_DEVICE`) or not at all.
+    """
+
+    return replace(impairment, duplicate_percent=0, reorder_percent=0, corrupt_percent=0)
+
+
+def withheld_upload_settings(impairment: Impairment, *, corrupt: bool) -> List[str]:
+    """Name the upload settings that do not run. `corrupt`: the upload device is in use."""
+
+    names = []
+    if impairment.reorder_percent:
+        names.append("reordering")
+    if impairment.duplicate_percent:
+        names.append("duplication")
+    if impairment.corrupt_percent and not corrupt:
+        names.append("corruption")
+    return names
+
+
 def _render_set(values: Sequence[object]) -> str:
     return "{ " + ", ".join(str(value) for value in values) + " }"
 
@@ -108,7 +144,15 @@ def _loss_arguments(loss_percent: int, burst_packets: int) -> List[str]:
 
 
 def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
+    """Return netem settings. Uploads only get what may run toward the router."""
+
     impairment = queue.impairment
+    if queue.direction == Direction.UPLOAD:
+        impairment = upstream_safe_impairment(impairment)
+    return _netem_arguments(impairment)
+
+
+def _netem_arguments(impairment: Impairment) -> List[str]:
     arguments = ["netem"]
     if impairment.delay_ms or impairment.jitter_ms:
         arguments.extend(["delay", f"{impairment.delay_ms}ms"])
@@ -224,6 +268,24 @@ def _render_nft_script(
             "{ type filter hook output priority -150; policy accept; }"
         ),
     ]
+    lines.extend((
+        # The ingress hook copies the connection's upload class into the mark.
+        # Classify every forwarded upload afresh so a class from an older plan
+        # never sticks.
+        f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" meta mark set 0',
+        (
+            f"add chain inet {PROJECT_TABLE} upload_class "
+            "{ type filter hook forward priority 100; policy accept; }"
+        ),
+        # A packet conntrack cannot track (a checksum the Pi found damaged, or
+        # out of its window) would skip NAT and reach the router with a test
+        # Wi-Fi source address.
+        f'add rule inet {PROJECT_TABLE} upload_class iifname "{test_interface}" '
+        f'oifname "{topology.uplink_interface}" ct state invalid drop '
+        'comment "never forward untracked test traffic to the router"',
+        f'add rule inet {PROJECT_TABLE} upload_class iifname "{test_interface}" '
+        f"ct mark set meta mark and {UPLOAD_CLASS_MASK:#x}",
+    ))
     known_addresses = service_addresses or {}
     for list_rule in plan.service_list_rules:
         set_name = service_list_set_name(list_rule)
@@ -245,6 +307,12 @@ def _render_nft_script(
         f'tcp sport 8080 meta mark set {DASHBOARD_REPLY_MARK}',
         f'add rule netdev {DOWNLOAD_TABLE} download meta mark {DASHBOARD_REPLY_MARK} '
         'meta mark set 0 return comment "keep local dashboard replies usable"',
+        # The browser proxy marks its socket toward the client. Keep that class
+        # on the connection so the client's uploads to the proxy are shaped on
+        # the Wi-Fi side, not the proxy's own connection toward the router.
+        f'add rule inet {PROJECT_TABLE} output oifname "{test_interface}" '
+        f"meta mark and {UPLOAD_CLASS_MASK:#x} != 0 "
+        f"ct mark set meta mark and {UPLOAD_CLASS_MASK:#x}",
     ])
     # Household MAC rules belong to the persistent access table. Standalone
     # experiment plans keep their own legacy MAC policy.
@@ -461,7 +529,9 @@ def _render_nft_script(
     return "\n".join(lines) + "\n"
 
 
-def _render_tc_commands(*, queues: Sequence[QueueSpec], interface: str) -> List[Command]:
+def _render_tc_commands(
+    *, queues: Sequence[QueueSpec], interface: str, corruption_only: bool = False
+) -> List[Command]:
     commands = [
         Command(
             executable="tc",
@@ -510,15 +580,22 @@ def _render_tc_commands(*, queues: Sequence[QueueSpec], interface: str) -> List[
         for queue in by_kind[kind]:
             if kind == "duplicate":
                 commands.append(_remove_child_queue(queue, interface, "netem"))
-            commands.append(_child_queue_command(queue, interface, kind))
+            commands.append(_child_queue_command(queue, interface, kind, corruption_only))
             commands.extend(_filter_commands(queue, interface))
     return commands
 
 
-def _child_queue_command(queue: QueueSpec, interface: str, kind: str) -> Command:
+def _child_queue_command(
+    queue: QueueSpec, interface: str, kind: str, corruption_only: bool = False
+) -> Command:
+    # An upload that only asked for withheld settings keeps a plain netem, so
+    # the queue keeps the handle the helper's queue counters look for.
     if kind == "fq_codel":
         settings = ("fq_codel",)
         purpose = f"preserve fair queuing for device {queue.device_id} on {interface}"
+    elif corruption_only:
+        settings = tuple(_corruption_arguments(queue.impairment))
+        purpose = f"apply upload corruption for device {queue.device_id} on {interface}"
     else:
         settings = tuple(_format_impairment_arguments(queue))
         purpose = (
@@ -573,16 +650,98 @@ def _filter_commands(queue: QueueSpec, interface: str) -> List[Command]:
     ]
 
 
+def _corruption_arguments(impairment: Impairment) -> List[str]:
+    """netem settings of the upload device: only the corruption, nothing else."""
+
+    return _netem_arguments(Impairment(corrupt_percent=impairment.corrupt_percent))
+
+
+def corrupting_upload_queues(plan: NetworkPlan) -> Tuple[QueueSpec, ...]:
+    """Return the upload queues whose corruption runs on the upload device."""
+
+    return tuple(
+        queue for queue in plan.queues
+        if queue.direction == Direction.UPLOAD and queue.impairment.corrupt_percent
+    )
+
+
+def _render_upload_redirect(
+    *, queues: Sequence[QueueSpec], topology: Topology, exempt_macs: Sequence[str] = ()
+) -> List[Command]:
+    """Send corrupting upload classes from the test interface's ingress through the upload device.
+
+    tc ingress runs before nftables, so the forward hook's mark is not known
+    yet. The forward hook keeps each connection's upload class in its
+    connection mark and `connmark` copies it back here. Only packets of a
+    marked class are redirected. Everything else, including traffic to the Pi
+    itself, never passes the upload device. The first packet of a new
+    connection has no class yet and passes unshaped.
+    """
+
+    interface = topology.test_interface
+    commands = [
+        Command(
+            executable="tc",
+            arguments=("qdisc", "add", "dev", interface, "handle", INGRESS_HANDLE, "ingress"),
+            purpose=f"create the upload intake on {interface}",
+        ),
+    ]
+    # Protected and unaffected devices leave the intake first. Their established
+    # connections still carry the class of an earlier plan in the connection
+    # mark, which the forward hook only clears after the packet was redirected.
+    for mac in sorted(set(exempt_macs)):
+        commands.append(Command(
+            executable="tc",
+            arguments=(
+                "filter", "add", "dev", interface, "parent", INGRESS_HANDLE,
+                "protocol", "all", "pref", "1", "flower", "src_mac", mac, "action", "ok",
+            ),
+            purpose=f"keep an unaffected device out of the upload intake on {interface}",
+        ))
+    commands += [
+        Command(
+            executable="tc",
+            arguments=(
+                "filter", "add", "dev", interface, "parent", INGRESS_HANDLE,
+                "protocol", "all", "pref", "2", "matchall",
+                "action", "connmark", "continue",
+            ),
+            purpose=f"restore each connection's upload class on {interface}",
+        ),
+    ]
+    for mark in sorted({queue.mark for queue in queues}):
+        for protocol in ("ip", "ipv6"):
+            commands.append(Command(
+                executable="tc",
+                arguments=(
+                    "filter", "add", "dev", interface, "parent", INGRESS_HANDLE,
+                    "protocol", protocol,
+                    "pref", str(mark + 10 if protocol == "ip" else mark + 110),
+                    "handle", str(mark), "fw",
+                    "action", "mirred", "egress", "redirect", "dev", UPLOAD_DEVICE,
+                ),
+                purpose=f"send {protocol} upload class {mark} through {UPLOAD_DEVICE}",
+            ))
+    return commands
+
+
 def render_command_plan(
     *,
     plan: NetworkPlan,
     topology: Topology,
     service_addresses: Optional[Mapping[str, Sequence[IPv4Address]]] = None,
+    upload_device: Optional[str] = None,
 ) -> Sequence[Command]:
     """Render a validated plan into commands for simulation or later execution.
 
     `service_addresses` maps a service list id to the destination addresses
     already learned for it, so a new table starts with them in the same batch.
+
+    Upload delay, jitter, loss and rate run on the uplink's egress. With
+    `upload_device` (an existing, up ifb device) upload corruption runs there,
+    fed from the test interface's ingress, before the Pi forwards. Without it
+    uploads are not corrupted. Uploads never get duplication or reordering:
+    see `upstream_safe_impairment`.
     """
 
     commands = [
@@ -600,6 +759,16 @@ def render_command_plan(
         commands.extend(
             _render_tc_commands(queues=upload_queues, interface=topology.uplink_interface)
         )
+    corrupting = corrupting_upload_queues(plan)
+    if corrupting and upload_device is not None:
+        commands.extend(
+            _render_tc_commands(queues=corrupting, interface=upload_device, corruption_only=True)
+        )
+        exempt = set(plan.protected_mac_addresses)
+        if plan.everyone_else is not None:
+            exempt.update(plan.everyone_else.unaffected_macs)
+        commands.extend(_render_upload_redirect(queues=corrupting, topology=topology,
+                                                exempt_macs=sorted(exempt)))
     if download_queues:
         commands.extend(
             _render_tc_commands(queues=download_queues, interface=topology.test_interface)
@@ -607,8 +776,14 @@ def render_command_plan(
     return tuple(commands)
 
 
-def render_live_queue_changes(*, previous: NetworkPlan, plan: NetworkPlan, topology: Topology):
-    """Return safe in-place changes or None when complete replacement is needed."""
+def render_live_queue_changes(
+    *, previous: NetworkPlan, plan: NetworkPlan, topology: Topology,
+    upload_device: Optional[str] = None,
+):
+    """Return safe in-place changes or None when complete replacement is needed.
+
+    `upload_device` is the upload device the previous plan was applied with.
+    """
 
     def classification(value):
         return replace(
@@ -621,6 +796,12 @@ def render_live_queue_changes(*, previous: NetworkPlan, plan: NetworkPlan, topol
 
     if classification(previous) != classification(plan):
         return None
+    if upload_device is not None and (
+        {queue.mark for queue in corrupting_upload_queues(previous)}
+        != {queue.mark for queue in corrupting_upload_queues(plan)}
+    ):
+        # The intake redirects only corrupting classes, so it must be rebuilt.
+        return None
     commands = []
     for before, after in zip(previous.queues, plan.queues):
         if before.impairment == after.impairment:
@@ -631,6 +812,17 @@ def render_live_queue_changes(*, previous: NetworkPlan, plan: NetworkPlan, topol
         ):
             return None
         interface = topology.uplink_interface if after.direction == Direction.UPLOAD else topology.test_interface
+        if (
+            upload_device is not None and after.direction == Direction.UPLOAD
+            and after.impairment.corrupt_percent != before.impairment.corrupt_percent
+        ):
+            commands.append(Command(
+                executable="tc",
+                arguments=("qdisc", "change", "dev", upload_device, "parent",
+                           queue_parent(after.mark), "handle", queue_handle(after.mark),
+                           *_corruption_arguments(after.impairment)),
+                purpose=f"update upload corruption for {after.device_id}",
+            ))
         commands.append(Command(
             executable="tc",
             arguments=("qdisc", "change", "dev", interface, "parent", queue_parent(after.mark),

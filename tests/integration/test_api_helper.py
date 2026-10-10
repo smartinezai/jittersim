@@ -93,8 +93,9 @@ class ApiHelperIntegrationTests(unittest.TestCase):
             self.assertEqual(self.api_server.write_response_for("/api/apply", {})[0], 200)
             self.assertTrue(self.active_plan_path.exists())
             original_plan = scheduler.applied_plan()
-            # Fail after inspecting the two root queues so the helper cleans up.
-            self.helper_executor.fail_on_index = len(self.helper_executor.commands) + 2
+            # Fail at the nft script, after inspecting the two root queues, the
+            # Wi-Fi intake and the ifb device, so the helper cleans up.
+            self.helper_executor.fail_on_index = len(self.helper_executor.commands) + 4
 
             with self.assertLogs(level="ERROR"):
                 status, _, _ = self.api_server.write_response_for("/api/apply", {})
@@ -114,7 +115,7 @@ class ApiHelperIntegrationTests(unittest.TestCase):
         self.api_server.scheduler = scheduler
         with patch.object(scheduler, "start"):
             self.assertEqual(self.api_server.write_response_for("/api/apply", {})[0], 200)
-            self.helper_executor.fail_on_index = len(self.helper_executor.commands) + 2
+            self.helper_executor.fail_on_index = len(self.helper_executor.commands) + 4
             with self.assertLogs(level="ERROR"):
                 self.assertEqual(self.api_server.write_response_for("/api/apply", {})[0], 502)
             self.assertEqual(self.api_server.write_response_for("/api/reset", {})[0], 200)

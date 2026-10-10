@@ -4,6 +4,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+.venv
 .venv/
 venv/
 build/
@@ -19,3 +20,7 @@ test-results/
 
 test-results/
 docs/releases/.registry.lock
+.venv-local-ci-*/
+
+# Outage lab results (tests/kernel/run-outage-lab.sh)
+outage-lab-output/

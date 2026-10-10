@@ -34,9 +34,9 @@
   .sidebar-nav li { flex: 0 0 auto; }
   .sidebar-nav a {
     min-height: 2.75rem; padding: 0.35rem 0.85rem; border: 1px solid var(--line);
-    background: #12233a; white-space: nowrap;
+    background: var(--bg-pill); white-space: nowrap;
   }
-  .sidebar-nav a[aria-current="page"] { border-color: #4c86bf; background: #1b3a5c; }
+  .sidebar-nav a[aria-current="page"] { border-color: var(--bd-selected); background: var(--bg-selected); }
   .sidebar-nav a:focus-visible { outline-offset: -3px; }
   .sidebar-nav[data-more-after] ul {
     -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent);
@@ -55,9 +55,9 @@
   .status-strip {
     display: flex; align-items: center; gap: 0.6rem; width: 100%; min-height: 2.75rem;
     padding: 0.3rem 0.75rem; border: 1px solid var(--line); border-radius: 0.5rem;
-    background: #12233a; color: #c4d5e8; font-size: 0.84rem; font-weight: 550;
+    background: var(--bg-pill); color: var(--tx-soft); font-size: 0.84rem; font-weight: 550;
   }
-  .status-strip.status-on { color: #8de2bc; }
+  .status-strip.status-on { color: var(--ok-text); }
   .sidebar .status-strip > span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .status-strip::after {
     content: ""; flex: 0 0 auto; width: 0.5rem; height: 0.5rem; margin-right: 0.2rem;
@@ -98,7 +98,7 @@
   }
   .safety-bar .router-wifi-control {
     min-width: 0; height: 2.75rem; gap: 0.35rem; padding: 0 0 0 0.6rem; border: 0;
-    border-radius: 0.5rem; background: #12233a; box-shadow: inset 0 0 0 1px var(--line);
+    border-radius: 0.5rem; background: var(--bg-pill); box-shadow: inset 0 0 0 1px var(--line);
   }
   .safety-bar .router-wifi-control > div { min-width: 0; }
   .safety-bar .router-wifi-label {
@@ -114,14 +114,14 @@
     position: fixed; z-index: 61; right: 0.75rem; bottom: calc(0.5rem + env(safe-area-inset-bottom, 0px));
     display: flex; align-items: center; justify-content: center; gap: 0.4rem;
     width: var(--controls-toggle-width); height: 2.75rem; min-height: 0; margin: 0; padding: 0 0.4rem;
-    border-color: #397bb0; background: #16314d; color: #f6fbff; font-size: 0.84rem; font-weight: 600;
+    border-color: var(--bd-primary); background: var(--bg-info-strong); color: var(--tx-on-primary); font-size: 0.84rem; font-weight: 600;
   }
   .sidebar .controls-toggle { text-align: center; }
   .controls-toggle::before {
     content: ""; flex: 0 0 auto; width: 0.45rem; height: 0.45rem; margin-top: 0.2rem;
     border-left: 2px solid currentColor; border-top: 2px solid currentColor; transform: rotate(45deg);
   }
-  .controls-toggle[aria-expanded="true"] { border-color: var(--accent); background: #1b3a5c; }
+  .controls-toggle[aria-expanded="true"] { border-color: var(--accent); background: var(--bg-selected); }
   .controls-toggle[aria-expanded="true"]::before { margin-top: -0.2rem; transform: rotate(225deg); }
 
   /* Open: the footer becomes a sheet above the bar. The bar is pinned on its own and stays. */
@@ -131,14 +131,14 @@
     max-height: calc(100vh - var(--phone-bar-height) - 2.5rem);
     max-height: calc(100dvh - var(--phone-bar-height) - 2.5rem);
     overflow-y: auto; overscroll-behavior: contain; padding: 1rem 1rem 1.1rem;
-    border-top: 1px solid #547392; border-radius: 0.9rem 0.9rem 0 0; background: #102238;
+    border-top: 1px solid var(--bd-raised); border-radius: 0.9rem 0.9rem 0 0; background: var(--bg-raised);
     box-shadow: 0 -1rem 2.5rem rgba(0, 0, 0, 0.5);
   }
   .sidebar.controls-open .sidebar-operate { display: grid; gap: 0.6rem; }
   .sidebar.controls-open .active-profile, .sidebar.controls-open .sidebar-actions,
   .sidebar.controls-open .router-wifi-copy, .sidebar.controls-open .sidebar-credentials { display: grid; }
   .sidebar.controls-open #runtime-summary, .sidebar.controls-open #message { display: block; }
-  .sidebar.controls-open .active-profile { padding-bottom: 0.75rem; border-bottom: 1px solid #2b435f; }
+  .sidebar.controls-open .active-profile { padding-bottom: 0.75rem; border-bottom: 1px solid var(--bd-subtle); }
   .sidebar .active-profile select, .sidebar .active-profile button { min-height: 2.75rem; }
   .sidebar .apply-summary { margin: 0; font-size: 0.8rem; }
 

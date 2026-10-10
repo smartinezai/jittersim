@@ -95,15 +95,15 @@ def test_the_largest_sequence_the_check_accepts_builds_and_checks(tmp_path, vers
     assert checked.returncode == 0 and checked.stdout.strip() == str(sequence)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "build-release.sh only requires a positive whole number for JITTERSIM_RELEASE_SEQUENCE, but "
-    "check-release-manifest.sh refuses 2**53 and above (and more than 16 digits) and updates.py "
-    "_is_sequence refuses them too (MAX_SEQUENCE). A build with such a number succeeds, can be signed "
-    "and is then refused at transfer. The build should refuse it, naming the limit"))
 @pytest.mark.parametrize("sequence", [2**53, 10**16, 10**20])
-def test_the_build_refuses_a_sequence_the_manifest_check_would_refuse(tmp_path, version, sequence):
-    built = build(tmp_path, sequence)
-    if built.returncode != 0:
-        return  # refused at build: the wanted behaviour
-    checked = sh(CHECK, tmp_path / "out.tar.gz", head(), version)
-    assert checked.returncode == 0, f"built a release with sequence {sequence} that the check refuses"
+def test_the_build_refuses_a_sequence_the_manifest_check_would_refuse(tmp_path, sequence):
+    # The limit is MAX_SEQUENCE in updates.py and the same in check-release-manifest.sh.
+    result = build(tmp_path, sequence)
+    assert result.returncode == 1 and "must be below 9007199254740992" in result.stderr, result.stderr
+    assert not (tmp_path / "out.tar.gz").exists()
+
+
+def test_the_build_limit_is_the_limit_of_the_update_code():
+    from jittersim.updates import MAX_SEQUENCE
+    assert MAX_SEQUENCE == 2**53 and str(MAX_SEQUENCE) in BUILD.read_text()
+    assert str(MAX_SEQUENCE) in CHECK.read_text()
