@@ -3641,55 +3641,6 @@ def check_operation(*, root=UPDATE_ROOT, descriptor=9):
 WRITERS = (WATCHER, *reversed(SERVICES))
 
 
-UPLOAD_DEVICE = "jittersim-ifb"
-
-
-def remove_upload_intake(config, run, query, timeout=10):
-    """Remove the Wi-Fi upload intake and its ifb device before other code runs.
-
-    Releases with upload-safe impairments (PR 125) redirect corrupting upload
-    classes from the test interface's ingress to `jittersim-ifb`. An older
-    package's helper and Panic do not know either, so a rollback or a
-    recovery copy would leave corruption running that nothing can stop. Call
-    this after the writers have stopped and before the other code is restored.
-    Each step is tried even if another fails. The result is read back, and the
-    first problem is raised, never ignored.
-    """
-    _, test_interface = runtime_interfaces(config)
-    problems = []
-
-    def links():
-        try:
-            return {item.get("ifname") for item in json.loads(query(["ip", "-j", "link", "show"], timeout) or "[]")
-                    if isinstance(item, dict)}
-        except (ValueError, TypeError) as error:
-            raise UpdateError("the network links could not be read before recovery") from error
-
-    def owned_intake(present):
-        if test_interface not in present:
-            return False
-        filters = query(["tc", "filter", "show", "dev", test_interface, "ingress"], timeout) or ""
-        return UPLOAD_DEVICE in filters
-
-    present = links()
-    steps = (
-        (lambda: owned_intake(present),
-         ["tc", "qdisc", "del", "dev", test_interface, "handle", "ffff:", "ingress"]),
-        (lambda: UPLOAD_DEVICE in present, ["ip", "link", "del", "dev", UPLOAD_DEVICE]),
-    )
-    for needed, command in steps:
-        try:
-            if needed():
-                run(command, timeout)
-        except UpdateError as error:
-            problems.append(error)
-    present = links()
-    if UPLOAD_DEVICE in present or owned_intake(present):
-        problems.append(UpdateError("the upload intake could not be removed before recovery"))
-    if problems:
-        raise problems[0]
-
-
 def writers_stopped(names, query, budget):
     for name in names:
         answer = query(["systemctl", "show", "--property=ActiveState", "--property=MainPID",
@@ -3704,7 +3655,7 @@ def writers_stopped(names, query, budget):
 
 
 def quiesce_manual_install(source, *, root=UPDATE_ROOT, descriptor=9, units=UNITS_ROOT,
-                           run=run_command, query=read_command, config=CONFIG_ROOT):
+                           run=run_command, query=read_command):
     """Provision current intent only after the installer's writers have ended."""
     with manual_identity_operation(root, descriptor=descriptor):
         if not _inherited_installer(_operation_record(root, "installer-pending.json")):
@@ -3721,9 +3672,6 @@ def quiesce_manual_install(source, *, root=UPDATE_ROOT, descriptor=9, units=UNIT
         budget.check()
         if not writers_stopped(names, query, budget):
             raise UpdateError("the installer settings writers did not stop")
-        budget.check()
-        remove_upload_intake(config, lambda command, timeout: run(command, budget.limit(timeout)),
-                             lambda command, timeout: query(command, budget.limit(timeout)))
         budget.check()
         # Never publish the earlier preview. The real producer rereads latest
         # intent after stop so a concurrent Panic cannot be lost in migration.
@@ -4303,7 +4251,6 @@ def apply_update(
             panic_safety.provision(*selected)
             if request.get("rollback"):
                 progress("rolling-back", "Restoring the previous installation and settings.")
-                remove_upload_intake(config, run, query)
                 restore()
                 if not wait_restarted_healthy():
                     raise UpdateError("recovery health check failed")
@@ -4443,7 +4390,6 @@ def apply_update(
                     run(["systemctl", "stop", *names], 60)
                     if not writers_stopped(names, query, budget):
                         raise UpdateError("the settings writers did not stop before recovery")
-                    remove_upload_intake(config, run, query)
                     restore()
                     recovered = wait_restarted_healthy()
                 elif stopped:

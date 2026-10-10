@@ -159,10 +159,6 @@ class UpdateTests(unittest.TestCase):
         def service_query(command, timeout):
             if command[:2] == ["systemctl", "show"]:
                 return "ActiveState=inactive\nMainPID=0\nControlPID=0\nTasksCurrent=0"
-            if query is None and command[:3] == ["ip", "-j", "link"]:
-                return "[]"
-            if query is None and command[:3] == ["tc", "filter", "show"]:
-                return ""
             return query(command, timeout) if query else self.wifi
 
         def identity(source, config, budget, **options):
@@ -371,71 +367,6 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse((self.code / "src").exists())
         self.assertIn("RECOVERY_FORMAT = 2", self.manager.read_text())
         self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
-
-    def intake_system(self, *, fail=None):
-        """A Pi with the upload intake and ifb device of a newer release."""
-        state = {"ingress": True, "ifb": True, "removed_while_new_code": []}
-
-        def query(command, timeout):
-            if command[:3] == ["ip", "-j", "link", "show"][:3]:
-                links = [{"ifname": name} for name in updates.runtime_interfaces(self.config)]
-                return json.dumps(links + ([{"ifname": "jittersim-ifb"}] if state["ifb"] else []))
-            if command[:3] == ["tc", "filter", "show"]:
-                return ("filter parent ffff: protocol ip pref 11 fw handle 0x1\n"
-                        "  action order 1: mirred (Egress Redirect to device jittersim-ifb) stolen\n"
-                        if state["ingress"] else "")
-            return self.wifi
-
-        def run(command, timeout):
-            if command[:3] == ["tc", "qdisc", "del"] and command[-1] == "ingress":
-                if fail == "ingress":
-                    raise UpdateError("simulated tc failure")
-                state["ingress"] = False
-                state["removed_while_new_code"].append((self.code / "src").exists())
-            if command[:3] == ["ip", "link", "del"]:
-                state["ifb"] = False
-                state["removed_while_new_code"].append((self.code / "src").exists())
-        return state, run, query
-
-    def test_a_requested_rollback_removes_the_upload_intake_before_restoring(self):
-        self.stage()
-        request_update("v1", root=self.root, code=self.code, config=self.config, run=lambda *args: None)
-        self.apply(lambda *args: None, lambda: True)
-        request_update("", rollback=True, root=self.root, code=self.code, config=self.config, run=lambda *args: None)
-        state, run, query = self.intake_system()
-        self.apply(run, lambda: True, query)
-        self.assertFalse(state["ingress"] or state["ifb"])
-        self.assertEqual(state["removed_while_new_code"], [True, True])
-        self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
-
-    def test_a_failed_update_removes_the_upload_intake_before_the_recovery_copy(self):
-        self.stage()
-        request_update("v1", root=self.root, code=self.code, config=self.config, run=lambda *args: None)
-        state, intake_run, query = self.intake_system()
-
-        def fail_package(command, timeout):
-            intake_run(command, timeout)
-            if "pip" in command and "install" in command and command[0] == str(self.code / ".venv/bin/python"):
-                raise UpdateError("package install failed")
-
-        with self.assertRaises(UpdateError):
-            self.apply(fail_package, lambda: True, query)
-        self.assertFalse(state["ingress"] or state["ifb"])
-        self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
-
-    def test_a_failed_intake_removal_still_removes_the_ifb_device_and_stops_the_rollback(self):
-        state, run, query = self.intake_system(fail="ingress")
-        with self.assertRaisesRegex(UpdateError, "simulated tc failure"):
-            updates.remove_upload_intake(self.config, run, query)
-        self.assertFalse(state["ifb"])
-        self.assertTrue(state["ingress"])
-
-    def test_a_pi_without_the_intake_needs_no_command(self):
-        commands = []
-        updates.remove_upload_intake(
-            self.config, lambda command, timeout: commands.append(command),
-            lambda command, timeout: "[]" if command[0] == "ip" else "")
-        self.assertEqual(commands, [])
 
     def test_failed_health_check_restores_the_previous_installation(self):
         self.stage()

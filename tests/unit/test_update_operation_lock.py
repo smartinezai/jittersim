@@ -469,21 +469,16 @@ def test_installer_child_rereads_proven_legacy_only_after_physical_writer_stop(r
         updates.atomic_json(legacy, {"current": True})
 
     def query(command, timeout):
-        if command[:3] == ["ip", "-j", "link"]:
-            # The upload intake check before and after its cleanup (none here).
-            calls.append("links")
-            return "[]"
         calls.append("proof")
         return "ActiveState=inactive\nMainPID=0\nControlPID=0\nTasksCurrent=0\n"
 
     descriptor = os.open(root / "lock", os.O_RDWR | os.O_CREAT, 0o600)
     try:
         updates.quiesce_manual_install(tmp_path, root=root, descriptor=descriptor,
-                                      units=units, run=run, query=query,
-                                      config=tmp_path / "no-config")
+                                      units=units, run=run, query=query)
     finally:
         os.close(descriptor)
-    assert calls == ["inspect", "stop", "proof", "links", "links", "provision"]
+    assert calls == ["inspect", "stop", "proof", "provision"]
 
 
 def test_installer_child_refuses_without_its_outer_group_lease(root, tmp_path):
