@@ -1474,8 +1474,12 @@ class HelperService:
                 self._ad_blocking_store.resume()
             except (OSError, ValueError, CommandExecutionError):
                 LOGGER.warning("Profiles started but ad-blocking resume could not be confirmed.")
+        # Whether upload corruption ran before the Pi forwards (the ifb path) or was
+        # left out. The dashboard names what a plan could not apply upstream-safe.
         return {"ok": True, "action": "apply", "commands_run": report.commands_run,
-                "counters_preserved": report.counters_preserved}
+                "counters_preserved": report.counters_preserved,
+                "upload_corruption_applied": getattr(report, "upload_corruption_applied", False)
+                is True}
 
     def _write_active_plan(self, plan: NetworkPlan) -> None:
         path = self._active_plan_path

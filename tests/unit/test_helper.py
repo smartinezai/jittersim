@@ -2955,3 +2955,34 @@ class QueueStatsClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpstreamSafeApplyResponseTests(unittest.TestCase):
+    """The dashboard learns whether upload corruption ran before the Pi forwards."""
+
+    def response(self, report_value):
+        applier = NetworkApplier(executor=FakeExecutor(),
+                                 topology=Topology(uplink_interface="eth0", test_interface="wlan0"))
+        real_apply = applier.apply
+
+        def apply(**arguments):
+            report = real_apply(**arguments)
+            if report_value is not None:
+                report = type("Report", (), {**vars(report), "upload_corruption_applied": report_value})()
+                report.commands_run = 1
+                report.counters_preserved = False
+            return report
+
+        applier.apply = apply
+        plan = compile_plan(
+            devices=(Device("alice", "Alice", "192.168.50.10", "bad"),),
+            profiles={"bad": Profile(id="bad", name="Bad", upload=Impairment(corrupt_percent=6))},
+        )
+        return HelperService(applier).handle_payload({"action": "apply", "plan": plan_to_payload(plan)})
+
+    def test_the_apply_response_reports_upload_corruption(self) -> None:
+        self.assertIs(self.response(True)["upload_corruption_applied"], True)
+        self.assertIs(self.response(False)["upload_corruption_applied"], False)
+
+    def test_an_applier_without_the_field_reports_false(self) -> None:
+        self.assertIs(self.response(None)["upload_corruption_applied"], False)
