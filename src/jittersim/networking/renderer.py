@@ -665,7 +665,9 @@ def corrupting_upload_queues(plan: NetworkPlan) -> Tuple[QueueSpec, ...]:
     )
 
 
-def _render_upload_redirect(*, queues: Sequence[QueueSpec], topology: Topology) -> List[Command]:
+def _render_upload_redirect(
+    *, queues: Sequence[QueueSpec], topology: Topology, exempt_macs: Sequence[str] = ()
+) -> List[Command]:
     """Send corrupting upload classes from the test interface's ingress through the upload device.
 
     tc ingress runs before nftables, so the forward hook's mark is not known
@@ -683,11 +685,25 @@ def _render_upload_redirect(*, queues: Sequence[QueueSpec], topology: Topology) 
             arguments=("qdisc", "add", "dev", interface, "handle", INGRESS_HANDLE, "ingress"),
             purpose=f"create the upload intake on {interface}",
         ),
+    ]
+    # Protected and unaffected devices leave the intake first. Their established
+    # connections still carry the class of an earlier plan in the connection
+    # mark, which the forward hook only clears after the packet was redirected.
+    for mac in sorted(set(exempt_macs)):
+        commands.append(Command(
+            executable="tc",
+            arguments=(
+                "filter", "add", "dev", interface, "parent", INGRESS_HANDLE,
+                "protocol", "all", "pref", "1", "flower", "src_mac", mac, "action", "ok",
+            ),
+            purpose=f"keep an unaffected device out of the upload intake on {interface}",
+        ))
+    commands += [
         Command(
             executable="tc",
             arguments=(
                 "filter", "add", "dev", interface, "parent", INGRESS_HANDLE,
-                "protocol", "all", "pref", "1", "matchall",
+                "protocol", "all", "pref", "2", "matchall",
                 "action", "connmark", "continue",
             ),
             purpose=f"restore each connection's upload class on {interface}",
@@ -700,7 +716,7 @@ def _render_upload_redirect(*, queues: Sequence[QueueSpec], topology: Topology) 
                 arguments=(
                     "filter", "add", "dev", interface, "parent", INGRESS_HANDLE,
                     "protocol", protocol,
-                    "pref", str(mark + 1 if protocol == "ip" else mark + 101),
+                    "pref", str(mark + 10 if protocol == "ip" else mark + 110),
                     "handle", str(mark), "fw",
                     "action", "mirred", "egress", "redirect", "dev", UPLOAD_DEVICE,
                 ),
@@ -748,7 +764,11 @@ def render_command_plan(
         commands.extend(
             _render_tc_commands(queues=corrupting, interface=upload_device, corruption_only=True)
         )
-        commands.extend(_render_upload_redirect(queues=corrupting, topology=topology))
+        exempt = set(plan.protected_mac_addresses)
+        if plan.everyone_else is not None:
+            exempt.update(plan.everyone_else.unaffected_macs)
+        commands.extend(_render_upload_redirect(queues=corrupting, topology=topology,
+                                                exempt_macs=sorted(exempt)))
     if download_queues:
         commands.extend(
             _render_tc_commands(queues=download_queues, interface=topology.test_interface)
