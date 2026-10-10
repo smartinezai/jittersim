@@ -169,10 +169,14 @@ input::placeholder, textarea::placeholder { color: var(--tx-disabled); }
 input:disabled, select:disabled, textarea:disabled { opacity: 0.6; cursor: not-allowed; }
 /* .content select (access.css) sets the background shorthand, which would drop the arrow, so the
    arrow rule matches its specificity and comes later. */
-select, .content select { appearance: none; padding-right: 2rem; cursor: pointer;
+select, .content select, .active-profile select { appearance: none; padding-right: 2rem; cursor: pointer;
   background-image: linear-gradient(45deg, transparent 50%, var(--tx-muted) 50%), linear-gradient(135deg, var(--tx-muted) 50%, transparent 50%);
   background-position: calc(100% - 1.05rem) 52%, calc(100% - 0.75rem) 52%;
   background-size: 0.3rem 0.3rem, 0.3rem 0.3rem; background-repeat: no-repeat; }
+/* Forced colours drop gradients, so give the native arrow back there. */
+@media (forced-colors: active) {
+  select, .content select, .active-profile select { appearance: auto; background-image: none; padding-right: 0.7rem; }
+}
 input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 label { color: var(--tx); font-weight: 520; }
 label > input, label > select, label > textarea { font-weight: 400; }
