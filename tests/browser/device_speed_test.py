@@ -151,6 +151,26 @@ def check_width(browser, width, height):
         expect(page.locator("#speed-test-announce")).to_have_text("Cancelled. Nothing was saved.")
         expect(history).to_have_count(2)
 
+        # a Finish that arrives after the run ended (cancelled elsewhere here) must not leave the
+        # window stuck in the running view
+        page.locator("#speed-test-begin").click()
+        expect(page.locator("#speed-test-progress")).to_contain_text("Measuring:")
+        run_id = page.request.get(base + "/api/speed-tests?mac=" + MAC_ADDRESS,
+                                  headers=HEADERS).json()["active"][0]["id"]
+
+        def cancel_first(route):
+            post("/api/speed-tests/cancel", {"run_id": run_id})
+            route.continue_()
+
+        page.route("**/api/speed-tests/finish", cancel_first)
+        page.locator("#speed-test-finish").click()
+        expect(page.locator("#speed-test-announce")).to_have_text(
+            "Cancelled. Nothing was saved.", timeout=LIMIT)
+        expect(page.locator("#speed-test-start")).to_be_visible()
+        expect(page.locator("#speed-test-running")).to_be_hidden()
+        page.unroute("**/api/speed-tests/finish")
+        expect(history).to_have_count(2)
+
         # a running test survives closing the window and shows again on reopening
         page.locator("#speed-test-begin").click()
         expect(page.locator("#speed-test-progress")).to_contain_text("Measuring:")
@@ -161,7 +181,11 @@ def check_width(browser, width, height):
         page.locator("#speed-test-cancel").click()
         expect(page.locator("#speed-test-announce")).to_have_text("Cancelled. Nothing was saved.")
 
-        # deleting one result
+        # deleting one result asks first
+        page.once("dialog", lambda confirm: confirm.dismiss())
+        history.first.get_by_role("button", name=re.compile("^Delete result")).click()
+        expect(history).to_have_count(2)
+        page.once("dialog", lambda confirm: confirm.accept())
         history.first.get_by_role("button", name=re.compile("^Delete result")).click()
         expect(history).to_have_count(1)
         page.keyboard.press("Escape")

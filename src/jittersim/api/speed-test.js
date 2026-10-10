@@ -104,6 +104,7 @@ function speedTestDialog() {
   dialog.setAttribute('aria-labelledby', 'speed-test-title');
   const title = speedTestNode('h2', 'Speed test');
   title.id = 'speed-test-title';
+  title.tabIndex = -1;
   const announce = speedTestNode('p', '', 'speed-test-announce');
   announce.id = 'speed-test-announce';
   announce.setAttribute('role', 'status');
@@ -183,10 +184,30 @@ function speedTestDialog() {
   close.className = 'speed-test-close';
   const note = speedTestNode('p', 'Closing this window keeps a running measurement going on the Pi.', 'speed-test-help');
   dialog.append(title, announce, start, running, results, note, close);
-  dialog.addEventListener('close', speedTestStopPolling);
+  dialog.addEventListener('close', () => {
+    speedTestStopPolling();
+    speedTestRestoreFocus();
+  });
   document.body.append(dialog);
   speedTestState.dialog = dialog;
   return dialog;
+}
+
+function speedTestFocusTitle() {
+  // The sections swap in place, so the focused control can vanish. Start again at the title.
+  const title = element('speed-test-title');
+  if (title && speedTestState.dialog && speedTestState.dialog.open) title.focus({preventScroll: true});
+}
+
+function speedTestRestoreFocus() {
+  // The device list redraws every few seconds, so the button that opened the window may be gone.
+  const device = speedTestState.device;
+  const rows = device ? document.querySelectorAll('.connected-row[data-mac-address]') : [];
+  const row = Array.from(rows).find((item) => item.dataset.macAddress === device.mac_address);
+  const live = row && row.querySelector('.speed-test-open-button:not([disabled])');
+  const fallback = document.querySelector('[data-page-link="devices"]');
+  const target = live || fallback;
+  if (target && target.isConnected) target.focus({preventScroll: true});
 }
 
 async function speedTestOpen(device) {
@@ -204,6 +225,7 @@ async function speedTestOpen(device) {
   element('speed-test-start').hidden = false;
   element('speed-test-results').hidden = false;
   if (!dialog.open) dialog.showModal();
+  speedTestFocusTitle();
   await speedTestLoad();
 }
 
@@ -261,6 +283,7 @@ function speedTestShowRunning(run) {
   open.replaceChildren('On ' + run.device_name + ', open ', link, ' (' + provider.name + ') and run the test. ', speedTestNode('small', provider.note));
   element('speed-test-qr-box').replaceChildren(speedTestQr(provider));
   speedTestRenderRunning(run);
+  speedTestFocusTitle();
 }
 
 function speedTestRenderRunning(run) {
@@ -286,7 +309,13 @@ async function speedTestPoll() {
   try {
     status = await request('/api/speed-tests/status?run=' + encodeURIComponent(run.id), 'GET');
   } catch (error) {
-    if (serial === speedTestState.serial) speedTestState.pollTimer = window.setTimeout(speedTestPoll, 2000);
+    if (serial !== speedTestState.serial || speedTestState.run !== run) return;
+    if (error.status === 404) {
+      // The dashboard restarted or forgot the run, so there is nothing left to watch.
+      await speedTestFinished({result: null, ended_reason: 'This test is no longer running.'});
+      return;
+    }
+    speedTestState.pollTimer = window.setTimeout(speedTestPoll, 2000);
     return;
   }
   if (serial !== speedTestState.serial || speedTestState.run !== run) return;
@@ -302,8 +331,21 @@ async function speedTestEnd(action) {
   const run = speedTestState.run;
   if (!run) return;
   speedTestStopPolling();
-  const status = await request('/api/speed-tests/' + action, 'POST', {run_id: run.id});
-  speedTestFinished(status);
+  let status;
+  try {
+    status = await request('/api/speed-tests/' + action, 'POST', {run_id: run.id});
+  } catch (error) {
+    if (speedTestState.run !== run) throw error;
+    if (error.status === 404) {
+      await speedTestFinished({result: null, ended_reason: 'This test is no longer running.'});
+      return;
+    }
+    // Already ended (409), busy (503) or no answer: ask again what the run did and keep watching.
+    await speedTestPoll();
+    if (error.status === 409) return;
+    throw error;
+  }
+  await speedTestFinished(status);
 }
 
 async function speedTestFinished(status) {
@@ -312,6 +354,7 @@ async function speedTestFinished(status) {
   element('speed-test-start').hidden = false;
   element('speed-test-results').hidden = false;
   speedTestSay(status.result ? 'Speed test saved.' : (status.ended_reason || 'Speed test ended.'));
+  speedTestFocusTitle();
   await speedTestLoad();
   if (status.result) speedTestEdit(status.result);
 }
@@ -346,7 +389,11 @@ function speedTestRenderHistory(results) {
     results.forEach((result) => {
       const row = speedTestNode('tr');
       row.dataset.resultId = String(result.id);
-      const profile = (result.profile || {}).profile_name || 'No profile';
+      const saved = result.profile || {};
+      // A schedule, timer, scenario or group profile can control the device instead of its own.
+      const control = ['profile', 'none', 'unknown', undefined].includes(saved.applied_by) ? '' :
+        ' (' + (saved.applied_by_label || saved.applied_by.replace('-', ' ')) + ')';
+      const profile = (saved.profile_name || 'No profile') + control;
       const shared = result.source === 'everyone' || result.source === 'everyone-else' ? ' (shared queue)' : '';
       const latency = (result.summary || {}).latency || {};
       const cells = [
@@ -357,7 +404,8 @@ function speedTestRenderHistory(results) {
         speedTestDirection(result, 'upload'),
         [latency.rtt_median_ms === null || latency.rtt_median_ms === undefined
           ? (latency.status === 'no-answer' ? 'No answer' : 'Not available') : latency.rtt_median_ms + ' ms',
-          latency.loss_percent ? latency.loss_percent + '% lost' : '']
+          [latency.loss_percent ? latency.loss_percent + '% lost' : '',
+            latency.shaped === false ? 'unshaped Wi-Fi round trip' : ''].filter(Boolean).join(' · ')]
       ];
       cells.forEach(([main, small]) => {
         const cell = speedTestNode('td');
@@ -436,6 +484,7 @@ function speedTestEdit(result) {
 }
 
 async function speedTestDelete(result) {
+  if (!window.confirm('Delete the speed test result from ' + speedTestWhen(result.started_at) + '? This cannot be undone.')) return;
   await request('/api/speed-tests/delete', 'POST', {result_id: result.id});
   if (speedTestState.editing === result.id) element('speed-test-editor').hidden = true;
   speedTestSay('Result deleted.');
@@ -515,6 +564,10 @@ connectedRowHooks.push((device, details) => {
   if (device.unaffected) {
     button.disabled = true;
     line.append(button, speedTestNode('small', 'Protected devices are not measured.'));
+  } else if (device.association_verified !== true) {
+    // Without a confirmed Wi-Fi connection the Pi cannot tell this device from an old address.
+    button.disabled = true;
+    line.append(button, speedTestNode('small', 'Wi-Fi connection status is unknown, so this device cannot be tested now.'));
   } else {
     button.addEventListener('click', () => {
       speedTestOpen(device).catch((error) => speedTestSay(error.message, 'error'));
