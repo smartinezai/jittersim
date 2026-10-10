@@ -6534,6 +6534,25 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(state.observed_state, "error")
         self.assertEqual(state.last_error, "network helper apply failed")
 
+    def test_an_incomplete_release_during_apply_shows_the_helpers_retry_text(self) -> None:
+        # Review S1: the helper says which restriction is left and that the owner must
+        # retry before Start. The generic "network helper apply failed" hid that.
+        text = ("Wi-Fi join limits could not be cleared. Retry before choosing Start.")
+
+        class IncompleteRelease(FakeHelper):
+            def apply(self, *, plan, explicit_apply=False):
+                raise HelperClientError(text, reason="release-incomplete")
+
+        self.server.helper_client = IncompleteRelease()
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 502)
+        failure = json.loads(body)
+        self.assertEqual(failure["error"], text)
+        self.assertEqual(failure["state"]["observed_state"], "error")
+        self.assertEqual(self.repository.get_runtime_state().last_error, text)
+
     def test_state_changes_require_a_matching_bearer_token(self) -> None:
         self.assertFalse(self.server.is_authorized("Bearer anything"))
         token_server = ControlServer(

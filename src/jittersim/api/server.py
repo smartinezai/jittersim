@@ -5646,6 +5646,11 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             if rejected is not None:
                 return rejected
             LOGGER.error("network helper apply failed: %s", error)
+            # A household release that left a restriction in force carries the
+            # helper's own text, which names it and asks for a retry (review S1).
+            # Every other failure keeps the generic text, which hides internals.
+            failure = (str(error) if error.reason == "release-incomplete"
+                       else "network helper apply failed")
             if self.scheduler is not None:
                 self.scheduler.invalidate_applied_plan()
             if scope is not None:
@@ -5654,7 +5659,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             else:
                 accepted, state = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
                     observed_state="error", last_action=runtime_action, last_result="failure",
-                    last_error="network helper apply failed",
+                    last_error=failure,
                 ))
             if not accepted:
                 return self._apply_refused(halts_at_start, undo=True)
@@ -5663,7 +5668,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 "application/json",
                 _json_bytes(
                     {
-                        "error": "network helper apply failed",
+                        "error": failure,
                         "hint": (
                             "On the Pi, run sudo journalctl -u jittersim-helper.service "
                             "-n 80 --no-pager to see which network step failed and "
