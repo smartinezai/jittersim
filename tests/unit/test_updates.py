@@ -159,10 +159,8 @@ class UpdateTests(unittest.TestCase):
         def service_query(command, timeout):
             if command[:2] == ["systemctl", "show"]:
                 return "ActiveState=inactive\nMainPID=0\nControlPID=0\nTasksCurrent=0"
-            if query is None and command[:3] == ["ip", "-j", "link"]:
+            if query is None and command[:4] == ["tc", "-j", "qdisc", "show"]:
                 return "[]"
-            if query is None and command[:3] == ["tc", "filter", "show"]:
-                return ""
             return query(command, timeout) if query else self.wifi
 
         def identity(source, config, budget, **options):
@@ -372,18 +370,30 @@ class UpdateTests(unittest.TestCase):
         self.assertIn("RECOVERY_FORMAT = 2", self.manager.read_text())
         self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
 
-    def intake_system(self, *, fail=None):
-        """A Pi with the upload intake and ifb device of a newer release."""
-        state = {"ingress": True, "ifb": True, "removed_while_new_code": []}
+    def intake_system(self, *, fail=None, ingress=True, ifb=True):
+        """A Pi with the upload intake and ifb device of a newer release.
+
+        Answers pass the production answer limit, and a full filter dump of a
+        plan with 15 classes is larger than that limit.
+        """
+        state = {"ingress": ingress, "ifb": ifb, "removed_while_new_code": [], "queries": []}
+        test_interface = updates.runtime_interfaces(self.config)[1]
+
+        def bounded(answer):
+            if len(answer.encode()) > updates.MAX_COMMAND_ANSWER:
+                raise UpdateError("release command answer exceeds its allowance")
+            return answer
 
         def query(command, timeout):
-            if command[:3] == ["ip", "-j", "link", "show"][:3]:
-                links = [{"ifname": name} for name in updates.runtime_interfaces(self.config)]
-                return json.dumps(links + ([{"ifname": "jittersim-ifb"}] if state["ifb"] else []))
+            state["queries"].append(command)
+            if command[:4] == ["tc", "-j", "qdisc", "show"]:
+                return bounded(json.dumps(
+                    [{"kind": "ingress", "handle": "ffff:", "parent": "ffff:fff1"}]
+                    if state["ingress"] else []))
             if command[:3] == ["tc", "filter", "show"]:
-                return ("filter parent ffff: protocol ip pref 11 fw handle 0x1\n"
-                        "  action order 1: mirred (Egress Redirect to device jittersim-ifb) stolen\n"
-                        if state["ingress"] else "")
+                return bounded("filter parent ffff: protocol ip pref 11 fw handle 0x1 "
+                               "action order 1: mirred (Egress Redirect to device jittersim-ifb)\n"
+                               * 30 if state["ingress"] else "")
             return self.wifi
 
         def run(command, timeout):
@@ -395,7 +405,16 @@ class UpdateTests(unittest.TestCase):
             if command[:3] == ["ip", "link", "del"]:
                 state["ifb"] = False
                 state["removed_while_new_code"].append((self.code / "src").exists())
+
+        def link_present(name):
+            return name == test_interface or (name == "jittersim-ifb" and state["ifb"])
+
+        state["link_present"] = link_present
         return state, run, query
+
+    def apply_with_intake(self, state, run, query, health=lambda: True):
+        with patch.object(updates, "_link_present", state["link_present"]):
+            return self.apply(run, health, query)
 
     def test_a_requested_rollback_removes_the_upload_intake_before_restoring(self):
         self.stage()
@@ -403,9 +422,11 @@ class UpdateTests(unittest.TestCase):
         self.apply(lambda *args: None, lambda: True)
         request_update("", rollback=True, root=self.root, code=self.code, config=self.config, run=lambda *args: None)
         state, run, query = self.intake_system()
-        self.apply(run, lambda: True, query)
+        self.apply_with_intake(state, run, query)
         self.assertFalse(state["ingress"] or state["ifb"])
+        # The intake goes first, then the device, both before the older code returns.
         self.assertEqual(state["removed_while_new_code"], [True, True])
+        self.assertFalse(any(command[:3] == ["tc", "filter", "show"] for command in state["queries"]))
         self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
 
     def test_a_failed_update_removes_the_upload_intake_before_the_recovery_copy(self):
@@ -419,14 +440,42 @@ class UpdateTests(unittest.TestCase):
                 raise UpdateError("package install failed")
 
         with self.assertRaises(UpdateError):
-            self.apply(fail_package, lambda: True, query)
+            self.apply_with_intake(state, fail_package, query)
         self.assertFalse(state["ingress"] or state["ifb"])
         self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
 
-    def test_a_failed_intake_removal_still_removes_the_ifb_device_and_stops_the_rollback(self):
+    def test_a_cleanup_failure_is_reported_and_the_older_package_is_still_restored(self):
+        self.stage()
+        request_update("v1", root=self.root, code=self.code, config=self.config, run=lambda *args: None)
+        self.apply(lambda *args: None, lambda: True)
+        request_update("", rollback=True, root=self.root, code=self.code, config=self.config, run=lambda *args: None)
+        state, run, query = self.intake_system(fail="ingress")
+        messages = []
+        real_atomic_json = updates.atomic_json
+
+        def record(path, value, *args, **kwargs):
+            if isinstance(value, dict) and value.get("message"):
+                messages.append(value["message"])
+            return real_atomic_json(path, value, *args, **kwargs)
+
+        with patch.object(updates, "atomic_json", record):
+            self.apply_with_intake(state, run, query)
+        self.assertFalse((self.code / "src").exists(), "the older package was not restored")
+        self.assertFalse(state["ifb"])
+        self.assertTrue(any("upload intake could not be removed" in message for message in messages))
+        self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
+
+    def test_a_retry_removes_a_redirect_whose_device_is_already_gone(self):
+        # A first attempt removed the ifb device but not the intake. Its
+        # redirect no longer names the device. The retry still removes it.
+        state, run, query = self.intake_system(ifb=False)
+        updates.remove_upload_intake(self.config, run, query, link_present=state["link_present"])
+        self.assertFalse(state["ingress"])
+
+    def test_a_failed_intake_removal_still_removes_the_ifb_device_and_is_raised(self):
         state, run, query = self.intake_system(fail="ingress")
         with self.assertRaisesRegex(UpdateError, "simulated tc failure"):
-            updates.remove_upload_intake(self.config, run, query)
+            updates.remove_upload_intake(self.config, run, query, link_present=state["link_present"])
         self.assertFalse(state["ifb"])
         self.assertTrue(state["ingress"])
 
@@ -434,7 +483,7 @@ class UpdateTests(unittest.TestCase):
         commands = []
         updates.remove_upload_intake(
             self.config, lambda command, timeout: commands.append(command),
-            lambda command, timeout: "[]" if command[0] == "ip" else "")
+            lambda command, timeout: "[]", link_present=lambda name: name != "jittersim-ifb")
         self.assertEqual(commands, [])
 
     def test_failed_health_check_restores_the_previous_installation(self):
