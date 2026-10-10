@@ -15,7 +15,8 @@ MAX_RESULTS_PER_DEVICE = 50
 MAX_RESULTS_TOTAL = 500
 MAX_LABEL_LENGTH = 80
 MAX_JSON_BYTES = 16_384
-RESULT_STATUSES = frozenset(("complete", "finished-early", "changed"))
+# "fault" is a run that stopped after an error or could not read the counters most of the time.
+RESULT_STATUSES = frozenset(("complete", "finished-early", "changed", "fault"))
 REPORTED_FIELDS = ("download_mbit", "upload_mbit", "latency_ms", "jitter_ms")
 REPORTED_MAXIMUM = 100_000.0
 
@@ -173,19 +174,29 @@ class SpeedTestStore:
             values.append(_encoded(clean_reported(reported)))
         with self.repository._lock:
             if changes:
-                cursor = self.db.execute(
-                    f"UPDATE speed_test_results SET {', '.join(changes)} WHERE id = ?",
-                    (*values, identifier),
-                )
-                self.repository._commit()
+                try:
+                    cursor = self.db.execute(
+                        f"UPDATE speed_test_results SET {', '.join(changes)} WHERE id = ?",
+                        (*values, identifier),
+                    )
+                    self.repository._commit()
+                except sqlite3.Error as error:
+                    self.repository._rollback()
+                    raise StorageError("could not update the speed test result") from error
                 if cursor.rowcount == 0:
                     return None
             return self.get(identifier)
 
     def delete(self, identifier: int) -> bool:
         with self.repository._lock:
-            cursor = self.db.execute("DELETE FROM speed_test_results WHERE id = ?", (identifier,))
-            self.repository._commit()
+            try:
+                cursor = self.db.execute(
+                    "DELETE FROM speed_test_results WHERE id = ?", (identifier,)
+                )
+                self.repository._commit()
+            except sqlite3.Error as error:
+                self.repository._rollback()
+                raise StorageError("could not delete the speed test result") from error
         return cursor.rowcount > 0
 
 
