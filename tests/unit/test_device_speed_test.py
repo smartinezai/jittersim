@@ -1,6 +1,7 @@
 """Device speed test: the arithmetic, storage, the measurement window and its routes."""
 
 import csv
+import hashlib
 import http.client
 import io
 import json
@@ -17,9 +18,10 @@ from jittersim.api.server import WRITE_PATHS, ControlServer
 from jittersim.api.speed_tests import SPEED_TEST_READS, SPEED_TEST_WRITES, SpeedTestManager
 from jittersim.config import speed_tests as store_module
 from jittersim.config.exemptions import UnaffectedDevice
-from jittersim.config.models import Device, Impairment, Profile
+from jittersim.config.models import Device, Impairment, Profile, ServiceList
 from jittersim.config.speed_tests import SpeedTestStore, clean_label, clean_reported
-from jittersim.config.storage import ConfigRepository
+from jittersim.config.storage import ConfigRepository, StorageError
+from jittersim.engine.activity import Source, TargetState
 from jittersim.networking.helper import HelperClientError
 from jittersim.speed_test import (
     PROVIDERS,
@@ -139,6 +141,16 @@ class ProviderTests(unittest.TestCase):
                                  provider["id"])
             self.assertTrue(provider["url"].startswith("https://"))
 
+    def test_the_two_addresses_and_their_stored_qr_rows_are_pinned(self) -> None:
+        # A change to an address or to a stored code must be deliberate: update this with it.
+        self.assertEqual([provider["url"] for provider in PROVIDERS],
+                         ["https://speed.cloudflare.com/", "https://librespeed.org/"])
+        text = "\n".join(
+            f"{provider['id']} {provider['url']} {provider['qr_size']} "
+            f"{' '.join(provider['qr_rows'])}" for provider in PROVIDERS)
+        self.assertEqual(hashlib.sha256(text.encode()).hexdigest(),
+                         "26c47bc3ab978fe12d1d1f621ae74558504f2972a96793282b81221236066f98")
+
     def test_only_https_pages_with_a_public_engine_are_offered(self) -> None:
         self.assertEqual([provider["id"] for provider in PROVIDERS], ["cloudflare", "librespeed"])
 
@@ -256,6 +268,21 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(self.store.delete(saved["id"]))
         self.assertFalse(self.store.delete(saved["id"]))
 
+    def test_update_and_delete_roll_back_and_report_a_database_fault(self) -> None:
+        saved = self.store.save(self.row())
+        for call in (lambda: self.store.update(saved["id"], label="x"),
+                     lambda: self.store.delete(saved["id"])):
+            with mock.patch.object(self.store, "db") as database, \
+                    mock.patch.object(self.repository, "_rollback") as rollback:
+                database.execute.side_effect = sqlite3.OperationalError("database is locked")
+                with self.assertRaises(StorageError):
+                    call()
+                rollback.assert_called_once()
+        self.assertEqual(self.store.get(saved["id"])["label"], "")
+
+    def test_a_fault_is_a_saved_status(self) -> None:
+        self.assertEqual(self.store.save(self.row(status="fault"))["status"], "fault")
+
     def test_label_and_reported_validation(self) -> None:
         self.assertEqual(clean_label(None), "")
         for bad in ("x" * 81, 5, "a\x00b"):
@@ -293,9 +320,21 @@ class CountingHelper(FakeHelper):
         self.queue_id = queue_id
         self.generation = "0a1b2c3d-1"
         self.fail = False
+        self.snapshot_fail = False
+        self.association = True
+        self.on_wifi = [PHONE, OTHER]
+        self.addresses = {PHONE: "192.168.50.10", OTHER: "192.168.50.77"}
+        self.queue_reads = 0
+        self.fail_next = 0
+        self.on_read = None
 
     def queue_stats(self):
-        if self.fail:
+        self.queue_reads += 1
+        if self.on_read is not None:
+            hook, self.on_read = self.on_read, None
+            hook()
+        if self.fail or self.fail_next > 0:
+            self.fail_next = max(0, self.fail_next - 1)
             raise HelperClientError("helper is busy", reason="helper-busy")
         seconds = self.clock[0] - 100
         return [
@@ -305,7 +344,33 @@ class CountingHelper(FakeHelper):
         ]
 
     def connected_devices(self):
-        return [{"mac_address": OTHER, "ipv4_address": "192.168.50.77"}]
+        return [
+            {"mac_address": mac, "ipv4_address": self.addresses[mac], "state": "connected",
+             "association_verified": self.association}
+            for mac in self.on_wifi
+        ]
+
+    def connected_device_snapshot(self):
+        if self.snapshot_fail:
+            raise HelperClientError("helper is busy", reason="helper-busy")
+        return {"devices": self.connected_devices(),
+                "association_status_available": self.association}
+
+
+class FakeScheduler:
+    """Answers the applied snapshot like the runtime scheduler does."""
+
+    def __init__(self):
+        self.states = {}
+
+    def set_source(self, key, kind, profile, label=""):
+        self.states[key] = TargetState(name=key, source=Source(kind, kind, label, "", profile))
+
+    def applied_snapshot(self):
+        return None, dict(self.states)
+
+    def begin_shutdown(self):
+        pass
 
 
 class QuietProber:
@@ -326,7 +391,9 @@ class QuietProber:
         pass
 
 
-class ManagerTests(unittest.TestCase):
+class ManagerBase(unittest.TestCase):
+    """A manager with a fake helper, scheduler and clock. Holds no tests of its own."""
+
     def setUp(self) -> None:
         self.clock = [100.0]
         self.repository = ConfigRepository(":memory:")
@@ -348,7 +415,14 @@ class ManagerTests(unittest.TestCase):
             return QuietProber(target)
 
         self.server.speed_test_prober_factory = prober
-        self.manager = SpeedTestManager(self.server, autostart=False, clock=lambda: self.clock[0])
+        self.scheduler = FakeScheduler()
+        self.scheduler.set_source("lab", "profile", "Slow")
+        self.server.scheduler = self.scheduler
+        self.sleeps = []
+        # One test clock for both: wall time dates the rows, the monotonic clock times the window.
+        self.manager = SpeedTestManager(
+            self.server, autostart=False, clock=lambda: self.clock[0],
+            monotonic=lambda: self.clock[0], sleep=self.sleeps.append)
         self.server._speed_test_manager = self.manager
 
     def write(self, path, payload):
@@ -359,11 +433,16 @@ class ManagerTests(unittest.TestCase):
         status, content_type, body = self.server.response_for(path, query=query)
         return status, content_type, body
 
+    def start_short(self, mac=PHONE):
+        return self.write("/api/speed-tests/start", {"mac_address": mac, "duration_seconds": 15})
+
     def run_seconds(self, run_id, seconds):
         for _ in range(seconds):
             self.clock[0] += 1
             self.manager.tick(run_id)
 
+
+class ManagerTests(ManagerBase):
     def test_a_full_window_measures_the_device_queues_and_saves_the_result(self) -> None:
         status, run = self.write("/api/speed-tests/start",
                                  {"mac_address": PHONE.upper(), "duration_seconds": 15,
@@ -552,6 +631,265 @@ class ManagerTests(unittest.TestCase):
                          (200, {"deleted": True}))
 
 
+class StartChecksTests(ManagerBase):
+    """Reading the helper before a run starts, and what the run records."""
+
+    def test_a_busy_helper_is_retried_before_the_start_is_refused(self) -> None:
+        self.helper.fail_next = 2
+        status, run = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+        self.assertEqual((status, run["source"]), (201, "device"))
+        self.assertEqual(self.sleeps, [0.25, 0.25])
+
+    def test_a_helper_that_stays_busy_gives_a_retryable_refusal_not_a_blind_run(self) -> None:
+        self.helper.fail = True
+        status, body = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+        self.assertEqual(status, 503)
+        self.assertIn("Try again", body["error"])
+        self.assertEqual(self.helper.queue_reads, 3)
+        self.assertEqual(self.manager.active(), [])
+        self.helper.fail = False
+        self.assertEqual(self.write("/api/speed-tests/start", {"mac_address": PHONE})[0], 201)
+
+    def test_none_is_only_for_a_good_read_with_no_queue(self) -> None:
+        _, run = self.write("/api/speed-tests/start", {"mac_address": OTHER})
+        self.assertEqual(run["source"], "none")
+        self.assertEqual(self.helper.queue_reads, 1)
+
+    def test_most_reads_failing_ends_the_run_as_a_fault_with_a_reason(self) -> None:
+        _, run = self.start_short()
+        self.helper.fail = True
+        self.run_seconds(run["id"], 15)
+        ended = self.manager.status(run["id"])
+        self.assertEqual(ended["state"], "ended")
+        self.assertIn("could not read", ended["ended_reason"])
+        self.assertEqual(ended["result"]["status"], "fault")
+        self.assertEqual(ended["result"]["summary"]["read_failures"], 15)
+        self.assertEqual(ended["result"]["summary"]["ended_reason"], ended["ended_reason"])
+
+    def test_a_few_failed_reads_are_counted_but_the_run_still_completes(self) -> None:
+        _, run = self.start_short()
+        self.helper.fail = True
+        self.run_seconds(run["id"], 3)
+        self.helper.fail = False
+        self.run_seconds(run["id"], 12)
+        result = self.manager.status(run["id"])["result"]
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["summary"]["read_failures"], 3)
+
+    def test_the_saved_profile_is_the_one_the_scheduler_applied(self) -> None:
+        self.repository.save_profile(Profile(id="night", name="Night"))
+        self.scheduler.set_source("lab", "schedule", "Night", label="Weeknights")
+        _, run = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+        profile = self.manager.runs[run["id"]].profile
+        self.assertEqual((profile["profile_name"], profile["profile_id"]), ("Night", "night"))
+        self.assertEqual((profile["applied_by"], profile["applied_by_label"]),
+                         ("schedule", "Weeknights"))
+
+    def test_a_progression_has_no_single_profile_name(self) -> None:
+        self.scheduler.set_source("lab", "progression", "", label="from Slow to Night")
+        _, run = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+        profile = self.manager.runs[run["id"]].profile
+        self.assertIsNone(profile["profile_id"])
+        self.assertIn("Progression", profile["profile_name"])
+        self.assertEqual(profile["applied_by"], "progression")
+
+    def test_an_unconfirmed_source_is_not_shown_as_the_saved_assignment(self) -> None:
+        self.scheduler.states.clear()
+        _, run = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+        profile = self.manager.runs[run["id"]].profile
+        self.assertTrue(profile["profile_name"].startswith("Unknown"))
+        self.assertIsNone(profile["profile_id"])
+        self.assertIsNone(profile["saved"])
+        self.server.scheduler = None
+        self.manager.runs.clear()
+        _, again = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+        self.assertTrue(self.manager.runs[again["id"]].profile["profile_name"].startswith("Unknown"))
+
+    def test_the_device_must_be_connected_and_its_current_address_is_pinged(self) -> None:
+        self.helper.addresses[PHONE] = "192.168.50.99"
+        self.assertEqual(self.write("/api/speed-tests/start", {"mac_address": PHONE})[0], 201)
+        self.assertEqual(self.targets, ["192.168.50.99"])
+        self.helper.on_wifi = [OTHER]
+        status, body = self.write("/api/speed-tests/start", {"mac_address": "02:00:00:00:00:09"})
+        self.assertEqual(status, 409)
+        self.assertIn("not connected", body["error"])
+        self.manager.runs.clear()
+        status, body = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+        self.assertEqual(status, 409, "a saved device that left the Wi-Fi is not tested either")
+
+    def test_an_unknown_connection_status_is_refused_as_something_to_retry(self) -> None:
+        self.helper.association = False
+        status, body = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+        self.assertEqual(status, 503)
+        self.assertIn("unknown", body["error"])
+        self.helper.association = True
+        self.helper.snapshot_fail = True
+        self.assertEqual(self.write("/api/speed-tests/start", {"mac_address": PHONE})[0], 503)
+        self.server.helper_client = None
+        status, body = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+        self.assertEqual(status, 503)
+        self.assertIn("helper is not connected", body["error"])
+
+    def test_the_helper_is_read_outside_the_lock_and_the_limits_are_checked_again(self) -> None:
+        owned = []
+        raced = []
+
+        def during_the_read():
+            owned.append(self.manager.lock._is_owned())
+            raced.append(self.manager.start({"mac_address": PHONE}))
+
+        self.helper.on_read = during_the_read
+        status, body = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+        self.assertEqual(owned, [False])
+        self.assertEqual(len(raced), 1)
+        self.assertEqual(status, 409)
+        self.assertIn("already running", body["error"])
+        self.assertEqual(len(self.manager.active()), 1)
+
+    def test_a_service_list_withholds_the_cap_conclusion(self) -> None:
+        self.repository.save_service_list(
+            ServiceList(id="streaming", name="Streaming", profile_id="slow",
+                        services=("netflix",)))
+        _, run = self.start_short()
+        self.assertIn("service rule", run["source_note"])
+        self.assertIn("ordinary queue only", run["source_note"])
+        self.run_seconds(run["id"], 15)
+        result = self.manager.status(run["id"])["result"]
+        self.assertTrue(result["summary"]["service_rules"])
+        self.assertEqual(result["summary"]["download"]["verdict"], "service-rules")
+        self.assertEqual(result["summary"]["upload"]["verdict"], "no-cap")
+        self.assertEqual(result["summary"]["download"]["busy_average_kbit"], 250.0)
+        comparison = compare_results(result, result)
+        self.assertEqual(comparison["verdicts"]["download"]["result"], "service-rules")
+        self.assertTrue(any("service rules" in warning for warning in comparison["warnings"]))
+
+    def test_a_shared_queue_says_the_ping_does_not_pass_it(self) -> None:
+        self.helper.queue_id = "general-profile"
+        _, run = self.write("/api/speed-tests/start", {"mac_address": OTHER})
+        self.assertIn("does not include the profile's delay", run["source_note"])
+        _, finished = self.write("/api/speed-tests/finish", {"run_id": run["id"]})
+        latency = finished["result"]["summary"]["latency"]
+        self.assertFalse(latency["shaped"])
+        self.assertIn("does not include", latency["note"])
+        self.helper.queue_id = "lab"
+        own = self.write("/api/speed-tests/start", {"mac_address": PHONE})[1]
+        finished = self.write("/api/speed-tests/finish", {"run_id": own["id"]})[1]
+        self.assertTrue(finished["result"]["summary"]["latency"]["shaped"])
+
+
+class EndingTests(ManagerBase):
+    """How a window ends: protection, faults, the clocks and shutdown."""
+
+    def test_finish_and_cancel_do_not_save_a_device_that_became_protected(self) -> None:
+        _, first = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+        self.run_seconds(first["id"], 5)
+        self.repository.save_unaffected_device(UnaffectedDevice(PHONE, "Phone", 2))
+        status, finished = self.write("/api/speed-tests/finish", {"run_id": first["id"]})
+        self.assertEqual((status, finished["result"]), (200, None))
+        self.assertEqual(finished["state"], "ended")
+        self.assertIn("Protected", finished["ended_reason"])
+        self.assertEqual(SpeedTestStore(self.repository).list(), [])
+
+    def test_the_protection_check_in_the_end_covers_a_run_that_ends_by_itself(self) -> None:
+        _, run = self.start_short()
+        self.run_seconds(run["id"], 14)
+        self.repository.save_unaffected_device(UnaffectedDevice(PHONE, "Phone", 2))
+        with mock.patch.object(self.manager, "_protected", side_effect=[False, True]):
+            self.run_seconds(run["id"], 1)
+        self.assertIsNone(self.manager.status(run["id"])["result"])
+        self.assertEqual(SpeedTestStore(self.repository).list(), [])
+
+    def test_the_deadline_and_the_rates_follow_the_monotonic_clock(self) -> None:
+        wall, mono = [1_000_000.0], [100.0]
+        helper = CountingHelper(mono)
+        self.server.helper_client = helper
+        manager = SpeedTestManager(self.server, autostart=False, clock=lambda: wall[0],
+                                   monotonic=lambda: mono[0], sleep=lambda seconds: None)
+        run = manager.start({"mac_address": PHONE, "duration_seconds": 15})
+        for _ in range(5):
+            mono[0] += 1
+            wall[0] += 1
+            manager.tick(run["id"])
+        wall[0] -= 7200  # somebody sets the clock back two hours
+        self.assertEqual(manager.status(run["id"])["seconds_left"], 10)
+        for _ in range(10):
+            mono[0] += 1
+            wall[0] += 1
+            manager.tick(run["id"])
+        ended = manager.status(run["id"])
+        self.assertEqual(ended["state"], "ended")
+        result = ended["result"]
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["started_at"], 1_000_000)
+        self.assertEqual(result["summary"]["download"]["busy_average_kbit"], 250.0)
+        self.assertEqual(result["summary"]["seconds"], 15.0)
+
+    def test_a_sampler_fault_is_logged_and_saved_as_a_fault_not_as_changed(self) -> None:
+        class Failing(QuietProber):
+            def send(self):
+                raise RuntimeError("socket gone")
+
+        self.server.speed_test_prober_factory = Failing
+        _, run = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+        with self.assertLogs(routes.LOGGER, "ERROR") as logs:
+            self.manager._loop(self.manager.runs[run["id"]])
+        self.assertIn("sampler failed", logs.output[0])
+        ended = self.manager.status(run["id"])
+        self.assertEqual(ended["result"]["status"], "fault")
+        self.assertIn("error", ended["ended_reason"])
+        warnings = compare_results(ended["result"], ended["result"])["warnings"]
+        self.assertTrue(any("fault" in warning for warning in warnings))
+        self.assertFalse(any("profile changed" in warning for warning in warnings))
+
+    def test_shutdown_stops_windows_without_saving_and_joins_the_threads(self) -> None:
+        manager = SpeedTestManager(self.server, clock=lambda: self.clock[0],
+                                   monotonic=lambda: self.clock[0],
+                                   sleep=lambda seconds: threading.Event().wait(0.01))
+        run = manager.start({"mac_address": PHONE, "duration_seconds": 15})
+        thread = manager.runs[run["id"]].thread
+        self.assertTrue(thread.is_alive())
+        manager.shutdown(timeout=5)
+        self.assertFalse(thread.is_alive())
+        ended = manager.status(run["id"])
+        self.assertEqual((ended["state"], ended["result"]), ("ended", None))
+        self.assertIn("stopped", ended["ended_reason"])
+        self.assertEqual(SpeedTestStore(self.repository).list(), [])
+        with self.assertRaises(routes.SpeedTestRequestError) as refused:
+            manager.start({"mac_address": PHONE})
+        self.assertEqual(refused.exception.status, 503)
+
+    def test_closing_the_server_stops_the_speed_tests_first(self) -> None:
+        with mock.patch.object(self.manager, "shutdown") as stop:
+            self.server.server_close()
+        stop.assert_called_once()
+
+    def test_ids_in_the_query_and_the_body_never_cause_a_server_error(self) -> None:
+        for query in ("baseline=%C2%B2&result=1", "baseline=%D9%A1&result=1",
+                      "baseline=9223372036854775808&result=1", "baseline=1&result=" + "9" * 40):
+            self.assertEqual(self.read("/api/speed-tests/compare", query)[0], 400, query)
+        self.assertEqual(self.read("/api/speed-tests/compare", "baseline=1&result=1")[0], 404)
+        self.assertEqual(
+            self.read("/api/speed-tests/compare", "baseline=9223372036854775807&result=1")[0], 404)
+        for path in ("/api/speed-tests/update", "/api/speed-tests/delete"):
+            for identifier in (2**63, 10**30):
+                body = {"result_id": identifier}
+                if path.endswith("update"):
+                    body["label"] = "x"
+                self.assertEqual(self.write(path, body)[0], 400, (path, identifier))
+        self.assertEqual(self.write("/api/speed-tests/delete", {"result_id": 2**63 - 1})[0], 404)
+
+    def test_a_storage_fault_on_update_or_delete_is_a_clean_error(self) -> None:
+        _, run = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+        self.run_seconds(run["id"], 5)
+        result = self.write("/api/speed-tests/finish", {"run_id": run["id"]})[1]["result"]
+        with mock.patch.object(SpeedTestStore, "update", side_effect=StorageError("locked")), \
+                self.assertLogs(routes.LOGGER, "ERROR"):
+            status, body = self.write("/api/speed-tests/update",
+                                      {"result_id": result["id"], "label": "x"})
+        self.assertEqual(status, 500)
+        self.assertIn("could not be saved", body["error"])
+
+
 class RouteTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repository = ConfigRepository(":memory:")
@@ -589,8 +927,10 @@ class RouteTests(unittest.TestCase):
             self.server.shutdown()
             thread.join(timeout=5)
 
-    def test_the_default_manager_is_made_once(self) -> None:
+    def test_the_default_manager_is_made_once_by_the_server(self) -> None:
         manager = routes.speed_test_manager(self.server)
+        self.assertIsInstance(manager, SpeedTestManager)
+        self.assertIs(manager, self.server._speed_test_manager)
         self.assertIs(manager, routes.speed_test_manager(self.server))
 
 
