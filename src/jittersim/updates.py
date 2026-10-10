@@ -997,6 +997,14 @@ PANIC_APPROVED_SOURCES = ({
     "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
     "src/jittersim/networking/helper.py": "252ccaffac176fc0f97dad552d28edb9d8119f291958d8a45876c6b3ca1be166",
     "src/jittersim/networking/access.py": "ddc801a896afa2b977c12662bdb34388680502350b8b5b16099cbc3978725ddd",
+}, {
+    # See docs/review-results-gated-panic-batch-2026-10-10.json. The combined batch: restart latch,
+    # Panic release of the household rules, protected-device emergency check, the Panic slot
+    # reservation and the total Panic deadline. networking/dashboard_access.py and
+    # networking/deadlines.py are pinned by tests/unit/test_dashboard_access_pin.py.
+    "src/jittersim/panic_guard.py": "041cf171875d7b85d1c0664c2acff262542a3ac3c2b2e8fe51f80d2d59d6d639",
+    "src/jittersim/networking/helper.py": "a765dc97cce4015e0d1189cf92373395e5ca88c9be19b2e25c000e0975c7314b",
+    "src/jittersim/networking/access.py": "41a0f6f96cf2a20616d7ac613dd95acf2cd31085a13018ce14667dea2e11e1f3",
 },)
 
 
