@@ -645,7 +645,7 @@ def _query_mac(query: Dict[str, List[str]]) -> Optional[str]:
 def _query_id(query: Dict[str, List[str]], name: str) -> int:
     value = query.get(name, [""])[0]
     # Only plain ASCII digits: other scripts pass isdigit() but cannot be read as a number.
-    if not (value.isascii() and value.isdigit()) or int(value) > MAX_ID:
+    if not (value.isascii() and value.isdigit()) or len(value) > 19 or int(value) > MAX_ID:
         raise SpeedTestRequestError(f"{name} must be a result number")
     return int(value)
 

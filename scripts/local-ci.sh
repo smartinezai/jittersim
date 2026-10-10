@@ -64,6 +64,7 @@ PI_BROWSER_MODULES=(
   ad_blocking
   group_devices
   impact_check
+  device_speed_test
   sidebar_status
   apply_clarity
   router_copy

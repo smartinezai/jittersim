@@ -879,7 +879,7 @@ Limits:
   result with the tester's IP address.
 
 The design and the open decisions are in
-[docs/implementation-plan-device-speed-test-2026-10-09.md](docs/implementation-plan-device-speed-test-2026-10-09.md).
+[implementation-plan-device-speed-test-2026-10-09.md](implementation-plan-device-speed-test-2026-10-09.md).
 
 ## Network layout
 

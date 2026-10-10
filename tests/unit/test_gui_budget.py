@@ -16,7 +16,8 @@ from tests.browser import gui_stats
 
 # The only addresses outside the Pi that the page may name. Both are plain links the person
 # clicks, never requests the page makes by itself (the page's policy blocks those at runtime).
-ALLOWED_OFF_ORIGIN_URLS = {"http://192.168.0.1", "https://duckduckgo.com/?q="}
+# The w3.org address is the SVG namespace name that the speed test QR code needs. It is never fetched.
+ALLOWED_OFF_ORIGIN_URLS = {"http://192.168.0.1", "https://duckduckgo.com/?q=", "http://www.w3.org/2000/svg"}
 
 
 def test_the_dashboard_stays_within_its_committed_static_budget():
