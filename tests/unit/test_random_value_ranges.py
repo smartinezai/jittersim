@@ -168,7 +168,10 @@ def test_custom_range_plan_round_trip_and_whole_commands():
     )
     assert plan_from_payload(plan_to_payload(plan)) == plan
     arguments = _format_impairment_arguments(plan.queues[0])
-    assert "6%" in arguments and "1%" in arguments and "2%" in arguments
+    # Upload queues on the uplink keep loss but never corrupt, duplicate or
+    # reorder (corruption runs on the ifb device, see the upstream safety tests).
+    assert "1%" in arguments and arguments[arguments.index("corrupt") + 1] == "0%"
+    assert "duplicate" not in arguments and "reorder" not in arguments
     assert _clean_queue_impairment(asdict(profile.upload))["corrupt_percent"] == 6
     bad = asdict(profile.upload)
     bad["corrupt_percent"] = float("nan")

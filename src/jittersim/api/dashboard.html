@@ -460,6 +460,7 @@
             <label><span class="field-label">Duplicate (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload duplicate help" data-help="The chance that a packet is delivered twice. Real networks do this occasionally and some apps handle it badly.">?</span></span> <input id="upload-duplicate" type="number" min="0" max="100" value="0" step="1"></label>
             <label><span class="field-label">Corrupt (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload corrupt help" data-help="The chance that a packet arrives with one damaged bit. Most devices spot the damage and throw the packet away so it behaves much like loss.">?</span></span> <input id="upload-corrupt" type="number" min="0" max="100" value="0" step="1"></label>
           </div>
+          <p class="form-note" id="upload-upstream-note" role="status" hidden>Upload duplication and reordering are not applied: those packets would reach the household router. Upload corruption is applied before the Pi forwards, so the router only receives well-formed packets. Download settings apply in full.</p>
           <div class="randomness-fields">
             <div class="randomness-field" id="upload-delay-random-card">
               <div class="randomness-title">Delay <span class="help-icon" tabindex="0" role="img" aria-label="Delay randomness help" data-help="Relative variation changes the base delay up or down. Chance active controls whether delay is active for the interval.">?</span></div>
