@@ -240,6 +240,8 @@ def test_a_dirty_tree_is_refused_unless_allowed(scratch_repository):
     assert "DIRTY (allowed with --allow-dirty)" in allowed.stdout
 
 
+@pytest.mark.skipif(shutil.which("npm") is None,
+                    reason="the plan for `all` includes the Homepage job, which needs npm (the Pi release image has none)")
 def test_a_dry_run_writes_nothing(scratch_repository):
     repository, _git = scratch_repository
     script = repository / "scripts" / "local-ci.sh"
