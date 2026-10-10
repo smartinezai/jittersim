@@ -91,7 +91,9 @@ WRITE_LOCK_WAIT_SECONDS = 3.0
 # and waits longer there than any other request, because an access change can
 # hold it for several seconds. The wait is set below so that the work after it
 # keeps PANIC_POST_LOCK_SECONDS of the deadline (review O-a). A longer hold makes
-# the answer helper-busy, which the client retries for NORMAL_ACCESS_BUSY_RETRY_SECONDS.
+# the answer helper-busy only after that whole wait. The client's retry window
+# (NORMAL_ACCESS_BUSY_RETRY_SECONDS) is longer than the wait, so such a refusal is
+# asked again at least once (review S2).
 # One Panic request has one deadline, this long after the helper takes it. Every
 # wait (network lock, Panic stop lock, ad pause, release lock, ad transition) and
 # every command uses only what is left of it. A step that opens the network or
@@ -110,11 +112,14 @@ PANIC_ANSWER_SECONDS = 26.0
 # keep the operation lock from Apply and Reset for longer than those wait for it.
 GATEWAY_STATUS_LOCK_WAIT_SECONDS = 1.0
 # A Panic client (dashboard or `jittersim normal-access`) asks a busy helper
-# again for NORMAL_ACCESS_BUSY_RETRY_SECONDS, once every
-# NORMAL_ACCESS_BUSY_RETRY_INTERVAL seconds. Normal access is idempotent and a busy
-# answer changed nothing. Every attempt starts with at least PANIC_ANSWER_SECONDS
-# left, so the helper always answers before the client gives up.
-NORMAL_ACCESS_BUSY_RETRY_SECONDS = 5.0
+# again while an attempt can still start within NORMAL_ACCESS_BUSY_RETRY_SECONDS of
+# the first one, waiting NORMAL_ACCESS_BUSY_RETRY_INTERVAL seconds in between.
+# Normal access is idempotent and a busy answer changed nothing. The window is two
+# seconds longer than the network lock wait, so a refusal that came only after the
+# whole wait (an access change or a DNS restart holding the lock for about 8 s) is
+# still retried once (review S2). Every attempt starts with at least
+# PANIC_ANSWER_SECONDS left, so the helper always answers before the client gives up.
+NORMAL_ACCESS_BUSY_RETRY_SECONDS = PANIC_NETWORK_LOCK_WAIT_SECONDS + 2.0
 NORMAL_ACCESS_TIMEOUT_SECONDS = PANIC_ANSWER_SECONDS + NORMAL_ACCESS_BUSY_RETRY_SECONDS + 1.0
 # Panic and Reset wait this long for the ad-blocking settings lock before they
 # report that the ad-blocking bypass could not be confirmed. An ad-blocking change
