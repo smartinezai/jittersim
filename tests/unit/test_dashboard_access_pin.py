@@ -13,9 +13,12 @@ from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[2] / "src/jittersim"
 
-# Reviewed in review-protected-dashboard-access-2026-10-09 (approve-with-conditions, R4).
+# Reviewed in review-protected-dashboard-access-2026-10-09 (approve-with-conditions, R4)
+# and again in the combined gated batch review of 2026-10-10 (dashboard_access.py after the
+# grant-cleanup fix and deadlines.py, the one Panic deadline used by every wait).
 PINNED_DASHBOARD_ACCESS_MODULES = {
-    "networking/dashboard_access.py": "d0cb7e30a305e222efe7c95af603da052783f57a6c65ca47b3a8b72d310007bf",
+    "networking/dashboard_access.py": "b1498ec9dc680bb0b3c59820668036be8485a36504424e05f4de755b91f51da6",
+    "networking/deadlines.py": "a1a5082e67fbdd176aebd2be6859b0f8192003a1bb3dca77686087e70fba7e02",
 }
 
 
