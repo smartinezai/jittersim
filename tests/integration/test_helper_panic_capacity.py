@@ -81,9 +81,21 @@ def test_one_operation_slot_stays_for_panic_when_all_others_are_busy(helper_dir,
     monkeypatch.setattr(HelperService, "handle_payload", held)
     with served_helper(helper_dir) as (service, client, server):
         running_experiment(service)
-        workers = [threading.Thread(target=lambda: HelperClient(
-            socket_path=helper_dir / "helper.sock", timeout_seconds=15).ping(), daemon=True)
-            for _ in range(MAX_HELPER_CONNECTIONS)]
+        def held_ping():
+            # The helper's listen backlog is small: a refused connect never reached
+            # it, so repeat it rather than lose one of the eight held pings.
+            deadline = time.monotonic() + 20
+            while True:
+                try:
+                    HelperClient(socket_path=helper_dir / "helper.sock", timeout_seconds=15).ping()
+                    return
+                except HelperClientError:
+                    if release.is_set() or time.monotonic() > deadline:
+                        return
+                    time.sleep(0.02)
+
+        workers = [threading.Thread(target=held_ping, daemon=True)
+                   for _ in range(MAX_HELPER_CONNECTIONS)]
         for worker in workers:
             worker.start()
         try:

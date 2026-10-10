@@ -22,6 +22,7 @@ from jittersim.api import server as server_module
 from jittersim.api.server import ControlRequestHandler, ControlServer
 from jittersim.config.storage import ConfigRepository
 from jittersim.networking import helper as helper_module
+from jittersim.networking import adblocking as adblocking_module
 from jittersim.networking import executor as executor_module
 from jittersim.networking.access import AccessManager
 from jittersim.networking.adblocking import AdRouting
@@ -128,6 +129,8 @@ class SlowAdStore:
         try:
             yield
         finally:
+            # Like AdStore: the end waits at least TRANSITION_END_WAIT_SECONDS (review O-c).
+            wait = max(wait, adblocking_module.TRANSITION_END_WAIT_SECONDS)
             self.waits.append(("transition end", wait))
             self.clock.now += wait
             self.routing.clear()
@@ -201,6 +204,25 @@ def test_without_contention_panic_keeps_the_usual_waits(tmp_path, clock, monkeyp
     assert service._network_lock.waits[0] == helper_module.PANIC_NETWORK_LOCK_WAIT_SECONDS
 
 
+def test_a_full_network_lock_wait_leaves_real_time_for_the_release(tmp_path, clock, monkeypatch):
+    # Review O-a: the deadline starts before the network lock wait. A wait for the
+    # lock's whole allowance must still leave the work after it more than the floors.
+    service, _ = slow_panic_service(tmp_path, clock, monkeypatch, time_out=False)
+    instant = SlowCommands(clock, time_out=False)
+    instant.clock = type("Frozen", (), {"now": 0.0})()  # commands take no time here
+    monkeypatch.setattr(executor_module.subprocess, "run", instant)
+    service.handle_payload({"action": "normal-access"})
+    assert service._network_lock.waits == [helper_module.PANIC_NETWORK_LOCK_WAIT_SECONDS]
+    after_lock = helper_module.PANIC_DEADLINE_SECONDS - helper_module.PANIC_NETWORK_LOCK_WAIT_SECONDS
+    assert after_lock >= helper_module.PANIC_POST_LOCK_SECONDS >= 6.0
+    # The first Panic stop save may use its whole wait. The household release lock
+    # still gets what is left of the post-lock time, not the 0.5 s floor.
+    (release_wait,) = service._access_manager.lock.waits
+    assert release_wait >= (helper_module.PANIC_POST_LOCK_SECONDS
+                            - panic_guard_module.GUARD_LOCK_WAIT_SECONDS)
+    assert release_wait > helper_module.PANIC_STEP_FLOOR_SECONDS
+
+
 def test_the_client_never_starts_an_attempt_the_helper_cannot_finish(clock):
     attempts = []
 
@@ -268,3 +290,42 @@ def test_the_browser_waits_longer_than_the_dashboard_needs_for_panic():
     assert server_bound + server_module.PANIC_DATABASE_ALLOWANCE_SECONDS <= browser
     assert (helper_module.PANIC_ANSWER_SECONDS + helper_module.NORMAL_ACCESS_BUSY_RETRY_SECONDS + 1
             <= helper_module.NORMAL_ACCESS_TIMEOUT_SECONDS)
+
+
+def test_panic_bookkeeping_waits_fit_the_database_allowance():
+    # N3: each repository step of Panic waits a bounded time for a backup to end,
+    # and the steps together stay inside the allowance that the browser timeout has.
+    from jittersim.api import access as access_module
+
+    worst = (access_module.PANIC_REPOSITORY_WAIT_SECONDS * access_module.PANIC_REPOSITORY_STEPS
+             + access_module.PANIC_RESULT_WAIT_SECONDS)
+    assert worst <= server_module.PANIC_DATABASE_ALLOWANCE_SECONDS
+    assert server_module.EMERGENCY_REPOSITORY_WAIT_SECONDS < server_module.EMERGENCY_CHECK_BUDGET_SECONDS
+
+
+def test_a_held_repository_lock_is_waited_for_only_boundedly(tmp_path):
+    from jittersim.config.storage import RepositoryBusy
+
+    repository = ConfigRepository(tmp_path / "config.db")
+    held, stop = threading.Event(), threading.Event()
+
+    def backup():
+        with repository._lock:
+            held.set()
+            stop.wait(10)
+
+    thread = threading.Thread(target=backup)
+    thread.start()
+    try:
+        assert held.wait(5)
+        started = time.monotonic()
+        with pytest.raises(RepositoryBusy):
+            with repository.locked_within(0.2):
+                pass
+        assert time.monotonic() - started < 2
+    finally:
+        stop.set()
+        thread.join(5)
+    with repository.locked_within(0.2):
+        assert repository.get_runtime_state() is not None
+    repository.close()

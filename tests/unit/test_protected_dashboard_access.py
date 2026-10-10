@@ -170,6 +170,48 @@ def make_service(tmp_path):
     return HelperService(applier, access_store=store), store, applier
 
 
+def test_a_claimed_grant_is_removed_only_by_its_own_claim(tmp_path):
+    service, store, _ = make_service(tmp_path)
+    sync(service, protected(MAC))
+    claim = "c" * 32
+    created = status(service, "register-self", claim_id=claim)
+    assert created["ok"] and created["claimed"] is True
+    wrong = status(service, "remove-claimed", mac_address=MAC, claim_id="d" * 32)
+    assert wrong["ok"] and wrong["removed"] is False
+    assert [item["mac_address"] for item in store.saved_devices()] == [MAC]
+    right = status(service, "remove-claimed", mac_address=MAC, claim_id=claim)
+    assert right["ok"] and right["removed"] is True
+    assert store.saved_devices() == []
+
+
+def test_an_existing_or_adopted_grant_is_never_removed_by_a_claim(tmp_path):
+    service, store, _ = make_service(tmp_path)
+    sync(service, protected(MAC))
+    store.add(MAC, "Manual")
+    existing = status(service, "register-self", claim_id="c" * 32)
+    assert existing["ok"] and existing["claimed"] is False
+    assert status(service, "remove-claimed", mac_address=MAC, claim_id="c" * 32)["removed"] is False
+    store.remove(MAC)
+    assert status(service, "register-self", claim_id="e" * 32)["claimed"] is True
+    # A second registration of the same device adopts the grant as its own.
+    assert status(service, "register-self")["ok"]
+    assert status(service, "remove-claimed", mac_address=MAC, claim_id="e" * 32)["removed"] is False
+    assert [item["mac_address"] for item in store.saved_devices()] == [MAC]
+
+
+def test_a_claim_is_forgotten_by_a_restarted_helper_and_never_widens_removal(tmp_path):
+    service, store, applier = make_service(tmp_path)
+    sync(service, protected(MAC))
+    assert status(service, "register-self", claim_id="c" * 32)["claimed"] is True
+    restarted = HelperService(applier, access_store=AccessStore(store.path))
+    sync(restarted, protected(MAC))
+    result = status(restarted, "remove-claimed", mac_address=MAC, claim_id="c" * 32)
+    assert result["ok"] and result["removed"] is False
+    assert [item["mac_address"] for item in store.saved_devices()] == [MAC]
+    bad = status(service, "remove-claimed", mac_address=MAC, claim_id="not-a-claim")
+    assert bad["ok"] is False
+
+
 def test_a_protected_device_is_allowed_and_told_why(tmp_path):
     service, _, _ = make_service(tmp_path)
     before = status(service)
@@ -239,6 +281,118 @@ def test_an_owned_move_without_saved_access_leaves_the_saved_file_alone(tmp_path
     assert not store.path.exists()
 
 
+class _SyncOnReleaseLock:
+    """The store's lock, which lets a startup sync run right after Panic's check releases it."""
+
+    def __init__(self, store, devices):
+        self._real, self._store, self._devices = store._lock, store, devices
+        self.armed = True
+
+    def acquire(self, *args, **kwargs):
+        return self._real.acquire(*args, **kwargs)
+
+    def __enter__(self):
+        return self._real.__enter__()
+
+    def __exit__(self, *exc):
+        return self._real.__exit__(*exc)
+
+    def release(self):
+        self._real.release()
+        if self.armed:
+            self.armed = False
+            # Another thread: the startup sync from the dashboard, between the check's
+            # release of the store lock and its answer.
+            thread = threading.Thread(target=self._store.sync_protected, args=(self._devices,))
+            thread.start()
+            thread.join(5)
+            assert not thread.is_alive()
+
+
+def test_the_emergency_check_answers_from_one_snapshot_of_grants_and_sync_state(tmp_path):
+    # N2: grants read before a startup sync and protected_synced read after it gave
+    # allowed=False with protected_synced=True, a final 403 the page never retries.
+    service, store, _ = make_service(tmp_path)
+    store._lock = _SyncOnReleaseLock(store, protected(MAC))
+    result = status(service, "emergency-status")
+    assert store._lock.armed is False  # the sync ran in the window
+    assert store.protected_synced is True
+    assert result["ok"] is True
+    # The answer describes the grants it was decided from: not yet synced, so retryable.
+    assert result["allowed"] is False
+    assert result["protected_synced"] is False
+    # The next check sees the synced grants.
+    store._lock = store._lock._real
+    assert status(service, "emergency-status")["allowed"] is True
+
+
+def test_panics_protection_sync_skips_the_access_lock_and_waits_boundedly_for_the_store(tmp_path):
+    # N1: the resync used by Panic's device check uses the Panic reserve, never waits
+    # for the access lock and waits a bounded time for a stalled grant write.
+    import time
+
+    from jittersim.networking.helper import (
+        EMERGENCY_ACCESS_STORE_WAIT_SECONDS,
+        _uses_panic_reserve,
+    )
+
+    payload = {"action": "dashboard-access", "operation": "emergency-protected-sync",
+               "devices": protected(MAC)}
+    assert _uses_panic_reserve(payload) is True
+    assert _uses_panic_reserve({**payload, "operation": "protected-sync"}) is False
+    service, store, _ = make_service(tmp_path)
+    service._access_lock.acquire()
+    try:
+        result = service.handle_payload(payload)
+    finally:
+        service._access_lock.release()
+    assert result["ok"] is True and result["protected_count"] == 1
+    assert status(service, "emergency-status")["allowed"] is True
+    held, done = threading.Event(), threading.Event()
+
+    def stalled_write():
+        with store._lock:
+            held.set()
+            done.wait(10)
+
+    writer = threading.Thread(target=stalled_write)
+    writer.start()
+    try:
+        assert held.wait(5)
+        started = time.monotonic()
+        busy = service.handle_payload({**payload, "devices": []})
+        assert time.monotonic() - started < EMERGENCY_ACCESS_STORE_WAIT_SECONDS + 1
+    finally:
+        done.set()
+        writer.join(5)
+    assert busy == {"ok": False, "error": "Device verification is busy. Try again.",
+                    "reason": "helper-busy"}
+    assert store.list_devices()[0]["mac_address"] == MAC  # unchanged
+    invalid = service.handle_payload({**payload, "devices": "all"})
+    assert invalid["ok"] is False and store.protected_synced is True
+
+
+def test_an_older_helper_without_the_emergency_sync_gets_the_ordinary_one(tmp_path):
+    service, store, _ = make_service(tmp_path)
+    repository = ConfigRepository(":memory:")
+    server = ControlServer(("127.0.0.1", 0), repository)
+    try:
+        helper = BridgeHelper(service)
+
+        def unknown(devices):
+            raise HelperClientError("Unknown dashboard access action.")
+
+        helper.dashboard_access_emergency_protected_sync = unknown
+        server.helper_client = helper
+        repository.save_unaffected_device(UnaffectedDevice(MAC, "Phone", 1))
+        result = server.dashboard_access(PEER, "emergency-status")
+        assert result["allowed"] is True and store.protected_synced is True
+        assert len(helper.sync_payloads) == 1
+    finally:
+        server.server_close()
+        repository.close()
+
+
 def test_the_client_sends_only_addresses_and_names(tmp_path):
     sent = []
 
@@ -265,6 +419,9 @@ class BridgeHelper(PlanRecordingHelper):
         self.fail_sync = 0
         self.sync_payloads = []
         self.operations = []
+        # Simulate another browser tab acting right before or after one operation.
+        self.before = {}
+        self.after = {}
 
     def _call(self, payload):
         result = self.service.handle_payload(payload)
@@ -274,7 +431,12 @@ class BridgeHelper(PlanRecordingHelper):
 
     def dashboard_access(self, operation="status", **values):
         self.operations.append(operation)
-        return self._call({"action": "dashboard-access", "operation": operation, **values})
+        if operation in self.before:
+            self.before.pop(operation)()
+        result = self._call({"action": "dashboard-access", "operation": operation, **values})
+        if operation in self.after:
+            self.after.pop(operation)()
+        return result
 
     def dashboard_access_protected_sync(self, devices):
         self.sync_payloads.append(list(devices))
@@ -669,6 +831,35 @@ class ProtectedAccessServerTests(unittest.TestCase):
         self.assertEqual(len(self.repository.list_unaffected_devices()), 1)
         self.assertEqual(self.helper.operations.count("register-self"), 1)
         self.assertEqual(self.server.dashboard_access(PEER)["grants"], ["protection"])
+
+    def refuse_stale_restore(self):
+        first = min(item["id"] for item in
+                    json.loads(self.server.response_for("/api/history")[2])["versions"])
+        stale = self.repository.get_runtime_state().configuration_version - 1
+        status, _, body = self.server.history_restore_for_peer(
+            {"id": first, "current_version": stale}, PEER)
+        self.assertEqual(status, 409, body)
+        self.assertEqual(len(self.repository.list_unaffected_devices()), 1)
+
+    def other_tab_saves_a_grant(self):
+        result = self.service.handle_payload({"action": "dashboard-access",
+                                              "operation": "register-self", "peer": PEER,
+                                              "name": "Other tab"})
+        self.assertTrue(result["ok"], result)
+
+    def test_a_refused_restore_keeps_a_grant_another_tab_saved_first(self):
+        self.protect()
+        self.helper.before["register-self"] = self.other_tab_saves_a_grant
+        self.refuse_stale_restore()
+        self.assertEqual([item["mac_address"] for item in self.store.saved_devices()], [MAC])
+        self.assertEqual(self.server.dashboard_access(PEER)["grants"], ["manual", "protection"])
+
+    def test_a_refused_restore_keeps_a_grant_another_tab_saved_after_it(self):
+        self.protect()
+        self.helper.after["register-self"] = self.other_tab_saves_a_grant
+        self.refuse_stale_restore()
+        self.assertEqual([item["mac_address"] for item in self.store.saved_devices()], [MAC])
+        self.assertEqual(self.server.dashboard_access(PEER)["grants"], ["manual", "protection"])
 
     def test_an_invalid_import_is_refused_before_any_grant_is_saved(self):
         self.protect()

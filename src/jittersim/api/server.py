@@ -41,7 +41,12 @@ from jittersim import release_uploads, updates
 from jittersim.request_workers import RequestWorkers, WorkersStillRunning
 from jittersim.socket_deadlines import DeadlineReader as _DeadlineReader
 from jittersim.api.dashboard import assemble_dashboard
-from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
+from jittersim.api.access import (
+    ACCESS_WRITES,
+    PANIC_REPOSITORY_WAIT_SECONDS,
+    read_access_api,
+    write_access_api,
+)
 from jittersim.api.trust import TRUST_DOWNLOADS, dashboard_name_report, easy_address, read_trust_api
 from jittersim.localname import read_local_name
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
@@ -106,6 +111,7 @@ from jittersim.config.storage import (
     ConfigRepository,
     DatabasePath,
     DeviceConflictError,
+    RepositoryBusy,
     StorageError,
     TrafficRateSettingsError,
 )
@@ -144,7 +150,7 @@ from jittersim.networking.dashboard_access import (
     normalize_mac as normalize_access_mac,
     validate_label as validate_access_label,
 )
-from jittersim.networking.deadlines import deadline_scope
+from jittersim.networking.deadlines import deadline_scope, scope_remaining
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
     WIFI_DETAILS_MISSING_MESSAGE,
@@ -304,6 +310,10 @@ EMERGENCY_CHECK_BUDGET_SECONDS = 8.0
 # few small database writes and the response. The browser's Panic timeout is at
 # least the sum (docs/architecture.md, "Panic time budget").
 PANIC_DATABASE_ALLOWANCE_SECONDS = 5.0
+# Panic's device check reads saved protection after a helper restart. It waits for
+# the repository at most this long, within EMERGENCY_CHECK_BUDGET_SECONDS, and is
+# helper-busy (retried) without a snapshot.
+EMERGENCY_REPOSITORY_WAIT_SECONDS = 2.0
 # The product name shown after the token is accepted. The public page never carries it.
 PRODUCT_NAME = "JitterSim"
 PRODUCT_COMMAND = "jittersim"
@@ -1418,7 +1428,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         if (result["allowed"] or result.get("protected_synced") is not False
                 or not self._may_be_protected(result.get("mac_address"))):
             return result
-        if self.sync_protected_access(blocking=False).get("synced"):
+        if self.sync_protected_access(blocking=False, emergency=True).get("synced"):
             result = self._checked_access("emergency-status", peer, values)
         if not result["allowed"] and result.get("protected_synced") is False:
             raise HelperClientError(
@@ -1431,10 +1441,28 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         if mac is None or getattr(self.helper_client, "dashboard_access_protected_sync", None) is None:
             return False
         try:
-            targets, _ = self._protected_access_targets()
+            with self._scoped_repository():
+                targets, _ = self._protected_access_targets()
+        except RepositoryBusy as error:
+            # No snapshot within the emergency budget: undecided, so retried, never allowed.
+            raise HelperClientError(
+                "Device verification is waiting for the dashboard database. Try again.",
+                reason="helper-busy") from error
         except (StorageError, sqlite3.Error):
             return True
         return any(item["mac_address"] == mac for item in targets)
+
+    def bounded_repository(self, seconds: float):
+        """The repository lock for a block, waited for at most `seconds` (RepositoryBusy)."""
+        locked = getattr(self.repository, "locked_within", None)
+        return nullcontext() if locked is None else locked(seconds)
+
+    def _scoped_repository(self):
+        """Inside a request deadline (Panic's device check), a bounded repository wait."""
+        remaining = scope_remaining()
+        if remaining is None:
+            return nullcontext()
+        return self.bounded_repository(min(EMERGENCY_REPOSITORY_WAIT_SECONDS, max(0.0, remaining)))
 
     def _checked_access(self, operation: str, peer: str, values: Dict[str, Any]) -> Dict[str, Any]:
         result = self.helper_client.dashboard_access(operation, peer=peer, **values)
@@ -1475,13 +1503,25 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             targets.append({"mac_address": mac, "name": name})
         return targets, not_eligible
 
-    def sync_protected_access(self, *, blocking: bool = True) -> Dict[str, Any]:
+    def sync_protected_access(self, *, blocking: bool = True, emergency: bool = False) -> Dict[str, Any]:
         """Replace the helper's protection grants with saved protection. Safe to repeat.
 
         Syncs run one at a time and each reads the protected list inside the lock, so an
-        older request can never overwrite the result of a newer change.
+        older request can never overwrite the result of a newer change. `emergency` is
+        Panic's device check: the helper serves that sync from its Panic reserve without
+        waiting for its access lock (review N1).
         """
-        sync = getattr(self.helper_client, "dashboard_access_protected_sync", None)
+        sync = ordinary = getattr(self.helper_client, "dashboard_access_protected_sync", None)
+        urgent = getattr(self.helper_client, "dashboard_access_emergency_protected_sync", None)
+        if emergency and ordinary is not None and urgent is not None:
+            def sync(targets):
+                try:
+                    return urgent(targets)
+                except HelperClientError as failure:
+                    if failure.reason == "helper-busy":
+                        raise
+                    # An older helper does not know the emergency sync.
+                    return ordinary(targets)
         if sync is None or not self._protected_access_lock.acquire(blocking=blocking):
             return self.protected_access_status()
         try:
@@ -1491,7 +1531,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             targets: Optional[List[Dict[str, str]]] = None
             not_eligible: List[Dict[str, str]] = []
             try:
-                targets, not_eligible = self._protected_access_targets()
+                with self._scoped_repository():
+                    targets, not_eligible = self._protected_access_targets()
             except (StorageError, sqlite3.Error):
                 LOGGER.warning("saved protection could not be read for dashboard access")
             for attempt in range(PROTECTED_ACCESS_SYNC_ATTEMPTS if targets is not None else 0):
@@ -1577,15 +1618,21 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             return identity
         return None
 
-    def _keep_access_as_saved_grant(self, peer: str, mac: str) -> bool:
+    def _keep_access_as_saved_grant(self, peer: str, mac: str,
+                                    claim_id: Optional[str] = None) -> Tuple[bool, bool]:
+        """Return whether access is kept and whether this call's claim created the grant."""
         name = next((item.display_name for item in self.repository.list_unaffected_devices()
                      if item.mac_address == mac), "")
         try:
             name = validate_access_label(name)
         except DashboardAccessError:
             name = ""
-        data = self.dashboard_access(peer, "register-self", name=name)
-        return data.get("mac_address") == mac and data.get("allowed") is True
+        values: Dict[str, Any] = {"name": name}
+        if claim_id is not None:
+            values["claim_id"] = claim_id
+        data = self.dashboard_access(peer, "register-self", **values)
+        kept = data.get("mac_address") == mac and data.get("allowed") is True
+        return kept, kept and claim_id is not None and data.get("claimed") is True
 
     def remove_protection_for_peer(self, payload: Any, peer: str) -> Tuple[int, str, bytes]:
         """Never silently remove the requester's only verified control route."""
@@ -1612,7 +1659,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         kept = False
         if own is not None and choice == "keep":
             try:
-                kept = self._keep_access_as_saved_grant(peer, mac)
+                kept, _ = self._keep_access_as_saved_grant(peer, mac)
             except HelperClientError as error:
                 return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                     {"error": "Nothing changed. Dashboard access could not be saved for this "
@@ -1642,15 +1689,18 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 and identity.get("grants") == ["protection"]):
             return self.write_response_for(path, payload)
         mac = identity["mac_address"]
-        granted: List[bool] = []
+        # One entry once access is kept: this request's claim when it created the grant,
+        # None when the grant already existed and so is never this request's to take back.
+        granted: List[Optional[str]] = []
 
         def keep_route_first(settings: SavedSettings) -> Optional[Tuple[int, str, bytes]]:
             # Runs after validation and before the replacement is saved: the requester's only
             # control route becomes a saved grant first, or nothing changes at all.
             if any(item.mac_address == mac for item in settings.unaffected_devices):
                 return None
+            claim = uuid.uuid4().hex
             try:
-                kept = self._keep_access_as_saved_grant(peer, mac)
+                kept, created = self._keep_access_as_saved_grant(peer, mac, claim)
             except HelperClientError as error:
                 return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                     {"error": "Nothing changed. These settings no longer protect this device "
@@ -1659,7 +1709,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes(
                     {"error": "Nothing changed. These settings no longer protect this device "
                               "and its dashboard access could not be saved. Try again."})
-            granted.append(True)
+            granted.append(claim if created else None)
             return None
 
         response = self.write_response_for(path, payload, before_replace=keep_route_first)
@@ -1667,10 +1717,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             return response
         if any(item.mac_address == mac for item in self.repository.list_unaffected_devices()):
             # The replacement was refused after the grant was saved: put access back as it was.
-            try:
-                self.dashboard_access(peer, "remove", mac_address=mac)
-            except HelperClientError:
-                LOGGER.warning("could not remove a saved grant for a refused settings change")
+            # Only the exact grant this request created, and only while nobody else saved it.
+            if granted[0] is not None:
+                try:
+                    self.dashboard_access(peer, "remove-claimed", mac_address=mac,
+                                          claim_id=granted[0])
+                except HelperClientError:
+                    LOGGER.warning("could not remove a saved grant for a refused settings change")
             return response
         # The grant stays even when the live apply of the saved replacement failed.
         self.reconcile_protected_access()
@@ -2470,8 +2523,20 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             if self.scheduler is not None and path not in ACTION_PATHS and path not in PRIORITY_WRITE_PATHS
             else nullcontext()
         )
+        # Panic waits for the repository only boundedly and skips its history
+        # checkpoint rather than wait for a backup (review N3).
+        panic = path in PRIORITY_WRITE_PATHS
+
+        def bookkeeping():
+            return self.bounded_repository(PANIC_REPOSITORY_WAIT_SECONDS) if panic else nullcontext()
+
         with operation:
-            before = self.repository.get_runtime_state().configuration_version
+            try:
+                with bookkeeping():
+                    before = self.repository.get_runtime_state().configuration_version
+            except RepositoryBusy:
+                LOGGER.warning("Panic runs without its history checkpoint: the database is busy")
+                before = None
             try:
                 access_response = (
                     write_access_api(self, path, payload, control_intent=control_intent)
@@ -2490,8 +2555,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         if path == "/api/apply" or live_global or live_general or live_ads
                         else self._write_response_for(path, payload, before_replace=before_replace))
             finally:
-                if self.repository.get_runtime_state().configuration_version != before:
-                    WorkflowStore(self.repository).checkpoint(path.removeprefix("/api/").replace("/", " "))
+                try:
+                    with bookkeeping():
+                        if (before is not None and
+                                self.repository.get_runtime_state().configuration_version != before):
+                            WorkflowStore(self.repository).checkpoint(
+                                path.removeprefix("/api/").replace("/", " "))
+                except RepositoryBusy:
+                    LOGGER.warning("Panic skipped its history checkpoint: the database is busy")
 
     def _write_response_for(self, path: str, payload: Dict[str, Any], *, control_intent=None,
                             before_replace=None) -> Tuple[int, str, bytes]:
@@ -6278,7 +6349,9 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 LOGGER.exception("protected devices' dashboard access could not be reconciled")
         try:
             if path not in ("/api/router/status", "/api/router/operation") and status != HTTPStatus.ACCEPTED:
-                self.server.repository.record_action(action=path, status_code=int(status))
+                with (self.server.bounded_repository(PANIC_REPOSITORY_WAIT_SECONDS)
+                      if path in PRIORITY_WRITE_PATHS else nullcontext()):
+                    self.server.repository.record_action(action=path, status_code=int(status))
         except StorageError:
             LOGGER.exception("could not record action history for %s", path)
         self._send_response(status=status, content_type=content_type, body=body)

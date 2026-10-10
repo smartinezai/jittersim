@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -140,6 +141,84 @@ class HelperAccessFailureTests(unittest.TestCase):
 
     def test_a_good_restore_reports_success(self):
         self.assertTrue(restore_access_at_start(self.manager))
+
+
+class IncompleteReleaseTests(unittest.TestCase):
+    """N4: every caller of a household release honours ``release_incomplete``.
+
+    The firewall opens, but hostapd refuses to clear the Wi-Fi join limits, so
+    excluded household devices still cannot join. No caller may report that as
+    a completed release.
+    """
+
+    MAC = "02:00:00:00:00:01"
+
+    def setUp(self):
+        HelperAccessFailureTests.setUp(self)
+        self.restrictive = AccessPlan(
+            mac=MacPolicy("denylist", (), (self.MAC,)),
+            options=AccessOptions(reject_wifi_joins=True),
+        )
+        self.disabled = replace(
+            self.restrictive, options=replace(self.restrictive.options, enabled=False))
+        admission = patch.object(self.manager, "admission_supported", return_value=True)
+        admission.start()
+        self.addCleanup(admission.stop)
+
+    def refusing_hostapd(self):
+        original = self.executor.run
+
+        def refuse(command):
+            if command.executable == "hostapd_cli":
+                original(command)
+                return CommandResult(return_code=0, stdout="FAIL\n")
+            return original(command)
+
+        return patch.object(self.executor, "run", refuse)
+
+    def test_an_ordinary_disable_reports_the_join_limits_that_remain(self):
+        answer = self.service.handle_payload(
+            {"action": "access-apply", "policy": self.restrictive.payload()})
+        self.assertTrue(answer["ok"], answer)
+        with self.refusing_hostapd(), self.assertLogs(level="WARNING"):
+            answer = self.service.handle_payload(
+                {"action": "access-apply", "policy": self.disabled.payload()})
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(answer["reason"], "release-incomplete")
+        self.assertIn("join", answer["error"])
+        self.assertFalse(self.manager.applied.options.enabled)
+        # A retry clears the join limits and confirms the release.
+        answer = self.service.handle_payload(
+            {"action": "access-apply", "policy": self.disabled.payload()})
+        self.assertTrue(answer["ok"], answer)
+        self.assertFalse(self.manager.release_incomplete)
+
+    def test_a_combined_apply_does_not_start_or_clear_the_stop_on_an_incomplete_release(self):
+        self.assertTrue(self.service.handle_payload(apply_payload(self.restrictive))["ok"])
+        started = self.service._active_plan
+        self.service._panic_stop_latched = True
+        with self.refusing_hostapd(), self.assertLogs(level="WARNING"):
+            answer = self.service.handle_payload(
+                {**apply_payload(self.disabled), "explicit_apply": True})
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(answer["reason"], "release-incomplete")
+        self.assertIn("join", answer["error"])
+        # The Panic stop is not cleared and the new profiles did not start.
+        self.assertTrue(self.service._panic_stop_latched)
+        self.assertIs(self.service._active_plan, started)
+
+    def test_startup_restoration_of_a_panic_stop_reports_an_incomplete_release(self):
+        self.manager.apply(self.restrictive)
+        with self.refusing_hostapd(), self.assertLogs(level="WARNING") as logs:
+            self.assertFalse(restore_access_at_start(self.manager, panic_stopped=True))
+        self.assertIn("join", "\n".join(logs.output))
+        self.assertFalse(self.manager.applied.options.enabled)
+
+    def test_startup_restoration_of_saved_off_rules_reports_an_incomplete_release(self):
+        self.manager.apply(self.restrictive)
+        self.manager.apply(self.disabled)
+        with self.refusing_hostapd(), self.assertLogs(level="WARNING"):
+            self.assertFalse(restore_access_at_start(self.manager))
 
 
 if __name__ == "__main__":

@@ -105,3 +105,32 @@ def test_the_recovery_command_rides_out_a_busy_helper(clock, tmp_path):
                      "--database", str(tmp_path / "missing.db")])
     assert code == 0, errors.getvalue()
     assert answers == []
+
+
+def test_the_dashboard_panic_failure_names_what_the_helper_could_not_do(tmp_path):
+    # Review O-b: the dashboard used to drop the helper's reason for a failed Panic.
+    import json
+
+    from jittersim.api.server import ControlServer
+    from jittersim.config.storage import ConfigRepository
+    from tests.unit.test_api import PlanRecordingHelper
+
+    reason = ("normal access was not fully restored. Household rules are off, but the "
+              "Wi-Fi join limits could not be cleared. Retry Panic.")
+
+    class IncompleteRelease(PlanRecordingHelper):
+        def normal_access(self):
+            raise HelperClientError(reason)
+
+    with ConfigRepository(tmp_path / "settings.db") as repository:
+        server = ControlServer(("127.0.0.1", 0), repository, helper_client=IncompleteRelease())
+        try:
+            status, _, body = server.write_response_for("/api/normal-access", {})
+        finally:
+            server.server_close()
+        error = json.loads(body)["error"]
+        assert status == 503
+        assert error.startswith("Normal access was not fully restored. Automation is paused. "
+                                "Retry the panic button.")
+        assert "the Wi-Fi join limits could not be cleared" in error
+        assert repository.get_runtime_state().last_error == error
