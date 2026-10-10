@@ -215,7 +215,7 @@ function speedTestRestoreFocus() {
   const rows = device ? document.querySelectorAll('.connected-row[data-mac-address]') : [];
   const row = Array.from(rows).find((item) => item.dataset.macAddress === device.mac_address);
   const live = row && row.querySelector('.speed-test-open-button:not([disabled])');
-  const fallback = document.querySelector('[data-page-link="devices"]');
+  const fallback = document.querySelector('.sidebar-nav a[href="#devices"]');
   const target = live || fallback;
   if (target && target.isConnected) target.focus({preventScroll: true});
 }
