@@ -5877,7 +5877,7 @@
 
     const PANIC_ATTEMPTS = 3;
 
-    // The dashboard answers Panic within 45 seconds: the device check, the helper and
+    // The dashboard answers Panic within 48 seconds: the device check, the helper and
     // the saves (docs/architecture.md, "Panic time budget"). Wait at least that long.
     const PANIC_REQUEST_TIMEOUT_MS = 50000;
 

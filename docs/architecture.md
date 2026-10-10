@@ -40,16 +40,17 @@ point back to this section. `tests/unit/test_panic_time_budget.py` checks them w
 a fake clock on which every wait lasts its whole allowance.
 
 - Browser: `PANIC_REQUEST_TIMEOUT_MS` in `api/dashboard.js` is 50 s per Panic attempt.
-- Dashboard route (`api/server.py`): at most 45 s. That is the device check, the helper
+- Dashboard route (`api/server.py`): at most 48 s. That is the device check, the helper
   client and the database allowance.
   - Device check: every helper call shares `EMERGENCY_CHECK_BUDGET_SECONDS` (8 s). This
     covers the emergency check, one protection resync and the fallback for an older
     helper. With nothing left the answer is 503, which the page retries. It never
     grants access.
-  - Helper client (`HelperClient.normal_access`): `NORMAL_ACCESS_TIMEOUT_SECONDS` (32 s).
-    It asks a busy helper again only during the first `NORMAL_ACCESS_BUSY_RETRY_SECONDS`
-    (5 s). Every attempt therefore starts with at least `PANIC_ANSWER_SECONDS` plus one
-    second left.
+  - Helper client (`HelperClient.normal_access`): `NORMAL_ACCESS_TIMEOUT_SECONDS` (35 s).
+    It asks a busy helper again only while an attempt can start within the first
+    `NORMAL_ACCESS_BUSY_RETRY_SECONDS` (8 s, the 6 s network lock wait plus 2 s). A
+    refusal that came only after the whole lock wait is therefore retried at least once.
+    Every attempt starts with at least `PANIC_ANSWER_SECONDS` plus one second left.
   - Database writes and the response: `PANIC_DATABASE_ALLOWANCE_SECONDS` (5 s). These
     are a few small SQLite writes. They are not bounded separately. Another process
     that holds the database lock can make each write wait up to SQLite's five-second
@@ -58,7 +59,7 @@ a fake clock on which every wait lasts its whole allowance.
   takes the request. Every wait uses only what is left of it:
   - the network lock, at most 6 s (`PANIC_NETWORK_LOCK_WAIT_SECONDS`), so the work
     after it always keeps `PANIC_POST_LOCK_SECONDS` (6 s) of the deadline. A longer
-    hold answers helper-busy, which the client retries for 5 s;
+    hold answers helper-busy, which the client retries within its 8 s window;
   - the Panic stop lock for each save, at most 2 s;
   - the ad-blocking pause, at most 8 s, and it leaves `PANIC_RELEASE_RESERVE_SECONDS`
     (4 s) for the household release;

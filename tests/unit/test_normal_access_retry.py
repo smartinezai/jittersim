@@ -134,3 +134,42 @@ def test_the_dashboard_panic_failure_names_what_the_helper_could_not_do(tmp_path
                                 "Retry the panic button.")
         assert "the Wi-Fi join limits could not be cleared" in error
         assert repository.get_runtime_state().last_error == error
+
+
+def test_a_refusal_after_the_full_network_lock_wait_is_retried(clock):
+    # Review S2: the helper answers helper-busy only after waiting the whole
+    # PANIC_NETWORK_LOCK_WAIT_SECONDS. An access change or a DNS restart can hold the
+    # network lock for about 8 s, so the attempt after that refusal must still be made.
+    answers = [busy(), {"ok": True, "action": "normal-access"}]
+    calls = []
+
+    def request(self, payload, **kwargs):
+        calls.append((clock.now, self.timeout_seconds))
+        clock.now += helper_module.PANIC_NETWORK_LOCK_WAIT_SECONDS + 0.5  # the wait and some overhead
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    with patch.object(HelperClient, "_request", request):
+        assert client().normal_access()["ok"] is True
+    assert answers == [] and len(calls) == 2
+    # The retry still leaves the helper its whole answer time.
+    assert calls[1][1] >= helper_module.PANIC_ANSWER_SECONDS
+
+
+def test_full_lock_wait_refusals_are_retried_a_bounded_number_of_times(clock):
+    calls = []
+
+    def request(self, payload, **kwargs):
+        calls.append((clock.now, self.timeout_seconds))
+        clock.now += helper_module.PANIC_NETWORK_LOCK_WAIT_SECONDS
+        raise busy()
+
+    started = clock.now
+    with patch.object(HelperClient, "_request", request), pytest.raises(HelperClientError) as error:
+        client().normal_access()
+    assert error.value.reason == "helper-busy"
+    assert 2 <= len(calls) <= 3
+    assert calls[-1][0] - started <= helper_module.NORMAL_ACCESS_BUSY_RETRY_SECONDS
+    assert clock.now - started <= helper_module.NORMAL_ACCESS_TIMEOUT_SECONDS

@@ -290,6 +290,33 @@ def test_the_browser_waits_longer_than_the_dashboard_needs_for_panic():
     assert server_bound + server_module.PANIC_DATABASE_ALLOWANCE_SECONDS <= browser
     assert (helper_module.PANIC_ANSWER_SECONDS + helper_module.NORMAL_ACCESS_BUSY_RETRY_SECONDS + 1
             <= helper_module.NORMAL_ACCESS_TIMEOUT_SECONDS)
+    # Review S2: a refusal after the whole network lock wait (plus a second for the
+    # request around it) still leaves room for one more attempt in the retry window.
+    assert (helper_module.PANIC_NETWORK_LOCK_WAIT_SECONDS + 1
+            + helper_module.NORMAL_ACCESS_BUSY_RETRY_INTERVAL
+            <= helper_module.NORMAL_ACCESS_BUSY_RETRY_SECONDS)
+    assert server_bound + server_module.PANIC_DATABASE_ALLOWANCE_SECONDS == 48
+
+
+def test_a_full_lock_wait_refusal_is_retried_inside_the_client_budget(clock):
+    attempts = []
+
+    def request(self, payload, **kwargs):
+        attempts.append((clock.now, self.timeout_seconds))
+        if len(attempts) == 1:
+            clock.now += helper_module.PANIC_NETWORK_LOCK_WAIT_SECONDS + 0.5
+            raise HelperClientError("busy", reason="helper-busy")
+        clock.now += helper_module.PANIC_ANSWER_SECONDS  # the retry uses its whole answer time
+        return {"ok": True}
+
+    client = HelperClient(socket_path=Path("/nonexistent/helper.sock"), timeout_seconds=5)
+    started = clock.now
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(HelperClient, "_request", request)
+        assert client.normal_access() == {"ok": True}
+    assert len(attempts) == 2
+    assert attempts[1][1] >= helper_module.PANIC_ANSWER_SECONDS + 1
+    assert clock.now - started <= helper_module.NORMAL_ACCESS_TIMEOUT_SECONDS
 
 
 def test_panic_bookkeeping_waits_fit_the_database_allowance():
