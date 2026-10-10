@@ -6,6 +6,8 @@ Panic-gated files. The branch is `fix/upstream-safe-impairments-gated`, cut from
 added: the coordinator arranges the independent review and the approved
 bundle. Until then, the Panic hash tests fail as expected.
 
+**Status (10 October 2026):** section 1 is part of the combined Panic batch. Section 2 (the rollback cleanup) was written and reviewed but is NOT merged and not implemented in main, because the reviews found open S2 problems. See docs/carry-forward-panic-batch-2026-10-10.md for the open problems and the owner action after a rollback (reboot the Pi).
+
 ## 1. Helper apply response (implemented on this branch)
 
 `src/jittersim/networking/helper.py`, `_handle_apply` return:

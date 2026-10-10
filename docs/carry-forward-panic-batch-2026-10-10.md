@@ -5,19 +5,27 @@ These items were found and are NOT fixed in the batch. None is new in the batch 
 rollback cleanup, which was left out on purpose.
 
 ## Rollback cleanup of the upload intake (left out)
-A rollback or a failed update restores the previous release. The previous release cannot remove
-the ifb device and the ingress redirect that the upload-safe layout adds, so upload corruption
-stays active on the test Wi-Fi until the next reboot (tc state does not survive a reboot). The
-router never sees damaged frames in that state because the Pi's kernel checks IP headers first,
-so this does not endanger the router. A cleanup was written (branches
-`fix/upstream-safe-rollback-cleanup` 488553c and `fix/upstream-safe-rollback-cleanup2` fd3c5d4)
-and reviewed. Three S2 problems remain in it, so it is not merged:
+Only a rollback from the first release that contains the upload-safe layout (PR 125) to an older
+release is affected. The older release does not know the ifb device and the ingress redirect that
+the layout adds, so its Panic and its Reset cannot remove them. While upload corruption was active
+it stays active on the test Wi-Fi until the Pi reboots (tc state does not survive a reboot). The
+older nftables rules also lack the rule that drops packets with a damaged TCP or UDP checksum,
+so such packets can leave without NAT (see docs/upstream-safe-impairments-2026-10-09.md). Their
+Ethernet and IPv4 headers stay well formed, because the Pi's kernel validates the IP header on
+ingress. Whether a Vodafone Station reacts to those packets is not proven.
+**Owner action after such a rollback: reboot the Pi.** Rollbacks between releases that both
+contain the layout are not affected.
+
+A cleanup was written (branches `fix/upstream-safe-rollback-cleanup` 488553c and
+`fix/upstream-safe-rollback-cleanup2` fd3c5d4) and reviewed. Open S2 problems in it, so it is not merged:
 1. It removes the Wi-Fi ingress qdisc because it exists, but another tool may own rules there.
    It needs a durable proof that JitterSim created the intake, kept through a partial cleanup.
 2. `CommandNotStopped` and `OperationOwnershipUnknown` (both subclasses of `UpdateError`) must
    propagate out of the cleanup and must not be turned into "continue to restore".
 3. A cleanup warning written with `progress("rolling-back", ...)` is overwritten by the final
    `rolled-back` status, so the owner sees success. Keep the warning in the final status.
+4. Plans larger than the 4096-byte answer limit and a partial cleanup that passes on retry
+   (round 4 findings, fixed in fd3c5d4 and then reopened by the findings above).
 
 ## Pre-existing, not changed by the batch
 - A stalled fsync of the stop records (`panic_guard.py`, `gateway.json`) can hold the network lock
