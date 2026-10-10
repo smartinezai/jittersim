@@ -6,7 +6,6 @@ import tempfile
 import threading
 import re
 import time
-import types
 import unittest
 from dataclasses import replace
 from ipaddress import IPv4Address
@@ -2967,13 +2966,12 @@ class UpstreamSafeApplyResponseTests(unittest.TestCase):
         real_apply = applier.apply
 
         def apply(**arguments):
-            real_apply(**arguments)
-            # A report object of the chosen shape. With None it lacks the field,
-            # like the report of an applier from before the upload-safe layout.
-            fields = {"commands_run": 1, "counters_preserved": False}
+            report = real_apply(**arguments)
             if report_value is not None:
-                fields["upload_corruption_applied"] = report_value
-            return types.SimpleNamespace(**fields)
+                report = type("Report", (), {**vars(report), "upload_corruption_applied": report_value})()
+                report.commands_run = 1
+                report.counters_preserved = False
+            return report
 
         applier.apply = apply
         plan = compile_plan(

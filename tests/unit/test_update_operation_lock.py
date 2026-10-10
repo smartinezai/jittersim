@@ -1,7 +1,6 @@
 """All mutable update and identity work shares physical command ownership."""
 
 import os
-from unittest.mock import patch
 import signal
 import shlex
 import subprocess
@@ -470,19 +469,21 @@ def test_installer_child_rereads_proven_legacy_only_after_physical_writer_stop(r
         updates.atomic_json(legacy, {"current": True})
 
     def query(command, timeout):
+        if command[:3] == ["ip", "-j", "link"]:
+            # The upload intake check before and after its cleanup (none here).
+            calls.append("links")
+            return "[]"
         calls.append("proof")
         return "ActiveState=inactive\nMainPID=0\nControlPID=0\nTasksCurrent=0\n"
 
     descriptor = os.open(root / "lock", os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        # No upload intake on this machine, so its cleanup runs no command.
-        with patch.object(updates, "_link_present", lambda name: False):
-            updates.quiesce_manual_install(tmp_path, root=root, descriptor=descriptor,
-                                          units=units, run=run, query=query,
-                                          config=tmp_path / "no-config")
+        updates.quiesce_manual_install(tmp_path, root=root, descriptor=descriptor,
+                                      units=units, run=run, query=query,
+                                      config=tmp_path / "no-config")
     finally:
         os.close(descriptor)
-    assert calls == ["inspect", "stop", "proof", "provision"]
+    assert calls == ["inspect", "stop", "proof", "links", "links", "provision"]
 
 
 def test_installer_child_refuses_without_its_outer_group_lease(root, tmp_path):

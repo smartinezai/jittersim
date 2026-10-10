@@ -488,11 +488,7 @@ class RollbackIntakeCleanupTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as config:
             # An empty configuration means install.sh's eth0 and wlan0.
-            # The Pi namespace has its own /sys/class/net.
-            updates.remove_upload_intake(
-                Path(config), run, query,
-                link_present=lambda name: _in(PI, "test", "-e", f"/sys/class/net/{name}",
-                                              check=False).returncode == 0)
+            updates.remove_upload_intake(Path(config), run, query)
         self.assertNotIn("ingress", _in(PI, "tc", "qdisc", "show", "dev", "wlan0").stdout)
         self.assertNotEqual(_in(PI, "ip", "link", "show", UPLOAD_DEVICE, check=False).returncode, 0)
         flow.wait(timeout=30)
