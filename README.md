@@ -821,14 +821,20 @@ before and after a profile. The Pi cannot run a speed test as the phone, so:
    Impact check uses) and saves download and upload speed: average while busy,
    median, 90th percentile, peak, bytes and drops. It also sends one ping per
    second from the Pi to the device for the round trip and loss over the test
-   Wi-Fi. That round trip includes the profile's download delay and the waiting
-   the running speed test causes. A device that blocks ping shows `No answer`.
+   Wi-Fi. For a device with its own profile that round trip includes the
+   profile's download delay and the waiting the running speed test causes. With
+   **Same as everyone** or **Everyone else** the Pi's own ping does not pass the
+   shared queue, so the result calls it an unshaped Wi-Fi round trip and it does
+   not include the profile's delay. A device that blocks ping shows `No answer`.
 4. **Finish now** saves early, **Cancel test** saves nothing, and closing the
    window keeps the measurement running. A new apply during the window ends it
    and marks the result `changed`.
 
-Each result keeps the time, the profile in force and its values, the label and
-the numbers you type in from the device's own speed test page. **Compare**
+Each result keeps the time, the device's MAC address and name, the profile that
+really applied (a schedule, timer, scenario or group profile is named as such)
+and its values, the label and the numbers you type in from the device's own
+speed test page. Results are part of the configuration backup and of the CSV and
+JSON exports, so share those files with care. **Compare**
 shows the change in each number between two results and whether the speed
 matches the profile's cap (`Matches the cap`, `Faster than the cap`, `Slower
 than the cap`, `No speed limit set`). **Export CSV** and **Export JSON** download
@@ -846,6 +852,13 @@ Limits:
   other devices and the result says so.
 - Protected devices cannot be tested: they are never shaped and their traffic
   is not measured.
+- The device must be connected to the test Wi-Fi. The Pi checks this first and
+  pings the address the device has now. While the Wi-Fi connection status is
+  unknown the button stays off. If the Pi cannot read its counters it asks you
+  to try again. If most reads fail during a test the result is saved as `fault`.
+- A service rule or service list sends some traffic through other queues. The
+  result then says it covers the ordinary queue only and does not judge the cap:
+  compare the numbers typed in from the device's speed test page.
 - At most two tests run at once, one per device. A dashboard restart drops a
   running test.
 - Cloudflare's speed test is free and needs no account. Cloudflare keeps each

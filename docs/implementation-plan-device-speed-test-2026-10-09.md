@@ -70,9 +70,14 @@ raw socket, no capability, no helper change. Before it sends anything it checks 
 `connect()` (which sends no packet) that the Pi itself has an address in the device's /24, so a
 development machine or test run never sends echoes to a real home network. If the socket is not
 allowed or the device does not answer (Windows blocks echo by default), the result says
-"no answer" or "not available" instead of a number. The round trip is Pi to device over the test
-Wi-Fi and passes the device's download queue, so it includes the profile's download delay and
-the queueing caused by the running speed test ("loaded latency"); it is labelled that way.
+"no answer" or "not available" instead of a number. For a device with its own profile the round
+trip is Pi to device over the test Wi-Fi and passes the device's download queue, so it includes
+the profile's download delay and the queueing caused by the running speed test ("loaded
+latency"). For **Same as everyone** and **Everyone else** the Pi's own echo does not pass the
+shared download or upload queue (the mark is only set in the forward chain), so the result says
+"unshaped Wi-Fi round trip" and the note says it does not include the profile's delay. The echo
+goes to the address the device has now, taken from the connected-device snapshot, never to the
+address of a saved row.
 
 ### Which public speed test
 
@@ -90,8 +95,9 @@ The QR code: the two allowed addresses are fixed in code, so their QR codes were
 once with macOS's built-in CoreImage `CIQRCodeGenerator` (error correction M), checked by
 decoding them with CoreImage's `CIDetector`, and stored as module rows in the script. No QR
 library is added to the page, no new dependency is installed, and the page draws the code as
-inline SVG, which the strict CSP allows. A unit test keeps the stored codes and the provider
-list in step.
+inline SVG, which the strict CSP allows. One unit test checks the shape of each code (size and
+finder patterns). Another pins the two addresses and a SHA-256 hash of the stored rows, so a
+change to an address or to a stored code has to be made on purpose.
 
 ### Cloudflare terms and limits found
 
@@ -109,22 +115,33 @@ list in step.
 
 * **Test speed** appears on each connected device row. It is disabled for a protected device
   (protected devices are never shaped and their traffic is not monitored) and while the Wi-Fi
-  connection status is unknown.
+  connection status is unknown. The server enforces the same: a start is refused (409) unless the
+  device is associated right now, and refused with 503 when the status is unknown, the helper is
+  missing or the counters cannot be read after three tries 0.25 s apart. The helper reads happen
+  before the manager lock is taken, and the limits are checked again inside it.
 * The window has three parts: start (speed test site, length, label), running (live seconds
   left, live download and upload, the link and QR code, Finish now, Cancel), and results
   (history for this device, typed-in device numbers, compare, export).
 * Starting returns at once. The Pi samples once per second in a background thread. When the
   time is up, or on Finish now, the result is saved. Cancel discards it.
 * A run stops early and is saved with status `changed` when the device's queues change during the
-  window (a new apply, a reset, counters that go backwards).
-* A device that becomes protected during a run: the run ends and nothing measured is saved.
+  window (a new apply, a reset, counters that go backwards). A sampler error ends it as `fault`,
+  and so does a run in which more than half of the reads failed (`read_failures` is kept).
+* A device that becomes protected during a run: the run ends and nothing measured is saved. The
+  check is repeated when the run ends, for Finish now and for every other way a run can end.
+* The saved profile is the one the scheduler's applied snapshot reports (saved assignment, group
+  profile, schedule, timer, scenario, progression or data limit). If the snapshot cannot confirm
+  the source, the row says `Unknown (source not confirmed)` instead of showing the saved
+  assignment as applied.
+* A service rule or service list sends some traffic through queues the Pi does not read here. The
+  run says so, and the cap verdict is replaced by `service-rules` (not judged).
 * A dashboard restart drops a running window (it lives in memory); nothing half-done is saved.
 
 ### Verdicts per direction
 
 From the per-second rates while the device was busy (seconds at or above 10% of the peak):
 
-* `too-little-traffic` when fewer than 3 busy seconds or under 256 KB moved: the person probably
+* `too-little-traffic` when fewer than 3 busy seconds or under 64 KiB moved: the person probably
   did not run the speed test during the window.
 * `no-cap` when the profile sets no speed for that direction.
 * `at-cap` when the 90th percentile is at least 90% of the cap and the median is at most 110%.
@@ -165,9 +182,9 @@ not part of the settings export/import.
 | `GET /api/speed-tests/status` | `run` | one active run with its live per-second rates |
 | `GET /api/speed-tests/compare` | `baseline`, `result` | both results and the change per number |
 | `GET /api/speed-tests/export` | `format=csv|json`, `mac` optional | the file text |
-| `POST /api/speed-tests/start` | `mac_address`, `provider`, `duration_seconds`, `label` | the new run (201), 409 when one already runs for this device or two run in total, 409 for a protected device |
-| `POST /api/speed-tests/finish` | `run_id` | the saved result |
-| `POST /api/speed-tests/cancel` | `run_id` | `{cancelled: true}` |
+| `POST /api/speed-tests/start` | `mac_address`, `provider`, `duration_seconds`, `label` | the new run (201), 409 when one already runs for this device or two run in total, 409 for a protected device or a device that is not connected, 503 when the connection status or the counters cannot be read (retry) |
+| `POST /api/speed-tests/finish` | `run_id` | the ended run: `state` is `ended` and `result` holds the saved row (404 when the run is unknown, 409 when it already ended) |
+| `POST /api/speed-tests/cancel` | `run_id` | the ended run with `result` null and `ended_reason` `Cancelled. Nothing was saved.` |
 | `POST /api/speed-tests/update` | `result_id`, `label`, `reported` | the updated result |
 | `POST /api/speed-tests/delete` | `result_id` | `{deleted: true}` |
 
@@ -178,7 +195,12 @@ Every body is checked field by field; unknown fields are refused.
 Self-contained `speed-test.js` and `speed-test.css`, added to the page by the assembler like
 `workflows.js`. The button joins each row through the existing `connectedRowHooks` list, so
 `renderConnectedDevices` is not edited. The window is a `<dialog>` made by the script. Live
-numbers are in a polite status region announced once per change of state, not per second.
+numbers are in a polite status region announced once per change of state, not per second. Focus
+moves to the window title whenever the sections change, and returns to a live **Test speed**
+button (or the Devices link, when the list was redrawn) when the window closes. Delete asks for
+confirmation first. A Finish or Cancel that finds the run already ended (409), lost (404) or the
+Pi busy (503) asks for the run's real state again, so the window never stays stuck in the
+running view.
 
 ## Security
 
