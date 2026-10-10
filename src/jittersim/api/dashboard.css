@@ -889,7 +889,7 @@
     .update-facts div { min-width: 0; }
     .update-facts dt { color: var(--tx-heading); font-size: 0.78rem; }
     .update-facts dd { margin: 0.1rem 0 0; overflow-wrap: anywhere; font-weight: 600; }
-    .update-notes { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 20rem; overflow: auto; margin: 0.4rem 0 0; }
+    .update-notes { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 20rem; overflow: auto; margin: 0.8rem 0; }
     .update-progress { margin-top: 0.8rem; padding: 0.6rem 0.8rem; border: 1px solid var(--bd-info); border-radius: 6px; background: var(--bg-info); color: var(--tx-info); }
     .sidebar-version { display: grid; gap: 0.35rem; }
     .sidebar-version-text { margin: 0; color: var(--tx-heading); font-size: 0.78rem; }
