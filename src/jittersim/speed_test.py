@@ -47,7 +47,20 @@ VERDICT_LABELS = {
     "above-cap": "Faster than the cap: the limit did not hold",
     "below-cap": "Slower than the cap: the internet or the device was the limit",
     "not-measured": "Not measured on the Pi",
+    "service-rules": "Not judged: a service rule sends some traffic through another queue",
 }
+# The verdicts that say how the speed compares with the cap. A service rule withholds them.
+CAP_VERDICTS = frozenset(("at-cap", "above-cap", "below-cap"))
+SHARED_SOURCES = ("everyone", "everyone-else")
+SHARED_LATENCY_NOTE = (
+    "The round trip does not include the profile's delay: the Pi's own ping does not pass "
+    "the shared queue."
+)
+SERVICE_RULES_NOTE = (
+    "A service rule or service list applies to this device, so some of its traffic goes through "
+    "other queues. The reading covers the ordinary queue only. Compare the numbers typed in "
+    "from the device's speed test page."
+)
 
 # The public speed test pages a person may open on the device. The QR codes are fixed because
 # the addresses are fixed: each was made once with macOS CoreImage CIQRCodeGenerator (error
@@ -249,6 +262,15 @@ def compare_results(baseline: Dict[str, Any], later: Dict[str, Any]) -> Dict[str
             )
         if result.get("status") == "changed":
             warnings.append(f"The profile changed during result {result.get('id')}.")
+        if result.get("status") == "fault":
+            warnings.append(
+                f"Result {result.get('id')} stopped after a fault and may be incomplete."
+            )
+        if (result.get("summary") or {}).get("service_rules"):
+            warnings.append(
+                f"Result {result.get('id')} had service rules in force: the cap conclusion is "
+                "withheld. Use the numbers typed in from the device's speed test page."
+            )
     return {
         "baseline": baseline,
         "result": later,
@@ -267,7 +289,11 @@ def compare_results(baseline: Dict[str, Any], later: Dict[str, Any]) -> Dict[str
 def _verdict(result: Dict[str, Any], direction: str) -> Optional[str]:
     summary = result.get("summary") or {}
     entry = summary.get(direction) if isinstance(summary, dict) else None
-    return entry.get("verdict") if isinstance(entry, dict) else None
+    verdict = entry.get("verdict") if isinstance(entry, dict) else None
+    # Service rules put some traffic in other queues, so the cap conclusion cannot be trusted.
+    if verdict in CAP_VERDICTS and summary.get("service_rules"):
+        return "service-rules"
+    return verdict
 
 
 EXPORT_COLUMNS = (

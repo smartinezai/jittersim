@@ -42,7 +42,12 @@ from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_ap
 from jittersim.api.trust import TRUST_DOWNLOADS, dashboard_name_report, easy_address, read_trust_api
 from jittersim.localname import read_local_name
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
-from jittersim.api.speed_tests import SPEED_TEST_WRITES, read_speed_test, write_speed_test
+from jittersim.api.speed_tests import (
+    SPEED_TEST_WRITES,
+    SpeedTestManager,
+    read_speed_test,
+    write_speed_test,
+)
 from jittersim.config.adblocking import MAX_STATE_BYTES as MAX_AD_BLOCKING_BODY_BYTES
 from jittersim.config.device_labels import (
     DeviceLabelError,
@@ -981,6 +986,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         self.name_status_path = name_status_path
         self.helper_client = helper_client
         self.scheduler = scheduler
+        # The device speed test windows. One manager for the life of the server.
+        self._speed_test_manager = SpeedTestManager(self)
         self.router_operations = RouterOperations(
             self._router_execute, str(admin_token) + "\0" + str(getattr(helper_client, "socket_path", "local")),
         )
@@ -2860,6 +2867,11 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
     def server_close(self) -> None:
         deadline = time.monotonic() + self.shutdown_timeout_seconds
+        # Speed test windows read the helper and write the repository. Stop them first, because
+        # the caller closes the repository right after this returns.
+        speed_tests = getattr(self, "_speed_test_manager", None)
+        if speed_tests is not None:
+            speed_tests.shutdown(timeout=self.shutdown_timeout_seconds)
         if self.scheduler is not None:
             self.scheduler.begin_shutdown()
         if self.homepage_store is not None:

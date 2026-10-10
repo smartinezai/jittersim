@@ -7,6 +7,7 @@ the device. See docs/implementation-plan-device-speed-test-2026-10-09.md.
 """
 
 import json
+import logging
 import secrets
 import threading
 import time
@@ -20,6 +21,7 @@ from jittersim.config.storage import StorageError
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, GENERAL_QUEUE_ID
 from jittersim.networking.helper import HelperClientError
 from jittersim.speed_test import (
+    CAP_VERDICTS,
     DEFAULT_DURATION_SECONDS,
     DEFAULT_PROVIDER,
     DIRECTIONS,
@@ -29,6 +31,9 @@ from jittersim.speed_test import (
     MIN_DURATION_SECONDS,
     PROVIDER_IDS,
     SAMPLE_INTERVAL_SECONDS,
+    SERVICE_RULES_NOTE,
+    SHARED_LATENCY_NOTE,
+    SHARED_SOURCES,
     SOURCE_LABELS,
     VERDICT_LABELS,
     IcmpProber,
@@ -42,6 +47,8 @@ from jittersim.speed_test import (
     unmeasured_direction,
 )
 
+LOGGER = logging.getLogger(__name__)
+
 SPEED_TEST_READS = frozenset(
     ("/api/speed-tests", "/api/speed-tests/status", "/api/speed-tests/compare",
      "/api/speed-tests/export")
@@ -53,6 +60,14 @@ SPEED_TEST_WRITES = frozenset(
 # Ended runs stay readable for a while so the page can show how they ended.
 KEEP_ENDED_RUNS = 8
 PROTECTED_MESSAGE = "Protected devices are never shaped and their traffic is not measured."
+# A busy helper gets a few more tries before the start is refused as something to retry.
+READ_ATTEMPTS = 3
+READ_RETRY_SECONDS = 0.25
+# When the applied source of a device's profile cannot be confirmed, the row says so.
+UNCONFIRMED_PROFILE = "Unknown (source not confirmed)"
+PROGRESSION_PROFILE = "Progression (changes during the test)"
+# Ids are SQLite integers. A larger number cannot exist, so it is a bad request, not a fault.
+MAX_ID = 2**63 - 1
 
 
 class SpeedTestRequestError(ValueError):
@@ -76,9 +91,14 @@ class SpeedTestRun:
         self.ended_reason: Optional[str] = None
         self.result: Optional[Dict[str, Any]] = None
         self.identity: Optional[Dict[str, Any]] = None
+        # Sampling ticks that tried to read the counters, and how many of those reads failed.
+        self.ticks = 0
         self.failed_reads = 0
+        self.thread: Optional[threading.Thread] = None
 
     def payload(self, now: float) -> Dict[str, Any]:
+        """The run as the page sees it. `now` is on the monotonic clock, like the deadline."""
+
         live = {}
         for direction in DIRECTIONS:
             rates = per_second_rates(self.samples[-2:], direction) if self.source != "none" else []
@@ -110,7 +130,11 @@ class SpeedTestRun:
 
 
 class SpeedTestManager:
-    """At most MAX_ACTIVE_RUNS windows, one per device, each with its own sampling thread."""
+    """At most MAX_ACTIVE_RUNS windows, one per device, each with its own sampling thread.
+
+    Wall time (`clock`) only dates the saved rows. The deadline and the counter intervals use
+    the monotonic clock, so a clock change during a window cannot stretch or shrink it.
+    """
 
     def __init__(self, server, *, autostart: bool = True, clock=time.time,
                  monotonic=time.monotonic, sleep=time.sleep):
@@ -121,6 +145,7 @@ class SpeedTestManager:
         self.sleep = sleep
         self.lock = threading.RLock()
         self.runs: Dict[str, SpeedTestRun] = {}
+        self.closed = False
 
     # Helpers that read the server's state.
 
@@ -141,6 +166,17 @@ class SpeedTestManager:
         if read is None or self.repository.get_runtime_state().observed_state == "reset":
             return None
         return read()
+
+    def _retry(self, read):
+        """Call a helper read. A busy or slow helper gets a few more tries."""
+
+        for attempt in range(READ_ATTEMPTS):
+            try:
+                return read()
+            except HelperClientError:
+                if attempt == READ_ATTEMPTS - 1:
+                    raise
+                self.sleep(READ_RETRY_SECONDS)
 
     def active(self) -> List[SpeedTestRun]:
         with self.lock:
@@ -171,7 +207,30 @@ class SpeedTestManager:
             raise SpeedTestRequestError(str(error)) from error
         if self._protected(mac_address):
             raise SpeedTestRequestError(PROTECTED_MESSAGE, 409)
+        # Refuse early, before any helper read. The limits are checked again under the lock.
+        self._check_room(mac_address)
+        # The helper reads can take seconds, so they run without the manager lock.
+        run = self._new_run(mac_address, provider, duration, label)
+        try:
+            with self.lock:
+                self._check_room(mac_address)
+                if self._protected(mac_address):
+                    raise SpeedTestRequestError(PROTECTED_MESSAGE, 409)
+                self.runs[run.id] = run
+                self._trim()
+                if self.autostart:
+                    run.thread = threading.Thread(
+                        target=self._loop, args=(run,), name="speed-test", daemon=True)
+                    run.thread.start()
+                return run.payload(self.monotonic())
+        except BaseException:
+            run.prober.close()
+            raise
+
+    def _check_room(self, mac_address: str) -> None:
         with self.lock:
+            if self.closed:
+                raise SpeedTestRequestError("The dashboard is stopping.", 503)
             active = self.active()
             if any(run.mac_address == mac_address for run in active):
                 raise SpeedTestRequestError("A speed test is already running for this device", 409)
@@ -179,37 +238,68 @@ class SpeedTestManager:
                 raise SpeedTestRequestError(
                     f"At most {MAX_ACTIVE_RUNS} speed tests can run at once. "
                     "Wait for one to end.", 409)
-            run = self._new_run(mac_address, provider, duration, label)
-            self.runs[run.id] = run
-            self._trim()
-        if self.autostart:
-            threading.Thread(target=self._loop, args=(run,), name="speed-test", daemon=True).start()
-        return run.payload(self.clock())
+
+    def _connected_client(self, mac_address: str) -> Dict[str, Any]:
+        """The station entry of a device that is on the test Wi-Fi right now.
+
+        It uses the snapshot the Devices page uses. A device that cannot be confirmed as
+        connected is refused: its saved address may belong to another device by now.
+        """
+
+        helper = self.server.helper_client
+        read = getattr(helper, "connected_device_snapshot", None) if helper is not None else None
+        if read is None:
+            raise SpeedTestRequestError(
+                "The Pi helper is not connected, so the device's Wi-Fi connection cannot be "
+                "checked.", 503)
+        try:
+            snapshot = self._retry(read)
+        except HelperClientError as error:
+            raise SpeedTestRequestError(
+                "The Pi could not check the Wi-Fi connection just now. Try again in a moment.",
+                503) from error
+        if snapshot.get("association_status_available") is not True:
+            raise SpeedTestRequestError(
+                "The Wi-Fi connection status is unknown right now. Try again in a moment.", 503)
+        for client in snapshot.get("devices", ()):
+            if client.get("mac_address") == mac_address and client.get(
+                    "association_verified") is True:
+                return client
+        raise SpeedTestRequestError("This device is not connected to the test Wi-Fi right now", 409)
 
     def _new_run(self, mac_address, provider, duration, label) -> SpeedTestRun:
+        """Read what the Pi knows about the device and build the run. It takes no manager lock."""
+
         repository = self.repository
+        client = self._connected_client(mac_address)
         device = repository.get_device_by_mac_address(mac_address)
         labels = repository.list_connected_device_labels()
         name = (labels.get(mac_address, {}).get("display_name") or (device.name if device else "")
                 or mac_address)
-        ipv4 = (str(device.ipv4_address) if device is not None
-                else self._connected_address(mac_address))
-        now = self.clock()
-        queues, note = None, None
+        # The address the device has now. The saved row may still hold an older one.
+        ipv4 = client.get("ipv4_address")
         try:
-            queues = self._read_queues()
-            if queues is None:
-                note = ("The Pi helper is not connected." if self.server.helper_client is None
-                        else "The network is reset or the helper cannot read queues.")
-        except HelperClientError:
-            note = "The queue counters could not be read."
+            queues = self._retry(self._read_queues)
+        except HelperClientError as error:
+            raise SpeedTestRequestError(
+                "The Pi could not read the queue counters just now. Try again in a moment.",
+                503) from error
+        now, mono = self.clock(), self.monotonic()
         source, entries = pick_queues(queues or [], device.id if device else None)
-        if source == "none" and note is None:
-            note = ("No profile applies to this device, so the Pi has no counter for it. Type in "
-                    "the numbers from the speed test page, or apply a profile with nothing set "
-                    "to measure it on the Pi without limits.")
-        elif source in ("everyone", "everyone-else"):
-            note = "Other devices share this queue, so their traffic is counted too."
+        notes: List[str] = []
+        if queues is None:
+            notes.append("The network is reset or the helper cannot read queues.")
+        elif source == "none":
+            notes.append(
+                "No profile applies to this device, so the Pi has no counter for it. Type in "
+                "the numbers from the speed test page, or apply a profile with nothing set "
+                "to measure it on the Pi without limits.")
+        elif source in SHARED_SOURCES:
+            notes.append("Other devices share this queue, so their traffic is counted too. "
+                         + SHARED_LATENCY_NOTE)
+        service_rules = source != "none" and self._service_rules_apply(device)
+        if service_rules:
+            notes.append(SERVICE_RULES_NOTE)
         run = SpeedTestRun(
             id=secrets.token_hex(8),
             mac_address=mac_address,
@@ -220,14 +310,16 @@ class SpeedTestManager:
             label=label,
             duration_seconds=duration,
             started_at=now,
-            deadline=now + duration,
+            started_mono=mono,
+            deadline=mono + duration,
             source=source,
-            source_note=note,
+            source_note=" ".join(notes) or None,
+            service_rules=service_rules,
             profile=self._profile_snapshot(device, source, entries),
         )
         if source != "none":
             run.identity = {direction: _identity(entry) for direction, entry in entries.items()}
-            run.samples.append(_sample(entries, now))
+            run.samples.append(_sample(entries, mono))
         factory = getattr(self.server, "speed_test_prober_factory", None)
         if ipv4 is None:
             run.prober = NoProber()
@@ -235,35 +327,68 @@ class SpeedTestManager:
             run.prober = factory(ipv4) if factory is not None else IcmpProber(ipv4)
         return run
 
-    def _connected_address(self, mac_address: str) -> Optional[str]:
-        helper = self.server.helper_client
-        if helper is None:
-            return None
-        try:
-            for client in helper.connected_devices():
-                if client.get("mac_address") == mac_address:
-                    return client.get("ipv4_address")
-        except (HelperClientError, AttributeError, TypeError):
-            return None
-        return None
+    def _service_rules_apply(self, device) -> bool:
+        """Whether a service rule can send some of this device's traffic through another queue.
+
+        A service list covers every unprotected device. A service quota or an immediate service
+        profile covers one saved device.
+        """
+
+        repository = self.repository
+        if any(item.enabled for item in repository.list_service_lists()):
+            return True
+        if device is None:
+            return False
+        rules = (*repository.list_service_quotas(), *repository.list_service_assignments())
+        return any(item.enabled and item.device_id == device.id for item in rules)
+
+    def _applied_profile(self, key, saved):
+        """What really applies to one queue: (profile, name, source kind, source label).
+
+        The scheduler's applied snapshot says what controls the device: its saved profile, a
+        group profile, a schedule, a timer, a scenario, a progression or a data limit. The saved
+        assignment is only called applied when the snapshot confirms it.
+        """
+
+        read = getattr(self.server.scheduler, "applied_snapshot", None)
+        states = read()[1] if read is not None else None
+        state = (states or {}).get(key)
+        if state is None:
+            return None, UNCONFIRMED_PROFILE, "unknown", ""
+        kind, name = state.source.kind, state.source.profile
+        if kind == "none":
+            return None, "No profile", kind, ""
+        if kind == "progression":
+            return None, PROGRESSION_PROFILE, kind, state.source.label
+        if not name:
+            return None, UNCONFIRMED_PROFILE, kind, state.source.label
+        profile = saved if saved is not None and saved.name == name else self._profile_named(name)
+        return profile, name, kind, state.source.label
+
+    def _profile_named(self, name):
+        matches = [profile for profile in self.repository.list_profiles() if profile.name == name]
+        return matches[0] if len(matches) == 1 else None
 
     def _profile_snapshot(self, device, source, entries) -> Dict[str, Any]:
         repository = self.repository
-        profile = None
+        profile, name, applied_by, applied_label = None, "No profile", "profile", ""
         if source == "device" and device is not None:
-            profile = repository.get_profile(device.profile_id)
+            profile, name, applied_by, applied_label = self._applied_profile(
+                device.id, repository.get_profile(device.profile_id))
         elif source == "everyone":
             profile = repository.get_general_profile()
+            name = profile.name if profile else "No profile"
         elif source == "everyone-else":
             identifier = repository.get_everyone_else_profile_id()
-            profile = repository.get_profile(identifier) if identifier else None
-        elif device is not None:
-            profile = repository.get_profile(device.profile_id)
+            profile, name, applied_by, applied_label = self._applied_profile(
+                EVERYONE_ELSE_QUEUE_ID, repository.get_profile(identifier) if identifier else None)
         general = repository.get_general_profile()
         return {
             "kind": source,
             "profile_id": profile.id if profile else None,
-            "profile_name": profile.name if profile else "No profile",
+            "profile_name": name,
+            "applied_by": applied_by,
+            "applied_by_label": applied_label,
             "saved": (
                 {"upload": impairment_payload(profile.upload),
                  "download": impairment_payload(profile.download)}
@@ -291,9 +416,13 @@ class SpeedTestManager:
                 self.sleep(max(0.0, next_at - self.monotonic()))
                 self.tick(run.id)
         except Exception:  # a sampling fault must not leave a window open forever
+            LOGGER.exception("the speed test sampler failed")
             with self.lock:
                 if run.state == "running":
-                    self._end(run, "changed", reason="The measurement stopped after an error.")
+                    try:
+                        self._end(run, "fault", reason="The measurement stopped after an error.")
+                    except Exception:
+                        LOGGER.exception("the speed test could not be ended cleanly")
         finally:
             run.prober.close()
 
@@ -307,18 +436,18 @@ class SpeedTestManager:
         if self._protected(run.mac_address):
             with self.lock:
                 if run.state == "running":
-                    run.state = "ended"
-                    run.ended_reason = PROTECTED_MESSAGE
+                    self._discard(run, PROTECTED_MESSAGE)
             return
         changed = False
         if run.source != "none":
+            run.ticks += 1
             try:
                 queues = self._read_queues()
             except HelperClientError:
                 # A busy or slow helper skips one sample; the next read carries on.
                 queues = False
                 run.failed_reads += 1
-            now = self.clock()
+            now = self.monotonic()
             if queues is None:
                 changed = True
             elif queues is not False:
@@ -341,14 +470,39 @@ class SpeedTestManager:
                 return
             if changed:
                 self._end(run, "changed", reason="The device's queues changed during the test.")
-            elif self.clock() >= run.deadline:
+            elif self.monotonic() >= run.deadline:
                 self._end(run, "complete")
 
     # Ending.
 
-    def _end(self, run: SpeedTestRun, status: str, *, reason: Optional[str] = None) -> None:
+    def _discard(self, run: SpeedTestRun, reason: str) -> None:
         run.state = "ended"
         run.ended_reason = reason
+
+    def _end(self, run: SpeedTestRun, status: str, *, reason: Optional[str] = None) -> None:
+        """End a running window and save its result. The caller holds the lock.
+
+        Every way a window ends comes through here, so protection is checked here, under the
+        same lock that decides whether to save: a device that became protected is not saved.
+        """
+
+        run.state = "ended"
+        run.ended_reason = reason
+        if status == "cancelled":
+            run.ended_reason = "Cancelled. Nothing was saved."
+            return
+        try:
+            protected = self._protected(run.mac_address)
+        except StorageError:
+            run.ended_reason = "The result could not be saved."
+            return
+        if protected:
+            self._discard(run, PROTECTED_MESSAGE)
+            return
+        if status in ("complete", "finished-early") and run.failed_reads * 2 > run.ticks:
+            # Most of the reads failed, so the numbers are too thin to call this complete.
+            status = "fault"
+            run.ended_reason = "The Pi could not read the queue counters for most of the test."
         caps = {
             direction: ((run.identity or {}).get(direction, {}).get("impairment") or {})
             .get("bandwidth_kbit")
@@ -360,9 +514,21 @@ class SpeedTestManager:
                 summary[direction] = unmeasured_direction()
             else:
                 summary[direction] = summarize_direction(run.samples, direction, caps[direction])
-        summary["latency"] = run.prober.summary()
-        summary["seconds"] = round(self.clock() - run.started_at, 1)
+            if run.service_rules and summary[direction].get("verdict") in CAP_VERDICTS:
+                summary[direction]["verdict"] = "service-rules"
+        latency = dict(run.prober.summary())
+        # Only a device's own queue sees the Pi's ping. Everything else is a plain Wi-Fi round trip.
+        latency["shaped"] = run.source == "device"
+        if run.source in SHARED_SOURCES:
+            latency["note"] = SHARED_LATENCY_NOTE
+        summary["latency"] = latency
+        summary["seconds"] = round(self.monotonic() - run.started_mono, 1)
+        summary["read_failures"] = run.failed_reads
         summary["source_note"] = run.source_note
+        if run.ended_reason:
+            summary["ended_reason"] = run.ended_reason
+        if run.service_rules:
+            summary["service_rules"] = True
         try:
             run.result = self._store().save({
                 "started_at": run.started_at,
@@ -385,14 +551,32 @@ class SpeedTestManager:
         with self.lock:
             run = self._running(run_id)
             self._end(run, "finished-early")
-            return run.payload(self.clock())
+            return run.payload(self.monotonic())
 
     def cancel(self, run_id: str) -> Dict[str, Any]:
         with self.lock:
             run = self._running(run_id)
-            run.state = "ended"
-            run.ended_reason = "Cancelled. Nothing was saved."
-            return run.payload(self.clock())
+            self._end(run, "cancelled")
+            return run.payload(self.monotonic())
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Stop every window without saving and wait for the sampling threads.
+
+        The server calls this before it closes the repository, so no thread reads or writes it
+        afterwards.
+        """
+
+        with self.lock:
+            self.closed = True
+            threads = []
+            for run in self.runs.values():
+                if run.state == "running":
+                    self._discard(run, "The dashboard stopped. Nothing was saved.")
+                if run.thread is not None:
+                    threads.append(run.thread)
+        deadline = self.monotonic() + timeout
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - self.monotonic()))
 
     def _running(self, run_id: Any) -> SpeedTestRun:
         run = self.runs.get(run_id) if isinstance(run_id, str) else None
@@ -407,7 +591,7 @@ class SpeedTestManager:
             run = self.runs.get(run_id) if run_id else None
             if run is None:
                 raise SpeedTestRequestError("This speed test is not known", 404)
-            return run.payload(self.clock())
+            return run.payload(self.monotonic())
 
 
 def pick_queues(queues, device_id, prefer=None):
@@ -444,10 +628,8 @@ def _sample(entries: Dict[str, Dict[str, Any]], now: float) -> Dict[str, Any]:
 
 
 def speed_test_manager(server) -> SpeedTestManager:
-    manager = getattr(server, "_speed_test_manager", None)
-    if manager is None:
-        manager = server._speed_test_manager = SpeedTestManager(server)
-    return manager
+    # The server makes its one manager when it is built.
+    return server._speed_test_manager
 
 
 def _query_mac(query: Dict[str, List[str]]) -> Optional[str]:
@@ -462,14 +644,15 @@ def _query_mac(query: Dict[str, List[str]]) -> Optional[str]:
 
 def _query_id(query: Dict[str, List[str]], name: str) -> int:
     value = query.get(name, [""])[0]
-    if not value.isdigit() or len(value) > 12:
+    # Only plain ASCII digits: other scripts pass isdigit() but cannot be read as a number.
+    if not (value.isascii() and value.isdigit()) or int(value) > MAX_ID:
         raise SpeedTestRequestError(f"{name} must be a result number")
     return int(value)
 
 
 def _payload_id(payload: Dict[str, Any]) -> int:
     value = payload.get("result_id")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_ID:
         raise SpeedTestRequestError("result_id must be a result number")
     return value
 
@@ -485,6 +668,9 @@ def read_speed_test(server, path: str, query: str = ""):
         return _read(server, path, fields)
     except SpeedTestRequestError as error:
         return response({"error": str(error)}, error.status)
+    except StorageError:
+        LOGGER.exception("could not read the speed test results")
+        return response({"error": "The speed test results could not be read."}, 500)
 
 
 def _read(server, path, query):
@@ -492,7 +678,7 @@ def _read(server, path, query):
     store = SpeedTestStore(server.repository)
     if path == "/api/speed-tests":
         mac_address = _query_mac(query)
-        runs = [run.payload(manager.clock()) for run in manager.active()
+        runs = [run.payload(manager.monotonic()) for run in manager.active()
                 if mac_address is None or run.mac_address == mac_address]
         return response({
             "providers": provider_payload(),
@@ -532,6 +718,9 @@ def write_speed_test(server, path: str, payload: Dict[str, Any]):
         return _write(server, path, payload)
     except SpeedTestRequestError as error:
         return response({"error": str(error)}, error.status)
+    except StorageError:
+        LOGGER.exception("could not save the speed test results")
+        return response({"error": "The speed test results could not be saved."}, 500)
 
 
 def _write(server, path, payload):
