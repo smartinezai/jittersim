@@ -4,6 +4,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+.venv
 .venv/
 venv/
 build/
