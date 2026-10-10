@@ -1071,3 +1071,30 @@ class UpstreamSafetyRendererTests(unittest.TestCase):
         self.assertEqual(withheld_upload_settings(self.HARSH, corrupt=False),
                          ["reordering", "duplication", "corruption"])
         self.assertEqual(withheld_upload_settings(Impairment(delay_ms=5), corrupt=False), [])
+
+
+class UpstreamSafeExemptionTests(unittest.TestCase):
+    def test_protected_and_unaffected_devices_leave_the_intake_before_any_redirect(self) -> None:
+        from jittersim.engine.plan import EveryoneElseRule
+
+        bad = Impairment(delay_ms=5, corrupt_percent=6)
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "bad"),),
+            profiles={"bad": Profile(id="bad", name="Bad", upload=bad)},
+            protected_mac_addresses=("02:00:00:00:00:aa",),
+            everyone_else=EveryoneElseRule(mark=0, upload_impairment=bad, download_impairment=Impairment(),
+                                           unaffected_macs=("02:00:00:00:00:bb",)),
+        )
+        commands = render_command_plan(plan=plan, topology=Topology("eth0", "wlan0"),
+                                       upload_device=UPLOAD_DEVICE)
+        intake = [command.arguments for command in commands if INGRESS_HANDLE in command.arguments]
+
+        self.assertEqual(intake[0][-1], "ingress")
+        bypass = intake[1:3]
+        self.assertEqual([arguments[arguments.index("src_mac") + 1] for arguments in bypass],
+                         ["02:00:00:00:00:aa", "02:00:00:00:00:bb"])
+        for arguments in bypass:
+            self.assertEqual(arguments[-2:], ("action", "ok"))
+        self.assertIn("connmark", intake[3])
+        prefs = [int(arguments[arguments.index("pref") + 1]) for arguments in intake[1:]]
+        self.assertLess(max(prefs[:2]), min(prefs[2:]), "a redirect would run before the exemption")

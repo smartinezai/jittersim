@@ -13,6 +13,7 @@ tests/kernel/run-in-docker.sh.
 import json
 import os
 import re
+import time
 import shutil
 import struct
 import subprocess
@@ -35,6 +36,7 @@ from jittersim.networking.renderer import UPLOAD_DEVICE
 
 from .lab import (
     CLIENT,
+    CLIENT_MAC,
     OTHER_CLIENT,
     PI,
     ROUTER,
@@ -382,3 +384,58 @@ class UpstreamSafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FLOW = r"""
+import socket, struct, sys, time
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+    udp.bind(("192.168.50.10", 40000))
+    for burst in range(2):
+        for number in range(int(sys.argv[2])):
+            udp.sendto(b"JSF" + struct.pack("!I", number), (sys.argv[1], 9998))
+            time.sleep(0.01)
+        # A quiet gap on the same connection while the test changes the plan.
+        if burst == 0:
+            time.sleep(4)
+"""
+
+
+def ifb_sent_packets():
+    result = _in(PI, "cat", f"/sys/class/net/{UPLOAD_DEVICE}/statistics/tx_packets", check=False)
+    return int(result.stdout.strip() or 0)
+
+
+@unittest.skipUnless(ENABLED, "needs root on Linux with JITTERSIM_KERNEL_TESTS=1")
+class ProtectedDeviceIntakeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        create_lab()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        remove_lab()
+
+    def test_a_device_protected_mid_connection_leaves_the_corruption_path(self) -> None:
+        applier = NetworkApplier(executor=NamespaceExecutor(PI), topology=TOPOLOGY)
+        self.addCleanup(applier.reset)
+        corrupting = Profile(id="c", name="C", upload=Impairment(corrupt_percent=30))
+        self.assertTrue(applier.apply(plan=compile_plan(
+            devices=[Device("a", "a", "192.168.50.10", "c"),
+                     Device("b", "b", "192.168.50.11", "c")],
+            profiles={"c": corrupting})).upload_corruption_applied)
+        # One UDP connection that stays open across the change.
+        flow = subprocess.Popen(
+            ["ip", "netns", "exec", CLIENT, sys.executable, "-c", FLOW, ROUTER_ADDRESS, "100"])
+        self.addCleanup(flow.kill)
+        time.sleep(1.5)
+        self.assertGreater(ifb_sent_packets(), 0, "the flow never reached the corruption path")
+        # The client's device record goes and its MAC becomes protected; another
+        # device keeps corruption so the intake stays in place.
+        report = applier.apply(plan=compile_plan(
+            devices=[Device("b", "b", "192.168.50.11", "c")], profiles={"c": corrupting},
+            protected_mac_addresses=(CLIENT_MAC,)))
+        self.assertTrue(report.upload_corruption_applied)
+        before = ifb_sent_packets()
+        flow.wait(timeout=30)
+        self.assertEqual(ifb_sent_packets(), before,
+                         "the protected device's open connection still passed the corruption path")
