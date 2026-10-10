@@ -32,43 +32,87 @@ def pi(tmp_path, monkeypatch):
     return root
 
 
-def run_now(capsys, arguments=("update",), *, token=True, final="complete", initial=None,
-            online="Release 0.3.0 (v0.3.0) is staged and ready to install."):
+REQUEST = "a" * 32
+
+
+def phases(*steps, version="0.3.0", before="0.2.0", request=REQUEST):
+    """Statuses the update service publishes one after another, as apply_update does. The
+    new release record appears at 'checking', before the health check decides."""
+    out = []
+    for phase in steps:
+        installed = version if phase in ("checking", "complete", "rolling-back") else before
+        if phase == "rolled-back":
+            installed = before
+        out.append({"phase": phase, "request_id": request, "request_kind": "install",
+                    "request_version": version, "installed": installed,
+                    "message": "Update " + phase + "."})
+    return out
+
+
+def run_now(capsys, arguments=("update", "now", "--yes"), *, token=True, statuses=None,
+            initial=None, online=None):
     online_calls = []
 
     def check(*args, **kwargs):
         online_calls.append(kwargs)
-        return {"result": "staged", "message": online}
+        return online or {"result": "staged",
+                          "message": "Release 0.3.0 (v0.3.0) is staged and ready to install."}
+
+    sequence = list(statuses if statuses is not None else phases(
+        "queued", "installing", "checking", "complete"))
+    final = sequence[-1] if sequence else {}
+
+    def read_status(*args, **kwargs):
+        return sequence.pop(0) if len(sequence) > 1 else final
 
     with patch("jittersim.cli.HelperClient") as helper, \
             patch.object(updates, "token_is_set", return_value=token), \
             patch.object(updates, "perform_online_check", side_effect=check), \
             patch.object(cli.subprocess, "run") as start, \
-            patch.object(updates, "update_status", return_value={
-                "phase": final, "request_id": "a" * 32, "installed": "0.3.0",
-                "message": "Release installed." if final == "complete"
-                else "Update failed. Previous installation restored and checked."}):
+            patch.object(cli.time, "sleep"), \
+            patch.object(updates, "update_status", side_effect=read_status):
         helper.return_value.release_status.return_value = initial or status()
-        helper.return_value.install_release.return_value = {"request_id": "a" * 32}
+        helper.return_value.install_release.return_value = {"request_id": REQUEST}
         code = jittersim(list(arguments))
     captured = capsys.readouterr()
     start.assert_not_called()
     return code, captured.out, captured.err, helper.return_value, online_calls
 
 
-def test_bare_update_checks_online_shows_notes_installs_and_waits(pi, capsys):
+def test_update_checks_online_shows_notes_installs_and_waits_for_complete(pi, capsys):
     (pi / "staged/deploy/RELEASE-NOTES.md").write_text(
         "## v0.3.0 - 2026-10-09\n\n* Faster \x1b[2Jcheck by @owner\n")
-    code, out, err, helper, online = run_now(capsys, ("update", "now", "--yes"))
+    code, out, err, helper, online = run_now(capsys)
     assert code == 0, err
     assert len(online) == 1 and online[0]["auto_install"] is False
     assert "Installed: 0.2.0" in out and "New release: 0.3.0, signed by owner@mac" in out
     assert "  ## v0.3.0 - 2026-10-09" in out and "\x1b" not in out
-    assert "restored automatically" in out and "Done. The Pi runs 0.3.0." in out
+    assert "Done. The Pi runs 0.3.0 and passed its health check." in out
     helper.install_release.assert_called_once_with(version="0.3.0")
 
 
-def test_bare_update_is_the_one_step_command(pi, capsys):
+def test_new_label_during_the_health_check_is_not_success(pi, capsys):
+    # The release record says 0.3.0 at 'checking', then the health check fails and restores.
+    code, out, err, _, _ = run_now(capsys, statuses=phases(
+        "queued", "installing", "checking", "rolling-back", "rolled-back"))
+    assert code == 1 and "Done." not in out
+    assert "confirmed that the previous installation (0.2.0) was restored" in err
+
+
+def test_a_failed_recovery_is_never_called_a_restore(pi, capsys):
+    code, out, err, _, _ = run_now(capsys, statuses=phases("queued", "installing", "checking", "failed"))
+    assert code == 1 and "restored" not in err and "Recovery may still be running" in err
+
+
+@pytest.mark.parametrize("arguments", [("update", "--yes"), ("update", "--offline", "--yes")])
+def test_options_after_bare_update_mean_update_now(pi, capsys, arguments):
+    code, out, err, helper, online = run_now(capsys, arguments)
+    assert code == 0, err
+    assert bool(online) == ("--offline" not in arguments)
+    helper.install_release.assert_called_once()
+
+
+def test_bare_update_asks_before_installing(pi, capsys):
     with patch.object(cli, "_confirm", return_value=False) as confirm:
         code, out, _, helper, online = run_now(capsys, ("update",))
     assert code == 0 and online and confirm.called
@@ -76,21 +120,39 @@ def test_bare_update_is_the_one_step_command(pi, capsys):
     helper.install_release.assert_not_called()
 
 
-def test_a_failed_health_check_reports_the_automatic_restore(pi, capsys):
-    code, out, err, _, _ = run_now(capsys, ("update", "now", "--yes"), final="rolled-back")
-    assert code == 1
-    assert "Previous installation restored" in out and "was restored" in err
+def test_a_failed_online_check_is_a_failure_not_up_to_date(pi, capsys):
+    code, out, err, helper, _ = run_now(capsys, initial=status(available=None), online={
+        "result": "failed", "message": "GitHub refused the token. It may have expired"})
+    assert code == 1 and "No newer release" not in out and "Up to date" not in out
+    assert "refused the token" in err and "--offline" in err
+    helper.install_release.assert_not_called()
 
 
 def test_up_to_date_installs_nothing(pi, capsys):
-    code, out, _, helper, _ = run_now(capsys, ("update", "now", "--yes"),
-                                      initial=status(available=None))
-    assert code == 0 and "Up to date. Installed: 0.2.0" in out
+    code, out, _, helper, _ = run_now(capsys, initial=status(available=None))
+    assert code == 0 and "No newer release. Installed: 0.2.0" in out
+    helper.install_release.assert_not_called()
+
+
+def test_an_update_in_progress_is_followed_not_restarted(pi, capsys):
+    running = phases("installing")[0]
+    code, out, err, helper, online = run_now(capsys, initial={**status(), **running},
+                                             statuses=phases("checking", "complete"))
+    assert code == 0, err
+    assert "already running" in out and not online
+    helper.install_release.assert_not_called()
+
+
+def test_a_release_that_just_failed_is_not_retried_under_yes(pi, capsys):
+    failed = phases("rolled-back")[0]
+    code, _, err, helper, _ = run_now(capsys, ("update", "now", "--yes", "--offline"),
+                                      initial={**status(), **failed, "installed": "0.2.0"})
+    assert code == 1 and "failed on this Pi before" in err
     helper.install_release.assert_not_called()
 
 
 def test_a_release_that_cannot_be_installed_is_not_queued(pi, capsys):
-    code, _, err, helper, _ = run_now(capsys, ("update", "now", "--yes"), initial=status(
+    code, _, err, helper, _ = run_now(capsys, initial=status(
         installable=False, reason="The key that signed the staged release is no longer trusted."))
     assert code == 1 and "no longer trusted" in err
     helper.install_release.assert_not_called()
@@ -99,13 +161,12 @@ def test_a_release_that_cannot_be_installed_is_not_queued(pi, capsys):
 def test_offline_and_missing_token_never_ask_github(pi, capsys):
     code, out, _, _, online = run_now(capsys, ("update", "now", "--yes", "--offline"))
     assert code == 0 and not online and "--offline" in out
-    code, out, _, _, online = run_now(capsys, ("update", "now", "--yes"), token=False)
+    code, out, _, _, online = run_now(capsys, token=False)
     assert code == 0 and not online and "set-token" in out
 
 
 def test_an_unfinished_update_must_be_retried_first(pi, capsys):
-    code, _, err, helper, _ = run_now(capsys, ("update", "now", "--yes"), initial=status(
-        phase="failed", retry={"id": "b" * 64}))
+    code, _, err, helper, _ = run_now(capsys, initial=status(phase="failed", retry={"id": "b" * 64}))
     assert code == 1 and "update retry" in err
     helper.install_release.assert_not_called()
 
@@ -180,30 +241,30 @@ def lab(tmp_path, monkeypatch):
     original = pi.server.helper_client
 
     class OnlineHelper:
-        """The Pi's helper with an online check that 'downloads' the published release."""
+        """The Pi's helper with an online check that 'downloads' the published release. With
+        auto_install it queues the install itself, as Install automatically does."""
 
-        fail_install = False
+        check_result = "staged"
+        auto_install = False
 
         def __getattr__(self, name):
             return getattr(original, name)
 
         def online_check(self, *, force=False):
-            updates.stage_release(published, root=pi.root, code=pi.code, config=pi.config)
+            if self.check_result == "staged":
+                updates.stage_release(published, root=pi.root, code=pi.code, config=pi.config)
             return {"job": "0123456789abcdef", "state": "running", "message": "Checking GitHub."}
 
         def online_status(self, job=None):
-            return {"job": job, "state": "done", "result": "staged",
+            if self.check_result == "failed":
+                return {"job": job, "state": "done", "result": "failed",
+                        "message": "GitHub refused the token. It may have expired"}
+            queued = False
+            if self.auto_install and not pi.installs:
+                original.install_release(version="0.3.0")
+                queued = True
+            return {"job": job, "state": "done", "result": "staged", "install_queued": queued,
                     "message": "Release 0.3.0 (v0.3.0) is staged and ready to install."}
-
-        def install_release(self, *, version, rollback=False):
-            if not self.fail_install:
-                return original.install_release(version=version, rollback=rollback)
-            updates.request_update(version, root=pi.root, code=pi.code, config=pi.config,
-                                   run=lambda *a: None)
-            (pi.root / "request.json").unlink()
-            updates.atomic_json(pi.root / "status.json", {
-                "phase": "rolled-back", "message": "Previous installation restored and health check passed."})
-            return {"ok": True, **original.release_status()}
 
     helper = OnlineHelper()
     pi.server.helper_client = helper
@@ -232,19 +293,54 @@ def test_remote_check_asks_the_pi_to_look_on_github(lab, capsys):
     assert pi.installs == [] and token not in out + err
 
 
-def test_remote_now_checks_installs_and_waits(lab, capsys):
+def test_remote_now_succeeds_only_after_complete(lab, capsys):
     pi, _, _ = lab
     code, out, err = remote(capsys, "now", "--yes")
     assert code == 0, err
-    assert "New release: 0.3.0" in out and "The Pi now runs release 0.3.0" in out
+    assert "Pi: checking" in out and out.index("Pi: checking") < out.index("Pi: complete")
+    assert "The Pi now runs release 0.3.0 and passed its health check" in out
     assert pi.installs == ["0.3.0"]
 
 
-def test_remote_now_reports_the_restore_after_a_failed_install(lab, capsys):
-    _, helper, _ = lab
-    helper.fail_install = True
-    code, _, err = remote(capsys, "now", "--yes", "--wait", "60")
-    assert code == 1 and "restored the previous installation" in err
+def test_remote_now_new_label_then_rollback_is_a_failure(lab, capsys):
+    pi, _, _ = lab
+    pi.outcome = "rolled-back"
+    code, out, err = remote(capsys, "now", "--yes", "--wait", "120")
+    assert code == 1 and "now runs" not in out
+    assert "confirmed that the previous installation" in err
+
+
+def test_remote_now_failed_recovery_is_not_called_a_restore(lab, capsys):
+    pi, _, _ = lab
+    pi.outcome = "failed"
+    code, _, err = remote(capsys, "now", "--yes", "--wait", "120")
+    assert code == 1 and "recovery is not confirmed" in err and "restored" not in err
+
+
+def test_remote_check_failure_is_an_error_and_installs_nothing(lab, capsys):
+    pi, helper, _ = lab
+    helper.check_result = "failed"
+    for action in ("check", "now"):
+        code, out, err = remote(capsys, action, "--yes") if action == "now" else remote(capsys, action)
+        assert code == 1 and "refused the token" in err and "No newer release" not in out
+    assert pi.installs == []
+
+
+def test_remote_now_follows_an_install_the_pi_already_started(lab, capsys, monkeypatch):
+    pi, helper, _ = lab
+    helper.auto_install = True
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("must not ask"))
+    code, out, err = remote(capsys, "now")
+    assert code == 0, err
+    assert "already started installing" in out and pi.installs == ["0.3.0"]
+
+
+def test_remote_now_json_prints_one_json_answer(lab, capsys):
+    code, out, err = remote(capsys, "now", "--yes", "--json")
+    assert code == 0, err
+    assert json.loads(out) == {"result": "installed", "installed": "0.3.0",
+                               "request_id": json.loads(out)["request_id"]}
+    assert remote(capsys, "now", "--json")[0] == 2
 
 
 def test_remote_now_without_confirmation_installs_nothing(lab, capsys, monkeypatch):

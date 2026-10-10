@@ -56,6 +56,9 @@ class DashboardWifiExecutor(WifiExecutor):
                 return CommandResult(
                     0, stdout="192.168.50.184 dev wlan0 lladdr 02:00:00:00:00:01 REACHABLE\n"
                 )
+            if command.arguments[:3] in (("-j", "link", "show"), ("link", "add", "name")):
+                # No ifb device on this fake Pi: upload corruption is left out.
+                return CommandResult(1, stderr='Device "jittersim-ifb" does not exist.\n')
             if command.arguments[:4] == ("-j", "-4", "route", "get"):
                 return CommandResult(0, stdout=json.dumps([{"dev": "wlan0"}]))
             if command.arguments[:4] == ("-j", "-4", "neigh", "show"):

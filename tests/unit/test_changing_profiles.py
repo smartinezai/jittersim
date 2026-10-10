@@ -228,7 +228,8 @@ def test_live_queue_changes_preserve_counters_but_duplication_uses_replacement()
     executor.commands.clear()
     report = applier.apply(plan=plan(Impairment(delay_ms=200, loss_percent=5)))
     assert report.counters_preserved
-    assert [c.arguments[:2] for c in executor.commands[2:]] == [("qdisc", "change"), ("qdisc", "change")]
+    # Two root queue checks, then the checks for a Wi-Fi intake and an ifb device.
+    assert [c.arguments[:2] for c in executor.commands[4:]] == [("qdisc", "change"), ("qdisc", "change")]
     executor.commands.clear()
     report = applier.apply(plan=plan(Impairment(delay_ms=200, duplicate_percent=1)))
     assert not report.counters_preserved

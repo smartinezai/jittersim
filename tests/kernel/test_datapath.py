@@ -23,6 +23,7 @@ from jittersim.engine.plan import EveryoneElseRule, ServiceAssignmentRule, Servi
 from jittersim.measure import load_run
 from jittersim.networking.applier import ApplyError, NetworkApplier
 from jittersim.networking.helper import HelperService
+from jittersim.networking.renderer import UPLOAD_DEVICE
 
 from .lab import (
     CLIENT,
@@ -107,11 +108,16 @@ class LinuxDatapathTests(unittest.TestCase):
             {"action": "apply", "plan": plan_to_payload(plan)})
         self.assertTrue(response["ok"], response)
         self.assertTrue(plan.queues)
+        # Upload loss stays on the uplink. Corruption runs on the ifb device
+        # before the Pi forwards. Uploads never duplicate or reorder.
         upload = _in(PI, "tc", "qdisc", "show", "dev", TOPOLOGY.uplink_interface)
         self.assertEqual(upload.returncode, 0, upload.stderr)
-        for field, value in (("loss", "1%"), ("reorder", "2%"),
-                             ("duplicate", "3%"), ("corrupt", "6%")):
-            self.assertRegex(upload.stdout, rf"\b{field}\s+{re.escape(value)}(?:\s|$)")
+        self.assertRegex(upload.stdout, r"\bloss\s+1%(?:\s|$)")
+        for field in ("reorder", "duplicate", "corrupt"):
+            self.assertNotIn(field, upload.stdout)
+        corruption = _in(PI, "tc", "qdisc", "show", "dev", UPLOAD_DEVICE)
+        self.assertEqual(corruption.returncode, 0, corruption.stderr)
+        self.assertRegex(corruption.stdout, r"\bcorrupt\s+6%(?:\s|$)")
         download = _in(PI, "tc", "qdisc", "show", "dev", TOPOLOGY.test_interface)
         self.assertEqual(download.returncode, 0, download.stderr)
         self.assertIn("loss gemodel p 0.2525% r 25%", download.stdout)
@@ -326,7 +332,9 @@ class LinuxDatapathTests(unittest.TestCase):
             devices=[device("a-phone", 10, "slow")], profiles={"slow": slow}
         )
         failing = NetworkApplier(
-            executor=NamespaceExecutor(PI, fail_on_index=3), topology=TOPOLOGY
+            # The second command of the plan, after two root queue checks and
+            # the checks for a Wi-Fi intake and an ifb device.
+            executor=NamespaceExecutor(PI, fail_on_index=5), topology=TOPOLOGY
         )
 
         with self.assertRaisesRegex(ApplyError, "cleanup completed"):
@@ -336,6 +344,7 @@ class LinuxDatapathTests(unittest.TestCase):
                                 check=False).returncode, 0)
         for interface in ("eth0", "wlan0"):
             self.assertNotIn("10:", _in(PI, "tc", "qdisc", "show", "dev", interface).stdout)
+        self.assertNotEqual(_in(PI, "ip", "link", "show", UPLOAD_DEVICE, check=False).returncode, 0)
 
     def test_helper_reports_what_each_queue_dropped(self) -> None:
         service = HelperService(self.applier)

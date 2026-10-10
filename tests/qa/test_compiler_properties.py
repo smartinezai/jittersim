@@ -23,6 +23,8 @@ from jittersim.networking.commands import Command, CommandResult
 from jittersim.networking.renderer import (
     DOWNLOAD_TABLE,
     PROJECT_TABLE,
+    UPLOAD_DEVICE,
+    corrupting_upload_queues,
     render_command_plan,
     render_reset_commands,
 )
@@ -117,11 +119,16 @@ def test_the_plan_stays_small_and_carries_no_names(scenario):
     assert len(commands) <= 1 + 2 * (2 + 6 * len(devices))
     assert len(script.encode("utf-8")) <= 16_000 + 3_000 * len(devices)
     assert re.fullmatch(r"[\x20-\x7e\n]*", script)
-    for device in devices:
+    def leaked(name):
         # A name is a label. A hostile one would end the nft statement or the quoted comment.
-        assert device.name not in script or SAFE_COMMENT.fullmatch(device.name)
+        # Names of one or two characters (a lone `"`) occur in any script by chance, so only
+        # longer names can be told apart from the script's own text.
+        return len(name) > 2 and name in script and not SAFE_COMMENT.fullmatch(name)
+
+    for device in devices:
+        assert not leaked(device.name)
     for profile in profiles.values():
-        assert profile.name not in script or SAFE_COMMENT.fullmatch(profile.name)
+        assert not leaked(profile.name)
     for comment in NFT_COMMENT.findall(script):
         assert SAFE_COMMENT.fullmatch(comment), comment
 
@@ -170,6 +177,9 @@ class KernelModel:
         self.children = {}       # interface -> set of (parent, handle)
         self.filters = {}        # interface -> set of (pref, handle)
         self.foreign_roots = {"br0": ("0:", "mq"), "eth1": ("8001:", "htb")}
+        # Upload corruption adds an ifb device and an ingress queue on the test interface.
+        self.links = set()
+        self.ingress = set()
         self.log = []
 
     def project_state(self):
@@ -177,6 +187,7 @@ class KernelModel:
             {table for table in self.tables if table not in self.FOREIGN_TABLES},
             {key: value for key, value in self.roots.items()},
             {key: set(value) for key, value in self.children.items() if value},
+            set(self.links) | {("ingress", interface) for interface in self.ingress},
         )
 
     def run(self, command: Command) -> CommandResult:
@@ -186,9 +197,57 @@ class KernelModel:
             return self._tc(arguments)
         if command.executable == "nft":
             return self._nft(command)
+        if command.executable == "ip":
+            return self._ip(arguments)
         raise AssertionError(f"the kernel model has no answer for {command.argv}")
 
+    def _ip(self, arguments):
+        name = arguments[3] if arguments[:2] in (("link", "add"), ("link", "set")) else arguments[-1]
+        if arguments[:3] == ("-j", "link", "show"):
+            if name in self.links:
+                return CommandResult(0, stdout=json.dumps([{"ifname": name}]))
+            return CommandResult(1, stderr=f'Device "{name}" does not exist.')
+        if arguments[:2] == ("link", "add"):
+            assert arguments[-2:] == ("type", "ifb")
+            if name in self.links:
+                return CommandResult(2, stderr="RTNETLINK answers: File exists")
+            self.links.add(name)
+            return CommandResult(0)
+        if arguments[:2] == ("link", "set"):
+            return CommandResult(0 if name in self.links else 1)
+        if arguments[:2] == ("link", "del"):
+            assert name in self.links, "removed a device JitterSim did not create"
+            self.links.discard(name)
+            self.roots.pop(name, None)
+            self.children.pop(name, None)
+            self.filters.pop(name, None)
+            return CommandResult(0)
+        raise AssertionError(f"the kernel model has no answer for ip {arguments}")
+
     def _tc(self, arguments):
+        if arguments[:3] == ("-j", "qdisc", "show") and arguments[-1] == "ingress":
+            interface = arguments[arguments.index("dev") + 1]
+            present = interface in self.ingress
+            return CommandResult(0, stdout=json.dumps(
+                [{"kind": "ingress", "handle": "ffff:"}] if present else []))
+        if arguments[-1] == "ingress" and arguments[0] == "qdisc":
+            interface = arguments[arguments.index("dev") + 1]
+            if arguments[1] == "add":
+                if interface in self.ingress:
+                    return CommandResult(2, stderr="Error: Exclusivity flag on, cannot modify.")
+                self.ingress.add(interface)
+                return CommandResult(0)
+            if arguments[1] == "del":
+                if interface not in self.ingress:
+                    return CommandResult(2, stderr="Error: Cannot find specified qdisc on specified device.")
+                self.ingress.discard(interface)
+                return CommandResult(0)
+        if arguments[0] == "filter" and "ffff:" in arguments:
+            interface = arguments[arguments.index("dev") + 1]
+            assert interface in self.ingress, "a filter on a missing intake"
+            return CommandResult(0)
+        if arguments[:2] == ("qdisc", "show"):
+            return CommandResult(0, stdout="")
         if arguments[:3] == ("-j", "qdisc", "show"):
             interface = arguments[arguments.index("dev") + 1]
             if interface in self.roots:
@@ -272,13 +331,18 @@ def test_reset_removes_exactly_what_apply_created(sequence):
         plan = compiled(devices, profiles)
         applier.apply(plan=plan)
         applied_any = True
-        tables, roots, _ = kernel.project_state()
+        tables, roots, _, redirect = kernel.project_state()
         assert tables == {("inet", PROJECT_TABLE), ("netdev", DOWNLOAD_TABLE)}
         expected_roots = {
             interface for interface, direction in (("eth0", "upload"), ("wlan0", "download"))
             if any(queue.direction.value == direction for queue in plan.queues)
         }
+        # Upload corruption runs on the ifb device behind the Wi-Fi intake, and only then.
+        corrupting = bool(corrupting_upload_queues(plan))
+        if corrupting:
+            expected_roots.add(UPLOAD_DEVICE)
         assert set(roots) == expected_roots
+        assert redirect == ({UPLOAD_DEVICE, ("ingress", "wlan0")} if corrupting else set())
         # Every queue the plan names exists, and nothing is left over from an earlier plan
         # that this one does not name. (A band that lost its device must not linger.)
         for queue in plan.queues:
@@ -287,8 +351,8 @@ def test_reset_removes_exactly_what_apply_created(sequence):
     assert applied_any
 
     applier.reset()
-    tables, roots, children = kernel.project_state()
-    assert tables == set() and roots == {} and children == {}
+    tables, roots, children, redirect = kernel.project_state()
+    assert tables == set() and roots == {} and children == {} and redirect == set()
     assert (kernel.tables & kernel.FOREIGN_TABLES) == kernel.FOREIGN_TABLES
     assert (set(kernel.FOREIGN_TABLES), dict(kernel.foreign_roots)) == foreign_before
 
