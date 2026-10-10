@@ -9,6 +9,7 @@ the device. See docs/implementation-plan-device-speed-test-2026-10-09.md.
 import json
 import logging
 import secrets
+import sqlite3
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -20,6 +21,7 @@ from jittersim.config.speed_tests import SpeedTestStore, clean_label, clean_repo
 from jittersim.config.storage import StorageError
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, GENERAL_QUEUE_ID
 from jittersim.networking.helper import HelperClientError
+from jittersim.request_workers import WorkersStillRunning
 from jittersim.speed_test import (
     CAP_VERDICTS,
     DEFAULT_DURATION_SECONDS,
@@ -95,6 +97,7 @@ class SpeedTestRun:
         self.ticks = 0
         self.failed_reads = 0
         self.thread: Optional[threading.Thread] = None
+        self.startup_uncertain = False
 
     def payload(self, now: float) -> Dict[str, Any]:
         """The run as the page sees it. `now` is on the monotonic clock, like the deadline."""
@@ -127,6 +130,10 @@ class SpeedTestRun:
             "live": live,
             "result": self.result,
         }
+
+
+# Best-effort bound within the server's shared shutdown budget, not a guaranteed reserve.
+SAMPLER_SHUTDOWN_TIMEOUT_SECONDS = 4.0
 
 
 class SpeedTestManager:
@@ -221,10 +228,22 @@ class SpeedTestManager:
                 if self.autostart:
                     run.thread = threading.Thread(
                         target=self._loop, args=(run,), name="speed-test", daemon=True)
-                    run.thread.start()
+                    try:
+                        run.thread.start()
+                    except BaseException:
+                        # Treat a failed start as uncertain. Python may have created the native
+                        # thread before the caller was interrupted, so keep both resources owned.
+                        self.closed = True
+                        run.startup_uncertain = (
+                            run.thread.ident is None and not run.thread.is_alive())
+                        run.state = "ended"
+                        run.ended_reason = (
+                            "The sampler could not start cleanly. Restart the dashboard.")
+                        raise
                 return run.payload(self.monotonic())
         except BaseException:
-            run.prober.close()
+            if run.thread is None:
+                run.prober.close()
             raise
 
     def _check_room(self, mac_address: str) -> None:
@@ -400,7 +419,10 @@ class SpeedTestManager:
         }
 
     def _trim(self) -> None:
-        ended = [run for run in self.runs.values() if run.state != "running"]
+        ended = [run for run in self.runs.values()
+                 if run.state != "running" and
+                 not run.startup_uncertain and
+                 (run.thread is None or not run.thread.is_alive())]
         for run in ended[:-KEEP_ENDED_RUNS] if len(ended) > KEEP_ENDED_RUNS else []:
             self.runs.pop(run.id, None)
 
@@ -482,22 +504,14 @@ class SpeedTestManager:
     def _end(self, run: SpeedTestRun, status: str, *, reason: Optional[str] = None) -> None:
         """End a running window and save its result. The caller holds the lock.
 
-        Every way a window ends comes through here, so protection is checked here, under the
-        same lock that decides whether to save: a device that became protected is not saved.
+        Every way a window ends comes through here, so protection is checked in the repository
+        transaction that saves the result. A device that became protected is not saved.
         """
 
         run.state = "ended"
         run.ended_reason = reason
         if status == "cancelled":
             run.ended_reason = "Cancelled. Nothing was saved."
-            return
-        try:
-            protected = self._protected(run.mac_address)
-        except StorageError:
-            run.ended_reason = "The result could not be saved."
-            return
-        if protected:
-            self._discard(run, PROTECTED_MESSAGE)
             return
         if status in ("complete", "finished-early") and run.failed_reads * 2 > run.ticks:
             # Most of the reads failed, so the numbers are too thin to call this complete.
@@ -529,22 +543,30 @@ class SpeedTestManager:
             summary["ended_reason"] = run.ended_reason
         if run.service_rules:
             summary["service_rules"] = True
+        row = {
+            "started_at": run.started_at,
+            "finished_at": self.clock(),
+            "mac_address": run.mac_address,
+            "device_id": run.device_id,
+            "device_name": run.device_name,
+            "label": run.label,
+            "status": status,
+            "provider": run.provider,
+            "source": run.source,
+            "protected": False,
+            "profile": run.profile,
+            "summary": summary,
+        }
         try:
-            run.result = self._store().save({
-                "started_at": run.started_at,
-                "finished_at": self.clock(),
-                "mac_address": run.mac_address,
-                "device_id": run.device_id,
-                "device_name": run.device_name,
-                "label": run.label,
-                "status": status,
-                "provider": run.provider,
-                "source": run.source,
-                "protected": False,
-                "profile": run.profile,
-                "summary": summary,
-            })
-        except StorageError:
+            # Serialize the protection check with the result insert. A concurrent request that
+            # protects this device must happen entirely before the check or after the saved row.
+            with self.repository.transaction():
+                if self._protected(run.mac_address):
+                    self._discard(run, PROTECTED_MESSAGE)
+                    return
+                result = self._store().save(row)
+            run.result = result
+        except (StorageError, sqlite3.Error):
             run.ended_reason = "The result could not be saved."
 
     def finish(self, run_id: str) -> Dict[str, Any]:
@@ -569,14 +591,24 @@ class SpeedTestManager:
         with self.lock:
             self.closed = True
             threads = []
+            uncertain = []
             for run in self.runs.values():
                 if run.state == "running":
                     self._discard(run, "The dashboard stopped. Nothing was saved.")
                 if run.thread is not None:
                     threads.append(run.thread)
-        deadline = self.monotonic() + timeout
+                    if run.startup_uncertain and run.thread.ident is None:
+                        uncertain.append(run)
+        deadline = time.monotonic() + min(max(timeout, 0.0), SAMPLER_SHUTDOWN_TIMEOUT_SECONDS)
         for thread in threads:
-            thread.join(timeout=max(0.0, deadline - self.monotonic()))
+            if thread.ident is not None:
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            raise WorkersStillRunning(
+                "A speed test sampler did not stop. Its repository remains in use.")
+        if uncertain:
+            raise WorkersStillRunning(
+                "A speed test sampler start is unresolved. Its repository remains in use.")
 
     def _running(self, run_id: Any) -> SpeedTestRun:
         run = self.runs.get(run_id) if isinstance(run_id, str) else None

@@ -51,11 +51,12 @@ trusts these numbers and compares them with the cap.
 * A device covered by **Same as everyone** (general profile) or by **Everyone else**: measured
   on the shared queue (source `everyone` or `everyone-else`). The result is marked as shared
   because other devices' traffic is in the same counters.
-* A device with no profile, a reset network, or a missing helper: the Pi has no counter for it
-  (source `none`). The run still opens the speed test page and the person can type in what the
-  device's speed test showed. For a Pi-measured baseline the dashboard says how: save a profile
-  with nothing set (the form allows it; the Pi then gives the device a plain fair queue with no
-  limit) and apply it, test, then apply the real profile and test again.
+* A device with no profile or a reset network: the Pi has no counter for it (source `none`). The
+  run can still be recorded and the person can type in what the device's speed test showed. A
+  missing helper or unavailable connection status is different: starting is refused with 503
+  because JitterSim cannot confirm the device is connected. For a Pi-measured baseline, save a
+  profile with nothing set (the form allows it; the Pi then gives the device a plain fair queue
+  with no limit) and apply it, test, then apply the real profile and test again.
 
 Reading the Wi-Fi station counters would also cover unshaped devices. That needs either a new
 helper action (Panic-gated: helper.py) or a new `iw` subprocess with interface configuration in
@@ -122,13 +123,15 @@ change to an address or to a stored code has to be made on purpose.
 * The window has three parts: start (speed test site, length, label), running (live seconds
   left, live download and upload, the link and QR code, Finish now, Cancel), and results
   (history for this device, typed-in device numbers, compare, export).
-* Starting returns at once. The Pi samples once per second in a background thread. When the
-  time is up, or on Finish now, the result is saved. Cancel discards it.
+* Starting first checks the connected-device snapshot and reads the queue counters. These helper
+  reads run outside the manager lock and may take a few seconds. After they finish, the run is
+  returned while the Pi samples once per second in a background thread. When the time is up, or
+  on Finish now, the result is saved. Cancel discards it.
 * A run stops early and is saved with status `changed` when the device's queues change during the
   window (a new apply, a reset, counters that go backwards). A sampler error ends it as `fault`,
   and so does a run in which more than half of the reads failed (`read_failures` is kept).
-* A device that becomes protected during a run: the run ends and nothing measured is saved. The
-  check is repeated when the run ends, for Finish now and for every other way a run can end.
+* A device that becomes protected during a run: the run ends and nothing measured is saved. When
+  a result is saved, protection is checked with the save. Cancel saves nothing.
 * The saved profile is the one the scheduler's applied snapshot reports (saved assignment, group
   profile, schedule, timer, scenario, progression or data limit). If the snapshot cannot confirm
   the source, the row says `Unknown (source not confirmed)` instead of showing the saved

@@ -23,8 +23,11 @@ LIVE = re.compile(r"Now: download 2\d\d kbit/s, upload 2\d\d kbit/s")
 
 
 def start_fixture():
+    environment = os.environ.copy()
+    environment["JITTERSIM_BROWSER_TEST_SCHEDULER"] = "1"
     process = subprocess.Popen(
-        [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True
+        [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True,
+        env=environment,
     )
     with selectors.DefaultSelector() as selector:
         selector.register(process.stdout, selectors.EVENT_READ)
@@ -190,6 +193,60 @@ def check_width(browser, width, height):
         expect(history).to_have_count(1)
         page.keyboard.press("Escape")
         expect(dialog).to_be_hidden()
+
+        # Locking the dashboard removes the private dialog and invalidates an in-flight poll.
+        refused_status_requests = []
+
+        def refuse_speed_status(route):
+            refused_status_requests.append(route.request.url)
+            route.fulfill(status=401, content_type="application/json",
+                          body='{"error":"Sign in again","registration_required":true}')
+
+        page.route("**/api/speed-tests/status*", refuse_speed_status)
+        open_button.click()
+        page.locator("#speed-test-duration").fill("15")
+        page.locator("#speed-test-begin").click()
+        expect(page.locator("#private-dashboard")).to_be_hidden(timeout=LIMIT)
+        expect(page.locator("#speed-test-dialog")).to_have_count(0)
+        page.wait_for_timeout(1200)
+        assert len(refused_status_requests) == 1, refused_status_requests
+        active = page.request.get(base + "/api/speed-tests?mac=" + MAC_ADDRESS,
+                                  headers=HEADERS).json()["active"]
+        assert len(active) == 1, active
+        post("/api/speed-tests/cancel", {"run_id": active[0]["id"]})
+        page.unroute("**/api/speed-tests/status*", refuse_speed_status)
+        page.goto(base)
+        expect(page.locator("#private-dashboard")).to_be_visible(timeout=LIMIT)
+
+        # A rejected Start can lock the dashboard while its button handler is awaiting the reply.
+        def refuse_speed_start(route):
+            route.fulfill(status=401, content_type="application/json",
+                          body='{"error":"Sign in again","registration_required":true}')
+
+        page.route("**/api/speed-tests/start", refuse_speed_start)
+        open_button.click()
+        page.locator("#speed-test-begin").click()
+        expect(page.locator("#private-dashboard")).to_be_hidden(timeout=LIMIT)
+        expect(page.locator("#speed-test-dialog")).to_have_count(0)
+        expect(page.locator("#toast-message")).not_to_have_text("Sign in again")
+        page.unroute("**/api/speed-tests/start", refuse_speed_start)
+        page.goto(base)
+        expect(page.locator("#private-dashboard")).to_be_visible(timeout=LIMIT)
+
+        # A refused initial load must not show a stale toast or leave focus in private UI.
+        def refuse_speed_open(route):
+            route.fulfill(status=401, content_type="application/json",
+                          body='{"error":"Sign in again","registration_required":true}')
+
+        page.route("**/api/speed-tests?mac=*", refuse_speed_open)
+        open_button.click()
+        expect(page.locator("#private-dashboard")).to_be_hidden(timeout=LIMIT)
+        expect(page.locator("#speed-test-dialog")).to_have_count(0)
+        expect(page.locator("#toast-message")).not_to_have_text("Sign in again")
+        expect(page.locator("#open-admin-credentials")).to_be_focused()
+        page.unroute("**/api/speed-tests?mac=*", refuse_speed_open)
+        page.goto(base)
+        expect(page.locator("#private-dashboard")).to_be_visible(timeout=LIMIT)
 
         # a protected device cannot be measured
         post("/api/unaffected-devices", {"mac_address": MAC_ADDRESS, "display_name": NAME})

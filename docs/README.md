@@ -187,6 +187,7 @@ are grouped by theme.
 | [Choose a saved profile when assigning a device](implementation-plan-device-profile-picker-2026-10-04.md) | 2026-10-04 |
 | [Device names, traffic clarity, profile list, sidebar status and impact check](implementation-plan-device-visibility-2026-10-01.md) | 2026-10-01 |
 | [Device workflows and repeatable tests](implementation-plan-device-workflows-2026-09.md) | 2026-09 |
+| [Device speed test](implementation-plan-device-speed-test-2026-10-09.md) | 2026-10-09 |
 | [Make raw diagnostics reachable from the keyboard](implementation-plan-diagnostics-keyboard-access-2026-10-03.md) | 2026-10-03 |
 | [Diagnostics keyboard request check](implementation-plan-diagnostics-preview-check-2026-10-04.md) | 2026-10-04 |
 | [Finish the coordinated dashboard changes](implementation-plan-final-dashboard-composition-2026-10-04.md) | 2026-10-04 |

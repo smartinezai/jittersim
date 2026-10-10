@@ -2,8 +2,10 @@
 // Self-contained: a "Test speed" button joins each connected device row through
 // connectedRowHooks and everything else lives in one dialog this script makes.
 const speedTestState = {
-  dialog: null, device: null, meta: null, run: null, results: [], editing: null, pollTimer: null, serial: 0
+  dialog: null, device: null, meta: null, run: null, results: [], editing: null,
+  pollTimer: null, serial: 0
 };
+const speedTestLockClosingDialogs = new WeakSet();
 const SPEED_TEST_FIELDS = {
   download_busy_kbit: ['Download, average while busy', 'kbit'],
   download_p90_kbit: ['Download, 90th percentile', 'kbit'],
@@ -35,8 +37,12 @@ function speedTestButton(label, id, onClick) {
   button.type = 'button';
   if (id) button.id = id;
   button.addEventListener('click', async () => {
+    const serial = speedTestState.serial;
     setButtonBusy(button, true);
-    try { await onClick(button); } catch (error) { speedTestSay(error.message, 'error'); }
+    try { await onClick(button); }
+    catch (error) {
+      if (serial === speedTestState.serial) speedTestSay(error.message, 'error');
+    }
     finally { if (button.isConnected) setButtonBusy(button, false); }
   });
   return button;
@@ -186,6 +192,10 @@ function speedTestDialog() {
   dialog.append(title, announce, start, running, results, note, close);
   dialog.addEventListener('close', () => {
     speedTestStopPolling();
+    if (speedTestLockClosingDialogs.has(dialog)) {
+      speedTestLockClosingDialogs.delete(dialog);
+      return;
+    }
     speedTestRestoreFocus();
   });
   document.body.append(dialog);
@@ -209,6 +219,31 @@ function speedTestRestoreFocus() {
   const target = live || fallback;
   if (target && target.isConnected) target.focus({preventScroll: true});
 }
+
+function speedTestClearPrivateState() {
+  speedTestStopPolling();
+  speedTestState.serial += 1;
+  const dialog = speedTestState.dialog;
+  if (dialog) {
+    if (dialog.open) {
+      speedTestLockClosingDialogs.add(dialog);
+      dialog.close();
+      const credentials = element('open-admin-credentials');
+      if (credentials && credentials.getClientRects().length) {
+        credentials.focus({preventScroll: true});
+      }
+    }
+    dialog.remove();
+  }
+  speedTestState.dialog = null;
+  speedTestState.device = null;
+  speedTestState.meta = null;
+  speedTestState.run = null;
+  speedTestState.results = [];
+  speedTestState.editing = null;
+}
+
+privateDataLockHooks.push(speedTestClearPrivateState);
 
 async function speedTestOpen(device) {
   const dialog = speedTestDialog();
@@ -255,6 +290,7 @@ async function speedTestLoad() {
 
 async function speedTestStart() {
   const device = speedTestState.device;
+  const serial = speedTestState.serial;
   const duration = Number(element('speed-test-duration').value);
   const run = await request('/api/speed-tests/start', 'POST', {
     mac_address: device.mac_address,
@@ -262,6 +298,7 @@ async function speedTestStart() {
     duration_seconds: Number.isInteger(duration) ? duration : speedTestState.meta.limits.default_seconds,
     label: element('speed-test-label').value
   });
+  if (serial !== speedTestState.serial) return;
   speedTestState.run = run;
   speedTestShowRunning(run);
   speedTestSay('Measuring. Open the speed test on the device now.');
@@ -330,25 +367,30 @@ async function speedTestPoll() {
 async function speedTestEnd(action) {
   const run = speedTestState.run;
   if (!run) return;
+  const serial = speedTestState.serial;
   speedTestStopPolling();
   let status;
   try {
     status = await request('/api/speed-tests/' + action, 'POST', {run_id: run.id});
   } catch (error) {
+    if (serial !== speedTestState.serial) return;
     if (speedTestState.run !== run) throw error;
     if (error.status === 404) {
-      await speedTestFinished({result: null, ended_reason: 'This test is no longer running.'});
+      await speedTestFinished({result: null, ended_reason: 'This test is no longer running.'}, serial);
       return;
     }
     // Already ended (409), busy (503) or no answer: ask again what the run did and keep watching.
     await speedTestPoll();
+    if (serial !== speedTestState.serial) return;
     if (error.status === 409) return;
     throw error;
   }
-  await speedTestFinished(status);
+  if (serial !== speedTestState.serial) return;
+  await speedTestFinished(status, serial);
 }
 
-async function speedTestFinished(status) {
+async function speedTestFinished(status, serial = speedTestState.serial) {
+  if (serial !== speedTestState.serial) return;
   speedTestState.run = null;
   element('speed-test-running').hidden = true;
   element('speed-test-start').hidden = false;
@@ -356,6 +398,7 @@ async function speedTestFinished(status) {
   speedTestSay(status.result ? 'Speed test saved.' : (status.ended_reason || 'Speed test ended.'));
   speedTestFocusTitle();
   await speedTestLoad();
+  if (serial !== speedTestState.serial) return;
   if (status.result) speedTestEdit(status.result);
 }
 
@@ -470,6 +513,7 @@ function speedTestEdit(result) {
     grid.append(wrap);
   });
   editor.append(grid, speedTestButton('Save result details', 'speed-test-save-reported', async () => {
+    const serial = speedTestState.serial;
     const reported = {};
     SPEED_TEST_REPORTED.forEach(([field]) => {
       const raw = element('speed-test-reported-' + field.replace('_', '-')).value.trim();
@@ -478,6 +522,7 @@ function speedTestEdit(result) {
     await request('/api/speed-tests/update', 'POST', {
       result_id: result.id, label: element('speed-test-edit-label').value, reported
     });
+    if (serial !== speedTestState.serial) return;
     speedTestSay('Result details saved.');
     await speedTestLoad();
   }));
@@ -485,17 +530,21 @@ function speedTestEdit(result) {
 
 async function speedTestDelete(result) {
   if (!window.confirm('Delete the speed test result from ' + speedTestWhen(result.started_at) + '? This cannot be undone.')) return;
+  const serial = speedTestState.serial;
   await request('/api/speed-tests/delete', 'POST', {result_id: result.id});
+  if (serial !== speedTestState.serial) return;
   if (speedTestState.editing === result.id) element('speed-test-editor').hidden = true;
   speedTestSay('Result deleted.');
   await speedTestLoad();
 }
 
 async function speedTestCompare() {
+  const serial = speedTestState.serial;
   const baseline = element('speed-test-baseline').value;
   const after = element('speed-test-after').value;
   const data = await request('/api/speed-tests/compare?baseline=' + encodeURIComponent(baseline) +
     '&result=' + encodeURIComponent(after), 'GET');
+  if (serial !== speedTestState.serial) return;
   const box = element('speed-test-comparison');
   box.replaceChildren();
   const table = speedTestNode('table', null, 'data-table speed-test-table');
@@ -537,13 +586,16 @@ async function speedTestCompare() {
 }
 
 async function speedTestExport(format) {
+  const serial = speedTestState.serial;
   const token = element('admin-token').value.trim();
   const mac = speedTestState.device ? speedTestState.device.mac_address : '';
   const response = await fetch('/api/speed-tests/export?format=' + format + '&mac=' + encodeURIComponent(mac), {
     headers: {Authorization: 'Bearer ' + token}, cache: 'no-store'
   });
   if (!response.ok) throw new Error('The export could not be made.');
-  const url = URL.createObjectURL(await response.blob());
+  const blob = await response.blob();
+  if (serial !== speedTestState.serial) return;
+  const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
   link.download = 'device-speed-tests.' + format;
@@ -570,7 +622,11 @@ connectedRowHooks.push((device, details) => {
     line.append(button, speedTestNode('small', 'Wi-Fi connection status is unknown, so this device cannot be tested now.'));
   } else {
     button.addEventListener('click', () => {
-      speedTestOpen(device).catch((error) => speedTestSay(error.message, 'error'));
+      const opening = speedTestOpen(device);
+      const serial = speedTestState.serial;
+      opening.catch((error) => {
+        if (serial === speedTestState.serial) speedTestSay(error.message, 'error');
+      });
     });
     line.append(button);
   }

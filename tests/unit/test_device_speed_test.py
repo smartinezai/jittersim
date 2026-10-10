@@ -23,6 +23,7 @@ from jittersim.config.speed_tests import SpeedTestStore, clean_label, clean_repo
 from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.activity import Source, TargetState
 from jittersim.networking.helper import HelperClientError
+from jittersim.request_workers import WorkersStillRunning
 from jittersim.speed_test import (
     PROVIDERS,
     IcmpProber,
@@ -443,6 +444,45 @@ class ManagerBase(unittest.TestCase):
 
 
 class ManagerTests(ManagerBase):
+    def test_failed_sampler_thread_start_does_not_leave_an_active_run(self) -> None:
+        self.manager.autostart = True
+        self.manager.sleep = lambda seconds: threading.Event().wait(0.001)
+        original_start = threading.Thread.start
+
+        def start_then_fail(thread):
+            original_start(thread)
+            raise RuntimeError("thread start outcome was interrupted")
+
+        with mock.patch.object(routes.threading.Thread, "start", autospec=True,
+                               side_effect=start_then_fail):
+            with self.assertRaisesRegex(RuntimeError, "thread start outcome was interrupted"):
+                self.manager.start({"mac_address": PHONE})
+
+        self.assertEqual(self.manager.active(), [])
+        run = next(iter(self.manager.runs.values()))
+        self.assertTrue(self.manager.closed)
+        self.assertEqual(run.state, "ended")
+        self.manager.shutdown(timeout=5)
+        self.assertFalse(run.thread.is_alive())
+
+    def test_unresolved_sampler_start_keeps_ownership_until_restart(self) -> None:
+        self.manager.autostart = True
+        with mock.patch.object(routes.threading.Thread, "start",
+                               side_effect=RuntimeError("thread start was interrupted")):
+            with self.assertRaisesRegex(RuntimeError, "thread start was interrupted"):
+                self.manager.start({"mac_address": PHONE})
+
+        run = next(iter(self.manager.runs.values()))
+        self.assertTrue(run.startup_uncertain)
+        self.assertTrue(self.manager.closed)
+        self.assertEqual(self.manager.active(), [])
+        with self.assertRaises(WorkersStillRunning):
+            self.manager.shutdown(timeout=5)
+
+        # This test models an unresolved native start, so release its fake ownership at teardown.
+        self.manager.runs.clear()
+        run.prober.close()
+
     def test_a_full_window_measures_the_device_queues_and_saves_the_result(self) -> None:
         status, run = self.write("/api/speed-tests/start",
                                  {"mac_address": PHONE.upper(), "duration_seconds": 15,
@@ -799,6 +839,37 @@ class EndingTests(ManagerBase):
         self.assertIsNone(self.manager.status(run["id"])["result"])
         self.assertEqual(SpeedTestStore(self.repository).list(), [])
 
+    def test_protection_check_and_result_insert_share_a_repository_transaction(self) -> None:
+        _, run = self.start_short()
+        original_protected = self.manager._protected
+        original_store = self.manager._store()
+        depths = []
+
+        def protected(mac_address):
+            depths.append(self.repository._transaction_depth)
+            return original_protected(mac_address)
+
+        def save(row):
+            depths.append(self.repository._transaction_depth)
+            return original_store.save(row)
+
+        with mock.patch.object(self.manager, "_protected", side_effect=protected), \
+                mock.patch.object(self.manager, "_store", return_value=mock.Mock(save=save)):
+            _, finished = self.write("/api/speed-tests/finish", {"run_id": run["id"]})
+
+        self.assertIsNotNone(finished["result"])
+        self.assertEqual(depths, [1, 1])
+
+    def test_a_busy_database_does_not_leave_finish_as_a_server_error(self) -> None:
+        _, run = self.start_short()
+        with mock.patch.object(self.repository, "transaction",
+                               side_effect=sqlite3.OperationalError("database is locked")):
+            _, finished = self.write("/api/speed-tests/finish", {"run_id": run["id"]})
+
+        self.assertEqual(finished["state"], "ended")
+        self.assertIsNone(finished["result"])
+        self.assertIn("could not be saved", finished["ended_reason"])
+
     def test_the_deadline_and_the_rates_follow_the_monotonic_clock(self) -> None:
         wall, mono = [1_000_000.0], [100.0]
         helper = CountingHelper(mono)
@@ -857,6 +928,19 @@ class EndingTests(ManagerBase):
         with self.assertRaises(routes.SpeedTestRequestError) as refused:
             manager.start({"mac_address": PHONE})
         self.assertEqual(refused.exception.status, 503)
+
+    def test_shutdown_reports_a_sampler_that_is_still_running(self) -> None:
+        _, started = self.start_short()
+        run = self.manager.runs[started["id"]]
+        run.thread = mock.Mock(ident=1)
+        run.thread.is_alive.return_value = True
+
+        with self.assertRaises(WorkersStillRunning):
+            self.manager.shutdown(timeout=5)
+
+        run.thread.join.assert_called_once()
+        self.assertAlmostEqual(run.thread.join.call_args.kwargs["timeout"], 4.0, places=3)
+        run.thread.is_alive.return_value = False
 
     def test_closing_the_server_stops_the_speed_tests_first(self) -> None:
         with mock.patch.object(self.manager, "shutdown") as stop:

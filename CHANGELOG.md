@@ -8,6 +8,9 @@ next release takes them over.
 
 ## Unreleased
 
+- Add a device speed test that records traffic through the applied profile, saves
+  results and compares them with numbers entered from a speed test run on the
+  device.
 - `sudo jittersim update` and `jittersim remote update now` report success only
   when their install request reached `complete` and the Pi runs the new
   version. A rollback is reported only when the Pi confirmed it.
