@@ -312,12 +312,13 @@ the first plan (September 2026) and is historical too.
 
 ## Screenshots
 
-The README uses these five images. They show sample data. The two overview
-images were retaken on 2026-10-09 with the refreshed look (see
+The README uses these five images with sample data. The two overview images
+were retaken on 2026-10-09 with the refreshed look (see
 [ui-overhaul-proposal-2026-10-09.md](ui-overhaul-proposal-2026-10-09.md)). The
-other three show the earlier look. The
-[staged update screenshot](screenshots/staged-update-check.png) also predates the
-current **Updates** page wording (**Install update**).
+staged update screenshot uses the current **Updates** page with the sample
+release `candidate-release`. It shows the automatic recovery copy and the
+collapsed release-notes section. The DNS-failure and router-outage screenshots
+show the earlier look.
 
 - [experience-overview-desktop.png](screenshots/experience-overview-desktop.png)
 - [experience-overview-phone.png](screenshots/experience-overview-phone.png)
