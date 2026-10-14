@@ -267,6 +267,29 @@ class FixtureProber:
 class FixtureServer(ControlServer):
     speed_test_prober_factory = FixtureProber
 
+    def write_response_for(self, path, payload):
+        response = super().write_response_for(path, payload)
+        if path != "/api/speed-tests/start" or payload.get("label") != "Fixture fault":
+            return response
+        status, _, body = response
+        if status != 201:
+            return response
+
+        run_id = json.loads(body)["id"]
+        manager = self._speed_test_manager
+        run = manager.runs[run_id]
+        read_queues = manager._read_queues
+
+        def fail_this_run():
+            current = manager.runs.get(run_id)
+            if current is not None and current.state == "running":
+                raise HelperClientError("fixture queue read failed")
+            return read_queues()
+
+        manager._read_queues = fail_this_run
+        run.deadline = time.monotonic() + 2.5
+        return response
+
     def response_for(self, path, query=""):
         status, content_type, body = super().response_for(path, query)
         if path == "/" and os.environ.get("JITTERSIM_BROWSER_TEST_WIDE_FONTS") == "1":

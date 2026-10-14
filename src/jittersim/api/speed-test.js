@@ -389,13 +389,23 @@ async function speedTestEnd(action) {
   await speedTestFinished(status, serial);
 }
 
+function speedTestEndMessage(status) {
+  const result = status.result;
+  if (result && ['changed', 'fault'].includes(result.status)) {
+    const reason = status.ended_reason || (result.summary && result.summary.ended_reason);
+    return 'Speed test saved, but may be incomplete.' + (reason ? ' ' + reason : '');
+  }
+  return result ? 'Speed test saved.' : (status.ended_reason || 'Speed test ended.');
+}
+
 async function speedTestFinished(status, serial = speedTestState.serial) {
   if (serial !== speedTestState.serial) return;
   speedTestState.run = null;
   element('speed-test-running').hidden = true;
   element('speed-test-start').hidden = false;
   element('speed-test-results').hidden = false;
-  speedTestSay(status.result ? 'Speed test saved.' : (status.ended_reason || 'Speed test ended.'));
+  const result = status.result;
+  speedTestSay(speedTestEndMessage(status));
   speedTestFocusTitle();
   await speedTestLoad();
   if (serial !== speedTestState.serial) return;

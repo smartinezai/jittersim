@@ -10,6 +10,8 @@ import struct
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
+from ipaddress import IPv4Address
 from pathlib import Path
 from unittest import mock
 
@@ -22,6 +24,16 @@ from jittersim.config.models import Device, Impairment, Profile, ServiceList
 from jittersim.config.speed_tests import SpeedTestStore, clean_label, clean_reported
 from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.activity import Source, TargetState
+from jittersim.engine.plan import (
+    EVERYONE_ELSE_QUEUE_ID,
+    GENERAL_QUEUE_ID,
+    Direction,
+    NetworkPlan,
+    QueueSpec,
+    ServiceAssignmentRule,
+    ServiceListRule,
+    ServiceQuotaRule,
+)
 from jittersim.networking.helper import HelperClientError
 from jittersim.request_workers import WorkersStillRunning
 from jittersim.speed_test import (
@@ -36,6 +48,7 @@ from jittersim.speed_test import (
     same_subnet,
     summarize_direction,
     summarize_probes,
+    VERDICT_LABELS,
 )
 from tests.unit.test_api import FakeHelper
 
@@ -363,12 +376,20 @@ class FakeScheduler:
 
     def __init__(self):
         self.states = {}
+        queue_ids = ("lab", GENERAL_QUEUE_ID, EVERYONE_ELSE_QUEUE_ID)
+        queues = tuple(
+            QueueSpec(device_id=queue_id, direction=direction, mark=1,
+                      impairment=Impairment())
+            for queue_id in queue_ids
+            for direction in (Direction.UPLOAD, Direction.DOWNLOAD)
+        )
+        self.plan = NetworkPlan(mark_rules=(), queues=queues)
 
     def set_source(self, key, kind, profile, label=""):
         self.states[key] = TargetState(name=key, source=Source(kind, kind, label, "", profile))
 
     def applied_snapshot(self):
-        return None, dict(self.states)
+        return self.plan, dict(self.states)
 
     def begin_shutdown(self):
         pass
@@ -482,6 +503,35 @@ class ManagerTests(ManagerBase):
         # This test models an unresolved native start, so release its fake ownership at teardown.
         self.manager.runs.clear()
         run.prober.close()
+
+    def test_shutdown_reports_a_sampler_blocked_in_a_helper_read(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        read_queues = self.helper.queue_stats
+
+        def blocked_read():
+            if self.helper.queue_reads == 0:
+                return read_queues()
+            entered.set()
+            if not release.wait(2):
+                raise HelperClientError("test helper was not released")
+            return read_queues()
+
+        self.manager.autostart = True
+        self.helper.queue_stats = blocked_read
+        _, run = self.start_short()
+        sampler = self.manager.runs[run["id"]].thread
+
+        try:
+            self.assertTrue(entered.wait(1))
+            with self.assertRaises(WorkersStillRunning):
+                self.manager.shutdown(timeout=0.02)
+            self.assertTrue(sampler.is_alive())
+        finally:
+            release.set()
+            sampler.join(timeout=2)
+
+        self.assertFalse(sampler.is_alive())
 
     def test_a_full_window_measures_the_device_queues_and_saves_the_result(self) -> None:
         status, run = self.write("/api/speed-tests/start",
@@ -693,7 +743,10 @@ class StartChecksTests(ManagerBase):
     def test_none_is_only_for_a_good_read_with_no_queue(self) -> None:
         _, run = self.write("/api/speed-tests/start", {"mac_address": OTHER})
         self.assertEqual(run["source"], "none")
+        self.assertIsNone(self.manager.runs[run["id"]].service_rules)
         self.assertEqual(self.helper.queue_reads, 1)
+        finished = self.manager.finish(run["id"])["result"]
+        self.assertNotIn("service_rules", finished["summary"])
 
     def test_most_reads_failing_ends_the_run_as_a_fault_with_a_reason(self) -> None:
         _, run = self.start_short()
@@ -724,6 +777,101 @@ class StartChecksTests(ManagerBase):
         self.assertEqual((profile["profile_name"], profile["profile_id"]), ("Night", "night"))
         self.assertEqual((profile["applied_by"], profile["applied_by_label"]),
                          ("schedule", "Weeknights"))
+
+    def test_the_shared_general_profile_uses_the_applied_scheduler_source(self) -> None:
+        self.repository.save_profile(Profile(id="night", name="Night"))
+        self.repository.save_general_profile("slow")
+        self.scheduler.set_source(GENERAL_QUEUE_ID, "schedule", "Night", label="Weeknights")
+        self.helper.queue_id = GENERAL_QUEUE_ID
+
+        _, run = self.write("/api/speed-tests/start", {"mac_address": OTHER})
+        profile = self.manager.runs[run["id"]].profile
+
+        self.assertEqual((profile["profile_name"], profile["profile_id"]), ("Night", "night"))
+        self.assertEqual((profile["applied_by"], profile["applied_by_label"]),
+                         ("schedule", "Weeknights"))
+
+    def test_a_missing_applied_plan_does_not_confirm_a_saved_rule_is_absent(self) -> None:
+        self.repository.save_service_list(
+            ServiceList(id="streaming", name="Streaming", profile_id="slow",
+                        services=("netflix",)))
+        self.scheduler.plan = None
+
+        _, run = self.start_short()
+        self.assertIsNone(self.manager.runs[run["id"]].service_rules)
+        self.assertIn("could not be confirmed", run["source_note"])
+        self.run_seconds(run["id"], 15)
+        result = self.manager.status(run["id"])["result"]
+
+        self.assertIsNone(result["summary"]["service_rules"])
+        self.assertEqual(result["summary"]["download"]["verdict"], "service-rules-unknown")
+        self.assertIn("could not be confirmed", VERDICT_LABELS["service-rules-unknown"])
+        comparison = compare_results(result, result)
+        self.assertEqual(comparison["verdicts"]["download"]["result"],
+                         "service-rules-unknown")
+        self.assertTrue(any("could not confirm" in warning
+                            for warning in comparison["warnings"]))
+        self.assertIn("service-rules-unknown", export_csv([result]))
+
+    def test_a_saved_but_unapplied_service_list_does_not_affect_the_verdict(self) -> None:
+        self.repository.save_service_list(
+            ServiceList(id="streaming", name="Streaming", profile_id="slow",
+                        services=("netflix",)))
+
+        _, run = self.start_short()
+        self.assertFalse(self.manager.runs[run["id"]].service_rules)
+        self.assertNotIn("service rule", run["source_note"] or "")
+        self.run_seconds(run["id"], 15)
+        result = self.manager.status(run["id"])["result"]
+
+        self.assertIs(result["summary"]["service_rules"], False)
+        self.assertEqual(result["summary"]["download"]["verdict"], "at-cap")
+
+    def test_applied_service_assignments_and_active_byte_or_time_quotas_match_device(self) -> None:
+        assignment = ServiceAssignmentRule(
+            assignment_id="browser", device_id="someone-else",
+            device_ip=IPv4Address("192.168.50.77"), domains=("example.test",), mark=3,
+            upload_impairment=Impairment(), download_impairment=Impairment())
+        self.scheduler.plan = replace(self.scheduler.plan,
+                                      service_assignment_rules=(assignment,))
+        _, unrelated = self.start_short()
+        self.assertFalse(self.manager.runs[unrelated["id"]].service_rules)
+        self.manager.cancel(unrelated["id"])
+
+        assignment = replace(assignment, device_id="lab", device_ip=IPv4Address("192.168.50.10"))
+        self.scheduler.plan = replace(self.scheduler.plan,
+                                      service_assignment_rules=(assignment,))
+        _, matched = self.start_short()
+        self.assertTrue(self.manager.runs[matched["id"]].service_rules)
+        self.manager.cancel(matched["id"])
+
+        for quota_kind in ("bytes", "time"):
+            for active, expected in ((False, False), (True, True)):
+                quota = ServiceQuotaRule(
+                    quota_id=f"{quota_kind}-quota", device_id="lab",
+                    device_ip=IPv4Address("192.168.50.10"),
+                    destination_addresses=(IPv4Address("203.0.113.10"),), mark=4,
+                    upload_impairment=Impairment(), download_impairment=Impairment(),
+                    active=active)
+                self.scheduler.plan = replace(
+                    self.scheduler.plan, service_assignment_rules=(), service_quota_rules=(quota,))
+                _, run = self.start_short()
+                self.assertIs(self.manager.runs[run["id"]].service_rules, expected,
+                              (quota_kind, active))
+                self.manager.cancel(run["id"])
+
+    def test_shared_service_verdict_is_unknown_without_the_general_queue_in_plan(self) -> None:
+        self.scheduler.set_source(GENERAL_QUEUE_ID, "profile", "Slow")
+        self.helper.queue_id = GENERAL_QUEUE_ID
+        self.scheduler.plan = replace(
+            self.scheduler.plan,
+            queues=tuple(queue for queue in self.scheduler.plan.queues
+                         if queue.device_id != GENERAL_QUEUE_ID))
+
+        _, run = self.write("/api/speed-tests/start", {"mac_address": OTHER})
+
+        self.assertIsNone(self.manager.runs[run["id"]].service_rules)
+        self.assertTrue(self.manager.runs[run["id"]].profile["profile_name"].startswith("Unknown"))
 
     def test_a_progression_has_no_single_profile_name(self) -> None:
         self.scheduler.set_source("lab", "progression", "", label="from Slow to Night")
@@ -790,6 +938,10 @@ class StartChecksTests(ManagerBase):
         self.repository.save_service_list(
             ServiceList(id="streaming", name="Streaming", profile_id="slow",
                         services=("netflix",)))
+        rule = ServiceListRule(
+            list_id="streaming", domains=("netflix.com",), mark=0,
+            upload_impairment=Impairment(), download_impairment=Impairment())
+        self.scheduler.plan = replace(self.scheduler.plan, service_list_rules=(rule,))
         _, run = self.start_short()
         self.assertIn("service rule", run["source_note"])
         self.assertIn("ordinary queue only", run["source_note"])

@@ -34,6 +34,7 @@ from jittersim.speed_test import (
     PROVIDER_IDS,
     SAMPLE_INTERVAL_SECONDS,
     SERVICE_RULES_NOTE,
+    SERVICE_RULES_UNKNOWN_NOTE,
     SHARED_LATENCY_NOTE,
     SHARED_SOURCES,
     SOURCE_LABELS,
@@ -316,9 +317,12 @@ class SpeedTestManager:
         elif source in SHARED_SOURCES:
             notes.append("Other devices share this queue, so their traffic is counted too. "
                          + SHARED_LATENCY_NOTE)
-        service_rules = source != "none" and self._service_rules_apply(device)
-        if service_rules:
+        plan, states = self._applied_snapshot()
+        service_rules = self._service_rules_apply(device, source, plan, states)
+        if service_rules is True:
             notes.append(SERVICE_RULES_NOTE)
+        elif service_rules is None and source != "none":
+            notes.append(SERVICE_RULES_UNKNOWN_NOTE)
         run = SpeedTestRun(
             id=secrets.token_hex(8),
             mac_address=mac_address,
@@ -334,7 +338,7 @@ class SpeedTestManager:
             source=source,
             source_note=" ".join(notes) or None,
             service_rules=service_rules,
-            profile=self._profile_snapshot(device, source, entries),
+            profile=self._profile_snapshot(device, source, entries, plan, states),
         )
         if source != "none":
             run.identity = {direction: _identity(entry) for direction, entry in entries.items()}
@@ -346,22 +350,55 @@ class SpeedTestManager:
             run.prober = factory(ipv4) if factory is not None else IcmpProber(ipv4)
         return run
 
-    def _service_rules_apply(self, device) -> bool:
-        """Whether a service rule can send some of this device's traffic through another queue.
+    def _applied_snapshot(self):
+        """Read one coherent scheduler snapshot, or return unknown when it is unavailable."""
 
-        A service list covers every unprotected device. A service quota or an immediate service
-        profile covers one saved device.
-        """
+        read = getattr(self.server.scheduler, "applied_snapshot", None)
+        if read is None:
+            return None, None
+        try:
+            snapshot = read()
+        except Exception:
+            LOGGER.warning("could not read the applied plan for a speed test")
+            return None, None
+        if not isinstance(snapshot, tuple) or len(snapshot) != 2:
+            return None, None
+        plan, states = snapshot
+        if plan is None or not isinstance(states, dict):
+            return None, None
+        return plan, states
 
-        repository = self.repository
-        if any(item.enabled for item in repository.list_service_lists()):
+    @staticmethod
+    def _plan_has_queue(plan, key):
+        return any(queue.device_id == key for queue in getattr(plan, "queues", ()))
+
+    def _service_rules_apply(self, device, source, plan, states) -> Optional[bool]:
+        """Whether the applied plan diverts some traffic from the measured queue."""
+
+        if source == "none":
+            return None
+        key = {
+            "device": device.id if device is not None else None,
+            "everyone": GENERAL_QUEUE_ID,
+            "everyone-else": EVERYONE_ELSE_QUEUE_ID,
+        }.get(source)
+        if (key is None or plan is None or states is None or states.get(key) is None
+                or not self._plan_has_queue(plan, key)):
+            return None
+        if source == "everyone" and not self._plan_has_queue(plan, GENERAL_QUEUE_ID):
+            return None
+
+        if getattr(plan, "service_list_rules", ()):
             return True
         if device is None:
             return False
-        rules = (*repository.list_service_quotas(), *repository.list_service_assignments())
-        return any(item.enabled and item.device_id == device.id for item in rules)
+        if any(rule.device_id == device.id for rule in getattr(
+                plan, "service_assignment_rules", ())):
+            return True
+        return any(rule.device_id == device.id and rule.active for rule in getattr(
+            plan, "service_quota_rules", ()))
 
-    def _applied_profile(self, key, saved):
+    def _applied_profile(self, key, saved, plan, states):
         """What really applies to one queue: (profile, name, source kind, source label).
 
         The scheduler's applied snapshot says what controls the device: its saved profile, a
@@ -369,11 +406,10 @@ class SpeedTestManager:
         assignment is only called applied when the snapshot confirms it.
         """
 
-        read = getattr(self.server.scheduler, "applied_snapshot", None)
-        states = read()[1] if read is not None else None
-        state = (states or {}).get(key)
-        if state is None:
+        if (plan is None or states is None or states.get(key) is None
+                or not self._plan_has_queue(plan, key)):
             return None, UNCONFIRMED_PROFILE, "unknown", ""
+        state = states[key]
         kind, name = state.source.kind, state.source.profile
         if kind == "none":
             return None, "No profile", kind, ""
@@ -388,19 +424,20 @@ class SpeedTestManager:
         matches = [profile for profile in self.repository.list_profiles() if profile.name == name]
         return matches[0] if len(matches) == 1 else None
 
-    def _profile_snapshot(self, device, source, entries) -> Dict[str, Any]:
+    def _profile_snapshot(self, device, source, entries, plan, states) -> Dict[str, Any]:
         repository = self.repository
         profile, name, applied_by, applied_label = None, "No profile", "profile", ""
         if source == "device" and device is not None:
             profile, name, applied_by, applied_label = self._applied_profile(
-                device.id, repository.get_profile(device.profile_id))
+                device.id, repository.get_profile(device.profile_id), plan, states)
         elif source == "everyone":
-            profile = repository.get_general_profile()
-            name = profile.name if profile else "No profile"
+            profile, name, applied_by, applied_label = self._applied_profile(
+                GENERAL_QUEUE_ID, repository.get_general_profile(), plan, states)
         elif source == "everyone-else":
             identifier = repository.get_everyone_else_profile_id()
             profile, name, applied_by, applied_label = self._applied_profile(
-                EVERYONE_ELSE_QUEUE_ID, repository.get_profile(identifier) if identifier else None)
+                EVERYONE_ELSE_QUEUE_ID, repository.get_profile(identifier) if identifier else None,
+                plan, states)
         general = repository.get_general_profile()
         return {
             "kind": source,
@@ -528,8 +565,11 @@ class SpeedTestManager:
                 summary[direction] = unmeasured_direction()
             else:
                 summary[direction] = summarize_direction(run.samples, direction, caps[direction])
-            if run.service_rules and summary[direction].get("verdict") in CAP_VERDICTS:
-                summary[direction]["verdict"] = "service-rules"
+            if summary[direction].get("verdict") in CAP_VERDICTS:
+                if run.service_rules is True:
+                    summary[direction]["verdict"] = "service-rules"
+                elif run.service_rules is None and run.source != "none":
+                    summary[direction]["verdict"] = "service-rules-unknown"
         latency = dict(run.prober.summary())
         # Only a device's own queue sees the Pi's ping. Everything else is a plain Wi-Fi round trip.
         latency["shaped"] = run.source == "device"
@@ -541,8 +581,8 @@ class SpeedTestManager:
         summary["source_note"] = run.source_note
         if run.ended_reason:
             summary["ended_reason"] = run.ended_reason
-        if run.service_rules:
-            summary["service_rules"] = True
+        if run.source != "none":
+            summary["service_rules"] = run.service_rules
         row = {
             "started_at": run.started_at,
             "finished_at": self.clock(),

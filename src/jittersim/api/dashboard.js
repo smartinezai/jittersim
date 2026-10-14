@@ -218,11 +218,15 @@
     const REQUEST_TIMEOUT_MS = 15000;
 
     const SLOW_REQUEST_TIMEOUT_MS = 45000;
+    const SPEED_TEST_START_TIMEOUT_MS = 75000;
 
     // Applying, resetting and anything that talks to the router or Wi-Fi can take a while.
     const SLOW_REQUEST_PATHS = /^\/api\/(apply|reset|normal-access|general-profile|router|wifi|release|import)/;
 
     function requestTimeoutMs(path, method) {
+      if (path === "/api/speed-tests/start" && method === "POST") {
+        return SPEED_TEST_START_TIMEOUT_MS;
+      }
       const slow = SLOW_REQUEST_PATHS.test(path) && (method !== "GET" || /^\/api\/(router|wifi)/.test(path));
       return slow ? SLOW_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
     }

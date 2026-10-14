@@ -48,6 +48,7 @@ VERDICT_LABELS = {
     "below-cap": "Slower than the cap: the internet or the device was the limit",
     "not-measured": "Not measured on the Pi",
     "service-rules": "Not judged: a service rule sends some traffic through another queue",
+    "service-rules-unknown": "Not judged: the active service rules could not be confirmed",
 }
 # The verdicts that say how the speed compares with the cap. A service rule withholds them.
 CAP_VERDICTS = frozenset(("at-cap", "above-cap", "below-cap"))
@@ -60,6 +61,9 @@ SERVICE_RULES_NOTE = (
     "A service rule or service list applies to this device, so some of its traffic goes through "
     "other queues. The reading covers the ordinary queue only. Compare the numbers typed in "
     "from the device's speed test page."
+)
+SERVICE_RULES_UNKNOWN_NOTE = (
+    "The active service rules could not be confirmed, so the cap conclusion may be incomplete."
 )
 
 # The public speed test pages a person may open on the device. The QR codes are fixed because
@@ -266,10 +270,16 @@ def compare_results(baseline: Dict[str, Any], later: Dict[str, Any]) -> Dict[str
             warnings.append(
                 f"Result {result.get('id')} stopped after a fault and may be incomplete."
             )
-        if (result.get("summary") or {}).get("service_rules"):
+        summary = result.get("summary") or {}
+        if summary.get("service_rules") is True:
             warnings.append(
                 f"Result {result.get('id')} had service rules in force: the cap conclusion is "
                 "withheld. Use the numbers typed in from the device's speed test page."
+            )
+        elif "service_rules" in summary and summary["service_rules"] is None:
+            warnings.append(
+                f"Result {result.get('id')} could not confirm the applied service rules, so the "
+                "cap conclusion is withheld."
             )
     return {
         "baseline": baseline,
@@ -291,8 +301,11 @@ def _verdict(result: Dict[str, Any], direction: str) -> Optional[str]:
     entry = summary.get(direction) if isinstance(summary, dict) else None
     verdict = entry.get("verdict") if isinstance(entry, dict) else None
     # Service rules put some traffic in other queues, so the cap conclusion cannot be trusted.
-    if verdict in CAP_VERDICTS and summary.get("service_rules"):
-        return "service-rules"
+    if verdict in CAP_VERDICTS:
+        if summary.get("service_rules") is True:
+            return "service-rules"
+        if "service_rules" in summary and summary["service_rules"] is None:
+            return "service-rules-unknown"
     return verdict
 
 

@@ -191,6 +191,55 @@ def check_width(browser, width, height):
         page.once("dialog", lambda confirm: confirm.accept())
         history.first.get_by_role("button", name=re.compile("^Delete result")).click()
         expect(history).to_have_count(1)
+
+        # A result saved after its applied profile changes must be marked incomplete in the UI.
+        page.locator("#speed-test-label").fill("Changed during test")
+        page.locator("#speed-test-duration").fill("90")
+        page.locator("#speed-test-begin").click()
+        expect(page.locator("#speed-test-live")).to_contain_text(LIVE, timeout=LIMIT)
+        active = page.request.get(
+            base + "/api/speed-tests?mac=" + MAC_ADDRESS, headers=HEADERS
+        ).json()["active"]
+        assert len(active) == 1, active
+        apply("nolimits")
+        page.wait_for_timeout(1500)
+        active = page.request.get(
+            base + "/api/speed-tests?mac=" + MAC_ADDRESS, headers=HEADERS
+        ).json()["active"]
+        if active:
+            post("/api/speed-tests/finish", {"run_id": active[0]["id"]})
+        expect(page.locator("#speed-test-announce")).to_contain_text(
+            "Speed test saved, but may be incomplete.", timeout=LIMIT)
+        changed = page.request.get(
+            base + "/api/speed-tests?mac=" + MAC_ADDRESS, headers=HEADERS
+        ).json()["results"][0]
+        assert changed["status"] == "changed", changed
+        assert "queues changed" in changed["summary"]["ended_reason"].lower(), changed
+        assert page.locator("#speed-test-announce").text_content().endswith(
+            changed["summary"]["ended_reason"])
+        expect(history).to_have_count(2)
+
+        # A sampler failure is persisted as a fault and keeps its recorded reason in the message.
+        page.locator("#speed-test-label").fill("Fixture fault")
+        page.locator("#speed-test-duration").fill("90")
+        page.locator("#speed-test-begin").click()
+        expect(page.locator("#speed-test-announce")).to_have_text(
+            "Measuring. Open the speed test on the device now.", timeout=LIMIT)
+        active = page.request.get(
+            base + "/api/speed-tests?mac=" + MAC_ADDRESS, headers=HEADERS
+        ).json()["active"]
+        assert len(active) == 1 and active[0]["label"] == "Fixture fault", active
+        expect(page.locator("#speed-test-announce")).to_contain_text(
+            "Speed test saved, but may be incomplete.", timeout=LIMIT)
+        faulted = page.request.get(
+            base + "/api/speed-tests?mac=" + MAC_ADDRESS, headers=HEADERS
+        ).json()["results"][0]
+        assert faulted["label"] == active[0]["label"], faulted
+        assert faulted["status"] == "fault", faulted
+        assert faulted["summary"]["ended_reason"], faulted
+        assert page.locator("#speed-test-announce").text_content().endswith(
+            faulted["summary"]["ended_reason"])
+        expect(history).to_have_count(3)
         page.keyboard.press("Escape")
         expect(dialog).to_be_hidden()
 
