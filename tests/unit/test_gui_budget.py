@@ -47,8 +47,11 @@ def test_measuring_is_deterministic_and_covers_every_metric():
     # A number that is always zero would never catch anything: the counts below are the
     # ones the GUI plan lowers, so they must be seen on the real page.
     for name in ("page_bytes", "distinct_colors", "distinct_font_sizes", "important_declarations",
-                 "aria_live_in_markup", "aria_live_flip_sites", "window_confirm_calls", "element_ids"):
+                 "window_confirm_calls", "element_ids"):
         assert first[name] > 0, name
+    # The live-region counts reached zero (the page has two fixed regions and no aria-live
+    # attribute). They are real counts all the same: the next test adds one and sees it.
+    assert first["aria_live_in_markup"] == 0 and first["aria_live_flip_sites"] == 0
 
 
 @pytest.mark.parametrize("addition, metric", [

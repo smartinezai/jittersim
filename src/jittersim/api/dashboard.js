@@ -213,6 +213,49 @@
       return true;
     }
 
+    // A list drawn again takes the control a person stands on with it. Rows carry data-key and a
+    // control keeps its name, so the same control of the same row gets focus back. Focus that went
+    // elsewhere is not moved, and a row that never comes back ends the search after 1.5 s.
+    const ROW_CONTROLS = "button, a[href], input[type='checkbox'], summary";
+
+    function controlName(node) {
+      return node.getAttribute("aria-label") || node.textContent.trim() || node.id || node.tagName;
+    }
+
+    function sameControls(row, name) {
+      return Array.from(row.querySelectorAll(ROW_CONTROLS)).filter((node) => controlName(node) === name);
+    }
+
+    function keepFocusWhenListsAreDrawn() {
+      let standing = null;
+      document.addEventListener("focusin", ({ target }) => {
+        const row = target.closest && target.closest("[data-key]");
+        const scope = row && row.parentElement.closest("[id]");
+        const name = scope && target.matches(ROW_CONTROLS) && controlName(target);
+        standing = name ? { scope: scope.id, key: row.dataset.key, name, control: target,
+          index: sameControls(row, name).indexOf(target), until: 0 } : null;
+      });
+      // Chromium reports a removed control's focus as leaving. One still in the page afterwards left on purpose.
+      document.addEventListener("focusout", ({ target }) => window.queueMicrotask(() => {
+        if (standing && target === standing.control && target.isConnected) standing = null;
+      }));
+      new MutationObserver(() => {
+        if (!standing || standing.control.isConnected) return;
+        standing.until = standing.until || performance.now() + 1500;
+        if (document.activeElement !== document.body || performance.now() > standing.until) {
+          standing = null;
+          return;
+        }
+        const scope = document.getElementById(standing.scope);
+        const row = scope && Array.from(scope.querySelectorAll("[data-key]")).find((item) => item.dataset.key === standing.key);
+        const same = row ? sameControls(row, standing.name) : [];
+        const target = same[Math.min(standing.index, same.length - 1)];
+        if (target && !target.disabled) target.focus({ preventScroll: true });
+      }).observe(document.body, { childList: true, subtree: true });
+    }
+
+    keepFocusWhenListsAreDrawn();
+
     const PI_NOT_ANSWERING = "Pi not answering, retrying";
 
     const REQUEST_TIMEOUT_MS = 15000;
@@ -795,8 +838,6 @@
       ["open-admin-credentials", "open-router-credentials", "open-router-credentials-inline"].forEach((id) => {
         element(id).setAttribute("aria-expanded", "true");
       });
-      element("credential-router-status").setAttribute("aria-live", "polite");
-      element("router-action-message").setAttribute("aria-live", "off");
       const field = element(kind === "router" ? "router-admin-password" : "admin-token");
       field.focus({preventScroll: true});
       // A short window shows the Check button below the field too when both fit.
@@ -817,8 +858,6 @@
       ["open-admin-credentials", "open-router-credentials", "open-router-credentials-inline"].forEach((id) => {
         element(id).setAttribute("aria-expanded", "false");
       });
-      element("credential-router-status").setAttribute("aria-live", "off");
-      element("router-action-message").setAttribute("aria-live", "polite");
       if (credentialOpener && credentialOpener.isConnected) credentialOpener.focus({preventScroll: true});
     }
 
@@ -980,7 +1019,9 @@
             ? "Remembered until " + rememberedUntil(saved.expires, savedHours(saved) > 24) + "."
             : "Will be remembered for " + REMEMBER_CHOICES[rememberHours(kind)] + " once accepted.";
         }
-        element(config.note).textContent = note;
+        const noteLine = element(config.note);
+        // A status line speaks whenever it is written, so it is only written when its words change.
+        if (noteLine.textContent !== note) noteLine.textContent = note;
       }
     }
 
@@ -1871,6 +1912,16 @@
       }, toastDismissDelay);
     }
 
+    // Say a result once. Errors go to the alert region and everything else to the status region.
+    // Both are always in the page and neither changes its aria-live, so a screen reader that
+    // already watches them hears each write. Polled lists never come through here.
+    function announce(message, assertive) {
+      const speaking = element(assertive ? "action-alert" : "action-announcer");
+      const quiet = element(assertive ? "action-announcer" : "action-alert");
+      if (quiet.textContent) quiet.textContent = "";
+      speaking.textContent = message;
+    }
+
     function showToast(message, kind) {
       const toast = element("toast");
       const icon = element("toast-icon");
@@ -1878,9 +1929,7 @@
       if (!toast.contains(document.activeElement)) toastReturnFocus = document.activeElement;
       element("toast-message").textContent = message;
       toast.className = "toast " + (kind || "working");
-      const announcer = element("action-announcer");
-      announcer.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
-      announcer.textContent = message;
+      announce(message, kind === "error");
       icon.textContent = kind === "success" ? "✓" : kind === "error" ? "!" : "";
       toast.hidden = false;
       toastDismissDelay = kind === "working" || kind === "error" ? 0 : 6000;
@@ -2847,6 +2896,7 @@
       devices.forEach((device) => {
         const row = document.createElement("div");
         row.className = "connected-row";
+        row.dataset.key = device.mac_address;
         row.dataset.macAddress = device.mac_address;
         const draft = connectedDrafts.get(device.mac_address) || {};
         const dot = document.createElement("span");
@@ -3254,6 +3304,7 @@
         data.devices.forEach((device) => {
           const row = document.createElement("div");
           row.className = "connected-row saved-device-label-row";
+          row.dataset.key = device.mac_address;
           const name = document.createElement("div");
           const title = document.createElement("p");
           title.className = "connected-address";
@@ -3367,9 +3418,12 @@
 
     function updateGroupFormControls() {
       const count = groupSelectedMembers.size;
-      element("group-member-count").textContent = count + " of 15 selected";
+      // These two speak (role="status"), so they are only written when their words change.
+      const memberCount = element("group-member-count");
+      if (memberCount.textContent !== count + " of 15 selected") memberCount.textContent = count + " of 15 selected";
       const problem = groupFormProblem();
-      element("group-validation").textContent = problem || groupSaveError;
+      const validation = element("group-validation");
+      if (validation.textContent !== (problem || groupSaveError)) validation.textContent = problem || groupSaveError;
       element("group-save").disabled = groupSubmitting || Boolean(problem);
       element("group-cancel-edit").disabled = groupSubmitting;
       element("group-profile-help").textContent = element("group-profile").value
@@ -3962,6 +4016,7 @@
         const buildRow = (observation, blockSyncs, afterBlockChange, inGroup) => {
           const item = document.createElement("li");
           item.className = "observation-domain";
+          item.dataset.key = device.ipv4_address + "|" + observation.domain;
           const domain = document.createElement("div");
           domain.className = "observation-domain-name";
           const parts = domainRowParts(observation);
@@ -4065,6 +4120,7 @@
         const buildGroup = (group) => {
           const item = document.createElement("li");
           item.className = "observation-group-item";
+          item.dataset.key = observationGroupOpenKey(device.ipv4_address, group.key);
           const wrapper = document.createElement("div");
           wrapper.className = "observation-group";
           const openKey = observationGroupOpenKey(device.ipv4_address, group.key);
@@ -4370,6 +4426,7 @@
     function createQuotaRow({ quota, service }) {
       const row = document.createElement("div");
       row.className = "quota-row" + (quota.reached ? " reached" : "");
+      row.dataset.key = service === "group" ? quota.group_id : service ? quota.id : quota.device_id;
       const heading = document.createElement("div");
       heading.className = "quota-row-heading";
       const title = document.createElement("strong");
@@ -4457,6 +4514,7 @@
       groups.forEach((group) => {
         const row = document.createElement("div");
         row.className = "quota-row";
+        row.dataset.key = group.id;
         const heading = document.createElement("div");
         heading.className = "quota-row-heading";
         const title = document.createElement("strong");
@@ -4593,6 +4651,7 @@
       lists.forEach((serviceList) => {
         const row = document.createElement("div");
         row.className = "quota-row";
+        row.dataset.key = serviceList.id;
         const heading = document.createElement("div");
         heading.className = "quota-heading";
         const title = document.createElement("strong");
@@ -4658,6 +4717,7 @@
       assignments.forEach((assignment) => {
         const row = document.createElement("div");
         row.className = "quota-row";
+        row.dataset.key = assignment.id;
         const heading = document.createElement("div");
         heading.className = "quota-heading";
         const title = document.createElement("strong");
@@ -4915,6 +4975,7 @@
     function createTimeQuotaRow(quota) {
       const row = document.createElement("div");
       row.className = "quota-row" + (quota.reached ? " reached" : "");
+      row.dataset.key = quota.id;
       const heading = document.createElement("div");
       heading.className = "quota-row-heading";
       const title = document.createElement("strong");
@@ -5242,6 +5303,7 @@
       schedules.forEach((schedule) => {
         const row = document.createElement("div");
         row.className = "schedule-row";
+        row.dataset.key = schedule.id;
         const text = document.createElement("div");
         const name = document.createElement("span");
         name.textContent =
@@ -5300,6 +5362,7 @@
       timers.forEach((timer) => {
         const row = document.createElement("div");
         row.className = "timer-row";
+        row.dataset.key = timer.id;
         const details = document.createElement("div");
         details.className = "timer-details";
         const title = document.createElement("strong");
@@ -5354,6 +5417,7 @@
       progressions.forEach((progression) => {
         const row = document.createElement("div");
         row.className = "progression-row";
+        row.dataset.key = progression.id;
         const heading = document.createElement("div");
         heading.className = "progression-row-heading";
         const title = document.createElement("strong");
@@ -6286,6 +6350,7 @@
       container.replaceChildren(...profiles.map((profile) => {
         const row = document.createElement("div");
         row.className = "saved-profile-row";
+        row.dataset.key = profile.id;
         row.dataset.profileId = profile.id;
         const text = document.createElement("div");
         const heading = document.createElement("p");
@@ -7721,9 +7786,10 @@
       const head = document.createElement("thead");
       head.appendChild(headRow);
       const body = document.createElement("tbody");
-      rows.forEach(({ cells, actions, rowClass }) => {
+      rows.forEach(({ cells, actions, rowClass, key }) => {
         const row = document.createElement("tr");
         if (rowClass) row.className = rowClass;
+        if (key) row.dataset.key = key;
         cells.forEach((value) => row.appendChild(tableCell(value)));
         const actionCell = document.createElement("td");
         const actionGroup = document.createElement("div");
@@ -7847,6 +7913,7 @@
             describeImpairment(profile.download),
             describeExtras(profile)
           ],
+          key: profile.id,
           actions: [
             ["Edit", () => fillProfileForm(profile)],
             ["Duplicate", () => duplicateProfile(profile)],
@@ -7902,7 +7969,8 @@
           ),
           conditionCell(condition)
         ],
-        actions: []
+        actions: [],
+        key: "everyone-else"
       };
     }
 
@@ -7959,6 +8027,7 @@
     function renderDeviceTable() {
       const rows = devices.map((device) => ({
         rowClass: deviceRowClass(device),
+        key: device.id,
         cells: [
           [deviceDisplayName(device), device.id],
           [device.ipv4_address, device.mac_address || "No MAC address"],
@@ -8978,6 +9047,7 @@
         const text = scenarioRunText(run);
         const row = document.createElement("div");
         row.className = "timer-row";
+        row.dataset.key = run.id;
         const details = document.createElement("div");
         details.className = "timer-details";
         const title = document.createElement("strong");
@@ -9005,6 +9075,7 @@
       savedScenarios.forEach((scenario) => {
         const row = document.createElement("div");
         row.className = "schedule-row";
+        row.dataset.key = scenario.id;
         const text = document.createElement("div");
         const name = document.createElement("span");
         name.textContent = scenario.name;

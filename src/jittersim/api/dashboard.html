@@ -9,7 +9,10 @@
 </head>
 <body class="dashboard-locked">
   <a class="skip-link" href="#content">Skip to main content</a>
-  <div id="action-announcer" class="action-announcer" role="status" aria-live="polite" aria-atomic="true"></div>
+  <!-- The only two live regions of the page. Both stay in the page for good so a screen reader
+       watches them from the start. Results are written here (see announce) and nothing else speaks. -->
+  <div id="action-announcer" class="action-announcer" role="status" aria-atomic="true"></div>
+  <div id="action-alert" class="action-announcer" role="alert" aria-atomic="true"></div>
   <div id="toast" class="toast" hidden>
     <span id="toast-icon" class="toast-icon" aria-hidden="true"></span>
     <span id="toast-message"></span>
@@ -44,7 +47,7 @@
       <button id="clear-admin-token" type="button">Clear token</button>
     </div>
     </form>
-    <p id="token-check-status" class="token-check-status" aria-live="off">Enter the token and choose Check token to load diagnostics.</p>
+    <p id="token-check-status" class="token-check-status">Enter the token and choose Check token to load diagnostics.</p>
     <p id="remember-length-note" class="credential-note">Longer is less safe on a shared computer: anyone who can use this browser can open the dashboard until the time is up. Choose Clear token to forget it sooner.</p>
     <details class="credential-help">
       <summary>How to get the admin token</summary>
@@ -66,7 +69,7 @@
       <button id="check-router-password" class="primary" type="button">Check password</button>
       <button id="clear-router-password" type="button">Clear router password</button>
     </div>
-    <p id="credential-router-status" class="credential-note" role="status" aria-live="off">
+    <p id="credential-router-status" class="credential-note">
       Choose Check password to sign in to the router once. Nothing on the router is changed.
       Repeated wrong passwords may temporarily lock its web login.
     </p>
@@ -124,14 +127,14 @@
             <button id="apply-button" class="primary" type="button">Start</button>
             <span class="help-icon" tabindex="0" role="img" aria-label="Start help" data-help="Starts everything you saved: device and group profiles and schedules and limits and service lists and access rules. Then saved changes apply on their own within a few seconds. Reset or Panic stops the profiles. Protected devices stay untouched.">?</span>
           </div>
-          <p id="apply-summary" class="apply-summary" aria-live="polite" hidden></p>
+          <p id="apply-summary" class="apply-summary" role="status" hidden></p>
           <div class="sidebar-action-row">
             <button id="reset-button" class="danger" type="button">Reset network</button>
             <span class="help-icon" tabindex="0" role="img" aria-label="Reset network help" data-help="Stops the profiles and removes their rules from the Pi so devices run normally. Household blocking of devices and sites stays on. Your saved settings are kept. Choose Start to run them again.">?</span>
           </div>
         </div>
         <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
-        <p id="message" class="action-message" aria-live="off" aria-hidden="true" hidden>Ready.</p>
+        <p id="message" class="action-message" aria-hidden="true" hidden>Ready.</p>
         <div class="safety-bar">
           <button id="panic-button" class="danger panic-button" type="button"
             title="Turn off all profiles and household blocking now. Your saved settings are kept.">
@@ -139,7 +142,7 @@
           </button>
           <div class="router-wifi-control">
             <div><span id="router-wifi-label" class="router-wifi-label">Router Wi-Fi · read only</span>
-              <p id="router-wifi-status" class="router-wifi-status" role="status" aria-live="polite">Enter router password</p>
+              <p id="router-wifi-status" class="router-wifi-status">Enter router password</p>
             </div>
             <button id="router-wifi-toggle" class="router-wifi-toggle" type="button" role="switch"
               aria-checked="false" aria-labelledby="router-wifi-label" aria-describedby="router-wifi-status" data-unknown="true" disabled>
@@ -150,7 +153,7 @@
         <div class="router-wifi-copy">
           <button id="refresh-router-wifi" type="button">Check router Wi-Fi</button>
           <button id="sync-router-ap" class="primary" type="button" aria-describedby="router-action-message" disabled>Copy router Wi-Fi to Pi</button>
-          <p id="router-action-message" class="router-wifi-status" role="status" aria-live="polite"></p>
+          <p id="router-action-message" class="router-wifi-status"></p>
         </div>
       </div>
       <div class="sidebar-version">
@@ -224,7 +227,7 @@
   </div>
   </section>
   <div id="private-dashboard" hidden>
-  <p id="mode-notice" class="notice" role="status">Checking control mode...</p>
+  <p id="mode-notice" class="notice">Checking control mode...</p>
   <section class="page" id="page-devices" data-page="devices" aria-label="Devices" tabindex="-1">
   <section class="card getting-started" id="getting-started" hidden>
     <h2>Getting started</h2>
@@ -244,7 +247,7 @@
       <button id="general-profile-apply" class="primary" type="button" disabled>Apply to all</button>
       <button id="general-profile-stop" type="button" disabled>Stop for everyone</button>
     </div>
-    <p id="general-profile-status" role="status" aria-live="polite">Check the admin token to view the profile for everyone.</p>
+    <p id="general-profile-status">Check the admin token to view the profile for everyone.</p>
     <p id="general-profile-note" class="form-note">The speed limit is shared only by affected devices. Protected devices bypass it completely. Stopping this profile resumes saved device rules. Panic turns all profiles off.</p>
   </section>
   <section class="card connected-card">
@@ -254,14 +257,14 @@
         <p>Devices on the Pi’s Wi-Fi. Devices on the router’s Wi-Fi are not listed here.</p>
       </div>
       <div class="connected-actions">
-        <span id="connected-count" class="count-badge">Check token</span>
+        <span id="connected-count" class="count-badge" role="status">Check token</span>
         <button id="check-devices" type="button">Check for devices</button>
       </div>
     </div>
     <p id="connected-refresh-status" class="connected-refresh-status">
       Refreshes every 5 seconds once the admin token is accepted.
     </p>
-    <div id="connected-devices" class="connected-list" aria-live="polite">Enter the admin token and choose Check token to view connected devices.</div>
+    <div id="connected-devices" class="connected-list">Enter the admin token and choose Check token to view connected devices.</div>
   </section>
   <section class="card" data-collapse="open">
       <div class="section-heading"><h2>Saved devices</h2><p>Assigned test clients and their current conditions</p></div>
@@ -292,7 +295,7 @@
         <p>Saved protection stays active when a device disconnects or changes IP. Global access rules still apply.</p>
       </div>
     </div>
-    <div id="unaffected-devices" class="connected-list" aria-live="polite">Check the admin token to view saved devices.</div>
+    <div id="unaffected-devices" class="connected-list">Check the admin token to view saved devices.</div>
     <p id="ad-blocking-status" class="form-note" role="status"></p>
     <p class="form-note">Block ads is optional for each saved device. It checks domain names without saving browsing history. Some ads share a website’s domain or use encrypted DNS so they can still appear. Changes affect new lookups and connections. Reset and Panic pause ad blocking.</p>
     <details>
@@ -332,7 +335,7 @@
   <section class="page" id="page-profiles" data-page="profiles" aria-label="Profiles" tabindex="-1" hidden>
     <section class="card" data-collapse="open" aria-labelledby="saved-profiles-title">
       <h2 id="saved-profiles-title">Saved profiles</h2>
-      <div id="saved-profiles" class="connected-list" aria-live="polite">Check the admin token to view saved profiles.</div>
+      <div id="saved-profiles" class="connected-list">Check the admin token to view saved profiles.</div>
     </section>
     <section class="card" data-collapse="open">
       <details>
@@ -344,7 +347,7 @@
         <textarea id="homepage-pages" rows="3" maxlength="4104"></textarea>
         <button id="homepage-create-code" type="button">Create pairing code</button>
         <button id="homepage-revoke" type="button">Revoke all homepage pairings</button>
-        <output id="homepage-code" aria-live="polite"></output>
+        <output id="homepage-code"></output>
       </details>
       <h2 id="profile-form-title">Save profile</h2>
       <form id="profile-form">
@@ -718,7 +721,7 @@
         <fieldset class="group-members">
           <legend>Devices in this group</legend>
           <p id="group-member-help" class="form-note">Check devices to add them. Uncheck devices to remove them. Changes take effect when you save.</p>
-          <p id="group-member-count" class="form-note" aria-live="polite">0 of 15 selected</p>
+          <p id="group-member-count" class="form-note" role="status">0 of 15 selected</p>
           <div id="group-devices" class="group-device-list" aria-describedby="group-member-help"></div>
         </fieldset>
         <p id="group-removal-help" class="form-note" hidden>Removing a device keeps its saved profile. Other active settings may still apply.</p>
@@ -728,7 +731,7 @@
           <button id="group-cancel-edit" type="button" hidden>Cancel</button>
         </div>
       </form>
-      <div id="group-list" class="quota-list" aria-live="polite">No groups saved.</div>
+      <div id="group-list" class="quota-list">No groups saved.</div>
     </section>
   </section><!-- /page:profiles -->
   <section class="page" id="page-schedules" data-page="schedules" aria-label="Schedules and limits" tabindex="-1" hidden>
@@ -766,7 +769,7 @@
           progressions win over schedules.</p>
         <button type="submit">Save schedule</button>
       </form>
-      <div id="schedule-list" class="schedule-list" aria-live="polite">No schedules yet.</div>
+      <div id="schedule-list" class="schedule-list">No schedules yet.</div>
     </section>
   <section class="card timer-card" data-collapse="closed">
     <div class="section-heading">
@@ -791,7 +794,7 @@
       <p class="form-note">The timer starts when saved. It temporarily overrides schedules and the device’s normal profile. The selected profile’s rerolls, outages, website rules and other settings run during the timer then the device returns to its normal profile.</p>
       <button class="primary" type="submit">Start timer</button>
     </form>
-    <div id="timer-list" class="timer-list" aria-live="polite">No active timers.</div>
+    <div id="timer-list" class="timer-list">No active timers.</div>
   </section>
   <section class="card scenario-card" data-collapse="closed">
     <div class="section-heading">
@@ -824,7 +827,7 @@
       </div>
       <div id="scenario-steps" class="scenario-steps"></div>
       <button type="button" id="scenario-add-step">Add step</button>
-      <p id="scenario-duration" class="form-note" aria-live="polite"></p>
+      <p id="scenario-duration" class="form-note" role="status"></p>
       <label class="quota-check"><input id="scenario-loop" type="checkbox"> Repeat from the
         first step until stopped</label>
       <p class="form-note">Each step lasts 10 seconds to 24 hours. A scenario has up to 20
@@ -874,7 +877,7 @@
       <p class="form-note">The start and end profiles are interpolated gradually. Existing randomness and outage settings continue to run. DNS mode counts observed queries. Device-data mode counts IPv4 upload and download bytes, so a long stream can advance it even when there are few new DNS queries. The device returns to its normal schedule or profile when the duration ends.</p>
       <button class="primary" type="submit">Start progression</button>
     </form>
-    <div id="progression-list" class="progression-list" aria-live="polite">No active progressions.</div>
+    <div id="progression-list" class="progression-list">No active progressions.</div>
   </section>
   <section class="card quota-card" data-collapse="open">
     <div class="section-heading">
@@ -919,7 +922,7 @@
       <p class="form-note">Editing a saved limit keeps its current usage. The fallback profile starts when the device total reaches the limit.</p>
       <button class="primary" type="submit">Save device limit</button>
     </form>
-    <div id="data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view limits.</div>
+    <div id="data-limit-list" class="quota-list">Enter the admin token to view limits.</div>
   </section>
   <section class="card quota-card" data-collapse="closed">
     <div class="section-heading">
@@ -964,7 +967,7 @@
       <p class="form-note">The shared limit adds the byte counters for all group members. A per-device limit takes priority if the same device has both.</p>
       <button class="primary" type="submit">Save group limit</button>
     </form>
-    <div id="group-data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view group limits.</div>
+    <div id="group-data-limit-list" class="quota-list">Enter the admin token to view group limits.</div>
   </section>
   <section class="card quota-card" id="service-list-card" data-collapse="closed">
     <div class="section-heading">
@@ -1002,7 +1005,7 @@
       <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device profile or the profile for Everyone. Protected devices are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's random variation and random outages apply to the whole list: all affected devices get the same new values and the same outages. During an outage the listed services are unreachable while the Pi's DNS and the dashboard and other sites keep working. The profile's website list is not used for service lists.</p>
       <button class="primary" type="submit">Save service list</button>
     </form>
-    <div id="service-list-list" class="quota-list" aria-live="polite">Enter the admin token to view service lists.</div>
+    <div id="service-list-list" class="quota-list">Enter the admin token to view service lists.</div>
   </section>
   <section class="card quota-card" data-collapse="closed">
     <div class="section-heading">
@@ -1034,7 +1037,7 @@
       <p class="form-note">Includes subdomains of each name. Configure the Mac browser's HTTPS proxy as 192.168.50.1:3128 while connected to the test Wi-Fi. Other proxied sites keep the device profile. Apps and connections that bypass the proxy are outside this control.</p>
       <button class="primary" type="submit">Save browser service profile</button>
     </form>
-    <div id="service-assignment-list" class="quota-list" aria-live="polite">Enter the admin token to view service profiles.</div>
+    <div id="service-assignment-list" class="quota-list">Enter the admin token to view service profiles.</div>
   </section>
   <section class="card quota-card" data-collapse="closed">
     <div class="section-heading">
@@ -1091,7 +1094,7 @@
       <p class="form-note">Only domains observed from the selected device appear here. Select all names used by the service. Matching direct traffic is counted together then multiplied by the quota weight. Browser proxy tunnels are outside this limit.</p>
       <button class="primary" type="submit">Save service limit</button>
     </form>
-    <div id="service-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view service limits.</div>
+    <div id="service-quota-list" class="quota-list">Enter the admin token to view service limits.</div>
   </section>
   <section class="card quota-card" data-collapse="closed">
     <div class="section-heading">
@@ -1148,7 +1151,7 @@
       <p class="form-note">Active time is counted when matching traffic is seen. A long video stream therefore keeps using the allowance even when there are no new clicks. Save the limit then start its timer from the saved row.</p>
       <button class="primary" type="submit">Save time limit</button>
     </form>
-    <div id="time-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view time limits.</div>
+    <div id="time-quota-list" class="quota-list">Enter the admin token to view time limits.</div>
   </section>
   </section><!-- /page:schedules -->
   <section class="page" id="page-router" data-page="router" aria-label="Router and Wi-Fi" tabindex="-1" hidden>
@@ -1158,7 +1161,7 @@
     <button id="reset-wifi-name" type="button" disabled aria-describedby="wifi-reset-status">
       <span>Reset Wi-Fi name</span><span class="credential-state">Restore default</span>
     </button>
-    <p id="wifi-reset-status" class="credential-state" role="status" aria-live="polite">Keep password and security</p>
+    <p id="wifi-reset-status" class="credential-state">Keep password and security</p>
   </section>
   <section class="card uplink-card" data-collapse="open">
     <div class="section-heading">
@@ -1168,7 +1171,7 @@
       </div>
       <span id="uplink-state" class="count-badge">Check token</span>
     </div>
-    <div id="uplink-details" class="uplink-grid" aria-live="polite">Enter the admin token and choose Check token to view the router connection.</div>
+    <div id="uplink-details" class="uplink-grid">Enter the admin token and choose Check token to view the router connection.</div>
     <p id="uplink-note" class="policy-note">The router controls use the TG3442DE local web interface. The Pi signs in with the router admin password when you run a router action.</p>
     <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
     <div class="router-controls">
@@ -1204,7 +1207,7 @@
     <div class="action-buttons">
       <button id="gateway-persistence-save" class="primary" type="button">Save outage behavior</button>
     </div>
-    <p id="gateway-persistence-state" class="token-check-status" role="status" aria-live="polite">Checking the router connection...</p>
+    <p id="gateway-persistence-state" class="token-check-status">Checking the router connection...</p>
   </section>
   <section class="card" data-collapse="open">
     <h2>Updates</h2>
@@ -1226,7 +1229,7 @@
           <option value="@all">All assigned devices</option>
         </select>
       </label>
-      <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Check the admin token to start live traffic sampling.</p>
+      <p id="traffic-status" class="traffic-status">Check the admin token to start live traffic sampling.</p>
     </div>
     <form id="traffic-rate-form" class="traffic-rate-form">
       <label>ISP download maximum (Mbit/s)
@@ -1236,7 +1239,7 @@
         <input id="traffic-isp-upload" type="number" min="0.1" max="1000" step="0.1" placeholder="Unknown">
       </label>
       <button class="primary" type="submit">Save speed references</button>
-      <p id="traffic-rate-status" class="traffic-rate-help" role="status" aria-live="polite"></p>
+      <p id="traffic-rate-status" class="traffic-rate-help"></p>
       <p class="traffic-rate-help">These reference lines do not limit traffic. The ISP plan maximum is shared with other home devices.</p>
     </form>
     <div class="traffic-metrics">
@@ -1263,7 +1266,7 @@
       </div>
       <p id="traffic-chart-detail" class="traffic-chart-detail">Hover a line or focus its legend label to inspect it. Click or tap a label to keep it highlighted. Escape clears the highlight.</p>
     </div>
-    <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
+    <p id="traffic-profile-status" class="traffic-profile-status">Select one device to show its applied default queue limits.</p>
     <p class="traffic-note">Dropped and waiting show packets the Pi itself discarded or is still
       delaying, in both directions.</p>
     <p class="traffic-note">Solid lines show traffic counted at the Pi before its queues. They do not show the speed a device receives. Dashed lines show ISP plan references. Dotted lines show applied profile limits. Profile limits describe the default queue. Service-specific queues may use different limits. The ISP plan is shared with household traffic and is not a live measurement of spare capacity. Only assigned devices are included. Check the admin token to start. Sampling pauses when this tab is hidden.</p>
@@ -1280,7 +1283,7 @@
       </div>
     </div>
     <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits. Protected devices never appear here. Optional ad blocking checks domain names without saving history. Block globally also blocks every name under a name (example.com also blocks www.example.com) while household access rules are on. Blocked and Unblock show on the exact name that was blocked.</p>
-    <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
+    <div id="observations" class="observation-list">No observations yet.</div>
   </section>
     <section class="card analytics-card" data-collapse="closed">
       <div class="section-heading">
@@ -1299,7 +1302,7 @@
           </select>
         </label>
       </div>
-      <p id="random-website-status" class="analytics-status" role="status" aria-live="polite">Enter the admin token to view randomized website choices.</p>
+      <p id="random-website-status" class="analytics-status" role="status">Enter the admin token to view randomized website choices.</p>
       <div class="analytics-table-wrap">
         <table class="analytics-table">
           <thead><tr><th scope="col">Device</th><th scope="col">Website</th><th scope="col">Kept</th><th scope="col">Removed</th><th scope="col">Active days</th></tr></thead>
