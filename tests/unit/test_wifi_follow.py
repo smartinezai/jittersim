@@ -12,7 +12,12 @@ from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.helper import HelperService
 from jittersim.networking.router import _settings_from_wifi_data
 from jittersim.networking.topology import Topology
-from jittersim.networking.wifi import RECOVERY_CONNECTION, RECOVERY_WIFI_NAME, WifiController, WifiError
+from jittersim.networking.wifi import (
+    RECOVERY_CONNECTION,
+    RECOVERY_WIFI_NAME,
+    WifiController,
+    WifiError,
+)
 from tests.unit.test_wifi_security_copy import CopyExecutor
 
 SSID = "802-11-wireless.ssid"

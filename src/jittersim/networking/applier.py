@@ -12,6 +12,7 @@ from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt
 from jittersim.config.models import ValidationError
 from jittersim.engine.plan import NetworkPlan
 
+from . import wifi_follow
 from .commands import Command, CommandResult
 from .executor import CommandExecutionError, CommandExecutor
 from .renderer import (
@@ -27,7 +28,6 @@ from .renderer import (
     render_service_address_commands,
 )
 from .topology import Topology
-from . import wifi_follow
 from .wifi import WifiController, WifiError
 
 LOGGER = logging.getLogger(__name__)
