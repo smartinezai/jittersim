@@ -2,9 +2,8 @@
 
 This page lists every file in `docs/` and the guides that live elsewhere in the
 repository. It groups them by status so you can tell what to trust. The
-overview's detailed feature content now lives in user-guide.md. The rest of
-this index was checked at `add7c87` on 2026-10-09; its README entries were
-updated against main at `4a89f34` on 2026-10-09.
+overview's detailed feature content now lives in user-guide.md. This index was
+checked against main at `48c948d` on 2026-10-16.
 
 ## What the status words mean
 
@@ -37,6 +36,7 @@ a month (for example `2026-09`) was written in that month.
 | [runbooks/restore-and-reimage.md](runbooks/restore-and-reimage.md) | Backing up, restoring the database and rebuilding the Pi on a new SD card |
 | [architecture.md](architecture.md) | Which file owns which part of the dashboard source |
 | [../DESIGN.md](../DESIGN.md) | The dark visual baseline of the dashboard |
+| [local-ci.md](local-ci.md) | Running the workflow commands on a Mac with `scripts/local-ci.sh`. Hosted CI cannot start jobs, so this is the gate of every pull request |
 | [releasing.md](releasing.md) | Cutting a release with `scripts/release.sh`, installing it and what the local verification record is |
 | [releases/README.md](releases/README.md) | The rules and manual commands behind a release: reserve, build, approve and publish |
 | [../CHANGELOG.md](../CHANGELOG.md) | The notes of every published release |
@@ -65,6 +65,8 @@ a month (for example `2026-09`) was written in that month.
 | [open-source-gap-review-2026-10-09.md](open-source-gap-review-2026-10-09.md) | Which hand-built parts a free tool would do better |
 | [open-source-adoption-2026-10-09.md](open-source-adoption-2026-10-09.md) | Free tools JitterSim could adopt (research) |
 | [dependency-audit-2026-10-09.md](dependency-audit-2026-10-09.md) | The 22 pip-audit findings in the release locks: reachability, fixes and what was left |
+| [outage-lab-results-2026-10-09.md](outage-lab-results-2026-10-09.md) | The Pi-only cutover rebuilt in network namespaces: 16 scenarios, one per failure mode of the outage dossier (PR 120) |
+| [qa-report-2026-10-09.md](qa-report-2026-10-09.md) | Exploratory QA of 9 October: seven findings, which PR 126 fixed and what was left as it was (PR 107) |
 
 ### Release records
 
@@ -91,6 +93,7 @@ instructions.
 | [implementation-plan-wifi-recovery-panel-2026-09.md](implementation-plan-wifi-recovery-panel-2026-09.md) | Wi-Fi recovery in the floating quick-actions panel (superseded in part: the router security copy still applies) | [Dashboard redesign: sidebar navigation](implementation-plan-dashboard-redesign-2026-10-01.md) | **Reset Wi-Fi name** now sits on the Router and Wi-Fi page (`dashboard.html`) |
 | [implementation-plan-mdns-dashboard-name-2026-09.md](implementation-plan-mdns-dashboard-name-2026-09.md) | Dashboard name `jittersim.local` | [Neutral sign-in page](implementation-plan-sign-in-2026-09.md) and the neutral name `netlab.local` | `src/jittersim/localname.py` (`DEFAULT_LOCAL_NAME = "netlab.local"`). Avahi publishing and the one-name rule still follow this plan |
 | [implementation-plan-online-release-source-2026-10-03.md](implementation-plan-online-release-source-2026-10-03.md) | Online release source (design note) | [Releasing JitterSim](releases/README.md) | Its status line says `publish-release.sh` is not built. The script now exists in `deploy/raspberry-pi/` |
+| `implementation-plan-switching-test-failures-2026-10-01.md` (not committed to the repository) | The live router switching test and its failed check rounds | PR 87 | JitterSim can no longer switch the router's Wi-Fi, so there is no live switching test to repeat. The helper refuses every router Wi-Fi write (`router-control-disabled` in `src/jittersim/networking/helper.py`) and the dashboard switch is read only. The plan was never committed, so it has no link. If it is committed later, link it here and keep it superseded |
 
 ## Historical
 
@@ -198,6 +201,7 @@ are grouped by theme.
 | [Skipped saved-device status repair](implementation-plan-skipped-device-status-2026-10-03.md) | 2026-10-03 |
 | [Clearer traffic lines and inspection](implementation-plan-traffic-chart-interaction-2026-10-03.md) | 2026-10-03 |
 | [Live traffic speed reference lines](implementation-plan-traffic-rate-reference-lines-2026-09.md) | 2026-09 |
+| [Dashboard UI overhaul: proposal](ui-overhaul-proposal-2026-10-09.md) (the visual refresh is delivered by PR 115) | 2026-10-09 |
 | [Find unfinished forms](implementation-plan-unfinished-form-navigation-2026-10-03.md) | 2026-10-03 |
 
 ### Tests, CI and project upkeep
@@ -312,7 +316,7 @@ the first plan (September 2026) and is historical too.
 
 ## Screenshots
 
-The README uses these five images. They show sample data. The two overview
+The README shows the two overview images and the user guide shows all five. They show sample data. The two overview
 images were retaken on 2026-10-09 with the refreshed look (see
 [ui-overhaul-proposal-2026-10-09.md](ui-overhaul-proposal-2026-10-09.md)). The
 other three show the earlier look. The
@@ -324,5 +328,8 @@ current **Updates** page wording (**Install update**).
 - [dns-failure-controls.png](screenshots/dns-failure-controls.png)
 - [router-outage-persistence.png](screenshots/router-outage-persistence.png)
 - [staged-update-check.png](screenshots/staged-update-check.png)
+
+The folder `docs/ui-overhaul/` holds the before and after captures of the look
+refresh of PR 115. The proposal embeds them.
 
 Icons in the dashboard come from Lucide. Its licence is in [third-party-notices.md](third-party-notices.md).

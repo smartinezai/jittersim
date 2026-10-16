@@ -45,7 +45,10 @@ Goal: turn a safe high-level policy into an explicit network plan without changi
 - [x] Define a command-plan data structure.
 - [x] Compile device identities into nftables mark operations.
 - [x] Compile upload and download settings into traffic-control operations.
-- [ ] Represent advanced ingress shaping through an `ifb` plan if later measurements require it.
+- [x] Represent advanced ingress shaping through an `ifb` plan. Upload corruption runs on the
+  `jittersim-ifb` device, fed from the test interface's ingress, so the Pi's own IP stack checks
+  every damaged packet before it forwards it (PR 125). Upload delay, jitter, loss and rate stay
+  on the uplink.
 - [x] Include project-owned handles and names so cleanup is bounded.
 - [x] Make compilation deterministic.
 - [x] Add a text renderer for simulation and debugging.
@@ -159,8 +162,8 @@ Goal: create realistic changing conditions without making tests irreproducible.
 
 The next intermittent-behaviour work is detailed in the
 [erratic connection plan](docs/implementation-plan-erratic-connections-2026-10-03.md).
-Milestones 12 to 15 below record the agreed direction and later feature ideas.
-They are planned work rather than available features.
+Milestone 15 delivered the first part of that plan. Milestones 16 to 19 below record the
+agreed direction and later feature ideas. They are planned work rather than available features.
 
 Suggested commits:
 
@@ -269,9 +272,11 @@ verified on the target Pi under normal household load.
 - [x] Check Ethernet routing, AP interface and subnet compatibility before
   changing services during installation.
 - [x] Avoid restarting an active AP during a routine software update.
-- [x] Require WPA2 with AES on install and later Wi-Fi changes.
-- [x] Restore the Wi-Fi name from the dashboard or console without changing
-  the password.
+- [x] Use WPA3 with AES for fresh installations and new manual Wi-Fi settings. Upgrades keep the
+  existing security type, and copying the router's Wi-Fi keeps its personal security type when the
+  Pi can verify that mode. (This replaced the first WPA2 rule.)
+- [x] Restore the default Wi-Fi name (`TestNet`) from the dashboard or console without
+  changing the password.
 - [ ] Verify stronger Wi-Fi security and name recovery on the target Pi.
 - [x] Use internet-only access for the first household trial. The isolated
   subnet continues to block the router's private services.
@@ -295,12 +300,25 @@ See the [household plan](docs/implementation-plan-household-access-point-2026-09
 - [x] Duplicate profiles and provide manual copying when clipboard access fails.
 - [x] Read router Wi-Fi state before presenting one verified switch. (Read only since PR 87.)
 - [x] Install administrator-approved releases with progress, health checks and recovery.
+- [x] Cut, check, sign and publish a release with one command, and update the Pi in one step from
+  its terminal or from the Mac (PR 108, 110). An update is reported as done only when its
+  install request completed (PR 122).
+- [ ] Cut the first release, v0.2.0. The tooling is merged and no tag or GitHub release exists
+  yet. The open pieces are listed under Current remaining work.
+- [x] Apply a saved profile to one device and start only that device while the network is
+  reset (PR 96, 127, 131). While an Everyone profile runs this is refused before anything is
+  saved.
+- [ ] Let one device run its own profile while an Everyone profile runs. It needs the
+  general-profile renderer to leave the device out of the shared mark and Linux packet checks
+  (see the design addendum, "Not covered").
 - [x] Exercise complete browser journeys in CI against an installed package.
 - [ ] Verify radio changes, release installation and recovery on the actual Pi.
 - [ ] Design a separate client measurement page if phone setup needs to be simpler.
 
-The dashboard remains inaccessible from the test Wi-Fi. Release delivery uses
-locally staged bundles without storing GitHub credentials on the Pi.
+Test Wi-Fi clients reach only a limited sign-in page. The private dashboard needs the admin
+token plus saved device access on the test Wi-Fi. Release delivery installs only archives that a
+trusted key signed. The online check uses a read-only GitHub token that
+`sudo jittersim update set-token` saves on the Pi.
 
 ## Milestone 13: DNS failures and headless operations
 
@@ -312,9 +330,13 @@ locally staged bundles without storing GitHub credentials on the Pi.
 - [x] Add headless access, diagnostics, bounded logs and staged update commands.
 - [x] Document caches, bypass paths and recovery commands.
 - [ ] Confirm error behavior, DNS policy and service recovery on the target Pi.
-- [ ] Find a trusted online source if the Pi should check for private releases.
-- [ ] Explore a separate browser feature for returning to a site's home page or
-  a chosen destination. DNS cannot see a page path or browsing history.
+- [x] Find a trusted online source if the Pi should check for private releases. The Pi asks
+  GitHub for the newest signed release with a read-only token and stages it when a trusted key
+  signed it and it is newer (`sudo jittersim update check --online`, PR 84).
+- [x] Explore a separate browser feature for returning to a site's home page or
+  a chosen destination. DNS cannot see a page path or browsing history. The controlled
+  extension is `extensions/homepage-bounce` with live pairing (PR 84). Real test-device
+  identity and physical recovery still need acceptance.
 
 ## Milestone 14: router outage persistence
 
@@ -335,8 +357,9 @@ locally staged bundles without storing GitHub credentials on the Pi.
 Goal: address the four existing weaknesses before adding richer faults.
 
 - [x] Save the erratic connection implementation plan for review.
-- [ ] Complete independent plan review and obtain human feedback before
-  production changes.
+- [x] Complete independent plan review and obtain human feedback before
+  production changes. The owner approved implementation on 3 October 2026 and an independent
+  source review of Delivery A found two more problems that were fixed (the plan records both).
 - [x] Advance outage choices independently from profile rerolls.
 - [x] Define and verify changing behaviour for service lists, browser
   assignments and quota fallback profiles while preserving current priority.
@@ -347,9 +370,10 @@ Goal: address the four existing weaknesses before adding richer faults.
 - [x] Record bounded pattern choices without application contents.
 - [ ] Verify limits, counters, protection, reset, restart and rollback.
 
-The implementation is undergoing independent source review and final release
-checks. The Linux live-update test verifies counter continuity. Physical client
-acceptance and independent expiry after a dashboard crash remain release gates.
+Delivery A is merged (PR 84). The Linux live-update test
+(`test_new_settings_keep_the_packets_a_queue_holds`) verifies counter continuity. Physical
+client acceptance and independent expiry after a dashboard crash remain release gates.
+Deliveries B to F are not started.
 
 See Delivery A in the
 [plan](docs/implementation-plan-erratic-connections-2026-10-03.md).
@@ -458,8 +482,10 @@ These should remain outside the first class-project scope:
 - Unbounded traffic logging
 - Modifying networks that are not explicitly configured as the test network
 
-The dashboard can control primary Wi-Fi on a Vodafone TG3442DE through its
-local web interface. Other router models still need manual control. JitterSim
+The dashboard reads the primary Wi-Fi state of a Vodafone TG3442DE through its
+local web interface and can copy its name and password to the Pi. Since PR 87 the
+Pi helper refuses every router Wi-Fi write and the dashboard switch is read only:
+turn the router's Wi-Fi on or off with the router's own button or page. JitterSim
 does not inspect HTTPS pages or promise complete website blocking. The test AP
 does not offer client IPv6 while device rules remain IPv4 based.
 
@@ -479,7 +505,8 @@ The project is ready for presentation when it can:
 
 ## Router security matching and visible name recovery
 
-- [x] Put Wi-Fi name recovery in the floating Quick actions panel.
+- [x] Offer Wi-Fi name recovery as **Reset Wi-Fi name** on the Router and Wi-Fi page (the floating
+  Quick actions panel was replaced by the sidebar).
 - [x] Detect and preview the router band and personal security type.
 - [x] Copy matching security with bounded recovery on failure.
 - [x] Preserve the mode during name reset and installation upgrades.
@@ -487,9 +514,46 @@ The project is ready for presentation when it can:
 
 ## Current remaining work
 
-The 2 October audit and the remaining-work plan that this section used to link
-are not in the repository. The open work is in
-[planned features](docs/planned-features.md) and
-[planned fixes](docs/planned-fixes.md). The physical checks that remain are in
-the [acceptance checklist](docs/pi-acceptance-checklist.md). The
-[documentation index](docs/README.md) lists the older plans.
+Checked against `origin/main` at `48c948d` (PR 115) on 16 October 2026. Every unticked box in the
+milestones above is one of these:
+
+- Owner-run physical acceptance on the Pi (Milestones 9 to 15 and the router security section).
+- An open design or decision: the household network design (Milestone 11), the separate client
+  measurement page (Milestone 12) and whether profiles should resume after a Pi restart
+  (Milestone 14).
+- Planned work that has not started: a device profile while Everyone runs (Milestone 12),
+  Milestones 16 to 19 (Deliveries B to F of the erratic connection plan) and the website list modes
+  of the [planned features](docs/planned-features.md).
+- The v0.2.0 release itself (Milestone 12), described below.
+
+Hosted CI cannot start jobs (billing limit). Every pull request is gated by
+`scripts/local-ci.sh` run on its exact head commit (see [local CI](docs/local-ci.md)).
+
+Open pull requests on the evening of 16 October 2026 (the first seven rows are the work in
+flight that evening):
+
+| PR | What it does | State |
+| --- | --- | --- |
+| 111 | Signed release notes in the update status, check-only manual checks, retry of a development-label build | Draft. Gated: needs the combined independent review and a new approved bundle |
+| 112 | Names the version on the Updates install button and shows release notes and the recovery copy | Ready for review. The notes need PR 111 |
+| 117 | Raises the wheel build lock to 0.46.3 | Draft, do not merge. It changes signed release inputs and needs independent review |
+| 121 | Device speed test: compare a device's speed before and after a profile | Ready for review |
+| 136 | Lands the combined Panic batch with one approved bundle. It carries PR 92 (protected devices get dashboard access), 103 and 104 | Draft |
+| 138 | Carry-forward fixes of the Panic batch: revoked dashboard grant after a rollback, Panic waits, intake cleanup. Based on PR 136 | Draft |
+| 139 | Fixes the release tooling bugs that a real dry run of v0.2.0 found | Draft |
+| 92, 103, 104 | Protected-device dashboard access and two Panic hardening fixes. Their content is carried by PR 136 | Open, wait for PR 136 |
+
+The first release, v0.2.0, is being prepared. `pyproject.toml` already says `0.2.0`, but no tag, no
+GitHub release and no reserved version exist yet (`docs/releases/registry.json`). The release tooling
+is merged (PR 108, 109, 110, 114, 116, 122). PR 139, 111, 112 and 117 are the open pieces, and the owner
+approves the release itself.
+
+Other places to look:
+
+- [Planned features](docs/planned-features.md) and [planned fixes](docs/planned-fixes.md) hold the
+  status of requested work and of known problems.
+- The physical checks that remain are in the [acceptance checklist](docs/pi-acceptance-checklist.md).
+- [Feature proposals](docs/feature-proposals-2026-10-09.md) lists thirty researched ideas that are not
+  started work.
+- The [documentation index](docs/README.md) lists the older plans and marks each as current,
+  historical or superseded.
