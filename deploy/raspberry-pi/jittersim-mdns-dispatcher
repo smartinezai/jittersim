@@ -17,6 +17,13 @@ esac
 
 case "$action" in
     up|down|dhcp4-change|reapply)
-        systemctl kill --kill-whom=main --signal=HUP jittersim-mdns.service 2>/dev/null || true
+        # Only a running publisher is woken. One that is stopped, failed or
+        # waiting for its restart has no process to signal, and it reads the
+        # current addresses on its first pass when it starts. A publisher that
+        # has only just started survives the signal: it handles SIGHUP before
+        # its slow setup.
+        if systemctl is-active --quiet jittersim-mdns.service; then
+            systemctl kill --kill-whom=main --signal=HUP jittersim-mdns.service 2>/dev/null || true
+        fi
         ;;
 esac

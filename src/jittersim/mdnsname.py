@@ -761,13 +761,6 @@ def _extra_names(name: str, trust_env: Path = TRUST_ENV) -> Tuple[str, ...]:
 
 
 def _publish_command(arguments: argparse.Namespace) -> int:
-    runtime = _environment(arguments.runtime_env)
-    uplink = runtime.get("JITTERSIM_UPLINK", "eth0")
-    test_interface = runtime.get("JITTERSIM_TEST_INTERFACE", "wlan0")
-    name = read_local_name(arguments.trust_env)
-    publisher = Publisher(
-        name=name, uplink=uplink, test_interface=test_interface,
-        extra_names=_extra_names(name, arguments.trust_env), status_path=arguments.status)
     flags = {"stop": False, "wake": False}
 
     def on_stop(*_ignored) -> None:
@@ -776,9 +769,23 @@ def _publish_command(arguments: argparse.Namespace) -> int:
     def on_wake(*_ignored) -> None:
         flags["wake"] = True
 
+    # The handlers come first, before any slow or failing work. The network hook
+    # sends SIGHUP as soon as the unit is active, which at boot can be while the
+    # setup below is still running (loading the certificate code and running
+    # openssl take seconds on a Pi). Until a handler exists SIGHUP ends the
+    # process, and systemd counts that as a clean exit. A wake-up or stop that
+    # arrives early is only remembered here. The loop answers it when it starts.
     signal.signal(signal.SIGTERM, on_stop)
     signal.signal(signal.SIGINT, on_stop)
     signal.signal(signal.SIGHUP, on_wake)
+
+    runtime = _environment(arguments.runtime_env)
+    uplink = runtime.get("JITTERSIM_UPLINK", "eth0")
+    test_interface = runtime.get("JITTERSIM_TEST_INTERFACE", "wlan0")
+    name = read_local_name(arguments.trust_env)
+    publisher = Publisher(
+        name=name, uplink=uplink, test_interface=test_interface,
+        extra_names=_extra_names(name, arguments.trust_env), status_path=arguments.status)
 
     def woken() -> bool:
         wake, flags["wake"] = flags["wake"], False
