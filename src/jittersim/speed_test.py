@@ -262,7 +262,7 @@ def compare_results(baseline: Dict[str, Any], later: Dict[str, Any]) -> Dict[str
         if result.get("source") in ("everyone", "everyone-else"):
             warnings.append(
                 f"Result {result.get('id')} was measured on a shared queue: other devices' traffic "
-                "is in the same counters."
+                "is in the same counters, and its round trip does not include the profile's delay."
             )
         if result.get("status") == "changed":
             warnings.append(f"The profile changed during result {result.get('id')}.")

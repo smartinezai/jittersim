@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -71,3 +72,58 @@ def test_end_message_marks_saved_changed_and_fault_results_incomplete():
         "Speed test saved, but may be incomplete. Read failed.",
         "Cancelled. Nothing was saved.",
     ]
+
+
+SPEED_TEST_SCRIPT = (
+    Path(__file__).resolve().parents[2] / "src" / "jittersim" / "api" / "speed-test.js"
+).read_text(encoding="utf-8")
+# Just enough of the dashboard for speed-test.js to load. The two overrides below replace the
+# window code so the test sees only what speedTestEnd decides.
+SPEED_TEST_STUBS = """
+const privateDataLockHooks = [];
+const connectedRowHooks = [];
+const window = {setTimeout: () => 1, clearTimeout: () => {}};
+let pending = [];
+function request(path, method, body) {
+  return new Promise((resolve, reject) => pending.push({path, resolve, reject}));
+}
+function element() { return null; }
+function showMessage() {}
+function setButtonBusy() {}
+"""
+SPEED_TEST_PROBES = """
+const finished = [];
+let polls = 0;
+function speedTestFinished(status) { finished.push(status); speedTestState.run = null; }
+async function speedTestPoll() { polls += 1; }
+"""
+
+
+@NEEDS_NODE
+def test_a_late_finish_answer_does_not_end_a_run_started_after_it():
+    outcome = run_node(
+        SPEED_TEST_STUBS + SPEED_TEST_SCRIPT + SPEED_TEST_PROBES + """
+(async () => {
+  const first = {id: 'first'};
+  speedTestState.run = first;
+  const ending = speedTestEnd('finish');
+  // The poll saw the first run end, then the person started a second one in the same window.
+  speedTestState.run = {id: 'second'};
+  pending[0].resolve({id: 'first', state: 'ended', result: {id: 7, status: 'finished-early'}});
+  let error = null;
+  try { await ending; } catch (caught) { error = caught.message; }
+  // A refused Finish for the first run must not throw over the second run either.
+  const third = {id: 'third'};
+  speedTestState.run = third;
+  const refused = speedTestEnd('finish');
+  speedTestState.run = {id: 'fourth'};
+  const failure = new Error('This speed test is not running');
+  failure.status = 404;
+  pending[1].reject(failure);
+  let refusedError = null;
+  try { await refused; } catch (caught) { refusedError = caught.message; }
+  console.log(JSON.stringify({finished, run: speedTestState.run.id, error, refusedError}));
+})();
+""")
+
+    assert outcome == {"finished": [], "run": "fourth", "error": None, "refusedError": None}

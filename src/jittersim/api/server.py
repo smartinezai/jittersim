@@ -3030,9 +3030,15 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         deadline = time.monotonic() + self.shutdown_timeout_seconds
         # Speed test windows read the helper and write the repository. Stop them first, because
         # the caller closes the repository right after this returns.
+        # A sampler stuck in a helper read must not stop the rest of the shutdown, so its error
+        # is raised at the end with the others and the caller keeps the repository open.
+        unresolved = []
         speed_tests = getattr(self, "_speed_test_manager", None)
         if speed_tests is not None:
-            speed_tests.shutdown(timeout=self.shutdown_timeout_seconds)
+            try:
+                speed_tests.shutdown(timeout=self.shutdown_timeout_seconds)
+            except WorkersStillRunning as error:
+                unresolved.append(error)
         if self.scheduler is not None:
             self.scheduler.begin_shutdown()
         if self.homepage_store is not None:
@@ -3049,7 +3055,6 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             self._close_pending(connection)
         # The listener can close at once. Shared state must outlive every owner.
         super().server_close()
-        unresolved = []
         cleanup = self._cleanup_worker
         if cleanup is not None and cleanup is not threading.current_thread():
             cleanup.join(timeout=max(0.0, deadline - time.monotonic()))

@@ -373,8 +373,8 @@ async function speedTestEnd(action) {
   try {
     status = await request('/api/speed-tests/' + action, 'POST', {run_id: run.id});
   } catch (error) {
-    if (serial !== speedTestState.serial) return;
-    if (speedTestState.run !== run) throw error;
+    // The window moved on (another device, or a newer run here): this answer is about the past.
+    if (serial !== speedTestState.serial || speedTestState.run !== run) return;
     if (error.status === 404) {
       await speedTestFinished({result: null, ended_reason: 'This test is no longer running.'}, serial);
       return;
@@ -385,7 +385,7 @@ async function speedTestEnd(action) {
     if (error.status === 409) return;
     throw error;
   }
-  if (serial !== speedTestState.serial) return;
+  if (serial !== speedTestState.serial || speedTestState.run !== run) return;
   await speedTestFinished(status, serial);
 }
 

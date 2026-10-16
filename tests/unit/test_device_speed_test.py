@@ -132,6 +132,17 @@ class ArithmeticTests(unittest.TestCase):
         self.assertEqual(len(result["warnings"]), 1)
         self.assertIn("shared queue", result["warnings"][0])
 
+    def test_compare_says_a_shared_queue_round_trip_misses_the_profile_delay(self) -> None:
+        baseline = {"id": 1, "mac_address": PHONE, "source": "device", "status": "complete",
+                    "summary": {"latency": {"rtt_median_ms": 105.0, "shaped": True}}}
+        later = {"id": 2, "mac_address": PHONE, "source": "everyone", "status": "complete",
+                 "summary": {"latency": {"rtt_median_ms": 5.0, "shaped": False}}}
+
+        warnings = compare_results(baseline, later)["warnings"]
+
+        self.assertTrue(any("round trip" in warning and "delay" in warning
+                            for warning in warnings), warnings)
+
     def test_csv_export_defuses_spreadsheet_formulas(self) -> None:
         text = export_csv([{"id": 1, "device_name": "=HYPERLINK(1)", "label": "@x",
                             "summary": {}, "profile": {}, "reported": {}}])
@@ -1098,6 +1109,18 @@ class EndingTests(ManagerBase):
         with mock.patch.object(self.manager, "shutdown") as stop:
             self.server.server_close()
         stop.assert_called_once()
+
+    def test_a_sampler_that_does_not_stop_still_lets_the_server_close_the_rest(self) -> None:
+        stuck = WorkersStillRunning("A speed test sampler did not stop.")
+        with mock.patch.object(self.manager, "shutdown", side_effect=stuck), \
+                mock.patch.object(self.server._request_workers, "stop_admission",
+                                  wraps=self.server._request_workers.stop_admission) as admission:
+            with self.assertRaises(WorkersStillRunning):
+                self.server.server_close()
+
+        # The listener and every other owner were still told to stop.
+        admission.assert_called()
+        self.assertEqual(self.server.socket.fileno(), -1)
 
     def test_ids_in_the_query_and_the_body_never_cause_a_server_error(self) -> None:
         for query in ("baseline=%C2%B2&result=1", "baseline=%D9%A1&result=1",

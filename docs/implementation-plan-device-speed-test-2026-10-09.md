@@ -258,3 +258,18 @@ and posts the numbers back, so nobody types them in.
   or approve a helper change (Panic-gated, independent review and a new bundle) that exposes the
   Wi-Fi station byte counters read-only.
 * **D4** Retention: 50 per device and 500 in total, or other numbers.
+
+### Defaults until the owner decides (16 October 2026)
+
+The owner has not answered D1 to D4 yet. Until then this change ships the most conservative
+choice for each. Each one can be changed later without a data migration.
+
+* **D1** Cloudflare stays the default and LibreSpeed stays the one alternative. This is the
+  behaviour already built and tested. JitterSim only links to the provider's own page, so no
+  endpoint is called by the Pi and no result is sent by JitterSim. M-Lab stays out because it
+  publishes the tester's public address.
+* **D2** Phase 2 is not built. No token-less route is added for the test Wi-Fi.
+* **D3** No helper change. Devices with no profile keep the "No limits" profile workaround and
+  the source `none`. The Panic-gated helper and access files are not touched.
+* **D4** Keep 50 results per device and 500 in total. These are the bounds the store enforces
+  and the unit tests pin. They keep the database small on the Pi.
