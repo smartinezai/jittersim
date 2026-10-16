@@ -306,6 +306,33 @@ without a warning on that device. Test Wi-Fi devices receive a separate
 certificate that names only the one address, the earlier test Wi-Fi name and
 `192.168.50.1`, so the sign-in page does not reveal other names.
 
+### Protected devices and dashboard access
+
+A protected device (see **Protected devices**) can open the dashboard without
+**Allow this device**. It still needs the admin token. Access has two
+separate reasons: a saved grant from **Allow this device** and protection.
+The Dashboard access list shows which one applies (**saved grant**, **from
+protection** or both). Rules:
+
+- Stopping protection removes only the access that came from protection. A
+  saved grant stays.
+- Removing a saved grant from a protected device keeps access while it is
+  protected (**Remove saved grant**).
+- If the device you are using can open the dashboard only because it is
+  protected, stopping its protection asks first: keep access as a saved grant
+  for this device or remove both. Restoring settings (import or history) that
+  no longer protect it keeps its access as a saved grant and says so.
+- If the Pi helper does not confirm the change, the list says so and offers
+  **Retry protected access**. Until Retry succeeds a device that is no longer
+  protected may still open the dashboard. The dashboard also retries by itself.
+- A changed private Wi-Fi address gets nothing by name or IP. Move the device
+  to its new address under Dashboard access and access follows protection.
+- Protection access is not saved in `/etc/jittersim/dashboard-access.json`.
+  The dashboard grants it again after every restart from the protected list.
+  Up to 256 protected devices plus 64 saved grants are supported.
+- Protection never grants SSH, router administration or public internet
+  access.
+
 The leaf certificate is renewed by the installer (and by dashboard updates)
 when its names or the Ethernet address change or fewer than 30 days remain.
 Devices that already trust the authority need nothing when that happens.

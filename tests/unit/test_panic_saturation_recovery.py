@@ -65,35 +65,23 @@ class DashboardSaturationTests(unittest.TestCase):
                 self.helper.release_apply.set()
 
 
-def test_all_helper_input_slots_expire_then_normal_access_retry_recovers():
+def test_all_helper_input_slots_stalled_still_let_normal_access_through():
+    # Review T4: stalled input waits in its own pool and a complete Panic request
+    # is read at once and served from the kept operation slot.
     with tempfile.TemporaryDirectory(prefix="js70-", dir="/tmp") as temporary:
         directory = Path(temporary)
         with helper(directory) as (_, client):
             sockets = []
             try:
-                for _ in range(MAX_HELPER_CONNECTIONS):
-                    # A busy machine can fill the small listen queue before the helper
-                    # accepts. Such a refused connect never reached the helper, so it is
-                    # simply repeated.
-                    retry_until = time.monotonic() + 5
-                    while True:
-                        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                        try:
-                            connection.connect(str(directory / "helper.sock"))
-                            break
-                        except ConnectionRefusedError:
-                            connection.close()
-                            if time.monotonic() > retry_until:
-                                raise
-                            time.sleep(0.02)
-                    connection.sendall(b"{")
-                    sockets.append(connection)
-                # Each connection has a real admitted input worker before the rejection.
+                # Repeats a connect that the small listen backlog refused.
+                from tests.integration.test_capacity_stalled_clients import stall_helper
+
+                sockets = stall_helper(directory / "helper.sock", helper_module.MAX_PENDING_HELPER_INPUT)
+                # Each connection has a real admitted input worker first.
                 time.sleep(0.05)
                 with pytest.raises(HelperClientError) as failed:
-                    client.normal_access()
+                    client.ping()
                 assert failed.value.reason == "helper-busy"
-                time.sleep(3.2)
                 assert client.normal_access()["ok"] is True
             finally:
                 for connection in sockets:

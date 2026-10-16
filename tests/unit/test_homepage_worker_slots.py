@@ -139,7 +139,8 @@ def test_each_server_holds_partial_start_admission(surface, monkeypatch):
         else:
             policy = surface == "policy-unix"
             server = UnixHelperServer(Path(directory) / "s", None, policy_only=policy)
-            slots, capacity = server._request_slots, 2 if policy else 8
+            # Connection admission is the input pool. Operation slots follow a complete request.
+            slots, capacity = server._input_slots, 2 if policy else 16
 
         def blocked(*_):
             entered.set()
