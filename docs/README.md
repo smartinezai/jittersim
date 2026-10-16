@@ -3,7 +3,7 @@
 This page lists every file in `docs/` and the guides that live elsewhere in the
 repository. It groups them by status so you can tell what to trust. The
 overview's detailed feature content now lives in user-guide.md. This index was
-checked against main at `48c948d` on 2026-10-16.
+checked against main at `36e0d2c` on 2026-10-17.
 
 ## What the status words mean
 
@@ -66,6 +66,9 @@ a month (for example `2026-09`) was written in that month.
 | [open-source-adoption-2026-10-09.md](open-source-adoption-2026-10-09.md) | Free tools JitterSim could adopt (research) |
 | [dependency-audit-2026-10-09.md](dependency-audit-2026-10-09.md) | The 22 pip-audit findings in the release locks: reachability, fixes and what was left |
 | [outage-lab-results-2026-10-09.md](outage-lab-results-2026-10-09.md) | The Pi-only cutover rebuilt in network namespaces: 16 scenarios, one per failure mode of the outage dossier (PR 120) |
+| [carry-forward-panic-batch-2026-10-10.md](carry-forward-panic-batch-2026-10-10.md) | What the reviews of the combined Panic batch (PR 136) found and left open, and the owner action after a rollback from the first upload-safe release |
+| [upstream-safe-gated-notes-2026-10-10.md](upstream-safe-gated-notes-2026-10-10.md) | The Panic-gated part of the upstream-safe impairments: the helper apply report (merged) and the rollback cleanup (not merged) |
+| [design-helper-action-authorization-2026-10-09.md](design-helper-action-authorization-2026-10-09.md) | A proposal for per-caller authorization on the helper socket. Nothing is implemented |
 | [qa-report-2026-10-09.md](qa-report-2026-10-09.md) | Exploratory QA of 9 October: seven findings, which PR 126 fixed and what was left as it was (PR 107) |
 
 ### Release records
@@ -150,6 +153,7 @@ are grouped by theme.
 | [Live homepage pairing implementation](implementation-plan-live-homepage-pairing-2026-10-03.md) | 2026-10-03 |
 | [Preserve omitted access-rule sections](implementation-plan-partial-access-rules-2026-10-02.md) | 2026-10-02 |
 | [Optional ad blocking for protected devices](implementation-plan-protected-device-ad-blocking-2026-10-03.md) | 2026-10-03 |
+| [Give protected devices dashboard access](implementation-plan-protected-device-dashboard-access-2026-10-04.md) (delivered by PR 92 in PR 136) | 2026-10-04 |
 | [A neutral sign-in page](implementation-plan-sign-in-2026-09.md) | 2026-09 |
 
 ### Profiles, patterns and the engine
@@ -295,7 +299,8 @@ machine that produced them.
 | [review-results-final-panic-consumers-2026-10-04.json](review-results-final-panic-consumers-2026-10-04.json) | Independent review of the Panic consumers |
 | [review-results-router-recovery-consumers-2026-10-05.json](review-results-router-recovery-consumers-2026-10-05.json) | Independent review of the router recovery consumers |
 | [review-results-router-recovery-optin-removal-2026-10-05.json](review-results-router-recovery-optin-removal-2026-10-05.json) | Independent review of the router recovery opt-in removal |
-| [review-results-panic-consumers-outage-logging-2026-10-09.json](review-results-panic-consumers-outage-logging-2026-10-09.json) | Independent review of the Panic consumers for outage logging |
+| [review-results-panic-consumers-outage-logging-2026-10-09.json](review-results-panic-consumers-outage-logging-2026-10-09.json), [addendum](review-results-panic-consumers-outage-logging-2026-10-09-addendum.json) | Independent review of the Panic consumers for outage logging, and its addendum |
+| [review-results-gated-panic-batch-2026-10-10.json](review-results-gated-panic-batch-2026-10-10.json) | Independent review of the combined Panic batch (PR 136) |
 | [router-incident-receipts-2026-10-04.json](router-incident-receipts-2026-10-04.json) | Receipts for the router incident findings |
 
 ## Historical archive

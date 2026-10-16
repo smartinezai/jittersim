@@ -3,13 +3,13 @@
 The exact October2 fix list is preserved in [the historical archive](history/2026-10-02-backlog-and-ux/planned-fixes.md).
 New feature ideas are in [feature proposals](feature-proposals-2026-10-09.md).
 
-Baseline: `origin/main` at `48c948d` (the merge of PR 115 on 10 October 2026), checked on
-16 October 2026. Statuses come from the source and the merged pull requests on that commit. Nothing
+Baseline: `origin/main` at `36e0d2c` (the merge of PR 136 on 16 October 2026), checked on
+17 October 2026. Statuses come from the source and the merged pull requests on that commit. Nothing
 here was run on a Pi. The 4 October accepted main `5e0fed2` matched tested candidate 6fb864f. Hosted
 jobs cannot start (billing limit), so every pull request is gated by `scripts/local-ci.sh` on its head
 commit ([local CI](local-ci.md)).
 
-## Changes after that candidate (9 and 10 October 2026)
+## Changes after that candidate (9 to 16 October 2026)
 
 - Router Wi-Fi writes are permanently refused by the Pi helper and the dashboard
   switch is read only (PR 87, merge `3903581`). Read-only router status checks and
@@ -20,9 +20,16 @@ commit ([local CI](local-ci.md)).
 - Dashboard token checks that meet a busy helper (PR 86) and persistent outage logging
   (PR 91) are merged. Both change the privileged helper. An independent Panic-consumer review
   ([results](review-results-panic-consumers-outage-logging-2026-10-09.json)) approved that
-  helper and access source as the newest entry of `PANIC_APPROVED_SOURCES`, and main's
-  `helper.py`, `access.py` and `panic_guard.py` match it. The review is not approval of
-  deployment.
+  helper and access source as an entry of `PANIC_APPROVED_SOURCES`. PR 136 later added the
+  newest entry, and main's `helper.py`, `access.py` and `panic_guard.py` match that one
+  (checked with `shasum`). A review is not approval of deployment.
+- The combined Panic batch landed with one approved bundle (PR 136, 16 October, which carried
+  PR 92, 103 and 104): after a helper restart the stop flag comes from the Panic guard or
+  `gateway.json`, Panic's household release opens the firewall first and never rolls back to the
+  restrictive rules, the helper has an input pool of 16 plus a reserved Panic slot, a bounded busy
+  retry and one total Panic deadline, and protected devices open the dashboard with an emergency
+  device check on the Panic path ([review results](review-results-gated-panic-batch-2026-10-10.json)).
+  The review found items that stay open ([carry-forward list](carry-forward-panic-batch-2026-10-10.md)).
 - Panic and capacity: Panic stays reachable when silent connections fill the dashboard
   queue (PR 95). The Panic reserve and the waiting queue are kept for real Panic requests
   (PR 123). Reliability tests for Panic and capacity were added (PR 93).
@@ -77,20 +84,23 @@ new tickets. The archived list retains all details and proposed fixes.
 
 ## Open fixes
 
-In flight on 16 October 2026 (states are in the [roadmap](../ROADMAP.md)):
+In flight on 17 October 2026 (states are in the [roadmap](../ROADMAP.md)):
 
 - PR 138 works the carry-forward list of the Panic batch: a rollback that brought back a
-  revoked dashboard grant, a backup lock that delayed dashboard Panic and a stalled write of
-  the stop records. PR 136 lands the combined Panic batch with one approved bundle and
-  carries PR 92, 103 and 104. Both touch hash-pinned files and need the independent review
-  and a matching approved bundle before merge.
+  revoked dashboard grant, a backup lock that delayed dashboard Panic, a stalled write of
+  the stop records and the rollback cleanup of the upload intake. It touches hash-pinned
+  files, so it needs the independent review and a matching approved bundle before merge. Two
+  owner decisions are open in its description.
 - PR 139 fixes release tooling bugs that a real dry run of v0.2.0 found. PR 111 and 112 add
   signed release notes to the update status and name the version on the Updates button. PR 117
   raises the wheel build lock. They belong to the first release, v0.2.0, which is not cut.
+- PR 140 (the Pi's test Wi-Fi follows the router copy), PR 142 (boot robustness), PR 143 (a
+  stability pass), PR 141 and 146 (in-page confirmations, one accessibility announcer) and PR 121
+  (device speed test) are open as well.
 - Not in flight and still open:
   - Every private request from a test-network peer still asks the helper for its own dashboard
-    access status (`_check_device_access`). PR 86 bounded the wait and kept the token, but
-    simultaneous requests do not share one answer and the sign-in retry after "Device
+    access status (`_check_device_access`). PR 86 bounded the wait and kept the token and PR 136
+    added a bounded busy retry, but simultaneous requests do not share one answer and the sign-in retry after "Device
     verification is busy" is manual. The probe with four simultaneous checks has not been
     repeated on an installed Pi.
   - Names accept control characters and bidirectional overrides through the API and import.
