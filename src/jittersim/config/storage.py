@@ -1310,6 +1310,7 @@ class ConfigRepository:
                 last_result = ?, last_error = ?,
                 exceptions_kept = CASE
                     WHEN last_action = 'reset' THEN 0
+                    WHEN ? = 0 THEN 1
                     WHEN EXISTS (
                         SELECT 1 FROM general_profile_setting WHERE profile_id IS NOT NULL
                     ) THEN 1
@@ -1324,6 +1325,9 @@ class ConfigRepository:
                 "applied" if success else "error",
                 "success" if success else "failure",
                 None if success else "scheduled network plan failed",
+                # Only an accepted plan without Everyone ends the record. A failed one
+                # replaced nothing, so the record still says what runs.
+                int(success),
             ),
         )
         self._end_exceptions_keep()

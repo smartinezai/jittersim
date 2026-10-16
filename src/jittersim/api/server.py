@@ -2151,6 +2151,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             states = device_protection_states(
                 self.repository, snapshot if protected else None
             )
+            beside_everyone = self.repository.get_everyone_exceptions()
             for client in devices:
                 group = groups_by_device.get(client["assigned_device_id"])
                 client["unaffected"] = client["mac_address"] in protected
@@ -2161,7 +2162,11 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 client["group_name"] = group.name if group else None
                 client["group_profile_id"] = group.profile_id if group else None
                 if general_status["active"] and not client["unaffected"]:
-                    client["general_profile_name"] = general_status["profile"]["name"]
+                    if client["assigned_device_id"] in beside_everyone:
+                        # This device left Everyone and runs the profile saved for it.
+                        client["beside_everyone"] = True
+                    else:
+                        client["general_profile_name"] = general_status["profile"]["name"]
             return (
                 HTTPStatus.OK,
                 "application/json",

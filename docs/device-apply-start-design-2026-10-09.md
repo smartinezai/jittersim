@@ -159,7 +159,8 @@ How long the device stays beside Everyone:
   covers the device again on the next apply. Nothing paused resumes.
 - A saved change, a scheduled apply and a restart of the dashboard keep the
   exceptions. A scheduled apply never adds a device. A scheduled apply of a plan
-  without Everyone, for example after a failed Stop, ends them.
+  without Everyone, for example after a failed Stop, ends them once it succeeds. A
+  failed scheduled apply keeps them.
 - A whole-scope action ends them only after the helper accepted its plan. A
   failed Start keeps them, so the record, the retry and the running policy agree.
   The usage of the devices is sampled before the counters restart.
@@ -224,7 +225,9 @@ Plan, helper and kernel:
   downloads, loss, an Everyone outage, a Protected client, two devices, counters
   and a switch in both directions while pings run.
 
-Dashboard: the runtime state carries `everyone_exceptions`. The sidebar lists the
+Dashboard: the runtime state carries `everyone_exceptions`. The connected clients
+list shows the device's own profile and says it runs beside Everyone instead of
+"Same as everyone". The sidebar lists the
 device with its own profile and the other devices with Everyone's, and the status
 line says how many devices run their own profile. The Everyone card explains it.
 

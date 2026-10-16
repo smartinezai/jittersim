@@ -88,6 +88,10 @@ def check_width(browser, base, width, height):
     expect(page.locator("#status-general")).to_have_text("Everyone: daily climb manual · active")
     expect(page.locator("#status-devices-list li")).to_have_count(1)
     expect(page.locator("#status-devices-list li")).to_contain_text("Slow test")
+    row = page.locator(f'.connected-row[data-mac-address="{MAC_ADDRESS}"]')
+    expect(row).to_contain_text("Profile: Slow test")
+    expect(row).to_contain_text("Runs its own profile while Everyone covers the rest")
+    expect(row).not_to_contain_text("Same as everyone")
     state = get("/api/state")["state"]
     assert state["everyone_exceptions"] == [CLIENT_ID], state
     assert state["device_only"] == [], state

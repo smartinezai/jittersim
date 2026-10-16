@@ -2952,7 +2952,8 @@
           device.general_profile_name ? "Same as everyone: " + device.general_profile_name +
             " · Shared speed limit" :
           "Profile: " + (device.assigned_profile_id ? savedProfileName(device.assigned_profile_id) : "None") +
-          (device.group_name ? " · Group: " + device.group_name + (device.group_profile_id ? " (override: " + savedProfileName(device.group_profile_id) + ")" : "") : "");
+          (device.group_name ? " · Group: " + device.group_name + (device.group_profile_id ? " (override: " + savedProfileName(device.group_profile_id) + ")" : "") : "") +
+          (device.beside_everyone ? " · Runs its own profile while Everyone covers the rest" : "");
         details.append(address, metadata, deviceType, assignmentInfo);
         connectedRowHooks.forEach((hook) => hook(device, details));
         if (device.hostname) {

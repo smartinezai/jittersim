@@ -5,6 +5,7 @@ device, with the same profile and the same shared limit. The device runs the pro
 that was chosen for it. Nothing else resumes and nothing is cleared silently.
 """
 
+import json
 import threading
 import time
 import unittest
@@ -500,6 +501,24 @@ class FailedEveryoneChangeTests(EveryoneRunningFixture):
         scheduler.tick(repository=self.repository)
         self.assertEqual(self.exceptions(), frozenset())
 
+    def test_a_failed_scheduled_retry_after_a_failed_stop_keeps_the_record(self) -> None:
+        scheduler = self.use_scheduler()
+        self.helper.fail_action = "apply"
+        with self.assertLogs("jittersim.api.server", "ERROR"):
+            self.assertEqual(self.write("/api/general-profile/stop", {})[0], 502)
+
+        # The scheduler fails too. Nothing replaced the running plan, so the record stays.
+        with self.assertLogs("jittersim.engine.runtime", "ERROR"):
+            self.assertFalse(scheduler.tick(repository=self.repository))
+        self.assertEqual(self.raw_rows(), {AIR_ID})
+        self.assertEqual(self.repository.get_runtime_state().last_action, "schedule")
+
+        # It goes only with the first accepted plan.
+        self.helper.fail_action = ""
+        scheduler._plan_retry_at = 0.0
+        self.assertTrue(scheduler.tick(repository=self.repository))
+        self.assertEqual(self.raw_rows(), frozenset())
+
     def test_a_failed_stop_keeps_the_record_and_a_later_start_ends_it(self) -> None:
         self.helper.fail_action = "apply"
 
@@ -682,6 +701,22 @@ class OrderingAndRestartTests(EveryoneRunningFixture):
         self.assertEqual(self.exceptions(), {AIR_ID})
         self.assertEqual(self.repository.list_activity()[0]["message"],
                          "Configuration applied again after the dashboard restarted")
+
+    def test_the_connected_list_does_not_call_the_exception_the_same_as_everyone(self) -> None:
+        self.assertEqual(self.apply_to()[0], 200)
+
+        status, _, body = self.server.response_for("/api/connected-devices")
+        clients = {item["assigned_device_id"] or item["mac_address"]: item
+                   for item in json.loads(body)["devices"]}
+
+        self.assertEqual(status, 200)
+        air = clients[AIR_ID]
+        self.assertNotIn("general_profile_name", air)
+        self.assertEqual(air["assigned_profile_id"], "slow-test")
+        self.assertTrue(air["beside_everyone"])
+        phone = clients[PHONE["mac_address"]]
+        self.assertEqual(phone["general_profile_name"], "daily climb manual")
+        self.assertNotIn("beside_everyone", phone)
 
     def test_the_runtime_state_names_the_exceptions(self) -> None:
         self.assertEqual(self.apply_to()[0], 200)
