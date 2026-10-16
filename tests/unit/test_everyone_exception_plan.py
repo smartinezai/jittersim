@@ -131,9 +131,8 @@ class MixedPlanCompilationTests(unittest.TestCase):
         with self.assertRaises(PlanError):
             mixed((clash,))
         # Without Everyone the id is an ordinary device id, as before.
-        self.assertEqual(
-            [rule.device_id for rule in compile_plan(devices=(clash,), profiles=PROFILES).mark_rules],
-            [GENERAL_QUEUE_ID])
+        plain = compile_plan(devices=(clash,), profiles=PROFILES)
+        self.assertEqual([rule.device_id for rule in plain.mark_rules], [GENERAL_QUEUE_ID])
 
     def test_website_rules_and_outages_of_the_device_are_kept(self) -> None:
         website = WebsiteFilter(AIR.ipv4_address, (IPv4Address("203.0.113.9"),))
