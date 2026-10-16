@@ -5205,6 +5205,16 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 stopped = last_action == "reset"
                 general = self.repository.get_general_profile()
                 beside_everyone = False
+                if general is None and not stopped and self.scheduler is not None:
+                    applied = self.scheduler.applied_plan()
+                    if applied is not None and applied.general_profile is not None:
+                        # A Stop for everyone that was saved but failed. Applying the saved
+                        # settings now would finish it and start every paused device setting.
+                        raise ValueError(
+                            "Everyone still runs because Stop for everyone did not finish. "
+                            "Nothing was saved. Choose Start to finish it, then apply this "
+                            "profile."
+                        )
                 if general is not None and not stopped:
                     if not self._everyone_runs():
                         # An Everyone that does not run, for example after a failed Start,

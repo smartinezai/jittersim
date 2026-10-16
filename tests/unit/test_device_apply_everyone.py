@@ -352,6 +352,38 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
         self.assertEqual(len(self.helper.plans), applied_before)
         self.assertEqual(self.helper.applied_plan.general_profile.profile_id, "low")
 
+    def test_a_device_apply_never_finishes_a_failed_stop_for_everyone(self) -> None:
+        from jittersim.networking.helper import HelperClientError
+
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan))
+        real = self.helper.apply
+        calls = []
+
+        def apply(**arguments):
+            calls.append(arguments["plan"])
+            if len(calls) == 1:
+                raise HelperClientError("simulated helper failure")
+            return real(**arguments)
+
+        with patch.object(self.helper, "apply", side_effect=apply), \
+                self.assertLogs("jittersim.api.server", "ERROR"):
+            status, _ = self.write("/api/general-profile/stop", {})
+        # Stop is saved but failed. The plan that ran, with Everyone, came back.
+        self.assertEqual(status, 502)
+        self.assertIsNone(self.repository.get_general_profile())
+        self.assertEqual(self.helper.applied_plan.general_profile.profile_id, "low")
+        applied_before = len(self.helper.plans)
+
+        status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 409)
+        self.assertIn("Stop for everyone did not finish", result["error"])
+        self.assertIsNone(self.repository.get_device(PHONE_ID))
+        self.assertEqual(len(self.helper.plans), applied_before)
+        self.assertEqual(self.helper.applied_plan.general_profile.profile_id, "low")
+
     def test_everyone_that_is_applying_or_unknown_is_not_running(self) -> None:
         for state in ("applying", "unknown", "error"):
             with self.subTest(state=state):
