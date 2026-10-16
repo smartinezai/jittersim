@@ -127,3 +127,43 @@ def test_a_late_finish_answer_does_not_end_a_run_started_after_it():
 """)
 
     assert outcome == {"finished": [], "run": "fourth", "error": None, "refusedError": None}
+
+
+@NEEDS_NODE
+def test_opening_another_device_clears_the_previous_results_first():
+    outcome = run_node(
+        """
+function fakeNode(tag) {
+  return {tag, children: [], textContent: '', hidden: false, disabled: false, className: '',
+    replaceChildren(...items) { this.children = items; }, focus() {}, append(...items) {
+      this.children.push(...items); }};
+}
+const nodes = {};
+const document = {createElement: fakeNode};
+"""
+        + SPEED_TEST_STUBS.replace("function element() { return null; }",
+                                   "function element(id) { return nodes[id] ||= fakeNode('x'); }")
+        + SPEED_TEST_SCRIPT
+        + """
+function speedTestDialog() { return {open: true, showModal() {}}; }
+(async () => {
+  // Device A's rows are on screen.
+  speedTestState.results = [{id: 1}];
+  nodes['speed-test-history'] = fakeNode('div');
+  nodes['speed-test-history'].children = ['row of device A'];
+  nodes['speed-test-baseline'] = fakeNode('select');
+  nodes['speed-test-baseline'].children = ['option of device A'];
+  speedTestOpen({mac_address: 'b', display_name: 'B'});
+  // Device B's results have not arrived yet.
+  console.log(JSON.stringify({
+    results: speedTestState.results.length,
+    history: nodes['speed-test-history'].children.map((child) => child.textContent || child),
+    baseline: nodes['speed-test-baseline'].children.length,
+    compareDisabled: nodes['speed-test-compare-button'].disabled,
+    pending: pending.length,
+  }));
+})();
+""")
+
+    assert outcome == {"results": 0, "history": ["Loading results…"], "baseline": 0,
+                       "compareDisabled": True, "pending": 1}

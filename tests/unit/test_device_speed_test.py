@@ -386,15 +386,20 @@ class CountingHelper(FakeHelper):
                 "association_status_available": self.association}
 
 
+def planned_impairment(direction):
+    return Impairment(bandwidth_kbit=250) if direction == Direction.DOWNLOAD else Impairment()
+
+
 class FakeScheduler:
     """Answers the applied snapshot like the runtime scheduler does."""
 
     def __init__(self):
         self.states = {}
         queue_ids = ("lab", GENERAL_QUEUE_ID, EVERYONE_ELSE_QUEUE_ID)
+        # The same impairments CountingHelper reports, so counters and plan correspond.
         queues = tuple(
             QueueSpec(device_id=queue_id, direction=direction, mark=1,
-                      impairment=Impairment())
+                      impairment=planned_impairment(direction))
             for queue_id in queue_ids
             for direction in (Direction.UPLOAD, Direction.DOWNLOAD)
         )
@@ -854,7 +859,8 @@ class StartChecksTests(ManagerBase):
             MarkRule(device_id="old", ipv4_address=IPv4Address("192.168.50.10"), mark=1),
             MarkRule(device_id="lab", ipv4_address=IPv4Address("192.168.50.20"), mark=2)),
             queues=self.scheduler.plan.queues + tuple(
-                QueueSpec(device_id="old", direction=direction, mark=1, impairment=Impairment())
+                QueueSpec(device_id="old", direction=direction, mark=1,
+                          impairment=planned_impairment(direction))
                 for direction in (Direction.UPLOAD, Direction.DOWNLOAD)))
         self.scheduler.set_source("old", "profile", "Slow")
         self.scheduler.set_source("lab", "profile", "Fast")
@@ -972,7 +978,9 @@ class StartChecksTests(ManagerBase):
                               (quota_kind, active))
                 self.manager.cancel(run["id"])
 
-    def test_shared_service_verdict_is_unknown_without_the_general_queue_in_plan(self) -> None:
+    def test_counters_of_a_queue_the_applied_plan_lacks_are_refused_to_retry(self) -> None:
+        # The helper shows the general queue but the published plan has none: the two describe
+        # different applies, so no profile can be trusted for these counters.
         self.scheduler.set_source(GENERAL_QUEUE_ID, "profile", "Slow")
         self.helper.queue_id = GENERAL_QUEUE_ID
         self.scheduler.plan = replace(
@@ -980,10 +988,59 @@ class StartChecksTests(ManagerBase):
             queues=tuple(queue for queue in self.scheduler.plan.queues
                          if queue.device_id != GENERAL_QUEUE_ID))
 
-        _, run = self.write("/api/speed-tests/start", {"mac_address": OTHER})
+        status, body = self.write("/api/speed-tests/start", {"mac_address": OTHER})
 
-        self.assertIsNone(self.manager.runs[run["id"]].service_rules)
-        self.assertTrue(self.manager.runs[run["id"]].profile["profile_name"].startswith("Unknown"))
+        self.assertEqual(status, 503, body)
+        self.assertEqual(self.manager.active(), [])
+
+    def test_counters_from_a_newer_apply_than_the_published_plan_are_refused(self) -> None:
+        # The helper already runs a 500 kbit/s queue while the scheduler still publishes the
+        # 250 kbit/s plan. Recording "Slow" next to those counters would be wrong.
+        reading = self.helper.queue_stats
+
+        def newer_apply():
+            return [dict(entry, impairment=dict(entry["impairment"], bandwidth_kbit=500))
+                    if entry["direction"] == "download" else entry for entry in reading()]
+
+        self.helper.queue_stats = newer_apply
+
+        status, body = self.start_short()
+
+        self.assertEqual(status, 503, body)
+        self.assertIn("applying a change", body["error"])
+        self.assertEqual(self.manager.active(), [])
+
+    def test_missing_dedicated_counters_never_fall_back_to_a_shared_queue(self) -> None:
+        # The plan marks the phone into its own queue and keeps it out of Everyone else. If the
+        # helper does not list that queue, Everyone else holds only other devices' traffic.
+        reading = self.helper.queue_stats
+        self.helper.queue_stats = lambda: [
+            dict(entry, device_id=EVERYONE_ELSE_QUEUE_ID) for entry in reading()
+            if entry["device_id"] == "lab"]
+
+        status, body = self.start_short()
+
+        self.assertEqual(status, 503, body)
+        self.assertEqual(self.manager.active(), [])
+
+    def test_a_dedicated_queue_with_a_shared_looking_id_is_measured_as_the_device(self) -> None:
+        # A real per-device plan can give a saved device the id general-profile. Its mark rule
+        # makes the queue dedicated, so it is measured as the device's own queue.
+        self.repository.delete_device("lab")
+        self.repository.save_device(Device(GENERAL_QUEUE_ID, "Lab phone", "192.168.50.10", "slow",
+                                           mac_address=PHONE))
+        self.scheduler.plan = replace(
+            self.scheduler.plan, general_profile=None,
+            mark_rules=(MarkRule(device_id=GENERAL_QUEUE_ID,
+                                 ipv4_address=IPv4Address("192.168.50.10"), mark=1),))
+        self.scheduler.set_source(GENERAL_QUEUE_ID, "profile", "Slow")
+        self.helper.queue_id = GENERAL_QUEUE_ID
+
+        status, run = self.start_short()
+        self.assertEqual(status, 201, run)
+        self.assertEqual(run["source"], "device")
+        self.run_seconds(run["id"], 3)
+        self.assertEqual(self.manager.status(run["id"])["state"], "running")
 
     def test_a_progression_has_no_single_profile_name(self) -> None:
         self.scheduler.set_source("lab", "progression", "", label="from Slow to Night")

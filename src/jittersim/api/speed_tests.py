@@ -12,6 +12,7 @@ import secrets
 import sqlite3
 import threading
 import time
+from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs
 
@@ -329,7 +330,25 @@ class SpeedTestManager:
                     "This device's current address is shaped by the queue of the saved device "
                     f"{owner.name if owner else queue_id}, so that queue and its profile are "
                     "measured.")
-        source, entries = pick_queues(queues or [], queue_id, plan=plan)
+        if queues is None:
+            source, entries = "none", {}
+        elif plan is not None and queue_id is not None:
+            # The plan marks this address into a dedicated queue, whatever its id looks like.
+            source, entries = pick_queues(queues or [], queue_id, prefer="device")
+            if not entries:
+                # Never fall back to a shared queue: the plan keeps this address out of it.
+                raise SpeedTestRequestError(
+                    "The Pi could not find this device's queue counters just now. Try again "
+                    "in a moment.", 503)
+        else:
+            source, entries = pick_queues(
+                queues or [], None if plan is not None else queue_id, plan=plan)
+        if plan is not None and entries and not _counters_match_plan(plan, queue_id_for(
+                source, queue_id), entries):
+            # The helper already runs a newer apply than the scheduler has published, or the
+            # other way round. The profile would not describe the counters, so do not start.
+            raise SpeedTestRequestError(
+                "The Pi is applying a change right now. Try again in a moment.", 503)
         if queues is None:
             notes.append("The network is reset or the helper cannot read queues.")
         elif source == "none":
@@ -720,8 +739,9 @@ def pick_queues(queues, device_id, prefer=None, plan=None):
     shared = (GENERAL_QUEUE_ID, EVERYONE_ELSE_QUEUE_ID)
     general = plan is None or getattr(plan, "general_profile", None) is not None
     everyone_else = plan is None or getattr(plan, "everyone_else", None) is not None
+    # A caller that names the source knows the queue is dedicated, so its id is used as it is.
     choices = (
-        ("device", None if device_id in shared else device_id),
+        ("device", None if device_id in shared and prefer is None else device_id),
         ("everyone", GENERAL_QUEUE_ID if general else None),
         ("everyone-else", EVERYONE_ELSE_QUEUE_ID if everyone_else else None),
     )
@@ -735,6 +755,27 @@ def pick_queues(queues, device_id, prefer=None, plan=None):
         if entries:
             return source, entries
     return (prefer or "none"), {}
+
+
+def queue_id_for(source: str, device_queue_id: Optional[str]) -> Optional[str]:
+    return {"device": device_queue_id, "everyone": GENERAL_QUEUE_ID,
+            "everyone-else": EVERYONE_ELSE_QUEUE_ID}.get(source)
+
+
+def _counters_match_plan(plan, queue_id, entries) -> bool:
+    """Whether the helper's queues carry the impairments the applied plan gives this queue."""
+
+    specs = {queue.direction.value: queue for queue in getattr(plan, "queues", ())
+             if queue.device_id == queue_id}
+    for direction, entry in entries.items():
+        spec = specs.get(direction)
+        reported = entry.get("impairment")
+        if spec is None or not isinstance(reported, dict):
+            return False
+        planned = asdict(spec.impairment)
+        if any(planned.get(key) != value for key, value in reported.items()):
+            return False
+    return True
 
 
 def _address_owner(plan, ipv4) -> Optional[str]:

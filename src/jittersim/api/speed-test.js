@@ -254,7 +254,7 @@ async function speedTestOpen(device) {
   speedTestState.editing = null;
   element('speed-test-title').textContent = 'Speed test: ' + (device.display_name || device.ipv4_address || device.mac_address);
   element('speed-test-announce').textContent = '';
-  element('speed-test-comparison').replaceChildren();
+  speedTestClearResults();
   element('speed-test-editor').hidden = true;
   element('speed-test-running').hidden = true;
   element('speed-test-start').hidden = false;
@@ -262,6 +262,15 @@ async function speedTestOpen(device) {
   if (!dialog.open) dialog.showModal();
   speedTestFocusTitle();
   await speedTestLoad();
+}
+
+function speedTestClearResults() {
+  // Another device's rows must not stay usable while this device's results load (or fail to).
+  speedTestState.results = [];
+  element('speed-test-history').replaceChildren(speedTestNode('p', 'Loading results…', 'speed-test-help'));
+  element('speed-test-comparison').replaceChildren();
+  ['speed-test-baseline', 'speed-test-after'].forEach((id) => element(id).replaceChildren());
+  element('speed-test-compare-button').disabled = true;
 }
 
 async function speedTestLoad() {

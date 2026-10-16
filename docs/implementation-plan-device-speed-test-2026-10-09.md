@@ -142,7 +142,12 @@ change to an address or to a stored code has to be made on purpose.
   also covers a saved device without a MAC address and an address the scheduler kept with
   another saved device; the note then names that device. A shared queue is only chosen when the
   applied plan has its rule, so a saved device id that looks like a shared queue id cannot be
-  taken for it. Without a readable applied plan the saved MAC address (or, for a device saved
+  taken for it. A queue the plan marks the address into is measured as the device's own queue
+  whatever its id, and when its counters are missing the start is refused (503) instead of
+  falling back to a shared queue the plan keeps the address out of. The start is also refused
+  (503) when the counters' impairments differ from what the applied plan gives that queue: the
+  helper and the scheduler then describe different applies and the profile would be wrong.
+  Without a readable applied plan the saved MAC address (or, for a device saved
   without one, the current address) decides, and the service-rule state stays unknown.
 * A service rule or service list sends some traffic through queues the Pi does not read here. The
   run says so, and the cap verdict is replaced by `service-rules` (not judged).
