@@ -5301,8 +5301,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             return state == "applied"
         if state not in ("applied", "unknown"):
             return False
-        limits = self.scheduler.applied_queue_bandwidth_limits()
-        return limits is not None and GENERAL_QUEUE_ID in limits
+        # The profile that runs must be the one saved. After a failed Apply to all the old
+        # one still runs, and this Apply must not switch every other device to the new one.
+        applied = self.scheduler.applied_plan()
+        return (
+            applied is not None
+            and applied.general_profile is not None
+            and applied.general_profile.profile_id == self.repository.get_general_profile().id
+        )
 
     def _stop_state(self) -> str:
         """Whether a Panic, outage or state error keeps profiles stopped: latched, clear or unknown."""
