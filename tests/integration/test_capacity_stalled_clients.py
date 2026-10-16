@@ -458,39 +458,40 @@ def stall_helper(path, count):
     return sockets
 
 
-def test_eight_stalled_helper_connections_are_the_limit_and_capacity_recovers():
+def test_stalled_helper_input_has_its_own_limit_and_panic_still_gets_through():
+    # Review T4: incomplete input waits in its own pool of MAX_PENDING_HELPER_INPUT
+    # and never takes the eight operation slots. A complete Panic request is read
+    # promptly even when that pool is full and uses the slot kept for it.
     with tempfile.TemporaryDirectory(prefix="js70-", dir="/tmp") as temporary:
         directory = Path(temporary).resolve()
         with served_helper(directory) as (service, client, server):
             running_experiment(service)
-            stalled = stall_helper(directory / "helper.sock", MAX_HELPER_CONNECTIONS)
+            stalled = stall_helper(directory / "helper.sock", helper_module.MAX_PENDING_HELPER_INPUT)
             try:
-                assert wait_until(lambda: server._request_slots._value == 0, 2)
-                # All eight were admitted. None was answered with a busy reply.
+                assert wait_until(lambda: server._input_slots._value == 0, 2)
+                assert server._request_slots._value == MAX_HELPER_CONNECTIONS
+                # All were admitted. None was answered with a busy reply.
                 for connection in stalled:
                     connection.settimeout(0.05)
                     with pytest.raises(socket.timeout):
                         connection.recv(1)
 
-                for call in (client.ping, client.normal_access):
-                    started = time.monotonic()
-                    with pytest.raises(HelperClientError) as busy:
-                        call()
-                    assert busy.value.reason == "helper-busy"
-                    assert time.monotonic() - started < 1.0
-                # The helper owns no reserve of its own. Panic waits for the input deadline.
-                assert service._panic_stop_latched is False
-                assert service._active_plan is not None
+                started = time.monotonic()
+                with pytest.raises(HelperClientError) as busy:
+                    client.ping()
+                assert busy.value.reason == "helper-busy"
+                assert time.monotonic() - started < 1.0
+                assert client.normal_access()["ok"] is True
+                assert service._panic_stop_latched is True
+                assert service._active_plan is None
 
                 # The three second input deadline frees every connection without any dispatch.
                 # Finished workers hand their slot back when the next request reaps them.
                 assert wait_until(lambda: not server._request_workers.has_workers, 6)
+                assert server._input_slots._value == helper_module.MAX_PENDING_HELPER_INPUT
                 assert server._request_slots._value == MAX_HELPER_CONNECTIONS
-                assert service._active_plan is not None
+                assert server._panic_slots._value == helper_module.PANIC_RESERVED_SLOTS
                 assert client.ping()["ok"] is True
-                assert client.normal_access()["ok"] is True
-                assert service._panic_stop_latched is True
-                assert service._active_plan is None
             finally:
                 for connection in stalled:
                     connection.close()

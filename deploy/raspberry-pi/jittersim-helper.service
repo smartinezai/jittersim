@@ -1,6 +1,8 @@
 [Unit]
 Description=JitterSim privileged networking helper
-After=network-online.target
+# Boot restoration finishes first, so it cannot restore household rules after a
+# Panic the helper serves, and the helper's own startup decision is applied last.
+After=network-online.target jittersim-access-boot.service
 Wants=network-online.target
 
 [Service]

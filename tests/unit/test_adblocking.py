@@ -541,3 +541,32 @@ def test_download_is_fixed_https_bounded_and_rejects_redirects():
         response.iter_content.return_value = [b"#" * (MAX_LIST_BYTES + 1)]
         with pytest.raises(ValueError):
             download_bytes()
+
+
+def test_a_short_release_transition_still_waits_to_record_its_end(store, tmp_path):
+    # Review O-c: Panic's release enters the transition with a short wait. Its end
+    # still waits the usual 3 s for the settings lock, so a brief holder cannot leave
+    # ad blocking marked as suspended for good.
+    import fcntl
+    import threading
+
+    store.configure([ALICE], [], resume=True)
+    released = threading.Event()
+
+    def hold_briefly():
+        with store.lock_path.open("a") as other:
+            fcntl.flock(other, fcntl.LOCK_EX)
+            started.set()
+            time.sleep(0.3)
+            fcntl.flock(other, fcntl.LOCK_UN)
+        released.set()
+
+    started = threading.Event()
+    with store.access_transition(wait=0.0):
+        assert store.read()["suspended"]
+        holder = threading.Thread(target=hold_briefly)
+        holder.start()
+        assert started.wait(5)
+    holder.join(5)
+    assert released.is_set()
+    assert not store.read()["suspended"]
