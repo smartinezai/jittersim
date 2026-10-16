@@ -5743,6 +5743,18 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 planning["everyone_exceptions"] = exceptions
                 if exceptions:
                     applied_keep = keep
+            if restore_plan is not None and keep:
+                # The plan that ran comes back with the record that went with it. The next
+                # accepted plan of the saved settings decides whether they still count.
+                applied_keep = keep
+        # A whole-scope update while devices run beside Everyone: if it fails at the helper the
+        # plan that ran is applied again, as for a failed device Apply.
+        ran_before = None
+        if (scope is None and not keep_exceptions and restore_plan is None
+                and self.scheduler is not None and self.repository.everyone_exception_rows()):
+            applied, sources = self.scheduler.applied_snapshot()
+            if applied is not None:
+                ran_before = (applied, sources)
         try:
             if restore_plan is not None:
                 prepared = (
@@ -5820,6 +5832,18 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 ))
             if not accepted:
                 return self._apply_refused(halts_at_start, undo=True)
+            if ran_before is not None:
+                put_back, _, _ = self._apply_configuration_locked(
+                    connected_snapshot=connected_snapshot, sample_usage=False,
+                    control_intent=(halts_at_start, control_revision), keep_exceptions=True,
+                    restore_plan=ran_before,
+                )
+                failure += (
+                    " What ran before was put back."
+                    if put_back == HTTPStatus.OK else
+                    " What ran before could not be put back, so the dashboard keeps trying."
+                )
+                state = self.repository.get_runtime_state()
             return (
                 HTTPStatus.BAD_GATEWAY,
                 "application/json",

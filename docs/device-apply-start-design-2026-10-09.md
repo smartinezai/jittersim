@@ -162,7 +162,8 @@ How long the device stays beside Everyone:
   without Everyone, for example after a failed Stop, ends them once it succeeds. A
   failed scheduled apply keeps them.
 - A whole-scope action ends them only after the helper accepted its plan. A
-  failed Start keeps them, so the record, the retry and the running policy agree.
+  failed Start, Apply to all or Stop for everyone keeps them and applies the plan
+  that ran again, so the record, the retry and the running policy agree.
   The usage of the devices is sampled before the counters restart.
 - Traffic progressions sample and advance only for the devices that run beside
   Everyone. The others stay paused.

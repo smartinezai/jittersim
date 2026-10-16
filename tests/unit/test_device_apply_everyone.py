@@ -7,7 +7,6 @@ that was chosen for it. Nothing else resumes and nothing is cleared silently.
 
 import json
 import threading
-import time
 import unittest
 from unittest.mock import patch
 
@@ -550,6 +549,44 @@ class WholeScopeActionTests(EveryoneRunningFixture):
         self.assertEqual(self.exceptions(), frozenset())
         self.assertEqual(self.repository.get_device(AIR_ID).profile_id, "slow-test")
 
+    def test_a_failed_whole_scope_update_puts_back_the_plan_that_ran(self) -> None:
+        from jittersim.networking.helper import HelperClientError
+
+        for path, payload in (
+            ("/api/apply", {}),
+            ("/api/general-profile", {"profile_id": "slow-test"}),
+            ("/api/general-profile/stop", {}),
+        ):
+            with self.subTest(path=path):
+                self.repository.save_general_profile("low")
+                self.repository.restore_everyone_exceptions(frozenset({AIR_ID}))
+                self.mark_applied()
+                scheduler = self.use_scheduler()
+                ran = self.helper.applied_plan
+                real = self.helper.apply
+                calls = []
+
+                def apply(**arguments):
+                    calls.append(arguments["plan"])
+                    if len(calls) == 1:
+                        raise HelperClientError("simulated helper failure")
+                    return real(**arguments)
+
+                scheduler.activate(applied_payload=plan_to_payload(ran))
+                with patch.object(self.helper, "apply", side_effect=apply), \
+                        self.assertLogs("jittersim.api.server", "ERROR"):
+                    status, result = self.write(path, payload)
+
+                self.assertEqual(status, 502)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[1].queues, ran.queues)
+                self.assertIn("What ran before was put back", result["error"])
+                self.assertEqual(self.raw_rows(), {AIR_ID})
+                # Leave a running Everyone with the Air beside it for the next case.
+                self.write("/api/reset", {})
+                self.assertEqual(self.write("/api/general-profile", {"profile_id": "low"})[0], 200)
+                self.assertEqual(self.apply_to()[0], 200)
+
     def test_a_failed_start_keeps_the_running_exceptions(self) -> None:
         self.helper.fail_action = "apply"
 
@@ -642,16 +679,32 @@ class OrderingAndRestartTests(EveryoneRunningFixture):
     def test_an_apply_queued_before_a_reset_starts_nothing(self) -> None:
         scheduler = self.use_scheduler()
         results = {}
-        with scheduler.exclusive():
-            waiting = threading.Thread(target=lambda: results.setdefault("apply", self.apply_to()))
-            waiting.start()
-            time.sleep(0.2)
-            resetting = threading.Thread(
-                target=lambda: results.setdefault("reset", self.write("/api/reset", {})))
-            resetting.start()
-            time.sleep(0.2)
-        waiting.join(5)
-        resetting.join(5)
+        captured, registered = threading.Event(), threading.Event()
+        capture = self.server._capture_control_intent
+        note = self.server.note_reset_request
+
+        def captured_intent(*arguments, **keywords):
+            result = capture(*arguments, **keywords)
+            captured.set()
+            return result
+
+        def noted_reset():
+            note()
+            registered.set()
+
+        with patch.object(self.server, "_capture_control_intent", side_effect=captured_intent), \
+                patch.object(self.server, "note_reset_request", side_effect=noted_reset):
+            with scheduler.exclusive():
+                waiting = threading.Thread(
+                    target=lambda: results.setdefault("apply", self.apply_to()))
+                waiting.start()
+                self.assertTrue(captured.wait(10))
+                resetting = threading.Thread(
+                    target=lambda: results.setdefault("reset", self.write("/api/reset", {})))
+                resetting.start()
+                self.assertTrue(registered.wait(10))
+            waiting.join(10)
+            resetting.join(10)
 
         self.assertEqual(results["reset"][0], 200)
         self.assertEqual(results["apply"][0], 409)
