@@ -2237,6 +2237,9 @@ READ_ONLY_ACTIONS = frozenset((
     "ping", "control-revision", "dashboard-access", "gateway-status", "capabilities", "access-status",
     "update-status", "clients", "uplink-info", "observe-dns", "queue-stats", "traffic-counters",
     "router-preview-ap", "router-status", "router-check", "router-wifi-credentials",
+    # Status reads the dashboard polls. Counting them as changes discarded the
+    # client scan in flight, and /api/connected-devices answered 502.
+    "update-online-status", "ad-blocking",
 ))
 
 
