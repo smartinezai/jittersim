@@ -31,6 +31,11 @@ ACCESS_WRITES = frozenset(
 # the history checkpoint and the action record. Together they stay inside
 # PANIC_DATABASE_ALLOWANCE_SECONDS (api/server.py).
 PANIC_REPOSITORY_WAIT_SECONDS = 0.5
+# A publish that waits for a backup holds the scheduler lock just as long. Panic
+# waits for that lock at most this long, then fences the scheduler without it,
+# still calls the helper and reports the recovery as unconfirmed. Counted in
+# PANIC_DATABASE_ALLOWANCE_SECONDS with the steps above.
+PANIC_SCHEDULER_WAIT_SECONDS = 0.5
 PANIC_RESULT_WAIT_SECONDS = 1.5
 PANIC_REPOSITORY_STEPS = 6
 
@@ -96,8 +101,12 @@ def normal_access(server):
             {"error": "A current networking helper is required to restore normal access."}, 503
         )
     ticket = None
+    # True when the scheduler lock was not free in time: the scheduler is fenced but
+    # cannot record a confirmed recovery, so the answer asks for another Panic.
+    unconfirmed = False
     if server.scheduler is not None:
-        ticket = server.scheduler.begin_recovery()
+        ticket = server.scheduler.begin_recovery(timeout=PANIC_SCHEDULER_WAIT_SECONDS)
+        unconfirmed = ticket is None
     persisted = True
     # A backup or slow commit holds the repository (review N3). The stop intent is
     # then saved after the helper call instead of before it: the scheduler fence of
@@ -138,6 +147,7 @@ def normal_access(server):
         result = server.helper_client.normal_access()
     except HelperClientError as helper_error:
         result = None
+        unconfirmed = False
         error = "Normal access was not fully restored. Automation is paused. Retry the panic button."
         # The helper's own reason (fixed wording, never command output) says what is left.
         detail = str(helper_error).strip()[:300]
@@ -147,6 +157,10 @@ def normal_access(server):
         if ticket:
             server.scheduler.abandon_recovery(ticket)
         raise
+
+    if unconfirmed:
+        error = ("Normal access was restored but the dashboard was busy, so the recovery is "
+                 "not confirmed. Automation is paused. Retry Panic before choosing Start.")
 
     def publish(overlap_failed=False):
         nonlocal persisted, error

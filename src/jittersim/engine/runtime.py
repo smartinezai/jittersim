@@ -1,5 +1,6 @@
 """Background runtime for schedules, randomized rerolls and outages."""
 
+import itertools
 import logging
 import secrets
 import sqlite3
@@ -221,6 +222,12 @@ class RuntimeScheduler:
         self._recoveries = set()
         self._recovery_required = False
         self._recovery_failures = 0
+        # Panics that could not take the lock in time (a publish waited for a backup).
+        # Written without the lock: each one changes the generation and keeps recovery
+        # unconfirmed until a recovery that began after it succeeds.
+        self._forced_halt_numbers = itertools.count(1)
+        self._forced_halts = 0
+        self._confirmed_forced_halts = 0
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
@@ -448,8 +455,9 @@ class RuntimeScheduler:
 
     def can_apply(self, generation: int) -> bool:
         with self._lock:
-            return (not self._closed and generation == self._halt_count
-                    and not self._recoveries and not self._recovery_required)
+            return (not self._closed and generation == self._generation()
+                    and not self._recoveries and not self._recovery_required
+                    and self._forced_halts == self._confirmed_forced_halts)
 
     def publish_if_current(self, generation: int, publish):
         """Publish a short local result under the same fence that Panic changes."""
@@ -466,24 +474,39 @@ class RuntimeScheduler:
             self._paused = True
             self._current_payload = None
 
-    def begin_recovery(self, *, cancel: bool = True):
-        """Block new work until emergency cleanup has a known saved result."""
+    def _generation(self) -> int:
+        return self._halt_count + self._forced_halts
 
-        with self._lock:
+    def begin_recovery(self, *, cancel: bool = True, timeout: Optional[float] = None):
+        """Block new work until emergency cleanup has a known saved result.
+
+        With a timeout, a lock held longer (a publish waiting for a database backup)
+        does not delay Panic: the work is fenced without the lock, None is returned
+        and the recovery stays unconfirmed until a later one succeeds.
+        """
+
+        if not self._lock.acquire(timeout=-1 if timeout is None else max(0.0, timeout)):
+            self._forced_halts = next(self._forced_halt_numbers)
+            self._paused = True
+            self._current_payload = None
+            return None
+        try:
             if cancel:
                 self.halt()
-            ticket = (self._halt_count, object(), self._recovery_failures)
+            ticket = (self._generation(), object(), self._recovery_failures, self._forced_halts)
             self._recoveries.add(ticket)
             self._recovery_required = True
             self._paused = True
             self._current_payload = None
             return ticket
+        finally:
+            self._lock.release()
 
     def publish_recovery(self, ticket, publish):
         """Keep older initial writes from replacing a newer recovery result."""
 
         with self._lock:
-            if ticket[0] != self._halt_count:
+            if ticket[0] != self._generation():
                 return False, None
             return True, publish()
 
@@ -498,7 +521,7 @@ class RuntimeScheduler:
 
         with self._lock:
             try:
-                if ticket[0] != self._halt_count:
+                if ticket[0] != self._generation():
                     if failed:
                         self._recovery_failures += 1
                         self._recovery_required = True
@@ -507,6 +530,10 @@ class RuntimeScheduler:
                 overlap_failed = ticket[2] != self._recovery_failures
                 result, success = publish(overlap_failed)
                 self._recovery_required = not success
+                if success:
+                    # Only Panics up to this ticket are confirmed. A later forced one
+                    # changed the generation and is still pending.
+                    self._confirmed_forced_halts = ticket[3]
                 if not success:
                     self._recovery_failures += 1
                 self.finish_halt()
@@ -624,7 +651,7 @@ class RuntimeScheduler:
     @property
     def halt_count(self) -> int:
         with self._lock:
-            return self._halt_count
+            return self._generation()
 
     def applied_snapshot(self):
         """Return the applied plan and its source descriptions without the apply lock."""
