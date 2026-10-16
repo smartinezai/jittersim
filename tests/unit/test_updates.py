@@ -517,6 +517,61 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse(retry_state["ingress"])
         self.assertFalse((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
 
+    def test_a_retry_checks_the_recorded_interface_after_the_settings_changed(self):
+        state, run, query = self.intake_system(fail="ingress")
+        with self.assertRaisesRegex(UpdateError, "simulated tc failure"):
+            updates.remove_upload_intake(self.config, run, query, root=self.root,
+                                         link_present=state["link_present"])
+        recorded_interface = updates.runtime_interfaces(self.config)[1]
+        # The restore brought back settings that name another test interface.
+        (self.config / "runtime.env").write_text(
+            "JITTERSIM_UPLINK=eth7\nJITTERSIM_TEST_INTERFACE=wlan9\n")
+        retry_state, retry_run, retry_query = self.intake_system(proof=False, ifb=False)
+        asked = []
+
+        def query_recording(command, timeout):
+            asked.append(command)
+            return retry_query(command, timeout)
+
+        updates.remove_upload_intake(
+            self.config, retry_run, query_recording, root=self.root,
+            link_present=lambda name: name in (recorded_interface, "wlan9"))
+        self.assertIn(recorded_interface, {command[5] for command in asked})
+        self.assertFalse(retry_state["ingress"])
+        self.assertFalse((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
+
+    def test_a_record_from_an_earlier_boot_proves_nothing(self):
+        interface = updates.runtime_interfaces(self.config)[1]
+        updates.atomic_json(self.root / updates.UPLOAD_INTAKE_RECORD,
+                            {"boot": "earlier-boot", "interfaces": [interface]})
+        # Another tool made an ingress qdisc after the reboot.
+        state, run, query = self.intake_system(proof=False, ifb=False)
+        updates.remove_upload_intake(self.config, run, query, root=self.root,
+                                     link_present=state["link_present"], boot_id="this-boot")
+        self.assertTrue(state["ingress"])
+        self.assertFalse((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
+
+    def test_a_failed_cleanup_is_tried_again_after_the_restore(self):
+        self.stage()
+        request_update("v1", root=self.root, code=self.code, config=self.config, run=lambda *args: None)
+        self.apply(lambda *args: None, lambda: True)
+        request_update("", rollback=True, root=self.root, code=self.code, config=self.config, run=lambda *args: None)
+        state, run, query = self.intake_system()
+        failures = []
+
+        def fail_first(command, timeout):
+            if command[:3] == ["tc", "qdisc", "del"] and not failures:
+                failures.append(command)
+                raise UpdateError("transient tc failure")
+            run(command, timeout)
+
+        self.apply_with_intake(state, fail_first, query)
+        self.assertFalse(state["ingress"] or state["ifb"])
+        status = update_status(root=self.root, code=self.code, config=self.config)
+        self.assertEqual(status["phase"], "rolled-back")
+        self.assertNotIn("upload intake", status["message"])
+        self.assertFalse((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
+
     def test_unstopped_or_unowned_commands_are_never_turned_into_a_restore(self):
         for error in (updates.CommandNotStopped("tc", None),
                       updates.OperationOwnershipUnknown("tc")):

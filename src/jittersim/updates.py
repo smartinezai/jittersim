@@ -3676,7 +3676,16 @@ def _answer_json(answer, problem):
         raise UpdateError(problem) from error
 
 
-def remove_upload_intake(config, run, query, timeout=10, *, root=UPDATE_ROOT, link_present=None):
+def _boot_id():
+    """This boot's identity. tc state and the ifb device never survive a reboot."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
+def remove_upload_intake(config, run, query, timeout=10, *, root=UPDATE_ROOT, link_present=None,
+                         boot_id=None):
     """Remove the Wi-Fi upload intake and its ifb device before other code runs.
 
     Releases with upload-safe impairments (PR 125) redirect corrupting upload
@@ -3684,37 +3693,40 @@ def remove_upload_intake(config, run, query, timeout=10, *, root=UPDATE_ROOT, li
     package's helper and Panic do not know either, so a rollback or a
     recovery copy would leave corruption running that nothing can stop.
 
-    The ingress qdisc is removed only with proof that JitterSim made it: its
+    An ingress qdisc is removed only with proof that JitterSim made it: its
     connmark filter at UPLOAD_INTAKE_PROOF_PREF, or the record a previous
-    attempt saved in `root` before it removed anything. Another tool's ingress
-    qdisc stays. Only one-line lookups are read, so a plan with many classes
-    cannot exceed the command answer limit. Each step is tried even if another
-    fails, the result is read back and the first problem is raised. Commands
-    that may still run, or whose ownership is unknown, are raised at once.
+    attempt saved in `root` before it removed anything. The record names the
+    interfaces and the boot, so a retry checks the interface it was saved for
+    even if the restored settings name another one, and a record from before a
+    reboot (which removed the kernel state) proves nothing. Another tool's
+    ingress qdisc stays. Only one-line lookups are read, so a plan with many
+    classes cannot exceed the command answer limit. Each step is tried even if
+    another fails, the result is read back and the first problem is raised.
+    Commands that may still run, or whose ownership is unknown, are raised at once.
     """
     link_present = link_present or _link_present
-    _, test_interface = runtime_interfaces(config)
+    boot = _boot_id() if boot_id is None else boot_id
     record = root / UPLOAD_INTAKE_RECORD
     problems = []
+    try:
+        _, test_interface = runtime_interfaces(config)
+    except (OSError, UpdateError) as error:
+        # A partly restored configuration. The recorded interfaces are still checked.
+        problems.append(error if isinstance(error, UpdateError) else UpdateError(str(error)))
+        test_interface = None
 
-    def ingress_present():
-        if not link_present(test_interface):
+    def ingress_present(interface):
+        if not link_present(interface):
             return False
         queues = _answer_json(
-            query(["tc", "-j", "qdisc", "show", "dev", test_interface, "ingress"], timeout),
+            query(["tc", "-j", "qdisc", "show", "dev", interface, "ingress"], timeout),
             "the upload intake could not be read before recovery")
         return isinstance(queues, list) and any(
             isinstance(queue, dict) and queue.get("kind") == "ingress" for queue in queues)
 
-    def recorded():
-        try:
-            return read_json(record).get("interface") == test_interface
-        except (OSError, ValueError, AttributeError) as error:
-            raise UpdateError("the saved upload intake record could not be read") from error
-
-    def proven():
+    def proven(interface):
         filters = _answer_json(
-            query(["tc", "-j", "filter", "show", "dev", test_interface, "parent",
+            query(["tc", "-j", "filter", "show", "dev", interface, "parent",
                    UPLOAD_INTAKE_HANDLE, "pref", UPLOAD_INTAKE_PROOF_PREF], timeout),
             "the upload intake could not be read before recovery")
         for item in filters if isinstance(filters, list) else ():
@@ -3726,50 +3738,65 @@ def remove_upload_intake(config, run, query, timeout=10, *, root=UPDATE_ROOT, li
                 return True
         return False
 
-    def owned_intake():
-        return ingress_present() and (recorded() or proven())
-
-    owned = device = False
     try:
-        present = ingress_present()
-        saved = present and recorded()
-        owned = present and (saved or proven())
-        if owned and not saved:
-            try:
-                atomic_json(record, {"interface": test_interface})
-            except OSError as error:
-                # The proof is still in place for this attempt, so the intake goes anyway.
-                problems.append(UpdateError(f"the upload intake record could not be saved: {error}"))
-    except (CommandNotStopped, OperationOwnershipUnknown):
-        raise
-    except UpdateError as error:
-        problems.append(error)
+        saved = read_json(record)
+    except (OSError, ValueError) as error:
+        raise UpdateError("the saved upload intake record could not be read") from error
+    recorded = []
+    if isinstance(saved, dict) and saved.get("boot") == boot and isinstance(saved.get("interfaces"), list):
+        recorded = [name for name in saved["interfaces"]
+                    if isinstance(name, str) and INTERFACE.fullmatch(name)]
+    interfaces = list(dict.fromkeys([*recorded, *([test_interface] if test_interface else [])]))
+    owned = []
+    for interface in interfaces:
+        try:
+            if ingress_present(interface) and (interface in recorded or proven(interface)):
+                owned.append(interface)
+        except (CommandNotStopped, OperationOwnershipUnknown):
+            raise
+        except UpdateError as error:
+            problems.append(error)
+            if interface in recorded:
+                # Unknown, but proven before: keep checking it on the next attempt.
+                owned.append(interface)
+    # The record keeps every interface still owed a check until all of them pass.
+    pending = list(dict.fromkeys([*recorded, *owned]))
+    if pending != recorded:
+        try:
+            atomic_json(record, {"boot": boot, "interfaces": pending})
+        except OSError as error:
+            # The proof is still in place for this attempt, so the intake goes anyway.
+            problems.append(UpdateError(f"the upload intake record could not be saved: {error}"))
     try:
         device = link_present(UPLOAD_DEVICE)
     except OSError as error:
         problems.append(UpdateError(f"the upload device could not be checked: {error}"))
-    steps = (
-        (owned, ["tc", "qdisc", "del", "dev", test_interface, "handle", UPLOAD_INTAKE_HANDLE,
-                 "ingress"]),
-        (device, ["ip", "link", "del", "dev", UPLOAD_DEVICE]),
-    )
-    for needed, command in steps:
+        device = False
+    steps = [["tc", "qdisc", "del", "dev", interface, "handle", UPLOAD_INTAKE_HANDLE, "ingress"]
+             for interface in owned]
+    if device:
+        steps.append(["ip", "link", "del", "dev", UPLOAD_DEVICE])
+    for command in steps:
         try:
-            if needed:
-                run(command, timeout)
+            run(command, timeout)
+        except (CommandNotStopped, OperationOwnershipUnknown):
+            raise
+        except UpdateError as error:
+            problems.append(error)
+    left = False
+    for interface in pending:
+        try:
+            left = ingress_present(interface) or left
         except (CommandNotStopped, OperationOwnershipUnknown):
             raise
         except UpdateError as error:
             problems.append(error)
     try:
-        left = owned_intake() or link_present(UPLOAD_DEVICE)
-    except (CommandNotStopped, OperationOwnershipUnknown):
-        raise
-    except UpdateError as error:
-        problems.append(error)
-    else:
-        if left:
-            problems.append(UpdateError("the upload intake could not be removed before recovery"))
+        left = link_present(UPLOAD_DEVICE) or left
+    except OSError as error:
+        problems.append(UpdateError(f"the upload device could not be checked: {error}"))
+    if left:
+        problems.append(UpdateError("the upload intake could not be removed before recovery"))
     if problems:
         raise problems[0]
     if record.exists() or record.is_symlink():
@@ -4337,6 +4364,21 @@ def apply_update(
         def with_intake_warning(message):
             return message if intake_problem is None else message + " " + upload_intake_warning(intake_problem)
 
+        def retry_intake_cleanup():
+            """Try a failed cleanup once more after the restore. The older helper never
+            adds the intake, and the saved record still proves which one is ours."""
+            nonlocal intake_problem
+            if intake_problem is None:
+                return
+            try:
+                remove_upload_intake(config, run, query, root=root)
+            except (CommandNotStopped, OperationOwnershipUnknown):
+                raise
+            except UpdateError as error:
+                intake_problem = error
+            else:
+                intake_problem = None
+
         try:
             # Even preflight is supervised by the new durable command lease.
             compatible_manager(Path(__file__))
@@ -4432,6 +4474,7 @@ def apply_update(
                 restore()
                 if not wait_restarted_healthy():
                     raise UpdateError("recovery health check failed")
+                retry_intake_cleanup()
                 cleanup_generations(root, budget)
                 recovered = True
                 progress("rolled-back", with_intake_warning(
@@ -4573,6 +4616,8 @@ def apply_update(
                         config, run, query, progress, root=root)
                     restore()
                     recovered = wait_restarted_healthy()
+                    if recovered:
+                        retry_intake_cleanup()
                 elif stopped:
                     restart_services()
                     recovered = wait_restarted_healthy()
