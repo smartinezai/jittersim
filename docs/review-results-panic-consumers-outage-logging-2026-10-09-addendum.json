@@ -1,0 +1,21 @@
+{
+  "date": "2026-10-09",
+  "addendum_to": "docs/review-results-panic-consumers-outage-logging-2026-10-09.json",
+  "reason": "A second-model review found that two statements in the record did not hold for the reviewed code. The record is kept unchanged. This addendum states the corrections and the fixes on branch fix/journal-followups.",
+  "corrections": [
+    {
+      "finding": "F3",
+      "original_claim": "When configure_outage_journal propagates CommandNotStopped or OperationOwnershipUnknown, the services are already restarted and healthy. A double run after a failed rollback health check is harmless.",
+      "correction": "wait_restarted_healthy ran the journal removal even when wait_healthy() returned false, so up to 10 s of privileged journal work could run while the restored services, and with them Panic, were unhealthy.",
+      "fix": "updates.py wait_restarted_healthy now removes the journal settings only when the health check passed. After a failed check the removal stays pending and the kept recovery request runs it on a later healthy attempt.",
+      "test": "tests/unit/test_updates.py::UpdateTests::test_a_failed_rollback_health_check_leaves_outage_journal_removal_pending"
+    },
+    {
+      "finding": "Q4 (journald limits bounded and optional)",
+      "original_claim": "Repeated removal is idempotent and harmless.",
+      "correction": "When logging was already persistent before installation, journal_policy.remove deleted the link, the owned file and the receipt before restarting journald. After a failed restart a retry found no link and returned unchanged without restarting journald, so the project limits could stay active.",
+      "fix": "journal_policy.remove now marks the receipt pending, unlinks only the link, restarts journald and deletes the owned file and receipt only after the restart succeeded. A retry that finds no link but a matching pending receipt for already persistent logging finishes the restart before reporting removed.",
+      "test": "tests/unit/test_outage_journal_policy.py::test_failed_removal_of_an_already_persistent_journal_is_finished_by_a_retry"
+    }
+  ]
+}

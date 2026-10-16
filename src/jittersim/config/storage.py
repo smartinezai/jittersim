@@ -67,6 +67,10 @@ class TrafficRateSettingsError(StorageError):
     """Raised when a graph-only ISP rate reference is invalid."""
 
 
+class RepositoryBusy(StorageError):
+    """Raised when the repository lock was not free within a bounded wait."""
+
+
 DatabasePath = Union[str, Path]
 _DOMAIN_RETENTION_SECONDS = 30 * 24 * 60 * 60
 _MAX_DOMAIN_OBSERVATIONS = 20_000
@@ -199,6 +203,22 @@ class ConfigRepository:
     def _rollback(self) -> None:
         if not self._transaction_depth:
             self._connection.rollback()
+
+    @contextmanager
+    def locked_within(self, seconds: float):
+        """Hold the repository lock for the block, waiting at most `seconds` for it.
+
+        Every method re-enters the lock, so calls inside the block do not wait again.
+        A backup or slow commit holds the lock: Panic then gets RepositoryBusy after a
+        bounded wait instead of waiting for it (review N3).
+        """
+
+        if not self._lock.acquire(timeout=max(0.0, seconds)):
+            raise RepositoryBusy("the configuration database is busy")
+        try:
+            yield
+        finally:
+            self._lock.release()
 
     @contextmanager
     def transaction(self):
@@ -4018,5 +4038,5 @@ def _serialized(method):
 
 # Every plain method runs under the repository lock. `transaction` holds the lock itself.
 for _name, _member in tuple(vars(ConfigRepository).items()):
-    if inspect.isfunction(_member) and _name not in ("__init__", "transaction"):
+    if inspect.isfunction(_member) and _name not in ("__init__", "transaction", "locked_within"):
         setattr(ConfigRepository, _name, _serialized(_member))
