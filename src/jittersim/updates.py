@@ -56,6 +56,11 @@ TOKEN_NAME = "update-token"
 # Trust settings that a rollback keeps as they are now: restoring an older copy of
 # /etc/jittersim must never bring back a key or a token the owner removed.
 PRESERVED_CONFIG = (SIGNERS_NAME, TOKEN_NAME)
+# The saved dashboard access list. A rollback also keeps it as it is now, so a grant the
+# owner revoked after the recovery copy was made never comes back. Unlike the trust
+# settings the recovery copy still holds it, so the digests of existing copies stay valid.
+DASHBOARD_ACCESS_NAME = "dashboard-access.json"
+KEPT_CURRENT_CONFIG = PRESERVED_CONFIG + (DASHBOARD_ACCESS_NAME,)
 # The highest release sequence this Pi ever installed. A rollback keeps it.
 FLOOR_NAME = "release-floor.json"
 SUDOERS_PATH = Path("/etc/sudoers.d/jittersim-update")
@@ -4012,10 +4017,10 @@ def apply_update(
             an older list."""
             keep = _trust_keep_directory(root, create=True)
             # Validate existing snapshots before changing any live folder.
-            for name in PRESERVED_CONFIG:
+            for name in KEPT_CURRENT_CONFIG:
                 _check_trust_file(keep / name)
             trusted_keys(keep)
-            for name in PRESERVED_CONFIG:
+            for name in KEPT_CURRENT_CONFIG:
                 current = config / name
                 _check_trust_file(current)
                 # The filtered restore never copies old trust into the live
@@ -4033,7 +4038,12 @@ def apply_update(
             os.close(descriptor)
             try:
                 shutil.copy2(source, temporary)
-                Path(temporary).chmod(0o600 if destination.name == TOKEN_NAME else 0o644)
+                if destination.name == DASHBOARD_ACCESS_NAME:
+                    # Root owns it and the helper's group reads it, like AccessStore writes it.
+                    os.chown(temporary, -1, source.stat().st_gid)
+                    Path(temporary).chmod(0o640)
+                else:
+                    Path(temporary).chmod(0o600 if destination.name == TOKEN_NAME else 0o644)
                 with open(temporary, "rb") as handle:
                     os.fsync(handle.fileno())
                 os.replace(temporary, destination)
@@ -4043,7 +4053,7 @@ def apply_update(
                 Path(temporary).unlink(missing_ok=True)
 
         def put_back_trust_settings(keep):
-            for name in PRESERVED_CONFIG:
+            for name in KEPT_CURRENT_CONFIG:
                 restored = config / name
                 # A recovery copy from an older manager may hold one.
                 if restored.is_symlink() or restored.exists():
@@ -4081,7 +4091,7 @@ def apply_update(
             for name, destination in (("code", code), ("config", config), ("data", data)):
                 if destination.exists():
                     remove_tree(destination, budget)
-                preserved = PRESERVED_CONFIG + (
+                preserved = KEPT_CURRENT_CONFIG + (
                     ".certificate-adoption", "ca", "dashboard.crt", "dashboard.key",
                     "dashboard-wifi.crt", "trust.env",
                 ) if name == "config" else ()

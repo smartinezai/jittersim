@@ -939,6 +939,57 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual((self.config / "control.env").read_text(), "private credentials")
         self.assertFalse((self.root / "keep").exists())
 
+    def test_a_rollback_never_brings_back_a_revoked_dashboard_grant(self):
+        access = self.config / "dashboard-access.json"
+        granted = '{"version": 1, "devices": [{"mac_address": "02:00:00:00:00:01"}]}'
+        access.write_text(granted)
+        access.chmod(0o640)
+        self.install()
+        self.assertEqual((self.backup("config") / access.name).read_text(), granted)
+        # The owner revokes the grant on the new release, then rolls back.
+        access.write_text('{"version": 1, "devices": []}')
+        access.chmod(0o640)
+        group = access.stat().st_gid
+        self.rollback()
+        self.assertEqual(access.read_text(), '{"version": 1, "devices": []}')
+        self.assertEqual(access.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(access.stat().st_gid, group)
+        self.assertEqual((self.config / "control.env").read_text(), "private credentials")
+        self.assertFalse((self.root / "keep").exists())
+
+    def test_a_rollback_never_restores_a_dashboard_access_file_removed_since(self):
+        access = self.config / "dashboard-access.json"
+        access.write_text('{"version": 1, "devices": [{"mac_address": "02:00:00:00:00:01"}]}')
+        access.chmod(0o640)
+        self.install()
+        access.unlink()
+        self.rollback()
+        self.assertFalse(access.exists())
+
+    def test_an_interrupted_restore_keeps_the_current_dashboard_access(self):
+        access = self.config / "dashboard-access.json"
+        access.write_text('{"version": 1, "devices": [{"mac_address": "02:00:00:00:00:01"}]}')
+        access.chmod(0o640)
+        self.install()
+        access.write_text('{"version": 1, "devices": []}')
+        access.chmod(0o640)
+        request_update("", rollback=True, root=self.root, code=self.code, config=self.config,
+                       run=lambda *args: None)
+        original = updates.snapshot_tree
+
+        def broken_data(source, destination, *args, **kwargs):
+            if Path(destination) == self.data:
+                raise OSError("disk error")
+            return original(source, destination, *args, **kwargs)
+
+        with patch("jittersim.updates.snapshot_tree", broken_data), \
+                patch("jittersim.updates.time.sleep"), self.assertRaises(OSError):
+            self.apply(lambda *args: None, lambda: True)
+        # The old grant never came back, not even while the restore was unfinished.
+        self.assertFalse(access.exists())
+        self.apply(lambda *args: None, lambda: True)
+        self.assertEqual(access.read_text(), '{"version": 1, "devices": []}')
+
     def test_a_rollback_never_brings_back_a_key_list_from_an_older_backup(self):
         self.install()
         # A recovery copy that an older manager made holds the old list.
