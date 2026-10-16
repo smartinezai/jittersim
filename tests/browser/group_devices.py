@@ -8,6 +8,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.confirm_dialogs import answer_confirm, cancel_with_escape
 from tests.browser.phone import sidebar_control
 from tests.browser.protected_clients import HEADERS, sign_in
 
@@ -162,16 +163,14 @@ def check_width(browser, base, width, height):
     device = next(device for device in page.request.get(base + "/api/devices", headers=HEADERS).json()["devices"]
                   if device.get("mac_address") == "02:00:00:00:00:01")
     assert device["profile_id"] == "slow"
-    confirmation = []
-
-    def accept_delete(dialog):
-        confirmation.append(dialog.message)
-        dialog.accept()
-
-    page.on("dialog", accept_delete)
-    connected_row.get_by_role("button", name="Delete group", exact=True).click()
+    delete = connected_row.get_by_role("button", name="Delete group", exact=True)
+    delete.click()
+    cancel_with_escape(page, delete, verb="Delete group", title="Delete this group?",
+                       text="Members keep their saved profiles.")
+    expect(connected_row).to_have_count(1)
+    delete.click()
+    answer_confirm(page, "Delete group", title="Delete this group?", text="saved profiles")
     expect(connected_row).to_have_count(0)
-    assert "saved profiles" in confirmation[-1]
     assert any(item["id"] == device["id"] for item in page.request.get(
         base + "/api/devices", headers=HEADERS).json()["devices"])
 

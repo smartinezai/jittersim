@@ -47,8 +47,11 @@ def test_measuring_is_deterministic_and_covers_every_metric():
     # A number that is always zero would never catch anything: the counts below are the
     # ones the GUI plan lowers, so they must be seen on the real page.
     for name in ("page_bytes", "distinct_colors", "distinct_font_sizes", "important_declarations",
-                 "aria_live_in_markup", "aria_live_flip_sites", "window_confirm_calls", "element_ids"):
+                 "aria_live_in_markup", "aria_live_flip_sites", "element_ids"):
         assert first[name] > 0, name
+    # The page asks every question in its own dialog, so no native confirm is left. The count
+    # is still real: the next test adds one and sees it.
+    assert first["window_confirm_calls"] == 0
 
 
 @pytest.mark.parametrize("addition, metric", [
@@ -146,10 +149,10 @@ def test_the_command_updates_a_baseline_file_and_reports_the_state(tmp_path, cap
     assert gui_stats.main(["--baseline", str(path), "--update"]) == 0
     assert gui_stats.load_recorded(path) == gui_stats.measure()
     assert gui_stats.main(["--baseline", str(path)]) == 0
-    lowered = dict(gui_stats.load_recorded(path), window_confirm_calls=0)
+    lowered = dict(gui_stats.load_recorded(path), important_declarations=0)
     path.write_text(gui_stats.render(lowered), encoding="utf-8")
     assert gui_stats.main(["--baseline", str(path)]) == 1
     assert "--update --allow-growth" in capsys.readouterr().err
     assert gui_stats.main(["--baseline", str(path), "--update"]) == 1
     assert gui_stats.main(["--baseline", str(path), "--update", "--allow-growth"]) == 0
-    assert gui_stats.load_recorded(path)["window_confirm_calls"] == gui_stats.measure()["window_confirm_calls"]
+    assert gui_stats.load_recorded(path)["important_declarations"] == gui_stats.measure()["important_declarations"]

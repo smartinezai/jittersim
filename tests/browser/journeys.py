@@ -10,6 +10,12 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.confirm_dialogs import (
+    answer_confirm,
+    cancel_with_button,
+    cancel_with_escape,
+    check_destructive_confirms,
+)
 from tests.browser.phone import close_controls, sidebar_control
 from tests.browser.service_list_focus import check_service_list_contexts
 
@@ -51,15 +57,21 @@ def check_wifi_recovery(page):
     requests = []
     page.on("request", lambda request: requests.append(request)
             if request.url.endswith("/api/access-point/reset-name") else None)
-    page.once("dialog", lambda dialog: dialog.dismiss())
+    ask = dict(title="Restore the default Wi-Fi name?", text="The password and security type stay the same.")
     button.click()
+    cancel_with_escape(page, button, verb="Restore name", **ask)
+    expect(field).to_have_value("Copied network")
+    expect(button).to_be_enabled()
+    assert not requests
+    button.click()
+    cancel_with_button(page, button, **ask)
     expect(field).to_have_value("Copied network")
     assert not requests
 
     page.route("**/api/access-point/reset-name", lambda route: route.fulfill(
         status=502, content_type="application/json", body='{"error":"Simulated reset failure"}'))
-    page.once("dialog", lambda dialog: dialog.accept())
     button.click()
+    answer_confirm(page, "Restore name", **ask)
     expect(page.locator("#wifi-reset-status")).to_contain_text("Simulated reset failure")
     expect(button).to_be_enabled()
     expect(field).to_have_value("Copied network")
@@ -67,8 +79,8 @@ def check_wifi_recovery(page):
 
     held = []
     page.route("**/api/access-point/reset-name", lambda route: held.append(route))
-    page.once("dialog", lambda dialog: dialog.accept())
     button.click()
+    answer_confirm(page, "Restore name", **ask)
     # The control becomes busy before the asynchronous request reaches the route.
     for _ in range(500):
         if held:
@@ -125,7 +137,14 @@ def check_access_and_help(page):
     page.get_by_role("link", name=DEVICES_LINK).click()
     expect(page.locator(".device-access-status").first).to_contain_text("Video for the test phone")
     page.get_by_role("button", name="Manage device and site access", exact=True).click()
-    page.get_by_role("button", name="Block Test phone", exact=True).click()
+    block = page.get_by_role("button", name="Block Test phone", exact=True)
+    block.click()
+    # The one-argument question keeps its Continue button, and focus returns to the busy opener
+    # as soon as its action ends.
+    cancel_with_escape(page, block, verb="Continue", text="Block network access for Test phone?")
+    expect(block).to_be_enabled()
+    expect(page.locator("#access-device-list")).to_contain_text("Network access allowed")
+    block.click()
     page.get_by_role("dialog").get_by_role("button", name="Continue", exact=True).click()
     expect(page.locator("#access-device-list")).to_contain_text("Network access blocked")
     page.get_by_role("button", name="Allow Test phone", exact=True).click()
@@ -636,6 +655,7 @@ def run():
                 )
                 check_service_list_contexts(browser, f"http://127.0.0.1:{port}/")
                 check_wifi_recovery(page)
+                check_destructive_confirms(page)
                 page.set_viewport_size({"width": 1440, "height": 1000})
                 page.screenshot(path="test-results/wifi-recovery-desktop.png", full_page=True)
                 page.set_viewport_size({"width": 430, "height": 1000})

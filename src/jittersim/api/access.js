@@ -329,7 +329,7 @@ function installFieldHelp() {
     button.addEventListener('pointerleave', leave); button.addEventListener('blur', leave);
     tip.addEventListener('pointerenter', () => clearTimeout(closeTimer)); tip.addEventListener('pointerleave', leave);
   });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape' && active) { close(); event.preventDefault(); } });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape' && active && !document.querySelector('dialog[open]')) { close(); event.preventDefault(); } });
   document.addEventListener('pointerdown', event => { if (active && !active.button.contains(event.target) && !active.tip.contains(event.target)) close(); });
   const reposition = () => { if (active) position(active); };
   window.addEventListener('resize', reposition); window.addEventListener('scroll', reposition, true);
