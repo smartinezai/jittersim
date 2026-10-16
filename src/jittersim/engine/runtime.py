@@ -145,11 +145,11 @@ def plan_address_moves(
     return moves, blocked
 
 
-@dataclass(frozen=True)
 class SchedulerBusy(Exception):
     """The scheduler lock was not free in time. The scheduler was fenced without it."""
 
 
+@dataclass(frozen=True)
 class PreparedRuntimePlan:
     """Network rules and their source descriptions from one evaluation."""
 
