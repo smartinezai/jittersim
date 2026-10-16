@@ -94,6 +94,7 @@ class NetworkApplier:
         self.wifi_record_path = wifi_follow.RECORD_PATH
         self.wifi_hold_path = wifi_follow.HOLD_PATH
         self.wifi_lock_path = wifi_follow.LOCK_PATH
+        self.wifi_fingerprint = wifi_follow.password_fingerprint
 
     def apply(
         self,
@@ -735,7 +736,8 @@ class NetworkApplier:
                 return controller.configure(ssid, password, "WPA3")
             commands_run = controller.configure(ssid, password, security)
             try:
-                wifi_follow.remember(ssid, security, self.wifi_record_path)
+                wifi_follow.remember(ssid, security, self.wifi_record_path,
+                                     fingerprint=self.wifi_fingerprint)
             except (OSError, ValueError):
                 LOGGER.warning("The router Wi-Fi copy works but is not remembered for the next boot.")
                 return commands_run

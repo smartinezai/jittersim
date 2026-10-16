@@ -1,7 +1,11 @@
 """The Pi Wi-Fi follows the last router copy that worked. Recovery is only a different name."""
 
+import hashlib
+import hmac
 import io
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -52,8 +56,14 @@ class FollowRouterTests(unittest.TestCase):
         self.applier.wifi_record_path = self.record
         self.applier.wifi_hold_path = self.hold
         self.applier.wifi_lock_path = self.lock
+        self.applier.wifi_fingerprint = self.fingerprint
         self.service = HelperService(self.applier, router_factory=lambda *_: Router())
         self.controller = WifiController(self.executor, "wlan0")
+
+    def fingerprint(self, salt):
+        """What openssl computes from nmcli's output (the password and a newline)."""
+        password = (self.executor.settings[PSK] + "\n").encode()
+        return hmac.new(salt.encode(), password, hashlib.sha256).hexdigest()
 
     def copy_router(self):
         preview = self.service.handle_payload({"action": "router-preview-ap", "admin_password": "admin-test"})
@@ -62,14 +72,15 @@ class FollowRouterTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
 
     def boot(self):
-        return wifi_follow.prepare_boot(self.controller, self.record, self.hold, self.previous)
+        return wifi_follow.prepare_boot(self.controller, self.record, self.hold, self.previous,
+                                        self.fingerprint)
 
     def run_cli(self, *argv):
         output, errors = io.StringIO(), io.StringIO()
         with redirect_stdout(output), redirect_stderr(errors):
             code = wifi_follow.main(list(argv), executor=self.executor, record_path=self.record,
                                     hold_path=self.hold, previous_path=self.previous,
-                                    lock_path=self.lock)
+                                    lock_path=self.lock, fingerprint=self.fingerprint)
         return code, output.getvalue() + errors.getvalue()
 
     def writes_since(self, start):
@@ -80,7 +91,10 @@ class FollowRouterTests(unittest.TestCase):
 
     def test_a_router_copy_records_its_name_and_security_but_never_the_password(self):
         self.copy_router()
-        self.assertEqual(json.loads(self.record.read_text()), {"ssid": "Home", "security": "WPA2"})
+        record = json.loads(self.record.read_text())
+        self.assertEqual({key: record[key] for key in ("ssid", "security")},
+                         {"ssid": "Home", "security": "WPA2"})
+        self.assertEqual(record["password_hmac"], self.fingerprint(record["salt"]))
         self.assertEqual(self.record.stat().st_mode & 0o777, 0o600)
         self.assertNotIn("home-test-password", self.record.read_text())
         self.assertEqual(self.executor.settings[PSK], "home-test-password")
@@ -161,6 +175,45 @@ class FollowRouterTests(unittest.TestCase):
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         self.assertEqual(self.run_cli("boot")[0], 0)
         self.assertEqual(self.executor.settings[SSID], "Home")
+
+    def test_a_password_changed_outside_this_code_is_never_given_the_router_name(self):
+        # For example an older release's manual change after a rollback, with the same security.
+        self.copy_router()
+        self.controller.rename(RECOVERY_WIFI_NAME)
+        self.executor.settings[PSK] = "older-release-password"
+        start = len(self.executor.commands)
+        self.assertEqual(self.boot(), "password-differs")
+        self.assertEqual(self.writes_since(start), [])
+        code, text = self.run_cli("router")
+        self.assertEqual(code, 1)
+        self.assertIn("password changed", text)
+        self.assertIn("state: password-differs", self.run_cli("status")[1])
+        self.assertEqual(self.executor.settings[SSID], RECOVERY_WIFI_NAME)
+        # Without a fingerprint nothing is recorded, so nothing is renamed later.
+        self.applier.wifi_fingerprint = lambda salt: None
+        self.copy_router()
+        self.assertFalse(self.record.exists())
+
+    def test_the_real_fingerprint_pipes_the_password_from_nmcli_into_openssl(self):
+        if subprocess.run(["sh", "-c", "command -v openssl"], capture_output=True).returncode:
+            self.skipTest("openssl is not installed")
+        directory = self.record.parent / "bin"
+        directory.mkdir()
+        calls = directory / "calls"
+        fake = directory / "nmcli"
+        fake.write_text("#!/bin/sh\necho \"$*\" >> %s\necho fixture-wifi-password\n" % calls)
+        fake.chmod(0o755)
+        openssl = subprocess.run(["sh", "-c", "command -v openssl"], capture_output=True,
+                                 text=True).stdout.strip()
+        os.symlink(openssl, directory / "openssl")
+        salt = "0" * 32
+        digest = wifi_follow.password_fingerprint(salt, search_path=str(directory))
+        expected = hmac.new(salt.encode(), b"fixture-wifi-password\n", hashlib.sha256).hexdigest()
+        self.assertEqual(digest, expected)
+        self.assertNotIn("fixture-wifi-password", calls.read_text())
+        self.assertIn("--show-secrets", calls.read_text())
+        fake.write_text("#!/bin/sh\nexit 10\n")
+        self.assertIsNone(wifi_follow.password_fingerprint(salt, search_path=str(directory)))
 
     # Boot: rename back to the router name without contacting the router.
 

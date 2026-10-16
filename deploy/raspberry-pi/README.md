@@ -397,8 +397,10 @@ Recovery changes only the name, so returning is a rename. At every boot
 name changes and the router is never contacted. When the router name does not
 start after ten tries, the previous name comes back for that boot and the next
 boot tries again. A manual Wi-Fi change or **Reset Pi Wi-Fi name** deletes the
-record, so the owner's own choice stays. A changed security type is left alone
-because the password may not be the router's any more. Copy the router again
+record, so the owner's own choice stays. The record also keeps a salted HMAC of the
+copy's password (openssl reads it from nmcli through a pipe, JitterSim never
+sees it), so a Wi-Fi whose security or password changed in another way, for
+example by an older release after a rollback, is left alone. Copy the router again
 after changing the router's Wi-Fi name or password.
 
 Use the supported commands instead of renaming the profile by hand. Dashboard
@@ -408,7 +410,7 @@ change is unfinished.
 
 ```sh
 F="sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow"
-$F status     # router, recovery-hold, returns-at-boot, not-remembered or security-differs
+$F status     # router, recovery-hold, returns-at-boot, not-remembered, security- or password-differs
 $F recovery   # JitterSim-Recovery, same password and security, held across reboots
 $F router     # end the hold and rename back to the router name now
 ```
