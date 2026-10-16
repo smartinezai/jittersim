@@ -145,15 +145,16 @@ Behaviour:
 | Everyone saved but the network never started (no earlier action) | Refused before saving (409). Choose Reset network first or stop Everyone. |
 | Panic or outage stop latched, or the Pi does not say | Refused before saving (409), as after a Reset. |
 | Device protected | Refused before saving, as before. |
-| More than 15 classes with Everyone and the exceptions | Refused before saving (409) and the earlier exceptions stay. |
+| More than 15 classes with Everyone, the exceptions, their service limits and the service lists | Refused before saving (409) and the earlier exceptions stay. Service limits count even when the plan is checked without DNS. |
 | The helper fails to apply | The assignment stays saved. The device is not an exception, the earlier ones stay and the scheduler plans them again. |
 
 How long the device stays beside Everyone:
 
-- Start, Apply to everyone, Stop for everyone, Reset network and Panic end every
-  exception. They are whole-scope actions, so every device follows them. Stop
-  for everyone then plans the saved devices as it always did, which includes the
-  device that was the exception.
+- Start, Apply to everyone and Stop for everyone end every exception once the
+  helper accepted their plan. Reset network and Panic end them at once. They are
+  whole-scope actions, so every device follows them. Stop for everyone then plans
+  the saved devices as it always did, which includes the device that was the
+  exception.
 - Deleting the device removes its exception and nothing else changes. Everyone
   covers the device again on the next apply. Nothing paused resumes.
 - A saved change, a scheduled apply and a restart of the dashboard keep the
@@ -179,8 +180,10 @@ Representation:
   statement that sets it can see.
 - The database enforces this too. A trigger deletes the rows on any write to the
   state columns that did not set `exceptions_kept`, so an older dashboard after a
-  rollback ends them with its first state write. Choosing, changing or stopping
-  Everyone also deletes them.
+  rollback ends them with its first state write.
+- Choosing, changing or stopping Everyone does not delete them by itself. The
+  write that records the helper's acceptance does. A failed Apply to all, Stop
+  for everyone or Start keeps the record, so it never changes the running policy.
 
 Rollback compatibility: an older dashboard ignores the table. On restart it
 applies Everyone for every device, which ends the exception on the network and in

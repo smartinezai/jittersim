@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from jittersim.config.exemptions import UnaffectedDevice
-from jittersim.config.models import Device, Impairment, Profile, ServiceList
+from jittersim.config.models import Device, Impairment, Profile, ServiceList, ServiceQuota
 from jittersim.engine.codec import plan_from_payload, plan_to_payload
 from jittersim.engine.plan import GENERAL_QUEUE_ID, Direction
 from jittersim.engine.service import compile_stored_plan
@@ -230,6 +230,26 @@ class EveryoneRunningRefusalTests(EveryoneRunningFixture):
         self.assertEqual(len(self.exceptions()), 14)
         self.assertNotIn(PHONE_ID, self.exceptions())
 
+    def test_a_service_limit_counts_toward_the_classes_even_without_dns(self) -> None:
+        for index in range(13):
+            device_id = f"extra-{index:02d}"
+            self.repository.save_device(Device(
+                device_id, f"Extra {index}", f"192.168.50.{100 + index}", "low"))
+            self.repository.add_everyone_exception(device_id)
+        # Everyone and 13 exceptions are 14 classes. One service limit makes 15.
+        self.repository.save_service_quota(ServiceQuota(
+            id="video", device_id="extra-00", name="Video", domains=("video.example",),
+            profile_id="low", limit_bytes=1_000))
+        self.assertEqual(len(self.exceptions()), 13)
+        before = self.exceptions()
+
+        status, result = self.apply_to()
+
+        self.assertEqual(status, 409)
+        self.assertIn("15 traffic classes", result["error"])
+        self.assertIsNone(self.repository.get_device(AIR_ID))
+        self.assertEqual(self.exceptions(), before)
+
     def test_a_failed_start_keeps_the_choice_and_the_earlier_exceptions(self) -> None:
         self.assertEqual(self.apply_to()[0], 200)
         self.helper.fail_action = "apply"
@@ -281,6 +301,43 @@ class FailedSavedChangeTests(EveryoneRunningFixture):
         self.assertTrue(scheduler.tick(repository=self.repository))
         self.assertEqual(self.running_ids(), [AIR_ID])
         self.assertEqual(self.exceptions(), {AIR_ID})
+
+
+class FailedEveryoneChangeTests(EveryoneRunningFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.assertEqual(self.apply_to()[0], 200)
+
+    def test_a_failed_apply_to_everyone_keeps_the_exception_until_one_succeeds(self) -> None:
+        self.helper.fail_action = "apply"
+
+        with self.assertLogs("jittersim.api.server", "ERROR"):
+            status, result = self.write("/api/general-profile", {"profile_id": "slow-test"})
+
+        self.assertEqual(status, 502, result)
+        self.assertEqual(self.repository.get_general_profile().id, "slow-test")
+        self.assertEqual(self.exceptions(), {AIR_ID})
+        self.helper.fail_action = ""
+        self.assertEqual(self.write("/api/general-profile", {"profile_id": "slow-test"})[0], 200)
+        self.assertEqual(self.exceptions(), frozenset())
+        self.assertEqual(self.raw_rows(), frozenset())
+        self.assertEqual(self.helper.applied_plan.mark_rules, ())
+
+    def test_a_failed_stop_keeps_the_record_and_a_later_start_ends_it(self) -> None:
+        self.helper.fail_action = "apply"
+
+        with self.assertLogs("jittersim.api.server", "ERROR"):
+            status, _ = self.write("/api/general-profile/stop", {})
+
+        self.assertEqual(status, 502)
+        self.assertIsNone(self.repository.get_general_profile())
+        # Nothing counts without Everyone, and nothing starts again by surprise.
+        self.assertEqual(self.exceptions(), frozenset())
+        self.assertEqual(self.raw_rows(), {AIR_ID})
+        self.helper.fail_action = ""
+        self.assertEqual(self.write("/api/general-profile", {"profile_id": "low"})[0], 200)
+        self.assertEqual(self.raw_rows(), frozenset())
+        self.assertEqual(self.helper.applied_plan.mark_rules, ())
 
 
 class WholeScopeActionTests(EveryoneRunningFixture):

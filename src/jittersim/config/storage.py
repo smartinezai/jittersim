@@ -881,9 +881,6 @@ class ConfigRepository:
         self._connection.execute(
             "UPDATE general_profile_setting SET profile_id = ? WHERE id = 1", (profile_id,)
         )
-        # Choosing, changing or stopping Everyone is a whole-scope act: every device
-        # follows it, so no device keeps running its own profile beside it.
-        self._connection.execute("DELETE FROM everyone_exceptions")
         self._bump_configuration_version()
         self._commit()
 
@@ -1042,6 +1039,12 @@ class ConfigRepository:
         rows = self._connection.execute(
             "SELECT device_id FROM everyone_exceptions ORDER BY device_id"
         ).fetchall()
+        return frozenset(row["device_id"] for row in rows)
+
+    def everyone_exception_rows(self) -> frozenset:
+        """Return every recorded exception, whether or not it counts right now."""
+
+        rows = self._connection.execute("SELECT device_id FROM everyone_exceptions").fetchall()
         return frozenset(row["device_id"] for row in rows)
 
     def add_everyone_exception(self, device_id: str) -> None:

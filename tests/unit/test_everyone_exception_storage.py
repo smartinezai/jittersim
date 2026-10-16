@@ -111,15 +111,19 @@ class EveryoneExceptionStorageTests(unittest.TestCase):
 
         self.assertFalse(self.repository.record_schedule_result(success=True))
 
-    def test_changing_everyone_ends_the_exceptions(self) -> None:
+    def test_choosing_everyone_does_not_end_them_before_the_helper_accepted(self) -> None:
         self.repository.add_everyone_exception("air")
 
         self.repository.save_general_profile("slow")
 
-        self.assertEqual(self.rows(), set())
-        self.repository.add_everyone_exception("air")
+        # A whole-scope action ends them with the write that records its success.
+        self.assertEqual(self.rows(), {"air"})
+        self.assertEqual(self.repository.everyone_exception_rows(), frozenset({"air"}))
         self.repository.save_general_profile(None)
-        self.assertEqual(self.rows(), set())
+        self.assertEqual(self.repository.get_everyone_exceptions(), frozenset())
+        self.assertEqual(self.repository.everyone_exception_rows(), frozenset({"air"}))
+        running(self.repository)
+        self.assertEqual(self.repository.everyone_exception_rows(), frozenset())
 
     def test_deleting_the_device_removes_its_exception_and_nothing_else(self) -> None:
         self.repository.add_everyone_exception("air")

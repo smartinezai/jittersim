@@ -3633,6 +3633,31 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
     def _validate_saved_structure(self) -> None:
         if self.repository.get_general_profile() is not None:
+            exceptions = self.repository.get_everyone_exceptions()
+            if exceptions:
+                # Everyone, the devices beside it, their service rules and the service lists
+                # share the classes. Count them structurally: a plan built without DNS leaves
+                # service limits out, which must not let a device in that the real plan refuses.
+                eligible_ids = {
+                    device.id for device in eligible_clients(self.repository).devices
+                    if device.id in exceptions
+                }
+                classes = 1 + len(eligible_ids) + sum(
+                    bool(item.enabled and item.device_id in eligible_ids)
+                    for items in (
+                        self.repository.list_service_quotas(),
+                        self.repository.list_time_quotas(),
+                        self.repository.list_service_assignments(),
+                    )
+                    for item in items
+                ) + sum(item.enabled for item in self.repository.list_service_lists())
+                if classes > MAX_SHAPED_MARKS_PER_PLAN:
+                    raise PlanError(
+                        "Everyone, the devices that run beside it, their service rules and "
+                        "the service lists can use at most "
+                        f"{MAX_SHAPED_MARKS_PER_PLAN} traffic classes together. Remove one or "
+                        "keep the device protected."
+                    )
             compile_stored_plan(repository=self.repository)
             return
         clients = eligible_clients(self.repository)
@@ -4808,9 +4833,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                                 )
                         elif beside_everyone:
                             self.repository.add_everyone_exception(device.id)
-                            # The plan with Everyone and this device must compile first.
-                            with without_dns():
-                                compile_stored_plan(repository=self.repository)
+                            # The classes and the plan with Everyone and this device must
+                            # fit before anything is saved.
+                            self._validate_saved_plan()
 
                 # Panic cannot land between the last check and the commit.
                 accepted, _ = self._publish_apply(control_intent[0], save)
@@ -5234,18 +5259,21 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         applied_keep = keep
         if scope is not None:
             planning["device_scope"] = scope
-        elif self.repository.get_general_profile() is not None:
-            # Everyone is saved: name the devices beside it, or none for a whole-scope plan.
-            running = self.repository.get_everyone_exceptions()
-            exceptions = running if keep_exceptions else frozenset()
-            planning["everyone_exceptions"] = exceptions
-            if running:
-                # The devices that run beside Everyone now stay recorded until the helper
-                # accepted the new plan. A failed Start or retry keeps the running policy
-                # and the usage of those devices is still sampled before the counters restart.
+        else:
+            if self.repository.everyone_exception_rows():
+                # The devices that run beside Everyone stay recorded until the helper accepted
+                # the new plan, whichever action asked for it. A failed Start, Apply to all
+                # or Stop keeps the running policy, and the usage of those devices is still
+                # sampled before the counters restart. Only a plan without them ends them.
                 keep = {"keep_everyone_exceptions": True}
-            if exceptions:
-                applied_keep = keep
+            if self.repository.get_general_profile() is not None:
+                # Everyone is saved: name the devices beside it, or none for a whole-scope plan.
+                exceptions = (
+                    self.repository.get_everyone_exceptions() if keep_exceptions else frozenset()
+                )
+                planning["everyone_exceptions"] = exceptions
+                if exceptions:
+                    applied_keep = keep
         try:
             prepared = (
                 self.scheduler.prepare_plan(
