@@ -33,6 +33,7 @@ class FollowRouterTests(unittest.TestCase):
         self.record = root / "wifi-router-copy.json"
         self.hold = root / "wifi-recovery-hold"
         self.previous = root / "boot-previous.json"
+        self.lock = root / "wifi.lock"
         self.executor = CopyExecutor()
         self.source = source = {"SSID": "Home", "Passphrase": "home-test-password", "Enable": True,
                                 "ModeEnabled": "WPA2-Personal", "Enable5G": False}
@@ -50,6 +51,7 @@ class FollowRouterTests(unittest.TestCase):
         self.applier = NetworkApplier(executor=self.executor, topology=Topology("eth0", "wlan0"))
         self.applier.wifi_record_path = self.record
         self.applier.wifi_hold_path = self.hold
+        self.applier.wifi_lock_path = self.lock
         self.service = HelperService(self.applier, router_factory=lambda *_: Router())
         self.controller = WifiController(self.executor, "wlan0")
 
@@ -66,7 +68,8 @@ class FollowRouterTests(unittest.TestCase):
         output, errors = io.StringIO(), io.StringIO()
         with redirect_stdout(output), redirect_stderr(errors):
             code = wifi_follow.main(list(argv), executor=self.executor, record_path=self.record,
-                                    hold_path=self.hold, previous_path=self.previous)
+                                    hold_path=self.hold, previous_path=self.previous,
+                                    lock_path=self.lock)
         return code, output.getvalue() + errors.getvalue()
 
     def writes_since(self, start):
@@ -124,6 +127,40 @@ class FollowRouterTests(unittest.TestCase):
         self.assertEqual(self.executor.settings[SSID], "New router name")
         self.assertFalse(self.record.exists())  # Never a boot back to the old name.
         self.assertEqual(self.boot(), "not-remembered")
+
+    def test_a_copy_deletes_the_older_record_before_it_changes_the_wifi(self):
+        self.copy_router()
+        seen = []
+        self.executor.on_up = lambda: seen.append(self.record.exists())
+        self.source["SSID"] = "New router name"
+        self.copy_router()
+        # While the new password was being started no record named the older router.
+        self.assertEqual(seen, [False])
+        self.assertEqual(json.loads(self.record.read_text())["ssid"], "New router name")
+
+    def test_a_held_lock_makes_every_wifi_change_wait_then_refuse(self):
+        import fcntl
+        import os
+        self.copy_router()
+        self.controller.rename(RECOVERY_WIFI_NAME)
+        descriptor = os.open(self.lock, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        before = dict(self.executor.settings)
+        start = len(self.executor.commands)
+        with self.assertRaises(WifiError) as caught:
+            with wifi_follow.wifi_lock(self.lock, wait=0.3):
+                pass
+        self.assertEqual(caught.exception.reason, "wifi-busy")
+        result = self.service.handle_payload({"action": "configure-ap", "ssid": "Owner choice",
+                                              "password": "owner-test-password"})
+        self.assertFalse(result["ok"])
+        self.assertTrue(self.record.exists())
+        self.assertEqual(self.executor.settings, before)
+        self.assertEqual(self.writes_since(start), [])
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        self.assertEqual(self.run_cli("boot")[0], 0)
+        self.assertEqual(self.executor.settings[SSID], "Home")
 
     # Boot: rename back to the router name without contacting the router.
 

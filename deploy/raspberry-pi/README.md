@@ -388,8 +388,9 @@ the newer version so the older dashboard restores the reset state.
 ## The Pi Wi-Fi follows the router
 
 After **Copy router Wi-Fi to Pi** worked, the Pi records the router's Wi-Fi
-name and security in `/etc/jittersim/wifi-router-copy.json` (root only, no
-password). The password and security of the copy stay in the Pi Wi-Fi.
+name and security in `/var/lib/jittersim-wifi/router-copy.json` (root only, no
+password). Updates and rollbacks never copy that folder, so a rollback cannot
+bring back an older record. The password and security of the copy stay in the Pi Wi-Fi.
 Recovery changes only the name, so returning is a rename. At every boot
 `jittersim-ap.service` renames a saved Wi-Fi with another name, for example
 `JitterSim-Recovery`, back to the router name before the start. Only the saved
@@ -400,9 +401,10 @@ record, so the owner's own choice stays. A changed security type is left alone
 because the password may not be the router's any more. Copy the router again
 after changing the router's Wi-Fi name or password.
 
-Use the supported commands instead of renaming the profile by hand. They refuse
-while a dashboard Wi-Fi change is unfinished. Do not start one from the
-dashboard while they run.
+Use the supported commands instead of renaming the profile by hand. Dashboard
+Wi-Fi changes, the boot step and these commands take turns through
+`/run/jittersim-wifi.lock`, and the commands refuse while a dashboard Wi-Fi
+change is unfinished.
 
 ```sh
 F="sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow"
@@ -411,7 +413,7 @@ $F recovery   # JitterSim-Recovery, same password and security, held across rebo
 $F router     # end the hold and rename back to the router name now
 ```
 
-`recovery` writes `/etc/jittersim/wifi-recovery-hold`. A router copy or
+`recovery` writes `/var/lib/jittersim-wifi/recovery-hold`. A router copy or
 `router` removes it. With router Wi-Fi off, Recovery leaves household devices
 without Wi-Fi: switch router Wi-Fi on first.
 

@@ -2,7 +2,8 @@
 
 ``Copy router Wi-Fi to Pi`` reads the router once and sets the Pi Wi-Fi's name, password and
 security. When that worked the name and security are recorded in
-``/etc/jittersim/wifi-router-copy.json`` (no password). Recovery changes only the name, so the
+``/var/lib/jittersim-wifi/router-copy.json`` (no password). That folder is outside every
+update and rollback copy, so a rollback never brings back an older record. Recovery changes only the name, so the
 password and security of the router copy stay in the Pi Wi-Fi and going back is a rename:
 
 * ``boot`` (jittersim-ap.service, before the start): renames the saved Wi-Fi back to the
@@ -21,9 +22,12 @@ not be the router's any more, so nothing is renamed then either.
 """
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -31,8 +35,11 @@ from .executor import CommandExecutionError, CommandExecutor, SubprocessExecutor
 from .wifi import RECOVERY_WIFI_NAME, WifiController, WifiError
 from .wifi_security import SECURITY_MODES
 
-RECORD_PATH = Path("/etc/jittersim/wifi-router-copy.json")
-HOLD_PATH = Path("/etc/jittersim/wifi-recovery-hold")
+STATE_DIR = Path("/var/lib/jittersim-wifi")
+RECORD_PATH = STATE_DIR / "router-copy.json"
+HOLD_PATH = STATE_DIR / "recovery-hold"
+# One Pi Wi-Fi change at a time across the helper, this command and the boot step.
+LOCK_PATH = Path("/run/jittersim-wifi.lock")
 # Lives for one boot only: /run is emptied at every boot.
 PREVIOUS_PATH = Path("/run/jittersim-wifi-boot-previous.json")
 MAX_RECORD_BYTES = 1024
@@ -43,8 +50,44 @@ class FollowError(WifiError):
     """A refused follow step. The Pi Wi-Fi was not changed."""
 
 
+@contextlib.contextmanager
+def wifi_lock(path: Path = LOCK_PATH, wait: float = 30.0):
+    """Hold the Pi Wi-Fi lock. Raises FollowError when another change keeps it.
+
+    Without a usable /run (tests, a development machine) the change runs unlocked.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError:
+        yield
+        return
+    try:
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise FollowError("Another Pi Wi-Fi change is running. Try again later.",
+                                      reason="wifi-busy") from None
+                time.sleep(0.2)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _sync_folder(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _write_json(path: Path, data: Dict[str, str]) -> None:
     """Replace ``path`` atomically with a root-only file."""
+    path.parent.mkdir(mode=0o700, exist_ok=True)
     temporary = path.with_name(".%s.%d.tmp" % (path.name, os.getpid()))
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
@@ -54,6 +97,7 @@ def _write_json(path: Path, data: Dict[str, str]) -> None:
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
+        _sync_folder(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -89,7 +133,11 @@ def remember(ssid: str, security: str, path: Path = RECORD_PATH) -> None:
 
 def forget(path: Path = RECORD_PATH) -> None:
     """Raises OSError when the record may still exist."""
-    path.unlink(missing_ok=True)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _sync_folder(path.parent)
 
 
 def held(hold_path: Path = HOLD_PATH) -> bool:
@@ -217,13 +265,22 @@ EXPLANATIONS = {
 
 def main(argv: Optional[List[str]] = None, *, executor: Optional[CommandExecutor] = None,
          record_path: Path = RECORD_PATH, hold_path: Path = HOLD_PATH,
-         previous_path: Path = PREVIOUS_PATH) -> int:
+         previous_path: Path = PREVIOUS_PATH, lock_path: Path = LOCK_PATH) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("action", choices=("status", "recovery", "router",
                                            "boot", "boot-fallback", "boot-done"))
     parser.add_argument("--test-interface",
                         default=os.environ.get("JITTERSIM_TEST_INTERFACE") or "wlan0")
     arguments = parser.parse_args(argv)
+    try:
+        with wifi_lock(lock_path, wait=45.0):
+            return _run(arguments, executor, record_path, hold_path, previous_path)
+    except FollowError as error:
+        print("Wi-Fi %s: %s" % (arguments.action, error), file=sys.stderr)
+        return 1
+
+
+def _run(arguments, executor, record_path, hold_path, previous_path) -> int:
     controller = WifiController(executor or SubprocessExecutor(timeout_seconds=15),
                                 arguments.test_interface)
     try:
