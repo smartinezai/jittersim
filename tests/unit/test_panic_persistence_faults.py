@@ -482,6 +482,12 @@ def test_a_stalled_stop_record_sync_does_not_keep_the_rules_in_place(monkeypatch
             assert_effects_stopped(rig)
             assert rig.service._panic_recovery_failed is True
             assert rig.service._panic_stop_latched is True
+            # A retry while the first saves still stall removes the rules again but
+            # never confirms: the stalled save could still replace its records.
+            retry = rig.service.handle_payload({"action": "normal-access"})
+            assert retry["ok"] is False
+            assert rig.service._panic_recovery_failed is True
+            assert rig.plan.hits == 1, "the retry started another save behind the stalled one"
         finally:
             rig.plan.armed = False
             rig.plan.release.set()

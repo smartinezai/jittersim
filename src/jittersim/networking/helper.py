@@ -294,6 +294,9 @@ class HelperService:
         self._load_gateway_state()
         self._panic_guard = panic_guard
         self._panic_guard_error = False
+        # The thread of Panic's first saves while they wait for storage. A later Panic
+        # never confirms a recovery while it may still replace the newer records.
+        self._stop_record_saver: Optional[threading.Thread] = None
         if panic_guard is not None:
             try:
                 guard = panic_guard.provision(gateway_state_path)
@@ -1013,9 +1016,15 @@ class HelperService:
     def _save_stop_records(self, deadline: float) -> threading.Thread:
         """Save the latched stop before the reset, waiting a bounded time for storage.
 
-        Returns the thread of the saves. It is still alive when they stalled.
+        Returns the thread of the saves. It is still alive when they stalled. While
+        the saves of an earlier Panic are still stalled, no new ones start: that
+        thread is returned, so this Panic also stays unconfirmed.
         """
 
+        previous = self._stop_record_saver
+        if previous is not None and previous.is_alive():
+            LOGGER.error("earlier Panic stop records are still being saved; removing the rules first")
+            return previous
         raised: List[BaseException] = []
 
         def save() -> None:
@@ -1028,6 +1037,7 @@ class HelperService:
         # The saves keep the deadline scope of this request.
         saver = threading.Thread(target=contextvars.copy_context().run, args=(save,),
                                  name="panic-stop-records", daemon=True)
+        self._stop_record_saver = saver
         saver.start()
         saver.join(bounded_wait(PANIC_STOP_RECORD_WAIT_SECONDS, deadline,
                                 floor=PANIC_STEP_FLOOR_SECONDS))
