@@ -242,21 +242,43 @@ def install(config=CONFIG, roots=CONFIG_ROOTS, vendor=VENDOR_ROOT, disk=Path("/v
     return "configured"
 
 
+def _unfinished_removal(config):
+    """A matching pending receipt for already persistent logging without the link."""
+    receipt = config / STATE_NAME
+    if not receipt.exists() or not _matches_state(config):
+        return False
+    state = json.loads(_read(receipt, 1024))
+    return state["previous_persistent"] and state["activation_pending"]
+
+
 def remove(config=CONFIG, vendor=VENDOR_ROOT, activate=_activate, roots=CONFIG_ROOTS):
     target, link = config / TARGET_NAME, vendor / NAME
+    receipt = config / STATE_NAME
     if not _owned_link(link, target):
         if link.exists() or link.is_symlink():
             raise PolicyError("administrator-policy")
-        return "unchanged"
+        if not _unfinished_removal(config):
+            return "unchanged"
+        # An earlier removal unlinked the setting but journald was not restarted,
+        # so it may still run with the project limits. Finish that restart now.
+        inspect_policy(roots=roots, target=target)
+        activate(time.monotonic() + 8)
+        for path in (target, receipt):
+            path.unlink()
+        return "removed"
     if not _matches_state(config):
         raise PolicyError("administrator-policy")
-    state = json.loads(_read(config / STATE_NAME, 1024))
+    state = json.loads(_read(receipt, 1024))
     inspect_policy(roots=roots, target=target)
     if state["previous_persistent"]:
+        # Keep the owned file and a pending receipt until journald has restarted
+        # without the link, so a failed restart is recognised and retried.
+        state["activation_pending"] = True
+        _atomic(receipt, json.dumps(state).encode())
         link.unlink()
-        for path in (target, config / STATE_NAME):
-            path.unlink()
         activate(time.monotonic() + 8)
+        for path in (target, receipt):
+            path.unlink()
         return "removed"
     # Keeping old disk evidence leaves the shared directory present. Without this
     # small compatibility setting Storage=auto would keep new logging persistent.

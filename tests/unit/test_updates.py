@@ -733,6 +733,31 @@ class UpdateTests(unittest.TestCase):
         self.assertGreater(removals[0], min(index for index in checks if index > max(restarts)))
         self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
 
+    def test_a_failed_rollback_health_check_leaves_outage_journal_removal_pending(self):
+        # While the restored services are unhealthy, Panic may be unavailable.
+        # Optional journal work must not add privileged commands to that window.
+        self.install()
+        utility = str(self.manager.with_name("jittersim-outage-journal.py"))
+        request_update("", rollback=True, root=self.root, code=self.code, run=lambda *a: None)
+        commands, run = self.recorder()
+        with patch("jittersim.updates.time.sleep"), self.assertRaises(UpdateError):
+            self.apply(run, lambda: False)
+        self.assertFalse([command for command in commands if utility in command], commands)
+        self.assertTrue(json.loads((self.root / "request.json").read_text())["rollback"])
+        # The kept recovery request removes the settings once the services are healthy.
+        commands, run = self.recorder()
+
+        def health():
+            commands.append(["health-check"])
+            return True
+
+        self.apply(run, health)
+        removals = [index for index, command in enumerate(commands)
+                    if utility in command and "remove" in command]
+        self.assertEqual(len(removals), 1, commands)
+        self.assertGreater(removals[0], commands.index(["health-check"]))
+        self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
+
     def test_the_watcher_restarts_and_a_running_test_wifi_is_left_alone(self):
         commands = self.install()
         calls = self.systemctl(commands)
