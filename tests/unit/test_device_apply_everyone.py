@@ -271,7 +271,7 @@ class EveryoneRunningRefusalTests(EveryoneRunningFixture):
         self.assertIsNone(self.repository.get_device(AIR_ID))
         self.assertEqual(self.exceptions(), before)
 
-    def test_a_failed_start_keeps_the_choice_and_the_earlier_exceptions(self) -> None:
+    def test_a_failed_start_changes_nothing_and_keeps_the_earlier_exceptions(self) -> None:
         self.assertEqual(self.apply_to()[0], 200)
         self.helper.fail_action = "apply"
 
@@ -280,8 +280,8 @@ class EveryoneRunningRefusalTests(EveryoneRunningFixture):
 
         self.assertEqual(status, 502)
         self.assertFalse(result["live_applied"])
-        self.assertIn("did not start", result["error"])
-        self.assertEqual(self.repository.get_device(PHONE_ID).profile_id, "low")
+        self.assertIn("did not start, so nothing changed", result["error"])
+        self.assertIsNone(self.repository.get_device(PHONE_ID))
         self.assertEqual(self.exceptions(), {AIR_ID})
         self.assertEqual(self.repository.get_general_profile().id, "low")
         state = self.repository.get_runtime_state()
@@ -294,7 +294,7 @@ class EveryoneRunningRefusalTests(EveryoneRunningFixture):
             status, _ = self.apply_to()
 
         self.assertEqual(status, 502)
-        self.assertEqual(self.repository.get_device(AIR_ID).profile_id, "slow-test")
+        self.assertIsNone(self.repository.get_device(AIR_ID))
         self.assertEqual(self.exceptions(), frozenset())
         self.helper.fail_action = ""
         # The saved state now plans Everyone for everyone, as before the failed start.
@@ -448,7 +448,7 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         self.assertEqual(calls[1].general_profile.profile_id, "low")
         self.assertEqual([rule.device_id for rule in self.last_plan().mark_rules], [AIR_ID])
         self.assertEqual(self.exceptions(), {AIR_ID})
-        self.assertEqual(self.repository.get_device(PHONE_ID).profile_id, "low")
+        self.assertIsNone(self.repository.get_device(PHONE_ID))
         self.assertIn("What ran before was put back", result["error"])
         state = self.repository.get_runtime_state()
         self.assertEqual((state.observed_state, state.last_action), ("applied", "apply"))
@@ -472,9 +472,25 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         self.assertEqual(calls[1].queues, ran_before.queues)
         self.assertEqual(self.delays(self.helper.applied_plan, AIR_ID), {3_000})
         self.assertIn("What ran before was put back", result["error"])
-        # The choice stays saved, as for any failed start.
-        self.assertEqual(self.repository.get_device(AIR_ID).profile_id, "blocked")
+        # Nothing changed: the Air keeps the profile it had, saved and running.
+        self.assertEqual(self.repository.get_device(AIR_ID).profile_id, "slow-test")
         self.assertEqual(self.exceptions(), {AIR_ID})
+
+    def test_a_later_device_apply_never_installs_an_earlier_failed_choice(self) -> None:
+        self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        patcher, calls = self.fail_first_apply()
+        with patcher, self.assertLogs("jittersim.api.server", "ERROR"):
+            self.assertEqual(self.apply_to(profile_id="low")[0], 502)
+
+        status, _ = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 200)
+        plan = self.last_plan()
+        # The Air still runs its own profile. The failed choice was never saved.
+        self.assertEqual(self.delays(plan, AIR_ID), {3_000})
+        self.assertEqual(self.delays(plan, PHONE_ID), {50})
+        self.assertEqual(self.exceptions(), {AIR_ID, PHONE_ID})
 
     def test_if_putting_it_back_fails_too_the_record_still_says_what_ran(self) -> None:
         self.use_scheduler()

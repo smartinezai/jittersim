@@ -5291,7 +5291,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             if beside_everyone:
                 return self._start_beside_everyone(
                     fields, snapshot, device, general, control_intent, previous_exceptions,
-                    ran_before)
+                    ran_before, existing)
             if not stopped:
                 return self._saved_control_response(fields, snapshot)
             return self._start_device_only(fields, snapshot, device, control_intent, previous_scope)
@@ -5337,7 +5337,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         return "latched" if latched else "clear"
 
     def _start_beside_everyone(self, fields, snapshot, device, general, control_intent,
-                               previous_exceptions, ran_before=None):
+                               previous_exceptions, ran_before=None, existing=None):
         """Apply Everyone for all and this device's own profile. Everyone is not cleared."""
 
         status, content_type, body = self._apply_configuration_locked(
@@ -5356,13 +5356,31 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             response["state"] = self._runtime_state_with_running()
             return status, content_type, _json_bytes(response)
 
-        # The device did not start, so it stays with Everyone and the earlier ones stay. The
-        # check and the restore are one step under the Panic fence: a Panic that ended the
+        # The device did not start, so nothing changes: it keeps the assignment it had, or
+        # none, and stays with Everyone, and the earlier exceptions stay. Saved and running
+        # then agree, so a later Apply or retry never installs this failed choice. The check
+        # and the restore are one step under the Panic fence: a Panic that ended the
         # exceptions is never undone.
         def restore():
-            if self.repository.get_runtime_state().last_action not in ("apply", "schedule"):
+            failed = self.repository.get_runtime_state()
+            if failed.last_action not in ("apply", "schedule"):
                 return False
-            self.repository.restore_everyone_exceptions(previous_exceptions)
+            try:
+                with self.repository.transaction():
+                    if existing is None:
+                        self.repository.delete_device(device.id)
+                    else:
+                        self.repository.save_device(existing, expected=device)
+                    self.repository.restore_everyone_exceptions(previous_exceptions)
+                    # Saving marks the state unknown. The failure stays what it was.
+                    self.repository.update_runtime_state(
+                        observed_state=failed.observed_state, last_action=failed.last_action,
+                        last_result=failed.last_result, last_error=failed.last_error,
+                        keep_everyone_exceptions=bool(previous_exceptions),
+                    )
+            except StorageError:
+                LOGGER.exception("could not put back the device assignment after a failed start")
+                self.repository.restore_everyone_exceptions(previous_exceptions)
             return True
 
         accepted, restored = self._publish_apply(control_intent[0], restore)
@@ -5380,8 +5398,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 " What ran before could not be put back, so the dashboard keeps trying."
             )
         response["error"] = (
-            "The profile is saved for this device but it did not start, so the device "
-            "stays with Everyone. " + response.get("error", "") + note
+            "The profile did not start, so nothing changed: the device keeps what it had and "
+            "Everyone keeps running for every device. " + response.get("error", "") + note
         ).strip()
         return status, content_type, _json_bytes(response)
 
