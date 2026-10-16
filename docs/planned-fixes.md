@@ -3,7 +3,7 @@
 The exact October2 fix list is preserved in [the historical archive](history/2026-10-02-backlog-and-ux/planned-fixes.md).
 New feature ideas are in [feature proposals](feature-proposals-2026-10-09.md).
 
-Baseline: `origin/main` at `36e0d2c` (the merge of PR 136 on 16 October 2026), checked on
+Baseline: `origin/main` at `2f68772` (the merge of PR 140 on 16 October 2026), checked on
 17 October 2026. Statuses come from the source and the merged pull requests on that commit. Nothing
 here was run on a Pi. The 4 October accepted main `5e0fed2` matched tested candidate 6fb864f. Hosted
 jobs cannot start (billing limit), so every pull request is gated by `scripts/local-ci.sh` on its head
@@ -30,6 +30,11 @@ commit ([local CI](local-ci.md)).
   retry and one total Panic deadline, and protected devices open the dashboard with an emergency
   device check on the Panic path ([review results](review-results-gated-panic-batch-2026-10-10.json)).
   The review found items that stay open ([carry-forward list](carry-forward-panic-batch-2026-10-10.md)).
+- The Pi's test Wi-Fi no longer stays on a fallback name such as `JitterSim-Recovery` after the
+  4 October incident: after a router copy that worked the Pi records the router's name and security
+  (no password), and every boot renames a saved Wi-Fi with another name back to it (PR 140,
+  `wifi_follow.py`). The router is not contacted and a manual Wi-Fi change or a name reset stops
+  the following.
 - Panic and capacity: Panic stays reachable when silent connections fill the dashboard
   queue (PR 95). The Panic reserve and the waiting queue are kept for real Panic requests
   (PR 123). Reliability tests for Panic and capacity were added (PR 93).
@@ -94,8 +99,7 @@ In flight on 17 October 2026 (states are in the [roadmap](../ROADMAP.md)):
 - PR 139 fixes release tooling bugs that a real dry run of v0.2.0 found. PR 111 and 112 add
   signed release notes to the update status and name the version on the Updates button. PR 117
   raises the wheel build lock. They belong to the first release, v0.2.0, which is not cut.
-- PR 140 (the Pi's test Wi-Fi follows the router copy), PR 142 (boot robustness), PR 143 (a
-  stability pass), PR 141 and 146 (in-page confirmations, one accessibility announcer) and PR 121
+- PR 142 (boot robustness), PR 143 (a stability pass), PR 141 and 146 (in-page confirmations, one accessibility announcer) and PR 121
   (device speed test) are open as well.
 - Not in flight and still open:
   - Every private request from a test-network peer still asks the helper for its own dashboard

@@ -519,7 +519,7 @@ The project is ready for presentation when it can:
 
 ## Current remaining work
 
-Checked against `origin/main` at `36e0d2c` (PR 136) on 17 October 2026. Every unticked box in the
+Checked against `origin/main` at `2f68772` (PR 140) on 17 October 2026. Every unticked box in the
 milestones above is one of these:
 
 - Owner-run physical acceptance on the Pi (Milestones 9 to 15 and the router security section).
@@ -534,9 +534,10 @@ milestones above is one of these:
 Hosted CI cannot start jobs (billing limit). Every pull request is gated by
 `scripts/local-ci.sh` run on its exact head commit (see [local CI](docs/local-ci.md)).
 
-Merged on the evening of 16 October 2026: PR 136 (the combined Panic batch with one approved
-bundle, `36e0d2c`), which carried PR 92 (protected devices get dashboard access), PR 103 and PR 104.
-`PANIC_APPROVED_SOURCES` has a new entry for it and main's three hash-pinned files match that entry.
+Merged on 16 October 2026: PR 136 (the combined Panic batch with one approved bundle, `36e0d2c`),
+which carried PR 92 (protected devices get dashboard access), PR 103 and PR 104, and PR 140 (the Pi's
+test Wi-Fi follows the router copy and returns from Recovery at boot, `2f68772`).
+`PANIC_APPROVED_SOURCES` has a new entry for PR 136 and main's three hash-pinned files match that entry.
 
 Open pull requests on 17 October 2026, apart from the documentation PR 144 and the guardrails PR 145:
 
@@ -548,7 +549,6 @@ Open pull requests on 17 October 2026, apart from the documentation PR 144 and t
 | 121 | Device speed test: compare a device's speed before and after a profile | Ready for review |
 | 138 | Carry-forward fixes of the Panic batch: a rollback bringing back a revoked dashboard grant, a backup lock delaying dashboard Panic, a stalled write of the stop records and the rollback cleanup of the upload intake | Draft. Two owner decisions are open in its description |
 | 139 | Fixes the release tooling bugs that a real dry run of v0.2.0 found | Draft |
-| 140 | The Pi's test Wi-Fi follows the router copy and returns from Recovery at boot | Draft |
 | 141 | Asks in the page, not in the browser, before deleting or changing Wi-Fi (nine of the eleven native confirms) | Ready for review |
 | 142 | Pi boot robustness: the mDNS name, an early SIGHUP, a volatile journal and boot noise | Draft |
 | 143 | Stability pass: a flaky explorer 502, Python 3.9 local CI and a digit limit | Draft |
