@@ -417,6 +417,40 @@ keeps the new plan format available to both processes. Before rolling back to
 a version without general profiles, reset and verify normal traffic under
 the newer version so the older dashboard restores the reset state.
 
+## The Pi Wi-Fi follows the router
+
+After **Copy router Wi-Fi to Pi** worked, the Pi records the router's Wi-Fi
+name and security in `/var/lib/jittersim-wifi/router-copy.json` (root only, no
+password). Updates and rollbacks never copy that folder, so a rollback cannot
+bring back an older record. The password and security of the copy stay in the Pi Wi-Fi.
+Recovery changes only the name, so returning is a rename. At every boot
+`jittersim-ap.service` renames a saved Wi-Fi with another name, for example
+`JitterSim-Recovery`, back to the router name before the start. Only the saved
+name changes and the router is never contacted. When the router name does not
+start after ten tries, the previous name comes back for that boot and the next
+boot tries again. A manual Wi-Fi change or **Reset Pi Wi-Fi name** deletes the
+record, so the owner's own choice stays. The record also keeps a salted HMAC of the
+copy's password (openssl reads it from nmcli through a pipe, JitterSim never
+sees it), so a Wi-Fi whose security or password changed in another way, for
+example by an older release after a rollback, is left alone. Copy the router again
+after changing the router's Wi-Fi name or password.
+
+Use the supported commands instead of renaming the profile by hand. Dashboard
+Wi-Fi changes, the boot step and these commands take turns through
+`/run/jittersim-wifi.lock`, and the commands refuse while a dashboard Wi-Fi
+change is unfinished.
+
+```sh
+F="sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow"
+$F status     # router, recovery-hold, returns-at-boot, not-remembered, security- or password-differs
+$F recovery   # JitterSim-Recovery, same password and security, held across reboots
+$F router     # end the hold and rename back to the router name now
+```
+
+`recovery` writes `/var/lib/jittersim-wifi/recovery-hold`. A router copy or
+`router` removes it. With router Wi-Fi off, Recovery leaves household devices
+without Wi-Fi: switch router Wi-Fi on first.
+
 ## Device visibility features
 
 Traffic discovery needs `protected_dns_capture` so protected devices are

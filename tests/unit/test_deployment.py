@@ -218,7 +218,8 @@ class AccessPointStartTests(unittest.TestCase):
         # The one safety check that stays: no test Wi-Fi without the management firewall.
         # It still fails the unit when the table is missing (no leading "-"). The listing
         # itself goes to /dev/null: see test_boot_noise.py for what it does at run time.
-        pre = [line for line in self.unit.splitlines() if line.startswith("ExecStartPre=")]
+        pre = [line for line in self.unit.splitlines() if line.startswith("ExecStartPre=")
+               and "nft list table inet jittersim_control" in line]
         self.assertEqual(len(pre), 1)
         self.assertIn("/usr/sbin/nft list table inet jittersim_control >/dev/null", pre[0])
         self.assertFalse(pre[0].startswith("ExecStartPre=-"))
@@ -236,11 +237,56 @@ class AccessPointStartTests(unittest.TestCase):
             command.index("GENERAL.STATE connection show jittersim-ap"),
             command.index("connection up jittersim-ap"),
         )
-        self.assertIn("= activated ] && exit 0", command)
-        self.assertIn("/usr/bin/nmcli --wait 10 connection up jittersim-ap && exit 0", command)
+        self.assertIn("= activated ] && return 0", command)
+        self.assertIn("/usr/bin/nmcli --wait 10 connection up jittersim-ap && return 0", command)
         self.assertIn("did not start after 10 tries", command)
         self.assertTrue(command.rstrip("'").endswith("exit 1"))
-        self.assertIn("TimeoutStartSec=180", self.unit)
+        # Two rounds of ten tries (router copy, then the previous Wi-Fi) fit the limit.
+        self.assertIn("TimeoutStartSec=360", self.unit)
+
+    def test_boot_returns_to_the_router_copy_and_never_blocks_the_start(self):
+        follow = "/opt/jittersim/.venv/bin/python -I -m jittersim.networking.wifi_follow"
+        # A failing step is ignored ("-"), so the Wi-Fi always starts with some profile.
+        self.assertEqual(self.directives(self.unit, "ExecStartPre")[1:], [
+            ["-" + follow.split()[0], *follow.split()[1:], "boot"]])
+        self.assertEqual(self.directives(self.unit, "ExecStartPost"), [
+            ["-" + follow.split()[0], *follow.split()[1:], "boot-done"]])
+        self.assertIn("EnvironmentFile=-/etc/jittersim/runtime.env", self.unit)
+        command = [line for line in self.unit.splitlines() if line.startswith("ExecStart=")][0]
+        # The previous Wi-Fi is tried only after the router copy failed ten times.
+        self.assertIn(follow + ' boot-fallback; [ "$$?" -ne 2 ] && start_wifi && exit 0', command)
+        self.assertLess(command.index("start_wifi && exit 0"), command.index("boot-fallback"))
+
+    def test_a_router_copy_that_will_not_start_falls_back_to_the_previous_wifi(self):
+        command = [line for line in self.unit.splitlines() if line.startswith("ExecStart=")][0]
+        script = command.split("-c '", 1)[1].rsplit("'", 1)[0].replace("$$", "$")
+        # 0: the old name is back. 1: the fallback failed but a start is still tried.
+        # 2: this boot renamed nothing, so there is no second round.
+        for fallback_exit, expected in ((0, 0), (1, 0), (2, 1)):
+            with self.subTest(fallback_exit=fallback_exit), tempfile.TemporaryDirectory() as directory:
+                log = Path(directory) / "calls"
+                fake = Path(directory) / "nmcli"
+                # Every start fails until the fallback ran.
+                fake.write_text(
+                    "#!/bin/sh\necho \"nmcli $*\" >> %s\n"
+                    "case \"$*\" in *GENERAL.STATE*) echo activating;; "
+                    "*'connection up'*) grep -q fallback %s;; esac\n" % (log, log)
+                )
+                python = Path(directory) / "python"
+                python.write_text("#!/bin/sh\necho \"fallback $*\" >> %s\nexit %d\n" % (log, fallback_exit))
+                for path in (fake, python):
+                    path.chmod(0o755)
+                result = subprocess.run(
+                    ["sh", "-c", script.replace("/usr/bin/nmcli", str(fake))
+                     .replace("/opt/jittersim/.venv/bin/python", str(python))
+                     .replace("sleep 3", "sleep 0")],
+                    capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
+                calls = log.read_text()
+                self.assertEqual(calls.count("connection up"), 11 if expected == 0 else 10)
+                self.assertEqual(calls.count("boot-fallback"), 1)
+                self.assertNotIn("down", calls)
 
     def test_the_retry_loop_runs_and_stops_at_the_first_success(self):
         command = [line for line in self.unit.splitlines() if line.startswith("ExecStart=")][0]

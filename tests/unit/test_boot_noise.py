@@ -43,10 +43,10 @@ esac
 
 
 def pre_steps(unit_path: Path) -> list:
-    """The ExecStartPre lines as (ignore_failure, argument list)."""
+    """The ExecStartPre lines that call nft, as (ignore_failure, argument list)."""
     steps = []
     for line in unit_path.read_text().splitlines():
-        if line.startswith("ExecStartPre="):
+        if line.startswith("ExecStartPre=") and "/usr/sbin/nft" in line:
             command = line.split("=", 1)[1]
             ignore = command.startswith("-")
             steps.append((ignore, shlex.split(command.lstrip("-"))))
