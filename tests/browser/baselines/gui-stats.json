@@ -56,7 +56,7 @@
     "aria_live_flip_sites": 6,
     "inline_event_handler_attributes": 0,
     "inline_style_attributes": 0,
-    "window_confirm_calls": 11
+    "window_confirm_calls": 1
   },
   "tolerance_percent": 2,
   "strict": [

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.confirm_dialogs import answer_confirm, cancel_with_escape
 from tests.browser.phone import sidebar_control
 
 
@@ -25,15 +26,17 @@ def check_wifi_recovery(page):
     requests = []
     page.on("request", lambda request: requests.append(request)
             if request.url.endswith("/api/access-point/reset-name") else None)
-    page.once("dialog", lambda dialog: dialog.dismiss())
+    ask = dict(title="Restore the default Wi-Fi name?", text="The password and security type stay the same.")
     button.click()
+    cancel_with_escape(page, button, verb="Restore name", **ask)
     expect(field).to_have_value("Copied network")
+    expect(button).to_be_enabled()
     assert not requests
 
     page.route("**/api/access-point/reset-name", lambda route: route.fulfill(
         status=502, content_type="application/json", body='{"error":"Simulated reset failure"}'))
-    page.once("dialog", lambda dialog: dialog.accept())
     button.click()
+    answer_confirm(page, "Restore name", **ask)
     expect(page.locator("#wifi-reset-status")).to_contain_text("Simulated reset failure")
     expect(button).to_be_enabled()
     expect(field).to_have_value("Copied network")
@@ -41,9 +44,9 @@ def check_wifi_recovery(page):
 
     held = []
     page.route("**/api/access-point/reset-name", lambda route: held.append(route))
-    page.once("dialog", lambda dialog: dialog.accept())
     with page.expect_request("**/api/access-point/reset-name", timeout=10000):
         button.click()
+        answer_confirm(page, "Restore name", **ask)
     expect(button).to_be_disabled()
     assert len(held) == 1
     held[0].continue_()
@@ -73,17 +76,14 @@ def check_router_copy(page):
     page.on("request", lambda request: copies.append(request)
             if request.url.endswith("/api/router/sync-ap") else None)
 
-    def check_dialog(dialog, accept):
-        assert "Browser home using WPA2 (2.4 GHz)" in dialog.message
-        assert "browser-wifi-password" not in dialog.message
-        dialog.accept() if accept else dialog.dismiss()
-
-    page.once("dialog", lambda dialog: check_dialog(dialog, False))
+    ask = dict(title="Copy the router Wi-Fi to the Pi?", text="Browser home using WPA2 (2.4 GHz)",
+               absent="browser-wifi-password")
     button.click()
+    cancel_with_escape(page, button, verb="Copy Wi-Fi", **ask)
     expect(page.locator("#router-action-message")).to_contain_text("Copy cancelled")
     assert not copies
-    page.once("dialog", lambda dialog: check_dialog(dialog, True))
     button.click()
+    answer_confirm(page, "Copy Wi-Fi", **ask)
     expect(page.locator("#router-action-message")).to_contain_text("Copied Browser home using WPA2")
     assert len(copies) == 1
     assert len(copies[0].post_data_json["expected_fingerprint"]) == 64

@@ -4541,7 +4541,9 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("/api/uplink", DASHBOARD_HTML)
         self.assertIn("Open router Wi-Fi settings", DASHBOARD_HTML)
         self.assertIn("Copy router Wi-Fi to Pi", DASHBOARD_HTML)
-        self.assertIn("Turn off router Wi-Fi", DASHBOARD_HTML)
+        # The router Wi-Fi switch is read only. It has no click handler and no question to ask.
+        self.assertNotIn("Turn off router Wi-Fi", DASHBOARD_HTML)
+        self.assertNotIn('element("router-wifi-toggle").addEventListener', DASHBOARD_HTML)
         self.assertIn("router-admin-password", DASHBOARD_HTML)
         self.assertIn("/api/router/sync-ap", DASHBOARD_HTML)
         self.assertIn("/api/router/wifi", DASHBOARD_HTML)
