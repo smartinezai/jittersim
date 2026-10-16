@@ -327,7 +327,7 @@ def source(tmp_path):
     return root
 
 
-def run_release(source, key, tmp_path, *args):
+def run_release(source, key, tmp_path, *args, env=None):
     fake = tmp_path / "bin"
     fake.mkdir(exist_ok=True)
     (fake / "gh").write_text("#!/bin/sh\ntouch " + str(tmp_path / "gh-was-called") + "\nexit 1\n")
@@ -335,6 +335,7 @@ def run_release(source, key, tmp_path, *args):
     environment = dict(os.environ, PATH=str(fake) + os.pathsep + os.environ["PATH"], HOME=str(tmp_path / "home"),
                        JITTERSIM_RELEASE_FAKE_CHECKS="1")
     environment.pop("SSH_AUTH_SOCK", None)
+    environment.update(env or {})
     return subprocess.run(["sh", str(source / "scripts/release.sh"), "--dry-run", "--home", str(tmp_path / "releases"),
                            "--key", str(key), *args], cwd=source, env=environment, capture_output=True,
                           text=True, stdin=subprocess.DEVNULL, timeout=180)
@@ -366,6 +367,34 @@ def test_release_script_dry_run_builds_signed_release_without_touching_github(re
     assert not git(tmp_path / "origin.git", "tag", "--list")
     assert git(tmp_path / "origin.git", "rev-parse", "main") == head
     assert not (tmp_path / "gh-was-called").exists()
+
+
+def recorded_checks(tmp_path, number="0.3.0"):
+    rows = (tmp_path / "releases" / number / "evidence" / "checks.tsv").read_text().splitlines()
+    return {row.split("\t")[0]: row.split("\t")[1] for row in rows}
+
+
+@pytest.mark.parametrize("scope, expected", [
+    (None, "bash scripts/local-ci.sh all"),
+    ("lint unit", "bash scripts/local-ci.sh lint unit"),
+    ("none", None),
+])
+def test_release_script_gives_local_ci_a_command_it_accepts(release, source, key, tmp_path, scope, expected):
+    """scripts/local-ci.sh without a command prints its usage and exits 2, so a bare call made
+    every real release stop at its last check. The scope is 'all' unless the owner narrows it."""
+    result = run_release(source, key, tmp_path, "0.3.0", env=None if scope is None else
+                         {"JITTERSIM_RELEASE_LOCAL_CI": scope})
+    assert result.returncode == 0, result.stdout + result.stderr
+    command = recorded_checks(tmp_path).get("local-ci")
+    assert command == expected
+    if command:
+        # What would run is a command local-ci.sh itself accepts (it runs nothing under --dry-run).
+        words = command.split()[2:]
+        check = subprocess.run(["bash", str(ROOT / "scripts/local-ci.sh"), "--dry-run", "--allow-dirty", *words],
+                               cwd=ROOT, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
+        assert check.returncode == 0, check.stdout + check.stderr
+    # The three checks the policy requires are always recorded, whatever the local-ci scope is.
+    assert {"lint", "python-tests", "browser-journeys"} <= set(recorded_checks(tmp_path))
 
 
 def test_release_script_refuses_an_old_or_malformed_version(source, key, tmp_path):

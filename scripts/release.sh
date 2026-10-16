@@ -240,8 +240,14 @@ check_and_record() {
     run_check lint "${python:-python3}" -m ruff check --select E9,F63,F7,F82,F811 src tests
     run_check python-tests "${python:-python3}" -m pytest -q -p no:cacheprovider
     run_check browser-journeys "${python:-python3}" -m tests.browser.journeys
-    if [ -f "$src/scripts/local-ci.sh" ]; then
-        run_check local-ci sh scripts/local-ci.sh
+    # scripts/local-ci.sh needs a command. Without one it prints its usage and exits 2. "all" runs
+    # every workflow job (Docker and the network included, so it takes long). Narrow it with e.g.
+    # JITTERSIM_RELEASE_LOCAL_CI="release-checks", or turn it off with "none". The checks the
+    # release policy requires are the three above, so this only adds assurance.
+    local_ci=${JITTERSIM_RELEASE_LOCAL_CI:-all}
+    if [ -f "$src/scripts/local-ci.sh" ] && [ "$local_ci" != none ]; then
+        # shellcheck disable=SC2086 # one word per local-ci argument on purpose
+        run_check local-ci bash scripts/local-ci.sh $local_ci
     fi
     python3 - "$record_dir/checks.tsv" "$record_dir/results.json" "$dry_run" <<'EOF'
 import json, sys
