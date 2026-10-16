@@ -146,7 +146,7 @@ Behaviour:
 | Panic or outage stop latched, or the Pi does not say | Refused before saving (409), as after a Reset. |
 | Device protected | Refused before saving, as before. |
 | More than 15 classes with Everyone, the exceptions, their service limits and the service lists | Refused before saving (409) and the earlier exceptions stay. Service limits count even when the plan is checked without DNS. |
-| The helper fails to apply | The assignment stays saved. The device is not an exception and the earlier ones stay. The dashboard applies what ran before at once, because a failed apply can remove the rules, and the scheduler keeps trying if that fails too. A Panic that lands meanwhile wins: the exceptions are put back only through the Panic fence. |
+| The helper fails to apply | The assignment stays saved. The device is not an exception and the earlier ones stay. The dashboard applies the plan that ran at once, not the saved settings, because a failed apply can remove the rules and the new profile may be what failed. The scheduler keeps trying if that fails too and later plans the saved settings as for any saved change. A Panic that lands meanwhile wins: the exceptions are put back only through the Panic fence. |
 
 How long the device stays beside Everyone:
 
@@ -158,7 +158,8 @@ How long the device stays beside Everyone:
 - Deleting the device removes its exception and nothing else changes. Everyone
   covers the device again on the next apply. Nothing paused resumes.
 - A saved change, a scheduled apply and a restart of the dashboard keep the
-  exceptions. A scheduled apply never adds a device.
+  exceptions. A scheduled apply never adds a device. A scheduled apply of a plan
+  without Everyone, for example after a failed Stop, ends them.
 - A whole-scope action ends them only after the helper accepted its plan. A
   failed Start keeps them, so the record, the retry and the running policy agree.
   The usage of the devices is sampled before the counters restart.

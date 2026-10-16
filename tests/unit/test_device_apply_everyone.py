@@ -351,6 +351,7 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         return patch.object(self.helper, "apply", side_effect=apply), calls
 
     def test_a_failed_device_apply_puts_back_what_ran_before(self) -> None:
+        self.use_scheduler()
         self.assertEqual(self.apply_to()[0], 200)
         patcher, calls = self.fail_first_apply()
 
@@ -369,7 +370,31 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         state = self.repository.get_runtime_state()
         self.assertEqual((state.observed_state, state.last_action), ("applied", "apply"))
 
+    def test_putting_back_never_installs_the_profile_that_failed(self) -> None:
+        # The Air already runs beside Everyone. Applying a profile that blocks everything
+        # fails at the helper. What goes back is the plan that ran, not the saved choice.
+        self.use_scheduler()
+        self.repository.save_profile(Profile(
+            id="blocked", name="Blocked", upload=Impairment(loss_percent=100),
+            download=Impairment(loss_percent=100)))
+        self.assertEqual(self.apply_to()[0], 200)
+        ran_before = self.helper.applied_plan
+        patcher, calls = self.fail_first_apply()
+
+        with patcher, self.assertLogs("jittersim.api.server", "ERROR"):
+            status, result = self.apply_to(profile_id="blocked")
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1].queues, ran_before.queues)
+        self.assertEqual(self.delays(self.helper.applied_plan, AIR_ID), {3_000})
+        self.assertIn("What ran before was put back", result["error"])
+        # The choice stays saved, as for any failed start.
+        self.assertEqual(self.repository.get_device(AIR_ID).profile_id, "blocked")
+        self.assertEqual(self.exceptions(), {AIR_ID})
+
     def test_if_putting_it_back_fails_too_the_record_still_says_what_ran(self) -> None:
+        self.use_scheduler()
         self.assertEqual(self.apply_to()[0], 200)
         self.helper.fail_action = "apply"
 
@@ -452,6 +477,28 @@ class FailedEveryoneChangeTests(EveryoneRunningFixture):
         self.assertEqual(self.exceptions(), frozenset())
         self.assertEqual(self.raw_rows(), frozenset())
         self.assertEqual(self.helper.applied_plan.mark_rules, ())
+
+    def test_a_failed_stop_then_a_scheduled_success_ends_the_record(self) -> None:
+        scheduler = self.use_scheduler()
+        self.helper.fail_action = "apply"
+        with self.assertLogs("jittersim.api.server", "ERROR"):
+            self.assertEqual(self.write("/api/general-profile/stop", {})[0], 502)
+        self.assertEqual(self.raw_rows(), {AIR_ID})
+        self.helper.fail_action = ""
+
+        self.assertTrue(scheduler.tick(repository=self.repository))
+
+        # Everyone is gone and the saved devices run, so no exception is left behind.
+        self.assertEqual(self.raw_rows(), frozenset())
+        self.assertIsNone(self.helper.applied_plan.general_profile)
+        # A later failed Apply to everyone followed by a tick cannot bring one back.
+        self.helper.fail_action = "apply"
+        with self.assertLogs("jittersim.api.server", "ERROR"):
+            self.assertEqual(
+                self.write("/api/general-profile", {"profile_id": "low"})[0], 502)
+        self.helper.fail_action = ""
+        scheduler.tick(repository=self.repository)
+        self.assertEqual(self.exceptions(), frozenset())
 
     def test_a_failed_stop_keeps_the_record_and_a_later_start_ends_it(self) -> None:
         self.helper.fail_action = "apply"

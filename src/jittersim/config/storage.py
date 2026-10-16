@@ -1288,7 +1288,13 @@ class ConfigRepository:
             SET observed_state = ?,
                 last_action = CASE WHEN last_action = 'reset' THEN 'reset' ELSE 'schedule' END,
                 last_result = ?, last_error = ?,
-                exceptions_kept = CASE WHEN last_action = 'reset' THEN 0 ELSE 1 END
+                exceptions_kept = CASE
+                    WHEN last_action = 'reset' THEN 0
+                    WHEN EXISTS (
+                        SELECT 1 FROM general_profile_setting WHERE profile_id IS NOT NULL
+                    ) THEN 1
+                    ELSE 0
+                END
             WHERE id = 1 AND (
                 last_action IS NULL OR last_action != 'reset'
                 OR EXISTS (SELECT 1 FROM device_start_scope)

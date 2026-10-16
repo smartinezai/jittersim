@@ -132,7 +132,7 @@ from jittersim.engine.eligibility import (
 )
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, GENERAL_QUEUE_ID, NetworkPlan
 from jittersim.engine.progression import progression_factor
-from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.runtime import PreparedRuntimePlan, RuntimeScheduler
 from jittersim.engine.scenarios import active_scenario_runs
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
@@ -4808,6 +4808,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         )
                 previous_scope = self.repository.get_device_start_scope() or frozenset()
                 previous_exceptions = self.repository.get_everyone_exceptions()
+                # What runs now, for the case that this start fails at the helper.
+                ran_before = None
+                if beside_everyone and self.scheduler is not None:
+                    applied, sources = self.scheduler.applied_snapshot()
+                    if applied is not None:
+                        ran_before = (applied, sources)
                 if self.scheduler:
                     self.scheduler.sample_before_control_change(repository=self.repository)
                 # Refuse a Panic or a changed helper intent before saving, on both paths.
@@ -4854,7 +4860,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             }
             if beside_everyone:
                 return self._start_beside_everyone(
-                    fields, snapshot, device, general, control_intent, previous_exceptions)
+                    fields, snapshot, device, general, control_intent, previous_exceptions,
+                    ran_before)
             if not stopped:
                 return self._saved_control_response(fields, snapshot)
             return self._start_device_only(fields, snapshot, device, control_intent, previous_scope)
@@ -4891,7 +4898,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         return "latched" if latched else "clear"
 
     def _start_beside_everyone(self, fields, snapshot, device, general, control_intent,
-                               previous_exceptions):
+                               previous_exceptions, ran_before=None):
         """Apply Everyone for all and this device's own profile. Everyone is not cleared."""
 
         status, content_type, body = self._apply_configuration_locked(
@@ -4921,11 +4928,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
         accepted, restored = self._publish_apply(control_intent[0], restore)
         note = ""
-        if status == HTTPStatus.BAD_GATEWAY and accepted and restored:
-            # A failed apply may have removed the rules that ran. Put back what ran before.
+        if status == HTTPStatus.BAD_GATEWAY and accepted and restored and ran_before is not None:
+            # A failed apply may have removed the rules that ran. Put back the plan that ran,
+            # not the saved settings: the device's new profile may be what failed.
             put_back, _, _ = self._apply_configuration_locked(
                 connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
-                keep_exceptions=True,
+                keep_exceptions=True, restore_plan=ran_before,
             )
             note = (
                 " What ran before was put back."
@@ -5260,9 +5268,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
     @recorded("apply", "dashboard")
     def _apply_configuration_locked(
         self, connected_snapshot=None, *, sample_usage=True, explicit_apply: bool = False, control_intent=None,
-        device_scope: bool = False, keep_exceptions: bool = False,
+        device_scope: bool = False, keep_exceptions: bool = False, restore_plan=None,
     ) -> Tuple[int, str, bytes]:
         """Apply the whole saved plan, or with `device_scope` only a device-only start.
+
+        `restore_plan` is a plan and its source descriptions that ran before: a failed
+        apply puts exactly that back, not what the saved settings say now.
 
         A device-only start is read here, under the shared lock, so a Reset that ran
         while this call waited leaves nothing to start. Start and Apply to everyone cover
@@ -5313,15 +5324,23 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 if exceptions:
                     applied_keep = keep
         try:
-            prepared = (
-                self.scheduler.prepare_plan(
-                    repository=self.repository, connected_snapshot=connected_snapshot,
-                    **planning,
+            if restore_plan is not None:
+                prepared = (
+                    PreparedRuntimePlan(plan=restore_plan[0], states=dict(restore_plan[1] or {}))
+                    if self.scheduler is not None else None
                 )
-                if self.scheduler is not None else None
-            )
+            else:
+                prepared = (
+                    self.scheduler.prepare_plan(
+                        repository=self.repository, connected_snapshot=connected_snapshot,
+                        **planning,
+                    )
+                    if self.scheduler is not None else None
+                )
             plan = (
-                prepared.plan
+                restore_plan[0]
+                if restore_plan is not None
+                else prepared.plan
                 if prepared is not None
                 else compile_stored_plan(
                     repository=self.repository,
