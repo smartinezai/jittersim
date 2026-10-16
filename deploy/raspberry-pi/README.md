@@ -1433,9 +1433,18 @@ changes are preserved. The policy utility also supports older-release rollback.
 
 Setup stops and prints one fixed reason word when it cannot be sure it is safe.
 `administrator-policy` means a journald file already sets storage or limits.
-Distribution defaults count too. Raspberry Pi OS may ship a volatile storage
-default. In that case set the limits yourself or ask for a decision. Nothing
-is overwritten. `unsafe-directory` or `unsafe-configuration` means an owner or
+Nothing is overwritten. One distribution default is not counted: Raspberry Pi OS
+ships `/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf` with
+exactly `Storage=volatile`. The project's file is named
+`90-jittersim-persistent.conf` so it sorts after that one (journald merges
+drop-ins by file name and the last value wins), and logs then survive a reboot
+(at most 64 MB on the card, 7 days). Earlier releases used the name
+`20-jittersim-outage.conf`, which lost to the Raspberry Pi OS file. The next
+setup or removal moves its link to the new name. A changed copy of the Raspberry
+Pi OS file, any other file in `/usr/lib`, and any file in `/etc` or `/run` that
+sets storage or limits (the same file name under `/etc` included) still counts
+as an administrator's choice. Then set the limits yourself or ask for a decision.
+`unsafe-directory` or `unsafe-configuration` means an owner or
 permission check failed. `low-space` means the card is too full. An interrupted
 setup leaves `/etc/jittersim-outage-journal` behind and later runs refuse to
 guess. Delete that folder and the link under
