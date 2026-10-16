@@ -630,20 +630,56 @@ function installRecords() {
 installRecords();
 
 
-async function confirmWorkflow(message) {
+// One accessible question for every destructive or restarting action. The one-argument form keeps
+// the generic Continue button. Options: confirmLabel (the verb on the button), danger (red button
+// for deletes), title (a heading that names the action), returnFocus (the control to focus again
+// when it is not the one that has focus now). Escape and Cancel answer false, and focus goes back
+// to the control that opened the question.
+let workflowConfirmSerial = 0;
+async function confirmWorkflow(message, options) {
+  const settings = options || {};
+  const opener = settings.returnFocus || document.activeElement;
+  const serial = ++workflowConfirmSerial;
   const dialog = document.createElement('dialog');
-  const text = textNode('p', message); text.id = 'workflow-confirm-text';
-  dialog.setAttribute('aria-labelledby', text.id);
+  dialog.className = 'workflow-confirm';
+  const text = textNode('p', message); text.id = 'workflow-confirm-text-' + serial;
+  if (settings.title) {
+    const title = textNode('h2', settings.title); title.id = 'workflow-confirm-title-' + serial;
+    dialog.setAttribute('aria-labelledby', title.id);
+    dialog.setAttribute('aria-describedby', text.id);
+    dialog.append(title);
+  } else dialog.setAttribute('aria-labelledby', text.id);
   dialog.append(text);
   const answer = await new Promise(resolve => {
-    const cancel = actionButton('Cancel', () => { dialog.close(); resolve(false); });
-    const proceed = actionButton('Continue', () => { dialog.close(); resolve(true); });
+    const choice = (label, value, className) => {
+      const button = textNode('button', label, className); button.type = 'button';
+      button.addEventListener('click', () => dialog.close(value));
+      return button;
+    };
+    const cancel = choice('Cancel', 'cancel');
+    const proceed = choice(settings.confirmLabel || 'Continue', 'confirm', settings.danger ? 'danger' : '');
     dialog.append(cancel, proceed);
-    dialog.addEventListener('cancel', () => resolve(false), {once:true});
+    // Escape closes the dialog without a return value, which counts as Cancel.
+    dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm'), {once:true});
     document.body.append(dialog); dialog.showModal(); cancel.focus();
   });
   dialog.remove();
+  restoreWorkflowFocus(opener);
   return answer;
+}
+function restoreWorkflowFocus(opener) {
+  if (!opener || opener === document.body || !opener.isConnected) return;
+  if (!opener.disabled) { opener.focus({preventScroll:true}); return; }
+  // The opener is busy while its own action runs (see actionButton). Give it focus when it is
+  // enabled again, unless the person has already moved on.
+  const watcher = new MutationObserver(() => {
+    if (opener.disabled) return;
+    watcher.disconnect();
+    const active = document.activeElement;
+    if (!active || active === document.body) opener.focus({preventScroll:true});
+  });
+  watcher.observe(opener, {attributes:true, attributeFilter:['disabled']});
+  window.setTimeout(() => watcher.disconnect(), 120000);
 }
 
 let releaseState = null;

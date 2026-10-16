@@ -31,14 +31,14 @@
   },
   "recorded": {
     "page_bytes": 764445,
-    "page_gzip6_bytes": 162661,
+    "page_gzip6_bytes": 166491,
     "page_lines": 15090,
     "markup_bytes": 111587,
     "markup_lines": 1487,
     "css_bytes": 98570,
     "css_gzip6_bytes": 20531,
     "css_lines": 1573,
-    "js_bytes": 554240,
+    "js_bytes": 567151,
     "js_lines": 12033,
     "element_ids": 548,
     "distinct_colors": 153,
@@ -56,7 +56,7 @@
     "aria_live_flip_sites": 6,
     "inline_event_handler_attributes": 0,
     "inline_style_attributes": 0,
-    "window_confirm_calls": 13
+    "window_confirm_calls": 0
   },
   "tolerance_percent": 2,
   "strict": [

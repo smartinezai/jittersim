@@ -329,7 +329,9 @@
           if (data.access_choice_required === true && path === "/api/unaffected-devices/delete" &&
               body && body.dashboard_access === undefined && tokenRevision === adminTokenRevision) {
             // Removing protection would also lock this device out. Never do that silently.
-            const choice = chooseProtectedAccess();
+            // The question can stay open for a while, so the request's own time limit ends first.
+            clearTimeout(timeout);
+            const choice = await chooseProtectedAccess();
             if (choice) return request(path, method, {...body, dashboard_access: choice}, options);
           }
           const error = new Error(applyHint);
@@ -559,12 +561,15 @@
           undo.type = "button";
           undo.textContent = move.recovery_required ? "Finish reversing move" : "Undo";
           undo.addEventListener("click", async () => {
-            if (!window.confirm("Reverse the move for " + move.name + "? Access or protection that came " +
-                "from this move will return to " + move.old_mac + " if it has not changed since then.")) return;
+            if (!await confirmFromButton(undo, "Reverse the move for " + move.name + "? Access or protection that came " +
+                "from this move will return to " + move.old_mac + " if it has not changed since then.",
+                {title: "Reverse this move?", confirmLabel: "Reverse move"})) return;
             const change = beginAddressChange();
-            if (!change) return;
+            if (!change) {
+              setButtonBusy(undo, false);
+              return;
+            }
             const {revision, generation} = change;
-            setButtonBusy(undo, true);
             try {
               await request("/api/dashboard-access/move-undo", "POST", {from_mac: move.old_mac});
               if (!addressResponseCurrent(revision, generation)) return;
@@ -624,11 +629,13 @@
       }
     });
 
-    function chooseProtectedAccess() {
-      if (window.confirm("This is the device you are using. It opens the dashboard only because it is protected. " +
-          "Keep dashboard access for it as a separate saved grant? Choose Cancel to decide about removing it.")) return "keep";
-      if (window.confirm("Stop protecting this device and remove its dashboard access? It then needs " +
-          "Allow this device or the management network to sign in again.")) return "remove";
+    async function chooseProtectedAccess() {
+      if (await confirmWorkflow("This is the device you are using. It opens the dashboard only because it is protected. " +
+          "Keep dashboard access for it as a separate saved grant? Choose Cancel to decide about removing it.",
+          {title: "Keep dashboard access?", confirmLabel: "Keep access"})) return "keep";
+      if (await confirmWorkflow("Stop protecting this device and remove its dashboard access? It then needs " +
+          "Allow this device or the management network to sign in again.",
+          {title: "Stop protecting this device?", confirmLabel: "Stop protecting", danger: true})) return "remove";
       return null;
     }
 
@@ -714,12 +721,13 @@
           remove.type = "button";
           remove.textContent = device.protected ? "Remove saved grant" : "Remove";
           remove.addEventListener("click", async () => {
-            if (!window.confirm(device.protected
+            if (!await confirmFromButton(remove, device.protected
                 ? "Remove the saved grant for " + (device.name || device.mac_address) +
                   "? It stays allowed while it is protected."
                 : "Remove dashboard access for " + (device.name || device.mac_address) +
-                  "? Removing this device returns it to sign-in.")) return;
-            setButtonBusy(remove, true);
+                  "? Removing this device returns it to sign-in.",
+                {title: device.protected ? "Remove the saved grant?" : "Remove dashboard access?",
+                  confirmLabel: device.protected ? "Remove saved grant" : "Remove access", danger: true})) return;
             try {
               await request("/api/dashboard-access/remove", "POST", {mac_address: device.mac_address});
               await checkAdminToken();
@@ -906,7 +914,8 @@
     element("close-credentials").addEventListener("click", closeCredentials);
 
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && !element("credentials-panel").hidden) {
+      // An open question owns Escape: it answers no and leaves this panel as it is.
+      if (event.key === "Escape" && !element("credentials-panel").hidden && !document.querySelector("dialog[open]")) {
         event.preventDefault();
         closeCredentials();
       }
@@ -1905,6 +1914,17 @@
       button.disabled = busy;
       if (busy) button.setAttribute("aria-busy", "true");
       else button.removeAttribute("aria-busy");
+    }
+
+    // Ask before a button's action with the one in-page dialog. The button stays busy while the
+    // question is open, so a second click cannot open another one. Cancel and Escape make it
+    // usable again and focus returns to it. After a yes the caller owns the busy state.
+    async function confirmFromButton(button, message, options) {
+      setButtonBusy(button, true);
+      let confirmed = false;
+      try { confirmed = await confirmWorkflow(message, {...options, returnFocus: button}); }
+      finally { if (!confirmed) setButtonBusy(button, false); }
+      return confirmed;
     }
 
     let toastTimer = null;
@@ -4854,9 +4874,13 @@
         showMessage("Wait for the group save to finish before deleting a group.", "working");
         return;
       }
-      if (!window.confirm("Delete " + group.name + "? Members keep their saved profiles. The group's shared data limit, schedules and running scenarios are deleted.")) return;
-      setButtonBusy(button, true);
+      if (!await confirmFromButton(button, "Delete " + group.name + "? Members keep their saved profiles. The group's shared data limit, schedules and running scenarios are deleted.",
+          {title: "Delete this group?", confirmLabel: "Delete group", danger: true})) return;
       try {
+        if (groupSubmitting) {
+          showMessage("Wait for the group save to finish before deleting a group.", "working");
+          return;
+        }
         await request("/api/groups/delete", "POST", { id: group.id });
         if (editingGroupId === group.id) stopEditing("group");
         refreshAfterSuccess("Device group deleted. Saved device profiles remain.");
@@ -7213,13 +7237,17 @@
         showMessage(text);
       };
       if (wifiChangePending) return cancelChange("Another Pi Wi-Fi change is still running.");
-      if (!window.confirm(WIFI_RESTART_NOTICE)) return cancelChange("Pi Wi-Fi change cancelled.");
+      // Held while the question is open so a second save or a name reset cannot start beside it.
       wifiChangePending = true;
       const submittedSsid = element("access-point-ssid").value;
       const submittedPassword = element("access-point-password").value;
       const submittedDraft = formDrafts.get("access-point-form");
-      const tokenRevision = adminTokenRevision;
+      let tokenRevision = adminTokenRevision;
       try {
+        if (!await confirmWorkflow(WIFI_RESTART_NOTICE, {title: "Change the Pi Wi-Fi?", confirmLabel: "Change Pi Wi-Fi"})) {
+          return cancelChange("Pi Wi-Fi change cancelled.");
+        }
+        tokenRevision = adminTokenRevision;
         // The Pi confirms first and restarts its Wi-Fi afterwards. The result is read once it is back.
         const outcome = await runWifiChange("/api/access-point", {
           ssid: submittedSsid,
@@ -7244,11 +7272,17 @@
 
     element("reset-wifi-name").addEventListener("click", async (event) => {
       if (wifiResetPending || wifiChangePending || !helperConfigured) return;
-      if (!window.confirm("Restore the default Wi-Fi name? The password and security type stay the same. " + WIFI_RESTART_NOTICE)) return;
       const button = event.currentTarget;
       const status = element("wifi-reset-status");
+      // Held while the question is open so a second click or a Wi-Fi save cannot start beside it.
       wifiResetPending = true;
-      setButtonBusy(button, true);
+      if (!await confirmFromButton(button, "Restore the default Wi-Fi name? The password and security type stay the same. " + WIFI_RESTART_NOTICE,
+          {title: "Restore the default Wi-Fi name?", confirmLabel: "Restore name"}) || !helperConfigured) {
+        wifiResetPending = false;
+        setButtonBusy(button, false);
+        button.disabled = !helperConfigured;
+        return;
+      }
       status.textContent = "Restoring the Pi Wi-Fi name...";
       const submittedDraft = formDrafts.get("access-point-form");
       const submittedSsid = element("access-point-ssid").value;
@@ -7443,7 +7477,11 @@
           if (!stillCurrent()) return;
           status.textContent = "Router Wi-Fi uses " + preview.security + " on " + preview.band + ".";
           const warning = preview.legacy ? " Older WPA is weak security. Copy it only for compatibility testing." : "";
-          if (!window.confirm("Copy " + preview.ssid + " using " + preview.security + " (" + preview.band + ")?" + warning + " The Pi will use the router's Wi-Fi password. " + (typeof WIFI_RESTART_NOTICE === "string" ? WIFI_RESTART_NOTICE : "") + " Keep a separate management connection.")) {
+          const copyConfirmed = await confirmWorkflow("Copy " + preview.ssid + " using " + preview.security + " (" + preview.band + ")?" + warning + " The Pi will use the router's Wi-Fi password. " + (typeof WIFI_RESTART_NOTICE === "string" ? WIFI_RESTART_NOTICE : "") + " Keep a separate management connection.",
+            {title: "Copy the router Wi-Fi to the Pi?", confirmLabel: "Copy Wi-Fi", returnFocus: button});
+          // The page keeps running while the question is open, so the credentials may have changed.
+          if (!stillCurrent()) return;
+          if (!copyConfirmed) {
             status.textContent = "Wi-Fi security checked. Copy cancelled.";
             showMessage(status.textContent, "success");
             return;
@@ -7572,14 +7610,8 @@
       routerAction("/api/router/sync-ap", {}, "Checking the router Wi-Fi security...", event.currentTarget);
     });
 
-    element("router-wifi-toggle").addEventListener("click", (event) => {
-      renderRouterWifi();
-      if (typeof routerWifiEnabled !== "boolean" || event.currentTarget.disabled) return;
-      const enabled = !routerWifiEnabled;
-      if (!enabled && !window.confirm("Turn off router Wi-Fi, including guest Wi-Fi? Keep the Pi connected by Ethernet. A Mac that is using the router's Wi-Fi loses its connection and needs to join the Pi's test Wi-Fi network.")) return;
-      routerAction("/api/router/wifi", {enabled, confirm_disable: !enabled},
-        enabled ? "Turning on router Wi-Fi..." : "Turning off router Wi-Fi...", event.currentTarget);
-    });
+    // The router Wi-Fi switch is read only (renderRouterWifi keeps it disabled and the Pi refuses
+    // router Wi-Fi writes), so it has no click handler and nothing to confirm.
 
     document.addEventListener("visibilitychange", () => {
       renderRouterWifi();
@@ -8213,17 +8245,19 @@
       }
     }
 
-    function deleteProfile(profile, button) {
-      if (!window.confirm("Delete the profile " + profile.name + "?")) return;
-      deleteItem("/api/profiles/delete", { id: profile.id }, "Profile deleted.", button);
+    async function deleteProfile(profile, button) {
+      if (!await confirmFromButton(button, "Delete the profile " + profile.name + "?",
+          {title: "Delete this profile?", confirmLabel: "Delete profile", danger: true})) return;
+      await deleteItem("/api/profiles/delete", { id: profile.id }, "Profile deleted.", button);
     }
 
-    function deleteDevice(device, button) {
+    async function deleteDevice(device, button) {
       const question = "Delete " + deviceTitle(device) + "? Its schedules, timers, progressions, " +
         "limits and browser service profiles are deleted too, and so is a group it is the " +
         "only member of.";
-      if (!window.confirm(question)) return;
-      deleteItem("/api/devices/delete", { id: device.id }, "Device deleted.", button);
+      if (!await confirmFromButton(button, question,
+          {title: "Delete this device?", confirmLabel: "Delete device", danger: true})) return;
+      await deleteItem("/api/devices/delete", { id: device.id }, "Device deleted.", button);
     }
 
     function formatMinute(minute) {
@@ -9212,8 +9246,8 @@
     }
 
     async function clearActivity(button) {
-      if (!window.confirm("Clear every event, including those hidden by filters? This can't be undone.")) return;
-      setButtonBusy(button, true);
+      if (!await confirmFromButton(button, "Clear every event, including those hidden by filters? This can't be undone.",
+          {title: "Clear the activity log?", confirmLabel: "Clear all events", danger: true})) return;
       try {
         await request("/api/activity/clear", "POST", {});
         element("activity-markdown").hidden = true;
@@ -9664,22 +9698,28 @@
       if (!file) return;
       const question = "Replace every profile, device, group, schedule, access rule and limit " +
         "with the settings in " + file.name + "?";
-      if (!window.confirm(question)) return;
-      showMessage("Importing settings...", "working");
-      let settings;
+      const importButton = element("import-settings-button");
+      if (!await confirmFromButton(importButton, question,
+          {title: "Replace all settings?", confirmLabel: "Replace settings", danger: true})) return;
       try {
-        settings = JSON.parse(await file.text());
-      } catch (error) {
-        showMessage(file.name + " is not a JSON settings export.", "error");
-        return;
-      }
-      try {
-        const result = await request("/api/import", "POST", settings);
-        refreshAfterSuccess(
-          result.live_applied ? "Settings imported and applied." : "Settings imported."
-        );
-      } catch (error) {
-        showMessage(error.message, "error");
+        showMessage("Importing settings...", "working");
+        let settings;
+        try {
+          settings = JSON.parse(await file.text());
+        } catch (error) {
+          showMessage(file.name + " is not a JSON settings export.", "error");
+          return;
+        }
+        try {
+          const result = await request("/api/import", "POST", settings);
+          refreshAfterSuccess(
+            result.live_applied ? "Settings imported and applied." : "Settings imported."
+          );
+        } catch (error) {
+          showMessage(error.message, "error");
+        }
+      } finally {
+        setButtonBusy(importButton, false);
       }
     });
 
