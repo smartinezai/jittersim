@@ -33,6 +33,14 @@ class EveryoneRunningFixture(DeviceApplyFixture):
         self.assertEqual(self.write("/api/general-profile", {"profile_id": "low"})[0], 200)
         self.helper.plans.clear()
 
+    def use_scheduler(self):
+        # Everyone was applied before the scheduler existed here. A real scheduler has
+        # been running since that apply, so it knows the plan that runs.
+        scheduler = super().use_scheduler()
+        if self.helper.applied_plan is not None:
+            scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan))
+        return scheduler
+
     def delays(self, plan, device_id, direction=Direction.UPLOAD):
         return {queue.impairment.delay_ms for queue in plan.queues
                 if queue.device_id == device_id and queue.direction == direction}
@@ -46,6 +54,13 @@ class EveryoneRunningFixture(DeviceApplyFixture):
 
     def exceptions(self):
         return self.repository.get_everyone_exceptions()
+
+    def mark_applied(self):
+        """A setup that saved settings directly: the network still runs what it ran."""
+
+        self.repository.update_runtime_state(
+            observed_state="applied", last_action="apply", last_result="success",
+            last_error=None, keep_everyone_exceptions=bool(self.exceptions()))
 
     def raw_rows(self):
         return frozenset(row[0] for row in self.repository._connection.execute(
@@ -108,6 +123,7 @@ class DeviceApplyBesideEveryoneTests(EveryoneRunningFixture):
     def test_service_lists_and_the_shared_profile_are_unchanged(self) -> None:
         self.repository.save_service_list(ServiceList(
             id="video", name="Video", profile_id="low", hostnames=("video.example",)))
+        self.mark_applied()
         before = compile_stored_plan(repository=self.repository)
 
         self.assertEqual(self.apply_to()[0], 200)
@@ -204,7 +220,9 @@ class EveryoneRunningRefusalTests(EveryoneRunningFixture):
 
     def test_a_network_that_never_started_is_still_refused_with_a_clear_answer(self) -> None:
         self.repository._connection.execute(
-            "UPDATE runtime_state SET last_action = NULL, exceptions_kept = 1")
+            "UPDATE runtime_state SET last_action = NULL, observed_state = 'unknown', "
+            "exceptions_kept = 1")
+        self.repository._connection.commit()
 
         status, result = self.apply_to()
 
@@ -218,6 +236,7 @@ class EveryoneRunningRefusalTests(EveryoneRunningFixture):
                 f"extra-{index:02d}", f"Extra {index}", f"192.168.50.{100 + index}", "low"))
             self.repository.add_everyone_exception(f"extra-{index:02d}")
         self.assertEqual(len(self.exceptions()), 13)
+        self.mark_applied()
         # Everyone's class and 13 exceptions fill 14 of the 15 classes. TV is not one of them.
         self.assertEqual(self.apply_to()[0], 200)
         self.assertEqual(len(self.exceptions()), 14)
@@ -241,6 +260,7 @@ class EveryoneRunningRefusalTests(EveryoneRunningFixture):
             id="video", device_id="extra-00", name="Video", domains=("video.example",),
             profile_id="low", limit_bytes=1_000))
         self.assertEqual(len(self.exceptions()), 13)
+        self.mark_applied()
         before = self.exceptions()
 
         status, result = self.apply_to()
@@ -279,6 +299,116 @@ class EveryoneRunningRefusalTests(EveryoneRunningFixture):
         # The saved state now plans Everyone for everyone, as before the failed start.
         plan = compile_stored_plan(repository=self.repository)
         self.assertEqual(plan.mark_rules, ())
+
+
+class EveryoneNotRunningTests(EveryoneRunningFixture):
+    def test_a_failed_first_start_then_a_device_apply_starts_nothing_else(self) -> None:
+        # Everyone is saved but the apply failed, so it does not run. A device Apply must
+        # not start it across the household as a side effect.
+        self.helper.fail_action = "apply"
+        with self.assertLogs("jittersim.api.server", "ERROR"):
+            self.assertEqual(self.write("/api/general-profile", {"profile_id": "low"})[0], 502)
+        self.helper.fail_action = ""
+        applied_before = len(self.helper.plans)
+
+        status, result = self.apply_to()
+
+        self.assertEqual(status, 409)
+        self.assertIn("not running", result["error"])
+        self.assertIn("Everyone is saved as daily climb manual", result["error"])
+        self.assertIsNone(self.repository.get_device(AIR_ID))
+        self.assertEqual(len(self.helper.plans), applied_before)
+        self.assertEqual(self.exceptions(), frozenset())
+
+    def test_everyone_that_is_applying_or_unknown_is_not_running(self) -> None:
+        for state in ("applying", "unknown", "error"):
+            with self.subTest(state=state):
+                self.repository._connection.execute(
+                    "UPDATE runtime_state SET observed_state = ?, exceptions_kept = 1", (state,))
+                self.repository._connection.commit()
+                before = len(self.helper.plans)
+
+                status, _ = self.apply_to()
+
+                self.assertEqual(status, 409)
+                self.assertEqual(len(self.helper.plans), before)
+                self.assertIsNone(self.repository.get_device(AIR_ID))
+
+
+class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
+    def fail_first_apply(self):
+        from jittersim.networking.helper import HelperClientError
+
+        real = self.helper.apply
+        calls = []
+
+        def apply(**arguments):
+            calls.append(arguments["plan"])
+            if len(calls) == 1:
+                raise HelperClientError("simulated helper failure")
+            return real(**arguments)
+
+        return patch.object(self.helper, "apply", side_effect=apply), calls
+
+    def test_a_failed_device_apply_puts_back_what_ran_before(self) -> None:
+        self.assertEqual(self.apply_to()[0], 200)
+        patcher, calls = self.fail_first_apply()
+
+        with patcher, self.assertLogs("jittersim.api.server", "ERROR"):
+            status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(calls), 2)
+        # The second apply is the plan from before: Everyone and the Air only.
+        self.assertEqual([rule.device_id for rule in calls[1].mark_rules], [AIR_ID])
+        self.assertEqual(calls[1].general_profile.profile_id, "low")
+        self.assertEqual([rule.device_id for rule in self.last_plan().mark_rules], [AIR_ID])
+        self.assertEqual(self.exceptions(), {AIR_ID})
+        self.assertEqual(self.repository.get_device(PHONE_ID).profile_id, "low")
+        self.assertIn("What ran before was put back", result["error"])
+        state = self.repository.get_runtime_state()
+        self.assertEqual((state.observed_state, state.last_action), ("applied", "apply"))
+
+    def test_if_putting_it_back_fails_too_the_record_still_says_what_ran(self) -> None:
+        self.assertEqual(self.apply_to()[0], 200)
+        self.helper.fail_action = "apply"
+
+        with self.assertLogs("jittersim.api.server", "ERROR"):
+            status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 502)
+        self.assertEqual(self.exceptions(), {AIR_ID})
+        self.assertIn("could not be put back", result["error"])
+        state = self.repository.get_runtime_state()
+        self.assertEqual((state.observed_state, state.last_action), ("error", "apply"))
+
+    def test_panic_between_the_failure_and_the_restore_leaves_nothing_behind(self) -> None:
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        self.helper.fail_action = "apply"
+        original = self.server._apply_configuration_locked
+        applies = []
+
+        def failing_then_panic(*arguments, **keywords):
+            result = original(*arguments, **keywords)
+            if not applies:
+                # Panic lands right after the failed apply: it stops and ends the exceptions.
+                scheduler.halt()
+                self.repository.update_runtime_state(
+                    observed_state="reset", last_action="reset", last_result="success",
+                    last_error=None)
+            applies.append(result[0])
+            return result
+
+        with patch.object(self.server, "_apply_configuration_locked",
+                          side_effect=failing_then_panic), \
+                self.assertLogs("jittersim.api.server", "ERROR"):
+            status, _ = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 502)
+        self.assertEqual(applies, [502])
+        self.assertEqual(self.raw_rows(), frozenset())
+        self.assertEqual(self.exceptions(), frozenset())
 
 
 class FailedSavedChangeTests(EveryoneRunningFixture):

@@ -142,11 +142,11 @@ Behaviour:
 | State when Apply is pressed on one device | Result |
 | --- | --- |
 | Everyone running | The device leaves Everyone. Other saved devices stay under Everyone. |
-| Everyone saved but the network never started (no earlier action) | Refused before saving (409). Choose Reset network first or stop Everyone. |
+| Everyone saved but not running: never started, a failed apply, or no applied plan with Everyone's queue | Refused before saving (409). Start would run Everyone for every device, which this Apply must not do. Choose Start, Reset network first or stop Everyone. |
 | Panic or outage stop latched, or the Pi does not say | Refused before saving (409), as after a Reset. |
 | Device protected | Refused before saving, as before. |
 | More than 15 classes with Everyone, the exceptions, their service limits and the service lists | Refused before saving (409) and the earlier exceptions stay. Service limits count even when the plan is checked without DNS. |
-| The helper fails to apply | The assignment stays saved. The device is not an exception, the earlier ones stay and the scheduler plans them again. |
+| The helper fails to apply | The assignment stays saved. The device is not an exception and the earlier ones stay. The dashboard applies what ran before at once, because a failed apply can remove the rules, and the scheduler keeps trying if that fails too. A Panic that lands meanwhile wins: the exceptions are put back only through the Panic fence. |
 
 How long the device stays beside Everyone:
 

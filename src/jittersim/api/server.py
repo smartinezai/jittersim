@@ -4786,11 +4786,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 general = self.repository.get_general_profile()
                 beside_everyone = False
                 if general is not None and not stopped:
-                    if last_action is None:
+                    if not self._everyone_runs():
+                        # An Everyone that does not run, for example after a failed Start,
+                        # would start for every device as a side effect of this Apply.
                         raise ValueError(
-                            f"Everyone is saved as {general.name} and would cover this device. "
-                            "Nothing was saved. Choose Reset network first to start only this "
-                            "device, or stop Everyone."
+                            f"Everyone is saved as {general.name} but is not running right now. "
+                            "Nothing was saved. Choose Start to run it, Reset network first to "
+                            "start only this device, or stop Everyone."
                         )
                     # Everyone runs. This device leaves it for its own profile.
                     beside_everyone = True
@@ -4857,6 +4859,24 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 return self._saved_control_response(fields, snapshot)
             return self._start_device_only(fields, snapshot, device, control_intent, previous_scope)
 
+    def _everyone_runs(self) -> bool:
+        """Whether the helper really runs the saved Everyone profile right now.
+
+        A saved Everyone that never started, or whose apply failed, does not run. A device
+        Apply must not start it for every other device as a side effect. A saved change
+        that waits for its apply leaves the state unknown, so the applied plan decides.
+        """
+
+        if self.repository.get_general_profile() is None:
+            return False
+        state = self.repository.get_runtime_state().observed_state
+        if self.scheduler is None:
+            return state == "applied"
+        if state not in ("applied", "unknown"):
+            return False
+        limits = self.scheduler.applied_queue_bandwidth_limits()
+        return limits is not None and GENERAL_QUEUE_ID in limits
+
     def _stop_state(self) -> str:
         """Whether a Panic, outage or state error keeps profiles stopped: latched, clear or unknown."""
 
@@ -4878,11 +4898,6 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
             keep_exceptions=True,
         )
-        if status != HTTPStatus.OK and self.repository.get_runtime_state().last_action in (
-            "apply", "schedule"
-        ):
-            # The device did not start, so it stays with Everyone and the earlier ones stay.
-            self.repository.restore_everyone_exceptions(previous_exceptions)
         response = json.loads(body)
         response.update(fields)
         response["live_applied"] = status == HTTPStatus.OK
@@ -4893,11 +4908,34 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 "for every other device. Start or Apply to all puts this device back on Everyone."
             )
             response["state"] = self._runtime_state_with_running()
-        else:
-            response["error"] = (
-                "The profile is saved for this device but it did not start, so the device "
-                "stays with Everyone. " + response.get("error", "")
-            ).strip()
+            return status, content_type, _json_bytes(response)
+
+        # The device did not start, so it stays with Everyone and the earlier ones stay. The
+        # check and the restore are one step under the Panic fence: a Panic that ended the
+        # exceptions is never undone.
+        def restore():
+            if self.repository.get_runtime_state().last_action not in ("apply", "schedule"):
+                return False
+            self.repository.restore_everyone_exceptions(previous_exceptions)
+            return True
+
+        accepted, restored = self._publish_apply(control_intent[0], restore)
+        note = ""
+        if status == HTTPStatus.BAD_GATEWAY and accepted and restored:
+            # A failed apply may have removed the rules that ran. Put back what ran before.
+            put_back, _, _ = self._apply_configuration_locked(
+                connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
+                keep_exceptions=True,
+            )
+            note = (
+                " What ran before was put back."
+                if put_back == HTTPStatus.OK else
+                " What ran before could not be put back, so the dashboard keeps trying."
+            )
+        response["error"] = (
+            "The profile is saved for this device but it did not start, so the device "
+            "stays with Everyone. " + response.get("error", "") + note
+        ).strip()
         return status, content_type, _json_bytes(response)
 
     def _start_device_only(self, fields, snapshot, device, control_intent, previous_scope):
