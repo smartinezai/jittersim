@@ -1,0 +1,76 @@
+{
+  "candidate": "067ffc3 (source hashes unchanged since 524ab84)",
+  "branch": "integrate/gated-batch-2026-10-09",
+  "base": "origin/main after PR 135",
+  "date": "2026-10-10",
+  "review_type": "Combined Panic batch: five review rounds by an Opus agent and by Sol (GPT-6.1), read-only, plus a final check of the revert",
+  "included_work": [
+    "PR 104 restart latch (stop flag from the guard or gateway.json)",
+    "PR 103 Panic release (open firewall first, release_incomplete, DNS flow cleanup)",
+    "PR 92 and PR 111 protected-device dashboard access and its emergency device check",
+    "helper input pool of 16 plus a reserved Panic slot, bounded busy retry, total Panic deadline (networking/deadlines.py)",
+    "upload_corruption_applied report field for the upstream-safe impairments (PR 125)"
+  ],
+  "consumer_hashes": {
+    "src/jittersim/panic_guard.py": "041cf171875d7b85d1c0664c2acff262542a3ac3c2b2e8fe51f80d2d59d6d639",
+    "src/jittersim/networking/helper.py": "a765dc97cce4015e0d1189cf92373395e5ca88c9be19b2e25c000e0975c7314b",
+    "src/jittersim/networking/access.py": "41a0f6f96cf2a20616d7ac613dd95acf2cd31085a13018ce14667dea2e11e1f3"
+  },
+  "pinned_by_tests": {
+    "src/jittersim/networking/dashboard_access.py": "tests/unit/test_dashboard_access_pin.py",
+    "src/jittersim/networking/deadlines.py": "tests/unit/test_dashboard_access_pin.py",
+    "src/jittersim/diagnostic_records.py and diagnostic_privacy.py": "tests/unit/test_panic_dispatch_dependencies.py"
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "head": "46c97eb",
+      "reviewers": "Opus, Sol A, Sol B",
+      "result": "Blockers G1 to G7 and optionals. G1 Wi-Fi join limits left active while Panic reported success. G2 a protection-only device was refused Panic right after a helper restart. G3 failed DNS connection cleanup. G4 no total Panic deadline. G5 the browser proxy reused a cached identity snapshot. G6 import and history restore removed the owner's route. G7 unbounded grant-store lock in the emergency check.",
+      "status": "all fixed in the first fix round"
+    },
+    {
+      "round": 2,
+      "head": "c2c6b2c",
+      "reviewers": "Opus (no blocker), Sol A, Sol B",
+      "result": "Narrow blockers N1 to N5 and optionals",
+      "status": "all fixed in the second fix round"
+    },
+    {
+      "round": 3,
+      "head": "34e4c83",
+      "reviewers": "Sol",
+      "result": "Three S2: rollback leaves upload corruption active, a protected device did not bypass corruption for existing connections, a full network-lock refusal used the whole Panic retry window",
+      "status": "The second and third were fixed (renderer restores no connection mark for protected devices, 8 s busy-retry window with client 35 s, dashboard 48 s and browser 50 s). The first is carried forward, see below."
+    },
+    {
+      "round": 4,
+      "head": "c0b708e",
+      "reviewers": "Sol",
+      "result": "Two S2 in the new rollback cleanup (plans larger than the answer limit, a partial cleanup passing on retry)",
+      "status": "superseded: the cleanup was removed from the batch"
+    },
+    {
+      "round": 5,
+      "head": "524ab84",
+      "reviewers": "Sol",
+      "result": "Four S2 in the rollback cleanup (removes another tool's ingress rules, hides an unfinished root command, the warning is overwritten by the final status, a kernel test missing an import). No finding outside the cleanup.",
+      "status": "The cleanup was reverted (d23afc8, ff4149a) and its open items were written to docs/carry-forward-panic-batch-2026-10-10.md"
+    },
+    {
+      "round": 6,
+      "head": "067ffc3",
+      "reviewers": "Sol (revert delta only). Opus was not used because less than 35 percent of the weekly allowance was left.",
+      "result": "The revert is complete and clean: updates.py, test_updates.py and test_update_operation_lock.py are identical to 34e4c83, no cleanup code, test class, constant or import is left, the restored helper test is correct, the three hashes match. One S2 about the carry-forward note overstating router safety (fixed in the note: damaged TCP and UDP checksum packets can leave without NAT after a rollback to a release without the drop rule, router reaction not proven). The known S2 that an older Panic cannot stop surviving upload corruption after such a rollback is restored on purpose and carried forward.",
+      "status": "note corrected, owner action (reboot after such a rollback) documented, rollback limitation carried forward"
+    }
+  ],
+  "carried_forward": "docs/carry-forward-panic-batch-2026-10-10.md",
+  "why_the_leftover_upload_intake_is_acceptable": "Only a rollback from the first upload-safe release to an older release is affected. The leftover ifb device and ingress redirect are volatile kernel state and disappear at the next reboot. The Pi's kernel still validates Ethernet and IPv4 headers, so no frame with a damaged header reaches the router. Packets with a damaged TCP or UDP checksum can leave without NAT until the reboot, and the router's reaction to them is not proven. The owner action is to reboot the Pi after such a rollback. This is a recorded residual risk that the owner accepts or rejects (docs/carry-forward-panic-batch-2026-10-10.md).",
+  "decision": "Approve this exact tuple for source admission. Release testing and live acceptance on the real Pi remain separate gates and need the owner.",
+  "not_checked": [
+    "hosted CI (billing blocked, local gate used instead)",
+    "any real Pi or router",
+    "Opus review of the final revert delta"
+  ]
+}

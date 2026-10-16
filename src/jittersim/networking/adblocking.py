@@ -53,6 +53,8 @@ BLOCKLIST_URL = "https://raw.githubusercontent.com/StevenBlack/hosts/master/host
 ADS_TABLE = "jittersim_adblocking"
 DNS_PORT = 5354
 LEASE_SECONDS = 5
+# The end of a household access transition waits at least this long for the settings lock.
+TRANSITION_END_WAIT_SECONDS = 3.0
 REFRESH_SECONDS = 1
 MAX_DOWNLOAD_SECONDS = 20
 
@@ -179,9 +181,9 @@ class AdStore:
         self.panic_guard = panic_guard or PanicGuard()
 
     @contextmanager
-    def lock(self):
+    def lock(self, wait=3.0):
         with self.lock_path.open("a") as lock:
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + wait
             while True:
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -287,8 +289,9 @@ class AdStore:
                     self._intent(True)
         return self.status()
 
-    def pause(self):
-        with self.lock():
+    def pause(self, *, wait=3.0):
+        """Stop ad blocking. Panic passes a longer `wait` for the settings lock."""
+        with self.lock(wait):
             self._intent(False)
             try:
                 state = self.read()
@@ -300,10 +303,15 @@ class AdStore:
             self._clear()
 
     @contextmanager
-    def access_transition(self):
-        """Bypass ads while household DNS rules change without losing saved switches."""
+    def access_transition(self, *, wait=3.0):
+        """Bypass ads while household DNS rules change without losing saved switches.
 
-        with self.lock():
+        `wait` bounds the wait for the settings lock on entry. Panic's release passes a
+        short one. The end waits at least TRANSITION_END_WAIT_SECONDS: it only clears
+        the suspension, and giving up there would leave ads bypassed for good (review O-c).
+        """
+
+        with self.lock(wait):
             try:
                 state = self.read()
             except (OSError, ValueError):
@@ -318,7 +326,7 @@ class AdStore:
             yield
         finally:
             if suspended:
-                with self.lock():
+                with self.lock(max(wait, TRANSITION_END_WAIT_SECONDS)):
                     try:
                         state = self.read()
                     except (OSError, ValueError):

@@ -22,11 +22,15 @@ from jittersim.config.storage import ConfigRepository, DeviceConflictError, Stor
 from jittersim.config.transfer import settings_to_payload
 from jittersim.engine.access import AccessClient, AccessPlan, access_from_payload, build_access_plan
 from jittersim.networking.access import (
+    DNS_CLEANUP_ATTEMPTS,
+    DNS_CLEANUP_BUDGET_SECONDS,
     AccessManager,
+    _removal_firewall,
     read_access,
     render_access_firewall,
     render_dns,
 )
+from jittersim.networking.commands import CommandResult
 from jittersim.networking.executor import CommandExecutionError
 from jittersim.networking.topology import Topology
 from tests.access_support import AccessExecutor
@@ -306,6 +310,171 @@ class AccessRecoveryTests(unittest.TestCase):
         guard = [c for c in self.commands_named("nft") if "access_transition" in c.stdin]
         self.assertIn("delete table inet jittersim_access_transition", guard[-1].stdin)
 
+    # Pi-only mode: every household device is on the test Wi-Fi, so a release
+    # that falls back to the old rules, or leaves the transition guard, takes
+    # the whole household offline (docs/pi-only-datapath-audit-2026-10-09.md).
+
+    def restrictive_plan(self):
+        return replace(
+            self.plan,
+            mac=MacPolicy("denylist", (), ("02:00:00:00:00:01",)),
+            options=AccessOptions(reject_wifi_joins=True),
+        )
+
+    def last_access_rules(self):
+        return [c.stdin for c in self.commands_named("nft")
+                if "jittersim_access " in c.stdin and "add chain inet jittersim_access" in c.stdin][-1]
+
+    def assert_released_and_open(self):
+        self.assertFalse(self.manager.applied.options.enabled)
+        self.assertFalse(read_access(self.directory / "policy.json").options.enabled)
+        guard = [c.stdin for c in self.commands_named("nft") if "access_transition" in c.stdin]
+        self.assertIn("delete table inet jittersim_access_transition", guard[-1])
+        self.assertNotIn("ether saddr", self.last_access_rules())
+        self.assertNotIn("redirect", self.last_access_rules())
+
+    def test_a_release_opens_forwarding_even_when_the_access_point_refuses_admission(self):
+        with patch.object(self.manager, "admission_supported", return_value=True):
+            self.manager.apply(self.restrictive_plan())
+            original = self.executor.run
+
+            def run(command):
+                if command.executable == "hostapd_cli":
+                    original(command)
+                    return CommandResult(return_code=0, stdout="FAIL\n")
+                return original(command)
+
+            # A refused admission change never stops the release, but excluded
+            # devices still cannot join, so the release is incomplete (G1).
+            with patch.object(self.executor, "run", run), self.assertLogs(level="WARNING"):
+                self.manager.disable()
+            # Internet is open again. The join limit is reported as not cleared.
+            self.assert_released_and_open()
+            self.assertIn("join", self.manager.status()["error"])
+            self.assertTrue(self.manager.release_incomplete)
+            # A retried Panic that clears the join limits completes the recovery.
+            self.manager.disable()
+        self.assertFalse(self.manager.release_incomplete)
+        self.assertIsNone(self.manager.status()["error"])
+
+    def failing_conntrack(self, failures):
+        """Fail the next `failures` conntrack calls, like a missing kernel module."""
+
+        original = self.executor.run
+        remaining = [failures]
+
+        def run(command):
+            result = original(command)
+            if command.executable == "conntrack" and remaining[0] > 0:
+                remaining[0] -= 1
+                return CommandResult(return_code=1, stderr="conntrack v1.4.7: module missing\n")
+            return result
+
+        return patch.object(self.executor, "run", run)
+
+    def resolver_commands(self):
+        return [(index, c.arguments[0]) for index, c in enumerate(self.executor.commands)
+                if c.executable == "systemctl" and "jittersim-dns.service" in c.arguments]
+
+    def test_a_release_keeps_a_permissive_resolver_while_old_dns_flows_remain(self):
+        # G3: old DNS flows still point at the resolver port. Stopping the
+        # resolver before they are cleared would leave those clients without DNS.
+        self.manager.apply(self.plan)
+        before = len(self.executor.commands)
+        with self.failing_conntrack(100), patch("jittersim.networking.access.time.sleep"), \
+                self.assertLogs(level="WARNING"):
+            self.manager.disable()
+        self.assert_released_and_open()
+        self.assertTrue(self.manager.release_incomplete)
+        self.assertIn("DNS", self.manager.status()["error"])
+        # The cleanup was retried a bounded number of times.
+        attempts = [c for c in self.executor.commands[before:] if c.executable == "conntrack"]
+        self.assertEqual(len(attempts), 2 * DNS_CLEANUP_ATTEMPTS)
+        # The resolver was restarted with the permissive configuration, never stopped.
+        actions = [action for index, action in self.resolver_commands() if index >= before]
+        self.assertEqual(actions, ["restart"])
+        disabled = replace(self.plan, options=replace(self.plan.options, enabled=False))
+        self.assertEqual((self.directory / "unbound.conf").read_text(), render_dns(disabled))
+        # A retried Panic still has the old flows to clear, even though the
+        # saved rules are already off.
+        with self.failing_conntrack(100), patch("jittersim.networking.access.time.sleep"), \
+                self.assertLogs(level="WARNING"):
+            self.manager.disable()
+        self.assertTrue(self.manager.release_incomplete)
+        # Once the old flows are cleared the resolver stops and recovery is complete.
+        before = len(self.executor.commands)
+        self.manager.disable()
+        self.assertFalse(self.manager.release_incomplete)
+        self.assertIsNone(self.manager.status()["error"])
+        self.assertEqual([action for index, action in self.resolver_commands() if index >= before],
+                         ["stop"])
+
+    def test_a_release_retries_the_dns_cleanup_before_stopping_the_resolver(self):
+        self.manager.apply(self.plan)
+        before = len(self.executor.commands)
+        with self.failing_conntrack(1), patch("jittersim.networking.access.time.sleep"):
+            self.manager.disable()
+        self.assert_released_and_open()
+        self.assertFalse(self.manager.release_incomplete)
+        self.assertIsNone(self.manager.status()["error"])
+        cleared = max(index for index, c in enumerate(self.executor.commands)
+                      if c.executable == "conntrack")
+        stops = [index for index, action in self.resolver_commands()
+                 if index >= before and action == "stop"]
+        self.assertEqual(len(stops), 1)
+        self.assertGreater(stops[0], cleared)
+
+    def test_a_failed_dns_cleanup_without_earlier_dns_rules_is_only_logged(self):
+        # Nothing was redirected to the resolver, so no DNS flow depends on it.
+        mac_only = AccessPlan(mac=MacPolicy("denylist", (), ("02:00:00:00:00:02",)))
+        self.manager.apply(mac_only)
+        with self.failing_conntrack(100), patch("jittersim.networking.access.time.sleep"), \
+                self.assertLogs(level="WARNING"):
+            self.manager.disable()
+        self.assert_released_and_open()
+        self.assertFalse(self.manager.release_incomplete)
+        self.assertIsNone(self.manager.status()["error"])
+
+    def test_the_dns_cleanup_retries_stay_within_their_budget(self):
+        self.assertLessEqual(DNS_CLEANUP_ATTEMPTS, 3)
+        self.assertLess(DNS_CLEANUP_BUDGET_SECONDS, 5)
+
+    def test_a_release_never_falls_back_to_the_previous_restrictive_rules(self):
+        self.manager.apply(self.plan)
+        original = self.executor.run
+
+        def run(command):
+            # Replacing the access table fails, removing it still works.
+            if command.executable == "nft" and "add chain inet jittersim_access dns" in (command.stdin or ""):
+                original(command)
+                raise CommandExecutionError("simulated nft failure")
+            return original(command)
+
+        with patch.object(self.executor, "run", run), self.assertLogs(level="WARNING"):
+            self.manager.disable()
+        removal = self.commands_named("nft")[-1].stdin
+        self.assertIn("delete table inet jittersim_access\n", removal)
+        self.assertIn("delete table netdev jittersim_access\n", removal)
+        self.assertIn("delete table inet jittersim_access_transition", removal)
+        self.assertFalse(self.manager.applied.options.enabled)
+        self.assertFalse(read_access(self.directory / "policy.json").options.enabled)
+        self.assertEqual(self.commands_named("systemctl", "restart")[1:], [])
+
+    def test_an_address_refresh_never_closes_the_whole_test_network(self):
+        client = AccessClient("child", "192.168.50.10", "02:00:00:00:00:02", ("global",))
+        plan = AccessPlan(blocks=(SiteBlock("global", "Global", ("example.com",), device_id="child"),),
+                          clients=(client,))
+        self.manager.apply(plan)
+        before = len(self.executor.commands)
+
+        self.manager.refresh_addresses(
+            [{"mac_address": "02:00:00:00:00:02", "ipv4_address": "192.168.50.11"}])
+
+        self.assertEqual(self.manager.applied.clients[0].address, "192.168.50.11")
+        guards = [c.stdin for c in self.executor.commands[before:]
+                  if c.executable == "nft" and "jittersim_access_transition" in c.stdin]
+        self.assertFalse(any('iifname "wlan0" drop' in stdin for stdin in guards))
+
     def test_a_failed_stop_of_the_unused_resolver_is_ignored(self):
         self.manager.apply(self.plan)
         stops = []
@@ -349,3 +518,196 @@ class AccessRecoveryTests(unittest.TestCase):
             )
             self.manager.apply(replace(plan, options=AccessOptions(enabled=False)))
             self.assertEqual((self.directory / "deny.macs").read_text().strip(), "")
+
+
+class HouseholdReleaseTests(unittest.TestCase):
+    """Panic's household release must never leave the test Wi-Fi closed."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.executor = AccessExecutor(self.directory)
+        self.manager = AccessManager(
+            executor=self.executor,
+            topology=Topology("eth0", "wlan0"),
+            directory=self.directory,
+            runtime_path=self.directory / "runtime.json",
+        )
+        admission = patch.object(self.manager, "admission_supported", return_value=True)
+        admission.start()
+        self.addCleanup(admission.stop)
+        self.restrictive = AccessPlan(
+            blocks=(SiteBlock("global", "Global", ("example.com",)),),
+            options=AccessOptions(reject_wifi_joins=True),
+            mac=MacPolicy("denylist", (), ("02:00:00:00:00:01",)),
+        )
+        self.manager.apply(self.restrictive)
+        self.mark = len(self.executor.commands)
+
+    def failing(self, predicate, result=None):
+        original = self.executor.run
+
+        def run(command):
+            if predicate(command):
+                self.executor.commands.append(command)
+                if result is not None:
+                    return result
+                raise CommandExecutionError("simulated timeout")
+            return original(command)
+
+        return patch.object(self.executor, "run", run)
+
+    def release_nft(self):
+        return [c.stdin for c in self.executor.commands[self.mark:] if c.executable == "nft"]
+
+    def assert_open(self):
+        nft = self.release_nft()
+        access = [s for s in nft if "jittersim_access " in s or "inet jittersim_access\n" in s]
+        self.assertTrue(access, "the permissive access table was never installed")
+        self.assertNotIn("ether saddr", access[-1])
+        self.assertNotIn("redirect", access[-1])
+        guard = [s for s in nft if "jittersim_access_transition" in s]
+        self.assertTrue(guard, "the transition guard was never cleared")
+        self.assertIn("delete table inet jittersim_access_transition", guard[-1])
+        # The restrictive rules are never reinstalled after the release started.
+        self.assertFalse(any("ether saddr" in s for s in nft))
+
+    def test_a_timing_out_hostapd_still_opens_the_test_network(self):
+        with self.failing(lambda c: c.executable == "hostapd_cli"), \
+                self.assertLogs("jittersim.networking.access", level="WARNING"):
+            status = self.manager.disable()
+        self.assert_open()
+        self.assertFalse(status["enabled"])
+        self.assertFalse(self.manager.applied.options.enabled)
+        self.assertFalse(read_access(self.directory / "policy.json").options.enabled)
+        self.assertIn("join limits", status["error"])
+
+    def test_a_failing_conntrack_is_only_a_warning(self):
+        from jittersim.networking.commands import CommandResult
+
+        with self.failing(lambda c: c.executable == "conntrack",
+                          CommandResult(return_code=1, stderr="conntrack v1.4: module missing")), \
+                self.assertLogs("jittersim.networking.access", level="WARNING"):
+            self.manager.disable()
+        self.assert_open()
+        self.assertFalse(self.manager.applied.options.enabled)
+
+    def test_a_failing_open_firewall_falls_back_to_removing_the_tables(self):
+        def permissive(command):
+            return (command.executable == "nft" and "jittersim_access_transition" not in command.stdin
+                    and "--check" not in command.arguments)
+
+        with self.failing(permissive), self.assertLogs("jittersim.networking.access", level="WARNING"):
+            self.manager.disable()
+        removal = self.release_nft()[-1]
+        self.assertIn("delete table inet jittersim_access\n", removal)
+        self.assertIn("delete table netdev jittersim_access\n", removal)
+        # O6: the private resolver port stays closed to everything but the test
+        # Wi-Fi and loopback, and the table that holds that rule is the last one.
+        privacy = ('add rule inet jittersim_access input iifname != "wlan0" iifname != "lo" '
+                   "meta l4proto { tcp, udp } th dport 5335 drop")
+        self.assertIn(privacy, removal)
+        lines = removal.splitlines()
+        self.assertNotIn("delete table inet jittersim_access", lines[lines.index(privacy):])
+        self.assertIn("delete table inet jittersim_access_transition", removal)
+        self.assertFalse(self.manager.applied.options.enabled)
+        self.assertFalse(read_access(self.directory / "policy.json").options.enabled)
+
+    def test_the_removal_fallback_adds_nothing_the_open_firewall_lacks(self):
+        # O6: the fallback must not fail on a rule of its own. Each add in it is
+        # also in the open (disabled) firewall that the release tries first.
+        opened = set(render_access_firewall(AccessPlan(options=AccessOptions(enabled=False)),
+                                            self.manager.topology).splitlines())
+        added = [line for line in _removal_firewall(self.manager.topology).splitlines()
+                 if line.startswith("add ") and "jittersim_access_transition" not in line]
+        self.assertTrue(added)
+        self.assertLessEqual(set(added), opened)
+        self.assertEqual(sum(line.startswith("add rule") for line in added), 1)
+
+    def test_when_nothing_loads_the_guard_clear_is_still_tried_and_nothing_rolls_back(self):
+        def access_tables(command):
+            return (command.executable == "nft" and "--check" not in command.arguments
+                    and "add chain inet jittersim_access_transition" not in command.stdin
+                    and not command.stdin.startswith("add table inet jittersim_access_transition"))
+
+        with self.failing(access_tables), self.assertLogs("jittersim.networking.access", level="ERROR"), \
+                self.assertRaises(CommandExecutionError):
+            self.manager.disable()
+        nft = self.release_nft()
+        guard = [s for s in nft if "jittersim_access_transition" in s]
+        self.assertIn("delete table inet jittersim_access_transition", guard[-1])
+        self.assertFalse(any("ether saddr" in s for s in nft))
+        self.assertEqual(self.commands_after("hostapd_cli")[0].arguments[-2:], ("macaddr_acl", "0"))
+
+    def commands_after(self, executable):
+        return [c for c in self.executor.commands[self.mark:] if c.executable == executable]
+
+    def test_a_busy_ad_blocking_lock_does_not_block_the_release(self):
+        class BusyAds:
+            def access_transition(self, **_):
+                raise ValueError("Ad-blocking settings are busy. Try again.")
+
+        self.manager.ad_blocking_store = BusyAds()
+        with self.assertLogs("jittersim.networking.access", level="WARNING"):
+            self.manager.disable()
+        self.assert_open()
+
+    def test_panic_never_waits_unbounded_for_the_access_lock(self):
+        import threading
+        import time
+
+        from jittersim.networking import access as access_module
+
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            with self.manager.lock:
+                held.set()
+                release.wait(10)
+
+        thread = threading.Thread(target=holder)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(release.set)
+        held.wait(5)
+        started = time.monotonic()
+        with patch.object(access_module, "RELEASE_LOCK_WAIT_SECONDS", 0.3, create=True), \
+                self.assertRaisesRegex(ValueError, "busy"):
+            self.manager.disable()
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_panic_never_waits_unbounded_for_the_boot_file_lock(self):
+        import fcntl
+        import time
+
+        from jittersim.networking import access as access_module
+
+        import threading
+
+        outcome = []
+
+        def release():
+            try:
+                self.manager.disable()
+                outcome.append(None)
+            except ValueError as error:
+                outcome.append(error)
+
+        with (self.directory / "lock").open("a") as other:
+            fcntl.flock(other, fcntl.LOCK_EX)
+            started = time.monotonic()
+            with patch.object(access_module, "RELEASE_LOCK_WAIT_SECONDS", 0.3, create=True):
+                thread = threading.Thread(target=release, daemon=True)
+                thread.start()
+                thread.join(5)
+                stuck = thread.is_alive()
+            if stuck:
+                fcntl.flock(other, fcntl.LOCK_UN)
+                thread.join(10)
+            self.assertFalse(stuck, "Panic waited unbounded on the boot restoration lock")
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertRegex(str(outcome[0]), "busy")
+        # Once the other writer is gone the release works.
+        self.manager.disable()
+        self.assert_open()

@@ -26,6 +26,7 @@ from unittest.mock import patch
 
 from jittersim.api.server import (
     DASHBOARD_HTML,
+    STARTUP_HELPER_BUSY_ATTEMPTS,
     WRITE_PATHS,
     ControlRequestHandler,
     ControlServer,
@@ -556,6 +557,52 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertIsNotNone(helper.applied_plan)
         self.assertEqual(self.repository.get_runtime_state().observed_state, "applied")
+
+    def test_startup_recovery_retries_a_briefly_busy_helper_a_bounded_number_of_times(self) -> None:
+        # O1: a helper still busy at boot must not silently skip the restore.
+        helper = FakeHelper()
+        calls = []
+        original = helper.set_gateway_persistence
+
+        def busy_twice(*, enabled):
+            calls.append(enabled)
+            if len(calls) <= 2:
+                raise HelperClientError("busy", reason="helper-busy")
+            return original(enabled=enabled)
+
+        helper.set_gateway_persistence = busy_twice
+        self.server.helper_client = helper
+        self.server.helper_poll_seconds = 0
+        self.repository.update_runtime_state(
+            observed_state="applied", last_action="apply", last_result="success", last_error=None
+        )
+
+        self.server.recover_saved_network_state()
+
+        self.assertEqual(len(calls), 3)
+        self.assertIsNotNone(helper.applied_plan)
+
+    def test_startup_recovery_gives_up_on_a_helper_that_stays_busy_or_fails(self) -> None:
+        for reason, expected_calls in (("helper-busy", STARTUP_HELPER_BUSY_ATTEMPTS), (None, 1)):
+            with self.subTest(reason=reason):
+                helper = FakeHelper()
+                calls = []
+
+                def refuse(*, enabled, reason=reason):
+                    calls.append(enabled)
+                    raise HelperClientError("refused", reason=reason)
+
+                helper.set_gateway_persistence = refuse
+                self.server.helper_client = helper
+                self.server.helper_poll_seconds = 0
+                self.repository.update_runtime_state(
+                    observed_state="applied", last_action="apply", last_result="success", last_error=None
+                )
+
+                self.server.recover_saved_network_state()
+
+                self.assertEqual(len(calls), expected_calls)
+                self.assertIsNone(helper.applied_plan)
 
     def test_the_activity_log_notes_a_restart_that_applies_again(self) -> None:
         self.server.helper_client = FakeHelper()
@@ -6488,6 +6535,25 @@ class ControlServerTests(unittest.TestCase):
         state = self.repository.get_runtime_state()
         self.assertEqual(state.observed_state, "error")
         self.assertEqual(state.last_error, "network helper apply failed")
+
+    def test_an_incomplete_release_during_apply_shows_the_helpers_retry_text(self) -> None:
+        # Review S1: the helper says which restriction is left and that the owner must
+        # retry before Start. The generic "network helper apply failed" hid that.
+        text = ("Wi-Fi join limits could not be cleared. Retry before choosing Start.")
+
+        class IncompleteRelease(FakeHelper):
+            def apply(self, *, plan, explicit_apply=False):
+                raise HelperClientError(text, reason="release-incomplete")
+
+        self.server.helper_client = IncompleteRelease()
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 502)
+        failure = json.loads(body)
+        self.assertEqual(failure["error"], text)
+        self.assertEqual(failure["state"]["observed_state"], "error")
+        self.assertEqual(self.repository.get_runtime_state().last_error, text)
 
     def test_state_changes_require_a_matching_bearer_token(self) -> None:
         self.assertFalse(self.server.is_authorized("Bearer anything"))
