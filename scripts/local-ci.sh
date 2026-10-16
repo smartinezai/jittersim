@@ -49,6 +49,7 @@ PI_BROWSER_MODULES=(
   wifi_recovery
   wifi_restart_reconnect
   dashboard_access
+  protected_dashboard_access
   trust_access
   address_move
   address_move_privacy

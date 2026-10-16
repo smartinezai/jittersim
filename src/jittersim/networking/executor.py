@@ -7,6 +7,7 @@ import time
 from typing import List, Optional, Protocol
 
 from .commands import Command, CommandResult
+from .deadlines import command_timeout
 
 
 class CommandExecutionError(RuntimeError):
@@ -86,7 +87,8 @@ class SubprocessExecutor:
                 input=command.stdin,
                 text=True,
                 capture_output=True,
-                timeout=command.timeout_seconds or self.timeout_seconds,
+                # A Panic deadline shortens it (see deadlines.py).
+                timeout=command_timeout(command.timeout_seconds or self.timeout_seconds),
                 check=False,
             )
         except subprocess.TimeoutExpired as error:
@@ -127,7 +129,7 @@ class SubprocessExecutor:
     def _run_sensitive(self, command: Command) -> CommandResult:
         """Keep private input and checked output inside the process boundary."""
 
-        timeout = command.timeout_seconds or self.timeout_seconds
+        timeout = command_timeout(command.timeout_seconds or self.timeout_seconds)
         deadline = time.monotonic() + timeout
         expected = command.expected_stdout.encode() if command.expected_stdout is not None else None
         process = None

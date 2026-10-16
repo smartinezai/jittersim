@@ -390,6 +390,10 @@ def main():
                     seed_demo_data(repository)
                     if os.environ.get("JITTERSIM_BROWSER_TEST_OLD_ADDRESS") == "1":
                         repository.save_unaffected_device(UnaffectedDevice(OLD_ADDRESS, "Old Mac", 1))
+                    if os.environ.get("JITTERSIM_BROWSER_TEST_PROTECTED_PEER") == "1":
+                        # The browser's own verified device is protected and has no saved grant.
+                        repository.save_unaffected_device(
+                            UnaffectedDevice("02:00:00:00:00:01", "Owner phone", 1))
                     helper_client = PatientHelperClient(socket_path=root / "wifi.sock")
                     keep_helper_busy(HelperClient(socket_path=root / "wifi.sock"))
                     scheduler = None
