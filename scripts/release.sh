@@ -38,8 +38,10 @@ Cuts release vX.Y.Z of $REPOSITORY from origin/main:
   --home DIR        where packages and evidence are kept (default: ~/jittersim-releases)
   --notes-file FILE use these release notes instead of GitHub's generated notes
   --yes             do not ask before merging and publishing (acceptance is still asked)
-  --dry-run         do every local step in a throwaway clone of this checkout's HEAD with
-                    fake checks: no push, PR, tag push, GitHub release or Pi
+  --dry-run         do every local step in a throwaway clone of this checkout's HEAD: no
+                    push, PR, tag push, GitHub release or Pi. The checks really run (point
+                    JITTERSIM_RELEASE_PYTHON at a python with the dev dependencies); set
+                    JITTERSIM_RELEASE_FAKE_CHECKS=1 for a quick run with fake ones
   -h, --help        show this help
 EOF
 }
