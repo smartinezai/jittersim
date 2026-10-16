@@ -21,6 +21,7 @@ import sys
 import unittest
 from collections import Counter, defaultdict
 from ipaddress import IPv4Address
+from pathlib import Path
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import compile_plan
@@ -453,6 +454,32 @@ class RollbackIntakeCleanupTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         remove_lab()
 
+    def test_the_rollback_cleanup_leaves_another_tools_ingress_qdisc(self) -> None:
+        import tempfile
+
+        from jittersim import updates
+
+        _in(PI, "tc", "qdisc", "add", "dev", "wlan0", "handle", "ffff:", "ingress")
+        self.addCleanup(lambda: _in(PI, "tc", "qdisc", "del", "dev", "wlan0", "ingress", check=False))
+        _in(PI, "tc", "filter", "add", "dev", "wlan0", "parent", "ffff:", "protocol", "all",
+            "pref", "2", "matchall", "action", "pass")
+        commands = []
+
+        def query(command, timeout):
+            result = _in(PI, *command, check=False)
+            if result.returncode:
+                raise updates.UpdateError(result.stderr.strip() or "command failed")
+            return result.stdout
+
+        with tempfile.TemporaryDirectory() as config, tempfile.TemporaryDirectory() as root:
+            updates.remove_upload_intake(
+                Path(config), lambda command, timeout: commands.append(command), query,
+                root=Path(root),
+                link_present=lambda name: _in(PI, "test", "-e", f"/sys/class/net/{name}",
+                                              check=False).returncode == 0)
+        self.assertEqual(commands, [])
+        self.assertIn("ingress", _in(PI, "tc", "qdisc", "show", "dev", "wlan0").stdout)
+
     def test_the_rollback_cleanup_removes_the_intake_under_a_running_marked_flow(self) -> None:
         import tempfile
 
@@ -486,13 +513,19 @@ class RollbackIntakeCleanupTests(unittest.TestCase):
                 raise updates.UpdateError(result.stderr.strip() or "command failed")
             return result.stdout
 
-        with tempfile.TemporaryDirectory() as config:
+        with tempfile.TemporaryDirectory() as config, tempfile.TemporaryDirectory() as root:
+            # The real tc answer proves that JitterSim made the intake.
+            proof = query(["tc", "-j", "filter", "show", "dev", "wlan0", "parent",
+                           updates.UPLOAD_INTAKE_HANDLE, "pref", updates.UPLOAD_INTAKE_PROOF_PREF], 10)
+            self.assertIn("connmark", proof)
+            self.assertLess(len(proof.encode()), updates.MAX_COMMAND_ANSWER)
             # An empty configuration means install.sh's eth0 and wlan0.
             # The Pi namespace has its own /sys/class/net.
             updates.remove_upload_intake(
-                Path(config), run, query,
+                Path(config), run, query, root=Path(root),
                 link_present=lambda name: _in(PI, "test", "-e", f"/sys/class/net/{name}",
                                               check=False).returncode == 0)
+            self.assertFalse((Path(root) / updates.UPLOAD_INTAKE_RECORD).exists())
         self.assertNotIn("ingress", _in(PI, "tc", "qdisc", "show", "dev", "wlan0").stdout)
         self.assertNotEqual(_in(PI, "ip", "link", "show", UPLOAD_DEVICE, check=False).returncode, 0)
         flow.wait(timeout=30)
