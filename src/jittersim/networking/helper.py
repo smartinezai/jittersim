@@ -973,7 +973,9 @@ class HelperService:
             self._household_stop_latched = True
             self._panic_recovery_failed = True
         stalled, save_errors = self._save_stop_records(deadline)
-        reset = self._handle_reset(deadline=deadline, record_state=not stalled.is_alive())
+        # The reset's bookkeeping write is skipped: the result is saved below, after the
+        # household release, so no write can hold the release.
+        reset = self._handle_reset(deadline=deadline, record_state=False)
         access_ok = False
         incomplete = None
         try:
@@ -1004,9 +1006,13 @@ class HelperService:
         with self._revision_lock:
             self._panic_recovery_failed = failed or not saved
         if not saved:
-            # Record the unconfirmed result in whichever file still accepts it.
+            # Record the unconfirmed result in whichever file still accepts it. Without
+            # a working sync, an unsynced gateway.json still holds the stop until reboot.
             self._write_panic_guard(deadline=deadline)
-            self._write_gateway_state(durable=True)
+            if not self._write_gateway_state(durable=True):
+                self._write_gateway_state()
+                # Not durable, so the state error stays reported.
+                self._gateway_state_error = True
             return {"ok": False, "error": "normal access recovery state could not be saved",
                     "experiments_stopped": reset["ok"], "access_disabled": access_ok}
         if not reset["ok"] or not access_ok:
@@ -1795,8 +1801,8 @@ class HelperService:
         self._recovery_pending = False
         self._outage_observed = False
         if record_state:
-            # Panic skips this while its stop saves stall: it would wait for the same
-            # storage before the household rules are released.
+            # Panic skips this and saves its result after the household release, so a
+            # storage stall here never holds that release.
             self._write_gateway_state()
         if blocking_failed:
             return {"ok": False, "error": "Profiles are off but ad-blocking bypass could not be confirmed. Retry Panic."}

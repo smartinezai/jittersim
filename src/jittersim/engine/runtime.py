@@ -513,8 +513,9 @@ class RuntimeScheduler:
             return
         self._forced_local.owner = False
         with self._forced_lock:
-            self._forced_owners -= 1
+            # Readers take no lock: invalidate the confirmation before the owner goes.
             self._forced_halts += 1
+            self._forced_owners -= 1
 
     def begin_recovery(self, *, cancel: bool = True, timeout: Optional[float] = None):
         """Block new work until emergency cleanup has a known saved result.

@@ -522,6 +522,30 @@ def test_a_stalled_gateway_write_does_not_hold_the_household_release(monkeypatch
                 thread.join(10)
 
 
+def test_a_stall_after_the_first_saves_does_not_hold_the_household_release(monkeypatch):
+    # Third review of PR 138: the first saves finish, then the reset's own write stalls.
+    with fault_rig(monkeypatch, "gateway", "write", stalled=True) as rig:
+        service = rig.service
+        original_reset = service._handle_reset
+
+        def reset(**options):
+            rig.plan.armed = True
+            try:
+                return original_reset(**options)
+            finally:
+                rig.plan.armed = False
+
+        monkeypatch.setattr(service, "_handle_reset", reset)
+        started = time.monotonic()
+        try:
+            service.handle_payload({"action": "normal-access"})
+            assert time.monotonic() - started < 5.0
+            assert rig.plan.hits == 0, "the reset wrote gateway.json before the release"
+            assert_effects_stopped(rig)
+        finally:
+            rig.plan.release.set()
+
+
 class LateSaveFailure(Exception):
     pass
 

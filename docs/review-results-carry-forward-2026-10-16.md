@@ -45,3 +45,15 @@ commit after a35e045.
 | R2-3 | S2 | A forced recovery had no owner, so a newer Panic could confirm while the forced one was still running, and its later failure did not restore the fence. | Fixed: forced recoveries are counted per request until they end, and each ends as one more unconfirmed halt. |
 
 S3: none.
+
+## Check of the fix commit 4da63b3
+
+Sol (GPT-6.1, high) checked 4da63b3 alone. R2-2 and the new wrapper and tuple: no findings.
+Two findings, both fixed in the next commit:
+
+- S1: R2-1 was only partly fixed. When the first saves finished and the reset's own write then
+  stalled, the household release still waited. Panic now always skips the reset's bookkeeping
+  write and saves its result after the release. When the synced save fails, an unsynced
+  `gateway.json` still records the stop (the state error stays reported).
+- S2: `end_forced_recovery()` removed the owner before it counted the halt, so a lock-free reader
+  could see a short gap. The order is now: halt first, then owner.
