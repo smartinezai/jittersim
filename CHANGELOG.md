@@ -17,3 +17,7 @@ next release takes them over.
   that just failed is not installed again.
 - `jittersim remote update now` follows an install the Pi already started when
   Install automatically is on, and `--json` prints one JSON answer.
+- The Updates page names the staged release on its install button (**Install
+  v1.1.0**), shows whether a recovery copy is kept, shows the release notes when
+  the Pi reports them, and the install confirmation names the signer and the
+  automatic restore.

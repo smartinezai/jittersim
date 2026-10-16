@@ -54,12 +54,16 @@ is unchanged.
 
 Open **Updates** and choose **Check for updates**. When a read-only GitHub
 token is saved on the Pi, the Pi downloads the newest release, checks its
-signature and stages it. Choose the install button labeled with the staged
-release name. The previous installation and its settings are backed up first.
-If the Pi's health check fails after installation, it tries to restore that
-backup by itself. The sidebar shows **Update available** while a release is
-staged. Checking every day and installing automatically are both off until you
-turn them on.
+signature and stages it. The page then names the release and who signed it,
+and **Recovery copy** says whether a copy of the previous installation is kept.
+When the Pi reports release notes for the staged release, a **Release notes**
+section shows them. Choose the install button, which names the staged release
+(for example **Install v1.1.0**). It reads **Install update** and stays off
+while nothing can be installed. The confirmation names the signer. The previous
+installation and its settings are backed up first. If the Pi's health check
+fails after installation, it tries to restore that backup by itself. The sidebar
+shows **Update available** while a release is staged. Checking every day and
+installing automatically are both off until you turn them on.
 
 On the Pi the same is one command: `sudo jittersim update` (add `--yes` to skip
 the question or `--offline` to skip GitHub). It checks GitHub, shows the new
