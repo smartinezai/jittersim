@@ -408,6 +408,8 @@ def test_stalled_state_sync_blocks_a_second_panic_with_helper_busy_then_recovers
     monkeypatch.setattr(helper_module, "PANIC_NETWORK_LOCK_WAIT_SECONDS", 0.6)
     # This test checks the helper's own busy answer, not the client's retry.
     monkeypatch.setattr(helper_module, "NORMAL_ACCESS_BUSY_RETRY_SECONDS", 0)
+    # The first Panic waits for its stop records for the whole check below.
+    monkeypatch.setattr(helper_module, "PANIC_STOP_RECORD_WAIT_SECONDS", 30)
     with fault_rig(monkeypatch, "guard", "file-sync", stalled=True) as rig:
         socket_path = rig.directory / "helper.sock"
         outcome = {}
@@ -457,6 +459,40 @@ def test_stalled_state_sync_blocks_a_second_panic_with_helper_busy_then_recovers
         assert rig.guard.read() == STOPPED
         assert leftovers(rig.directory) == []
         assert_effects_stopped(rig)
+
+
+@pytest.mark.parametrize("target", ["guard", "gateway"])
+def test_a_stalled_stop_record_sync_does_not_keep_the_rules_in_place(monkeypatch, target):
+    # Carry-forward item b: a storage stall in the first saves held the network lock
+    # before any rule was removed. Panic now removes the rules after a bounded wait.
+    monkeypatch.setattr(helper_module, "PANIC_STOP_RECORD_WAIT_SECONDS", 0.3)
+    with fault_rig(monkeypatch, target, "file-sync", stalled=True) as rig:
+        rig.plan.armed = True
+        try:
+            started = time.monotonic()
+            answer = rig.service.handle_payload({"action": "normal-access"})
+            elapsed = time.monotonic() - started
+            assert rig.plan.entered.is_set(), "the save never reached the stalled sync"
+            assert not rig.plan.release.is_set()
+            assert elapsed < 5.0
+            assert answer["ok"] is False
+            assert answer["experiments_stopped"] is True
+            assert answer["access_disabled"] is True
+            # The rules are gone while the stop record still waits for storage.
+            assert_effects_stopped(rig)
+            assert rig.service._panic_recovery_failed is True
+            assert rig.service._panic_stop_latched is True
+        finally:
+            rig.plan.armed = False
+            rig.plan.release.set()
+        for thread in threading.enumerate():
+            if thread.name == "panic-stop-records":
+                thread.join(10)
+        # A retry once storage answers again saves the confirmed stop.
+        assert rig.service.handle_payload({"action": "normal-access"})["ok"] is True
+        assert rig.guard.read() == STOPPED
+        assert flags(rig.service._gateway_status()) == flags(STOPPED)
+        assert leftovers(rig.directory) == []
 
 
 # Restart rule: the guard and gateway.json are combined so that a stop in either

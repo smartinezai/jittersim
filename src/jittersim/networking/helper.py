@@ -1,6 +1,7 @@
 """Unix-socket boundary for the privileged networking process."""
 
 import argparse
+import contextvars
 import copy
 import io
 import grp
@@ -106,6 +107,11 @@ PANIC_POST_LOCK_SECONDS = 6.0
 PANIC_NETWORK_LOCK_WAIT_SECONDS = PANIC_DEADLINE_SECONDS - PANIC_POST_LOCK_SECONDS
 PANIC_STEP_FLOOR_SECONDS = 0.5
 PANIC_RELEASE_RESERVE_SECONDS = 4.0
+# Panic saves its stop records (the Panic guard, then gateway.json) before it removes
+# any rule. A storage stall in those fsyncs must not keep the rules in place: Panic
+# waits this long for the saves (the guard's lock wait plus a margin), then removes
+# the rules anyway and answers that the stop could not be saved.
+PANIC_STOP_RECORD_WAIT_SECONDS = panic_guard_module.GUARD_LOCK_WAIT_SECONDS + 1.0
 PANIC_ANSWER_SECONDS = 26.0
 # Gateway reads run while the request holds the operation lock. They wait this long
 # for a reset that holds the network lock, then answer helper-busy, so they never
@@ -963,8 +969,7 @@ class HelperService:
             self._panic_stop_latched = True
             self._household_stop_latched = True
             self._panic_recovery_failed = True
-        self._write_panic_guard(deadline=deadline)
-        self._write_gateway_state(durable=True)
+        stalled = self._save_stop_records(deadline)
         reset = self._handle_reset(deadline=deadline)
         access_ok = False
         incomplete = None
@@ -979,6 +984,13 @@ class HelperService:
         except Exception:  # noqa: BLE001 - any failure is recorded and answered (review O4)
             LOGGER.exception("could not disable household restrictions")
         failed = not reset["ok"] or not access_ok
+        if stalled.is_alive():
+            # The first saves still wait for storage. More saves would wait behind them
+            # under the network lock, and a later one could be overtaken by the stalled
+            # one. The stalled saves record a stop that is not confirmed, which is true.
+            LOGGER.error("Panic stop records are still being saved; recovery is unconfirmed")
+            return {"ok": False, "error": "normal access recovery state could not be saved",
+                    "experiments_stopped": reset["ok"], "access_disabled": access_ok}
         saved = self._write_gateway_state(durable=True, panic_recovery_failed=failed)
         saved = self._write_panic_guard(panic_recovery_failed=failed or not saved,
                                         deadline=deadline) and saved
@@ -997,6 +1009,35 @@ class HelperService:
             return {"ok": False, "error": error,
                     "experiments_stopped": reset["ok"], "access_disabled": access_ok}
         return {"ok": True, "action": "normal-access", "experiments_stopped": True, "access_disabled": True}
+
+    def _save_stop_records(self, deadline: float) -> threading.Thread:
+        """Save the latched stop before the reset, waiting a bounded time for storage.
+
+        Returns the thread of the saves. It is still alive when they stalled.
+        """
+
+        raised: List[BaseException] = []
+
+        def save() -> None:
+            try:
+                self._write_panic_guard(deadline=deadline)
+                self._write_gateway_state(durable=True)
+            except BaseException as error:  # noqa: BLE001 - raised again by the caller
+                raised.append(error)
+
+        # The saves keep the deadline scope of this request.
+        saver = threading.Thread(target=contextvars.copy_context().run, args=(save,),
+                                 name="panic-stop-records", daemon=True)
+        saver.start()
+        saver.join(bounded_wait(PANIC_STOP_RECORD_WAIT_SECONDS, deadline,
+                                floor=PANIC_STEP_FLOOR_SECONDS))
+        if saver.is_alive():
+            LOGGER.error("Panic stop records stalled in storage; removing the rules first")
+        elif raised:
+            # The saves handle storage errors themselves. Anything else ends Panic as
+            # it did before the saves ran in their own thread.
+            raise raised[0]
+        return saver
 
     def _release_incomplete(self):
         """The error of a household release that left a restriction in force, else None."""
