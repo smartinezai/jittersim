@@ -5233,7 +5233,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 if beside_everyone and self.scheduler is not None:
                     applied, sources = self.scheduler.applied_snapshot()
                     if applied is not None:
-                        ran_before = (applied, sources)
+                        ran_before = (applied, sources, self.scheduler.roll_snapshot())
                 if self.scheduler:
                     self.scheduler.sample_before_control_change(repository=self.repository)
                 # Refuse a Panic or a changed helper intent before saving, on both paths.
@@ -5754,9 +5754,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 and self.scheduler is not None and self.repository.everyone_exception_rows()):
             applied, sources = self.scheduler.applied_snapshot()
             if applied is not None:
-                ran_before = (applied, sources)
+                ran_before = (applied, sources, self.scheduler.roll_snapshot())
         try:
             if restore_plan is not None:
+                # The randomization state of the plan that ran comes back with it.
+                if self.scheduler is not None:
+                    self.scheduler.restore_rolls(restore_plan[2])
                 prepared = (
                     PreparedRuntimePlan(plan=restore_plan[0], states=dict(restore_plan[1] or {}))
                     if self.scheduler is not None else None

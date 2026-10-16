@@ -637,6 +637,18 @@ class RuntimeScheduler:
         with self._lock:
             return self._halt_count
 
+    def roll_snapshot(self):
+        """Copy the randomization state that belongs to the plan that runs."""
+
+        with self._apply_lock:
+            return {key: replace(roll) for key, roll in self._rolls.items()}
+
+    def restore_rolls(self, snapshot) -> None:
+        """Put back the randomization state of a plan that is applied again."""
+
+        with self._apply_lock:
+            self._rolls = {key: replace(roll) for key, roll in snapshot.items()}
+
     def applied_snapshot(self):
         """Return the applied plan and its source descriptions without the apply lock."""
 

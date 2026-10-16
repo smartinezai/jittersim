@@ -587,6 +587,41 @@ class WholeScopeActionTests(EveryoneRunningFixture):
                 self.assertEqual(self.write("/api/general-profile", {"profile_id": "low"})[0], 200)
                 self.assertEqual(self.apply_to()[0], 200)
 
+    def test_a_failed_update_puts_back_the_scheduler_state_with_the_plan(self) -> None:
+        from jittersim.networking.helper import HelperClientError
+
+        for path, payload in (("/api/apply", {}), ("device", None)):
+            with self.subTest(path=path):
+                self.write("/api/reset", {})
+                self.assertEqual(self.write("/api/general-profile", {"profile_id": "low"})[0], 200)
+                scheduler = self.use_scheduler()
+                self.assertEqual(self.apply_to()[0], 200)
+                scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan))
+                before = {key: roll for key, roll in scheduler._rolls.items()}
+                self.assertIn(AIR_ID, before)
+                real = self.helper.apply
+                calls = []
+
+                def apply(**arguments):
+                    calls.append(arguments["plan"])
+                    if len(calls) == 1:
+                        raise HelperClientError("simulated helper failure")
+                    return real(**arguments)
+
+                with patch.object(self.helper, "apply", side_effect=apply), \
+                        self.assertLogs("jittersim.api.server", "ERROR"):
+                    if payload is None:
+                        status, _ = self.apply_to(PHONE, "low")
+                    else:
+                        status, _ = self.write(path, payload)
+
+                self.assertEqual(status, 502)
+                self.assertEqual(len(calls), 2)
+                # The randomization state, outage deadlines and sessions of the devices that
+                # ran are the ones that ran, so the next tick keeps the same policy.
+                for key, roll in before.items():
+                    self.assertEqual(scheduler._rolls.get(key), roll, key)
+
     def test_a_failed_start_keeps_the_running_exceptions(self) -> None:
         self.helper.fail_action = "apply"
 
