@@ -19,6 +19,7 @@ next release takes them over.
   Install automatically is on, and `--json` prints one JSON answer.
 - The dashboard asks before deleting a profile, device or group, clearing the
   activity log, importing settings, changing the Pi Wi-Fi, restoring its name,
-  reversing an address move or copying the router Wi-Fi in its own dialog
-  instead of the browser's. The dialog names the action on its button, Escape
+  reversing an address move, copying the router Wi-Fi, removing dashboard
+  access or stopping protection of the device in use in its own dialog instead
+  of the browser's. The dialog names the action on its button, Escape
   cancels it and focus returns to the control that opened it.

@@ -326,6 +326,14 @@
             typeof data.hint === "string"
             ? "Network helper apply failed. " + data.hint
             : data.error || response.statusText;
+          if (data.access_choice_required === true && path === "/api/unaffected-devices/delete" &&
+              body && body.dashboard_access === undefined && tokenRevision === adminTokenRevision) {
+            // Removing protection would also lock this device out. Never do that silently.
+            // The question can stay open for a while, so the request's own time limit ends first.
+            clearTimeout(timeout);
+            const choice = await chooseProtectedAccess();
+            if (choice) return request(path, method, {...body, dashboard_access: choice}, options);
+          }
           const error = new Error(applyHint);
           error.status = response.status;
           error.code = data.code;
@@ -621,11 +629,30 @@
       }
     });
 
+    async function chooseProtectedAccess() {
+      if (await confirmWorkflow("This is the device you are using. It opens the dashboard only because it is protected. " +
+          "Keep dashboard access for it as a separate saved grant? Choose Cancel to decide about removing it.",
+          {title: "Keep dashboard access?", confirmLabel: "Keep access"})) return "keep";
+      if (await confirmWorkflow("Stop protecting this device and remove its dashboard access? It then needs " +
+          "Allow this device or the management network to sign in again.",
+          {title: "Stop protecting this device?", confirmLabel: "Stop protecting", danger: true})) return "remove";
+      return null;
+    }
+
+    function accessReason(grants) {
+      const manual = grants.includes("manual");
+      const protection = grants.includes("protection");
+      if (manual && protection) return "Dashboard access comes from a saved grant and from protection. The admin token is still required.";
+      if (protection) return "Dashboard access comes from protecting this device. The admin token is still required.";
+      if (manual) return "Dashboard access comes from a saved grant. The admin token is still required.";
+      return "Dashboard access is available.";
+    }
+
     async function loadDashboardAccess() {
       const data = await request("/api/dashboard-access/status", "GET");
       element("allow-dashboard-device").disabled = !data.can_register;
       element("dashboard-access-status").textContent = data.allowed
-        ? "Dashboard access is available."
+        ? accessReason(Array.isArray(data.grants) ? data.grants : [])
         : data.can_register ? "Token accepted. Choose Allow this device to save dashboard access."
         : "Token accepted but this device could not be verified. Wait a few seconds and check again.";
       setDashboardUnlocked(data.allowed);
@@ -635,34 +662,82 @@
       return data;
     }
 
+    let dashboardAccessListSerial = 0;
+
     async function loadDashboardAccessList() {
       const container = element("dashboard-access-list");
+      // An older read that answers late must not replace a newer list.
+      const serial = ++dashboardAccessListSerial;
       try {
         const data = await request("/api/dashboard-access", "GET");
+        if (serial !== dashboardAccessListSerial) return;
         container.replaceChildren();
-        if (!data.devices.length) container.textContent = "No devices have saved Pi Wi-Fi access.";
+        const sync = data.protected_access || {};
+        if (sync.synced === false) {
+          const failed = document.createElement("p");
+          failed.className = "form-note";
+          failed.setAttribute("role", "alert");
+          failed.textContent = "Dashboard access for protected devices is not confirmed. " + (sync.error || "") +
+            " A device that is no longer protected may still open the dashboard until Retry succeeds. ";
+          const retry = document.createElement("button");
+          retry.type = "button";
+          retry.textContent = "Retry protected access";
+          retry.addEventListener("click", async () => {
+            setButtonBusy(retry, true);
+            try {
+              await request("/api/dashboard-access/sync-protected", "POST", {});
+              showMessage("Dashboard access for protected devices is confirmed.", "success");
+            } catch (error) { showMessage(error.message, "error"); }
+            finally { setButtonBusy(retry, false); await loadDashboardAccessList(); }
+          });
+          failed.appendChild(retry);
+          container.appendChild(failed);
+        }
+        (sync.not_eligible || []).forEach((item) => {
+          const note = document.createElement("p");
+          note.className = "form-note";
+          note.textContent = "Protected " + item.mac_address + " cannot open the dashboard: " + item.reason;
+          container.appendChild(note);
+        });
+        if (!data.devices.length) container.append("No devices have saved Pi Wi-Fi access.");
         data.devices.forEach((device) => {
           const row = document.createElement("p");
           const label = document.createElement("span");
-          label.textContent = (device.name || "Device") + " · " + device.mac_address +
+          const saved = device.manual !== false;
+          const reason = device.replaced_by ? "" : saved && device.protected ? " · saved grant and protection"
+            : device.protected ? " · from protection" : " · saved grant";
+          label.textContent = (device.name || "Device") + " · " + device.mac_address + reason +
             (device.replaced_by ? " · replaced by " + device.replaced_by : "") + " ";
+          row.appendChild(label);
+          if (!saved) {
+            const note = document.createElement("span");
+            note.className = "form-note";
+            note.textContent = "Choose Stop protecting under Protected devices to remove this access.";
+            row.appendChild(note);
+            container.appendChild(row);
+            return;
+          }
           const remove = document.createElement("button");
           remove.type = "button";
-          remove.textContent = "Remove";
+          remove.textContent = device.protected ? "Remove saved grant" : "Remove";
           remove.addEventListener("click", async () => {
-            if (!window.confirm("Remove dashboard access for " + (device.name || device.mac_address) +
-                "? Removing this device returns it to sign-in.")) return;
-            setButtonBusy(remove, true);
+            if (!await confirmFromButton(remove, device.protected
+                ? "Remove the saved grant for " + (device.name || device.mac_address) +
+                  "? It stays allowed while it is protected."
+                : "Remove dashboard access for " + (device.name || device.mac_address) +
+                  "? Removing this device returns it to sign-in.",
+                {title: device.protected ? "Remove the saved grant?" : "Remove dashboard access?",
+                  confirmLabel: device.protected ? "Remove saved grant" : "Remove access", danger: true})) return;
             try {
               await request("/api/dashboard-access/remove", "POST", {mac_address: device.mac_address});
               await checkAdminToken();
             } catch (error) { showMessage(error.message, "error"); }
             finally { setButtonBusy(remove, false); }
           });
-          row.append(label, remove);
+          row.appendChild(remove);
           container.appendChild(row);
         });
-      } catch (error) { container.textContent = error.message; }
+      } catch (error) { if (serial === dashboardAccessListSerial) container.textContent = error.message; }
     }
 
     element("allow-dashboard-device").addEventListener("click", async () => {
@@ -5826,12 +5901,16 @@
 
     const PANIC_ATTEMPTS = 3;
 
+    // The dashboard answers Panic within 48 seconds: the device check, the helper and
+    // the saves (docs/architecture.md, "Panic time budget"). Wait at least that long.
+    const PANIC_REQUEST_TIMEOUT_MS = 50000;
+
     async function requestPanic(path) {
       const revision = adminTokenRevision;
       for (let attempt = 1; ; attempt += 1) {
         if (revision !== adminTokenRevision || !adminTokenVerified) throw new Error("Panic sign-in changed. Check token again.");
         try {
-          return await request(path, "POST", {});
+          return await request(path, "POST", {}, {timeoutMs: PANIC_REQUEST_TIMEOUT_MS});
         } catch (error) {
           const again = error.timeout === true || PANIC_RETRY_STATUSES.includes(error.status);
           if (!again || attempt >= PANIC_ATTEMPTS) throw error;
