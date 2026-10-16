@@ -18,7 +18,7 @@ every device, so low runs for everyone and the Air never gets slow-test.
 | Stopped by Reset, no latch | The device profile starts for that device only. Everyone, other saved devices, Everyone else, service lists and ad-blocking stay paused. |
 | Already a device-only start | The device joins the running device-only set. Nothing else resumes. |
 | Running normally without Everyone | Unchanged: the assignment is saved and the running saved plan is applied again. |
-| Everyone running | Refused before saving (409). The answer names the running Everyone profile. See "Not covered". |
+| Everyone running | The device leaves Everyone and runs its own profile. Everyone keeps running for every other device. See "Everyone running: a device beside Everyone". |
 | Panic or outage stop latched | Refused before saving (409). Only Start or Apply to everyone may clear that stop. |
 | Device protected | Refused before saving, as before. |
 
@@ -127,10 +127,100 @@ The plan builders take an explicit `device_scope`. With a scope:
 - The Everyone picker keeps a pending pick when only the running flag changes.
   It still resets when the saved Everyone profile itself changes.
 
+## Everyone running: a device beside Everyone
+
+The owner approved this case on 4 October 2026. While Everyone runs, applying a
+profile to one connected device saves the assignment and starts it for that
+device at once. Everyone keeps running with the same profile, the same shared
+limit and the same service lists for every other device. The device runs the
+profile it would run without Everyone: its scenario, timer, progression,
+schedule, group profile or device profile, then its data-limit fallbacks. Its own
+service limits and browser service rules stay.
+
+Behaviour:
+
+| State when Apply is pressed on one device | Result |
+| --- | --- |
+| Everyone running | The device leaves Everyone. Other saved devices stay under Everyone. |
+| Everyone saved but the network never started (no earlier action) | Refused before saving (409). Choose Reset network first or stop Everyone. |
+| Panic or outage stop latched, or the Pi does not say | Refused before saving (409), as after a Reset. |
+| Device protected | Refused before saving, as before. |
+| More than 15 classes with Everyone and the exceptions | Refused before saving (409) and the earlier exceptions stay. |
+| The helper fails to apply | The assignment stays saved. The device is not an exception, the earlier ones stay and the scheduler plans them again. |
+
+How long the device stays beside Everyone:
+
+- Start, Apply to everyone, Stop for everyone, Reset network and Panic end every
+  exception. They are whole-scope actions, so every device follows them. Stop
+  for everyone then plans the saved devices as it always did, which includes the
+  device that was the exception.
+- Deleting the device removes its exception and nothing else changes. Everyone
+  covers the device again on the next apply. Nothing paused resumes.
+- A saved change, a scheduled apply and a restart of the dashboard keep the
+  exceptions. A scheduled apply never adds a device.
+- Importing settings replaces the saved devices, so every exception goes.
+- Everyone's own roll, outage and website choices are unchanged by an exception.
+
+Representation:
+
+- New table `everyone_exceptions(device_id PRIMARY KEY REFERENCES devices(id)
+  ON DELETE CASCADE)`, created with `CREATE TABLE IF NOT EXISTS`, so the
+  migration is automatic and idempotent. It is runtime state and never exported.
+- The rows count only while an Everyone profile is saved and the last action is
+  `apply` or `schedule`. Anything else reads as no exceptions.
+- Every `update_runtime_state` call ends them unless it passes
+  `keep_everyone_exceptions`. A saved change and a scheduled result keep them
+  through the new column `runtime_state.exceptions_kept`, which only the
+  statement that sets it can see.
+- The database enforces this too. A trigger deletes the rows on any write to the
+  state columns that did not set `exceptions_kept`, so an older dashboard after a
+  rollback ends them with its first state write. Choosing, changing or stopping
+  Everyone also deletes them.
+
+Rollback compatibility: an older dashboard ignores the table. On restart it
+applies Everyone for every device, which ends the exception on the network and in
+the database with its first state write. When this version comes back the rows are
+gone, so nothing starts again by surprise. The new column has a default and older
+code never reads it.
+
+Plan, helper and kernel:
+
+- Everyone keeps mark 1. Exception devices get marks from 2, then service limits,
+  browser service rules and lists. Everyone plus its exceptions share the 15
+  classes.
+- The plan codec accepts devices beside Everyone, never lets a device or service
+  rule take mark 1 and still refuses everyone-else beside Everyone. No helper
+  source changed: the helper and the applier only follow the plan they receive. A
+  helper that was not restarted after an update refuses the new plan and the
+  apply fails as any other failed apply does.
+- The rules skip the exception addresses in both directions. The upload mark,
+  the Everyone website allowlist and the Everyone outage match only other source
+  addresses. Downloads are identified for everyone except the exception
+  addresses, and IPv6 downloads are identified as before. The device's own
+  marks, counters, queues, website filters and outages are the normal device
+  rules.
+- An Everyone outage cannot name the device's IPv6 address, so while Everyone is
+  in an outage all IPv6 uploads are dropped, as they already are when a service
+  list guards the outage rule. IPv4, which JitterSim shapes, stays connected for
+  the device.
+- The browser proxy gives a device beside Everyone its own queue and website
+  rules and gives every other client Everyone's.
+- The generated rules without exceptions are the rules they always were.
+- Packet checks (`tests/kernel/test_everyone_exception.py`) cover uploads,
+  downloads, loss, an Everyone outage, a Protected client, two devices, counters
+  and a switch in both directions while pings run.
+
+Dashboard: the runtime state carries `everyone_exceptions`. The sidebar lists the
+device with its own profile and the other devices with Everyone's, and the status
+line says how many devices run their own profile. The Everyone card explains it.
+
 ## Not covered
 
-A device exception while Everyone is running needs the general-profile
-renderer to exclude the device's address from the shared mark in both
-directions. That changes kernel rules and needs Linux packet checks. Until
-then Apply is refused with a clear answer while Everyone runs, and nothing is
-saved silently.
+- A service list covers every affected client, so listed traffic of an exception
+  device uses the list's profile, as it does for any device. Listed downloads of
+  the device also add to Everyone's shared usage figure, which counts all
+  listed downloads.
+- Device speed tests, the traffic page's per-device view and per-device limits
+  other than data limits are unchanged by this change.
+- A running helper needs no new capability flag: that would change a Panic
+  consumer. A later change can add one with its own approval.

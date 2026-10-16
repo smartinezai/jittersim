@@ -420,8 +420,9 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
                 addresses = tuple(IPv4Address(value) for value in raw_addresses)
             except (TypeError, ValueError) as error:
                 raise PlanCodecError("general profile destinations are invalid") from error
-        if mark_rules or service_marks:
-            raise PlanCodecError("a general profile cannot contain individual profile rules")
+        # Devices may run their own profile beside Everyone. Mark 1 is Everyone's queue.
+        if 1 in marks_by_device.values() or 1 in service_marks.values():
+            raise PlanCodecError("mark 1 belongs to the general profile")
         general_profile = GeneralProfileRule(profile_id, addresses, data["outage_active"])
         service_marks[GENERAL_QUEUE_ID] = 1
 
@@ -687,9 +688,6 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         if isinstance(error, PlanCodecError):
             raise
         raise PlanCodecError("network policy is invalid") from error
-
-    if general_profile is not None and (website_filters or blocked_device_addresses):
-        raise PlanCodecError("a general profile cannot contain individual profile filters")
 
     try:
         raw_macs = _as_list(plan_data.get("protected_mac_addresses", []), "protected_mac_addresses")

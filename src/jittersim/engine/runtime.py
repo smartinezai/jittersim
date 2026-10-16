@@ -52,6 +52,7 @@ from .plan import (
     GENERAL_QUEUE_ID,
     SERVICE_LIST_QUEUE_PREFIX,
     EveryoneElseRule,
+    GeneralProfileRule,
     NetworkPlan,
     ServiceAssignmentRule,
     ServiceQuotaRule,
@@ -180,6 +181,12 @@ def _general_profile_runs(repository: ConfigRepository) -> bool:
 
     return (repository.get_general_profile() is not None
             and repository.get_device_start_scope() is None)
+
+
+def _only_everyone_runs(repository: ConfigRepository) -> bool:
+    """Everyone covers every client and no device runs its own profile beside it."""
+
+    return _general_profile_runs(repository) and not repository.get_everyone_exceptions()
 
 
 class RuntimeScheduler:
@@ -374,6 +381,7 @@ class RuntimeScheduler:
         now: Optional[float] = None,
         connected_snapshot: Optional[dict] = None,
         device_scope: Optional[frozenset] = None,
+        everyone_exceptions: Optional[frozenset] = None,
     ) -> NetworkPlan:
         """Preview the current runtime plan without advancing rerolls or outages.
 
@@ -390,7 +398,7 @@ class RuntimeScheduler:
             try:
                 plan, _ = self._build_plan(
                     repository=repository, now=current_time, connected_snapshot=connected_snapshot,
-                    device_scope=device_scope,
+                    device_scope=device_scope, everyone_exceptions=everyone_exceptions,
                 )
                 return plan
             finally:
@@ -404,18 +412,21 @@ class RuntimeScheduler:
         now: Optional[float] = None,
         connected_snapshot: Optional[dict] = None,
         device_scope: Optional[frozenset] = None,
+        everyone_exceptions: Optional[frozenset] = None,
     ) -> PreparedRuntimePlan:
         """Keep source descriptions paired with the exact plan being applied.
 
         `device_scope` limits the plan to a device-only start. Without it the
-        whole saved configuration runs.
+        whole saved configuration runs. While Everyone runs, `everyone_exceptions`
+        names the devices that run their own profile beside it: None reads the saved
+        ones and an empty set is the whole-scope plan.
         """
 
         current_time = time.time() if now is None else now
         with self._apply_lock:
             plan, states = self._build_plan(
                 repository=repository, now=current_time, connected_snapshot=connected_snapshot,
-                device_scope=device_scope,
+                device_scope=device_scope, everyone_exceptions=everyone_exceptions,
             )
             return PreparedRuntimePlan(
                 plan=plan, states=states, unresolved_names=self._unresolved_names
@@ -1151,6 +1162,7 @@ class RuntimeScheduler:
         random_website_outcomes: Optional[List[RandomWebsiteOutcome]] = None,
         connected_snapshot: Optional[dict] = None,
         device_scope: Optional[frozenset] = None,
+        everyone_exceptions: Optional[frozenset] = None,
     ) -> Tuple[NetworkPlan, Dict[str, TargetState]]:
         """Build the runtime plan and what applies to each target, for the activity log.
 
@@ -1166,6 +1178,7 @@ class RuntimeScheduler:
                     random_website_outcomes=random_website_outcomes,
                     connected_snapshot=connected_snapshot,
                     device_scope=device_scope,
+                    everyone_exceptions=everyone_exceptions,
                 )
             finally:
                 self._unresolved_names = tuple(lookups.timed_out)
@@ -1178,11 +1191,21 @@ class RuntimeScheduler:
         random_website_outcomes: Optional[List[RandomWebsiteOutcome]] = None,
         connected_snapshot: Optional[dict] = None,
         device_scope: Optional[frozenset] = None,
+        everyone_exceptions: Optional[frozenset] = None,
     ) -> Tuple[NetworkPlan, Dict[str, TargetState]]:
         scoped = device_scope is not None
         general_profile = None if scoped else repository.get_general_profile()
+        beside_everyone = None
         if general_profile is not None:
-            return self._build_general_plan(repository=repository, profile=general_profile, now=now)
+            if everyone_exceptions is None:
+                everyone_exceptions = repository.get_everyone_exceptions()
+            if not everyone_exceptions:
+                return self._build_general_plan(
+                    repository=repository, profile=general_profile, now=now)
+            # Everyone runs and these devices opt out of it. Only they get device rules.
+            beside_everyone = general_profile
+            device_scope = frozenset(everyone_exceptions)
+            scoped = True
         snapshot = connected_snapshot
         if snapshot is None and repository.list_unaffected_devices():
             snapshot = station_snapshot(self._helper_client)
@@ -1383,6 +1406,8 @@ class RuntimeScheduler:
             # Device ids may already use the full identifier length, so number
             # the runtime profiles instead of prefixing the device id.
             runtime_profile_id = f"runtime-{len(runtime_devices) + 1}"
+            while beside_everyone is not None and runtime_profile_id == beside_everyone.id:
+                runtime_profile_id += "-device"
             runtime_profiles[runtime_profile_id] = roll.runtime_profile
             runtime_devices.append(replace(device, profile_id=runtime_profile_id))
 
@@ -1456,7 +1481,27 @@ class RuntimeScheduler:
                 next_change_at=self._next_schedule_change(schedules, now, everyone_else=True),
             )
 
-        service_list_rules = () if scoped else self._build_service_list_rules(
+        general_rule = None
+        if beside_everyone is not None:
+            # Everyone keeps its own roll, outage and website choices, as when it runs alone.
+            general_roll = self._roll(
+                key="@general",
+                selected_profile=beside_everyone,
+                source_key=beside_everyone.id,
+                source_profiles=beside_everyone,
+                now=now,
+                generator_key=GENERAL_QUEUE_ID,
+            )
+            active_device_ids.add("@general")
+            runtime_profiles[beside_everyone.id] = general_roll.runtime_profile
+            general_rule = GeneralProfileRule(
+                profile_id=beside_everyone.id,
+                allowed_addresses=resolve_domains(
+                    domains=general_roll.runtime_profile.website_domains)
+                if general_roll.runtime_profile.website_mode == "allow_only" else None,
+                outage_active=general_roll.outage_until > now,
+            )
+        service_list_rules = () if scoped and general_rule is None else self._build_service_list_rules(
             repository=repository,
             profiles=profiles,
             now=now,
@@ -1535,6 +1580,7 @@ class RuntimeScheduler:
             service_assignment_rules=service_assignment_rules,
             service_list_rules=service_list_rules,
             everyone_else=everyone_else,
+            general_profile=general_rule,
         )
         return plan, states
 
@@ -1877,7 +1923,7 @@ class RuntimeScheduler:
     def _sample_traffic_if_needed(self, *, repository: ConfigRepository, now: float) -> None:
         """Persist a bounded DNS sample when a traffic progression is active."""
 
-        if _general_profile_runs(repository) or now - self._last_traffic_sample_at < 5:
+        if _only_everyone_runs(repository) or now - self._last_traffic_sample_at < 5:
             return
         progressions = repository.list_active_progressions(now=int(now))
         if not any(progression.mode == "traffic" for progression in progressions):
@@ -1931,17 +1977,23 @@ class RuntimeScheduler:
     def counter_device_ids(self, *, repository: ConfigRepository) -> set:
         """Use the installed rule membership when adding shared counters."""
 
-        if _general_profile_runs(repository):
+        if _only_everyone_runs(repository):
             return set()
         protected = {item.mac_address for item in repository.list_unaffected_devices()}
         allowed = {
             device.id for device in repository.list_devices() if device.mac_address not in protected
         }
+        if _general_profile_runs(repository):
+            # Beside Everyone only the devices that run their own profile have counters.
+            allowed &= repository.get_everyone_exceptions()
         payload = self._current_payload
         if isinstance(payload, dict) and isinstance(payload.get("mark_rules"), list):
             return allowed & {rule["device_id"] for rule in payload["mark_rules"]}
         snapshot = station_snapshot(self._helper_client) if protected else None
-        return {device.id for device in eligible_clients(repository, snapshot).devices}
+        return {
+            device.id for device in eligible_clients(repository, snapshot).devices
+            if device.id in allowed
+        }
 
     def _sample_quota_usage_if_needed(
         self,

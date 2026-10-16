@@ -587,6 +587,15 @@ line says `Running for N devices only` and **Start** resumes every saved
 setting. **Reset network** or **Panic** stops the devices again. After Panic or
 a router outage, choose **Start** first.
 
+While a profile for Everyone runs you can also give one device its own profile.
+Choose a profile beside the connected client and click **Apply profile**. That
+device leaves Everyone and runs the profile you chose. Everyone keeps running for
+every other device with the same profile and the same shared limit. The status
+line says how many devices run their own profile. **Start**, **Apply to all**,
+**Stop for everyone**, **Reset network** and **Panic** end this for every device,
+and deleting the device ends it for that device. Nothing paused starts as a side
+effect.
+
 The line under the button counts what is saved. The message after a start counts
 what JitterSim really started. Access rules also run after a start so a start
 with no profiles saved says that they apply. Without the Pi helper the dashboard

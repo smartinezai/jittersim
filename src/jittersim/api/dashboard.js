@@ -2366,6 +2366,8 @@
       const steady = running && (state === "applied" || state === "unknown");
       // A device-only start runs its own devices. Everyone and the rest stay paused.
       const deviceOnly = Array.isArray(input.deviceOnly) ? input.deviceOnly : [];
+      // While Everyone runs, these saved devices run their own profile beside it.
+      const everyoneExceptions = Array.isArray(input.everyoneExceptions) ? input.everyoneExceptions : [];
       const generalInEffect = !!generalProfile && steady && deviceOnly.length === 0 &&
         (generalState.active === true || state === "unknown");
       const generalName = generalProfile ? generalProfile.name || generalProfile.id : "";
@@ -2404,7 +2406,13 @@
         const affected = generalInEffect
           ? clients
               .filter((client) => !client.unaffected && client.association_verified !== false)
-              .map((client) => ({name: nameOf(client), profile: generalName}))
+              .map((client) => ({
+                name: nameOf(client),
+                profile: client.assigned_device_id &&
+                  everyoneExceptions.includes(client.assigned_device_id)
+                  ? profileNameOf(client.group_profile_id || client.assigned_profile_id)
+                  : generalName
+              }))
           : clients
               .filter((client) => !client.unaffected && client.assigned_device_id &&
                 client.assigned_effective_state !== "unverified" &&
@@ -2470,6 +2478,7 @@
         running: !!lastRuntimeState && lastRuntimeState.running === true,
         lastAction: lastRuntimeState ? lastRuntimeState.last_action : null,
         deviceOnly: lastRuntimeState ? lastRuntimeState.device_only : null,
+        everyoneExceptions: lastRuntimeState ? lastRuntimeState.everyone_exceptions : null,
         generalState: generalProfileState,
         profiles,
         clients: connectedClients,
@@ -2614,6 +2623,15 @@
           tone: "ok"
         };
       }
+      const beside = Array.isArray(options.everyoneExceptions) ? options.everyoneExceptions.length : 0;
+      if (running === true && beside > 0 && (state === "applied" || state === "unknown")) {
+        return {
+          text: "Running. Everyone covers all devices except " + beside +
+            (beside === 1 ? " device that runs its own profile" : " devices that run their own profile") +
+            ". Start puts them back on Everyone.",
+          tone: "ok"
+        };
+      }
       if (running === true) {
         if (state === "applied") {
           return {
@@ -2714,6 +2732,7 @@
         {
           lastAction: lastRuntimeState.last_action,
           deviceOnly: lastRuntimeState.device_only,
+          everyoneExceptions: lastRuntimeState.everyone_exceptions,
           helperConfigured: helperKnown ? helperConfigured : true
         }
       );
