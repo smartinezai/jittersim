@@ -385,6 +385,31 @@ keeps the new plan format available to both processes. Before rolling back to
 a version without general profiles, reset and verify normal traffic under
 the newer version so the older dashboard restores the reset state.
 
+## The Pi Wi-Fi follows the router
+
+After **Copy router Wi-Fi to Pi** worked, the Pi remembers that copy in the
+inactive NetworkManager profile `jittersim-ap-router`. Its password stays in
+NetworkManager's root-only file. At every boot `jittersim-ap.service` puts the
+copy back in place of any other profile, for example `JitterSim-Recovery`.
+Only profiles change and the router is never contacted. When the copy does not
+start after ten tries, the profile it replaced comes back for that boot and the
+next boot tries the copy again. A manual Wi-Fi change or **Reset Pi Wi-Fi name**
+forgets the copy, so the owner's own choice stays. Copy the router again after
+changing the router's Wi-Fi name or password.
+
+Use the supported commands instead of renaming the profile by hand:
+
+```sh
+F="sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow"
+$F status     # router, recovery-hold, returns-at-boot or not-remembered
+$F recovery   # JitterSim-Recovery, same password and security, held across reboots
+$F router     # end the hold and return to the router copy now
+```
+
+`recovery` writes `/etc/jittersim/wifi-recovery-hold`. A router copy or
+`router` removes it. With router Wi-Fi off, Recovery leaves household devices
+without Wi-Fi: switch router Wi-Fi on first.
+
 ## Device visibility features
 
 Traffic discovery needs `protected_dns_capture` so protected devices are

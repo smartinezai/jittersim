@@ -10,13 +10,23 @@ After=NetworkManager.service jittersim-access-boot.service jittersim-control-fir
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/etc/jittersim/runtime.env
 # Never open the test Wi-Fi without the management firewall.
 ExecStartPre=/usr/sbin/nft list table inet jittersim_control
+# The Pi Wi-Fi follows the router: when Copy router Wi-Fi to Pi saved a copy that worked,
+# it replaces any other profile (such as JitterSim-Recovery) before the start. Only
+# NetworkManager profiles change here and the router is never contacted. An operator
+# hold (wifi_follow recovery) and a manual Wi-Fi change are left alone. "-": a failure
+# here never stops the start, the Wi-Fi then starts with the profile it has.
+ExecStartPre=-/opt/jittersim/.venv/bin/python -I -m jittersim.networking.wifi_follow boot
 # NetworkManager counts as started before wlan0 may be ready and autoconnect is off,
 # so the start tries up to ten times 3 s apart. A connection that is already active
-# counts as success and is never brought up again or taken down.
-ExecStart=/bin/sh -c 'for try in 1 2 3 4 5 6 7 8 9 10; do [ "$$(/usr/bin/nmcli -g GENERAL.STATE connection show jittersim-ap 2>/dev/null)" = activated ] && exit 0; /usr/bin/nmcli --wait 10 connection up jittersim-ap && exit 0; sleep 3; done; echo "The test Wi-Fi did not start after 10 tries. Check nmcli device status." >&2; exit 1'
-TimeoutStartSec=180
+# counts as success and is never brought up again or taken down. When the router copy
+# does not start, the profile it replaced at this boot comes back for ten more tries.
+ExecStart=/bin/sh -c 'start_wifi() { for try in 1 2 3 4 5 6 7 8 9 10; do [ "$$(/usr/bin/nmcli -g GENERAL.STATE connection show jittersim-ap 2>/dev/null)" = activated ] && return 0; /usr/bin/nmcli --wait 10 connection up jittersim-ap && return 0; sleep 3; done; return 1; }; start_wifi && exit 0; /opt/jittersim/.venv/bin/python -I -m jittersim.networking.wifi_follow boot-fallback && start_wifi && exit 0; echo "The test Wi-Fi did not start after 10 tries. Check nmcli device status." >&2; exit 1'
+# The replaced profile is no longer needed once the Wi-Fi runs.
+ExecStartPost=-/opt/jittersim/.venv/bin/python -I -m jittersim.networking.wifi_follow boot-done
+TimeoutStartSec=360
 RemainAfterExit=yes
 
 [Install]

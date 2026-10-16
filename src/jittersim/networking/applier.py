@@ -1,6 +1,7 @@
 """Apply and reset operations built on the structured networking boundary."""
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from ipaddress import IPv4Address
@@ -26,7 +27,9 @@ from .renderer import (
     render_service_address_commands,
 )
 from .topology import Topology
-from .wifi import WifiController
+from .wifi import HOLD_PATH, WifiController, WifiError
+
+LOGGER = logging.getLogger(__name__)
 
 
 # Every protected device must be skippable so the two limits are one number.
@@ -86,6 +89,8 @@ class NetworkApplier:
         # The uplink root was checked once for queues of an older release.
         self._uplink_checked = False
         self._last_commands: Sequence[Command] = ()
+        # Removed by a router copy: copying the router means following it again.
+        self.wifi_hold_path = HOLD_PATH
 
     def apply(
         self,
@@ -708,11 +713,37 @@ class NetworkApplier:
             stats[interface] = decoded
         return stats
 
-    def configure_access_point(self, *, ssid: str, password: str, security: str = "WPA3") -> int:
-        """Set the local test AP credentials without touching the upstream router."""
+    def configure_access_point(self, *, ssid: str, password: str,
+                               security: Optional[str] = None) -> int:
+        """Set the local test AP credentials without touching the upstream router.
+
+        The helper passes ``security`` only for a copy of the router Wi-Fi. That copy is
+        remembered so the Pi returns to it at boot. A manual change (no ``security``, always
+        WPA3) is the owner's own choice: the router copy is forgotten first, and the change is
+        refused when that cannot be confirmed, so no later boot brings the old copy back.
+        """
 
         _validate_access_point_settings(ssid=ssid, password=password)
-        return WifiController(self._executor, self._topology.test_interface).configure(ssid, password, security)
+        controller = WifiController(self._executor, self._topology.test_interface)
+        if security is None:
+            controller.forget_router_copy()
+            return controller.configure(ssid, password, "WPA3")
+        commands_run = controller.configure(ssid, password, security)
+        try:
+            controller.remember_router_copy()
+        except WifiError:
+            LOGGER.warning("The router Wi-Fi copy works but is not remembered for the next boot.")
+        else:
+            self._end_recovery_hold()
+        return commands_run
+
+    def _end_recovery_hold(self) -> None:
+        try:
+            self.wifi_hold_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            LOGGER.warning("The Recovery hold could not be removed. The next boot keeps Recovery.")
 
     def recover_wifi(self) -> bool:
         """Restore a Wi-Fi import interrupted before its recovery copy was removed."""
@@ -721,7 +752,9 @@ class NetworkApplier:
     def reset_wifi_name(self) -> Dict[str, str]:
         """Restore the Pi Wi-Fi name without reading or changing its password."""
 
-        return WifiController(self._executor, self._topology.test_interface).reset_name()
+        controller = WifiController(self._executor, self._topology.test_interface)
+        controller.forget_router_copy()
+        return controller.reset_name()
 
     def _try_reset(self) -> Optional[CommandExecutionError]:
         try:
