@@ -215,13 +215,15 @@ class AccessPointStartTests(unittest.TestCase):
         self.assertIn("EnvironmentFile=-/etc/jittersim/runtime.env", self.unit)
         command = [line for line in self.unit.splitlines() if line.startswith("ExecStart=")][0]
         # The previous Wi-Fi is tried only after the router copy failed ten times.
-        self.assertIn(follow + " boot-fallback && start_wifi && exit 0", command)
+        self.assertIn(follow + ' boot-fallback; [ "$$?" -ne 2 ] && start_wifi && exit 0', command)
         self.assertLess(command.index("start_wifi && exit 0"), command.index("boot-fallback"))
 
     def test_a_router_copy_that_will_not_start_falls_back_to_the_previous_wifi(self):
         command = [line for line in self.unit.splitlines() if line.startswith("ExecStart=")][0]
         script = command.split("-c '", 1)[1].rsplit("'", 1)[0].replace("$$", "$")
-        for fallback_exit, expected in ((0, 0), (1, 1)):
+        # 0: the old name is back. 1: the fallback failed but a start is still tried.
+        # 2: this boot renamed nothing, so there is no second round.
+        for fallback_exit, expected in ((0, 0), (1, 0), (2, 1)):
             with self.subTest(fallback_exit=fallback_exit), tempfile.TemporaryDirectory() as directory:
                 log = Path(directory) / "calls"
                 fake = Path(directory) / "nmcli"

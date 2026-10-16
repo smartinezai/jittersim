@@ -27,7 +27,8 @@ from .renderer import (
     render_service_address_commands,
 )
 from .topology import Topology
-from .wifi import HOLD_PATH, WifiController, WifiError
+from . import wifi_follow
+from .wifi import WifiController, WifiError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -89,8 +90,9 @@ class NetworkApplier:
         # The uplink root was checked once for queues of an older release.
         self._uplink_checked = False
         self._last_commands: Sequence[Command] = ()
-        # Removed by a router copy: copying the router means following it again.
-        self.wifi_hold_path = HOLD_PATH
+        # The Pi Wi-Fi follows the router (see wifi_follow). Tests point these elsewhere.
+        self.wifi_record_path = wifi_follow.RECORD_PATH
+        self.wifi_hold_path = wifi_follow.HOLD_PATH
 
     def apply(
         self,
@@ -717,33 +719,40 @@ class NetworkApplier:
                                security: Optional[str] = None) -> int:
         """Set the local test AP credentials without touching the upstream router.
 
-        The helper passes ``security`` only for a copy of the router Wi-Fi. That copy is
-        remembered so the Pi returns to it at boot. A manual change (no ``security``, always
-        WPA3) is the owner's own choice: the router copy is forgotten first, and the change is
-        refused when that cannot be confirmed, so no later boot brings the old copy back.
+        The helper passes ``security`` only for a copy of the router Wi-Fi. Its name and
+        security are recorded so a boot returns from Recovery to them. A manual change (no
+        ``security``, always WPA3) is the owner's own choice: the record is deleted first and
+        the change is refused when that fails, so no boot renames the Wi-Fi over it.
         """
 
         _validate_access_point_settings(ssid=ssid, password=password)
         controller = WifiController(self._executor, self._topology.test_interface)
         if security is None:
-            controller.forget_router_copy()
+            self._stop_following_router()
             return controller.configure(ssid, password, "WPA3")
         commands_run = controller.configure(ssid, password, security)
         try:
-            controller.remember_router_copy()
-        except WifiError:
+            wifi_follow.remember(ssid, security, self.wifi_record_path)
+        except (OSError, ValueError):
             LOGGER.warning("The router Wi-Fi copy works but is not remembered for the next boot.")
+            try:
+                wifi_follow.forget(self.wifi_record_path)  # Never keep an older router name.
+            except OSError:
+                LOGGER.error("An older router Wi-Fi record could not be removed. "
+                             "Check /etc/jittersim/wifi-router-copy.json.")
         else:
-            self._end_recovery_hold()
+            try:
+                wifi_follow.end_hold(self.wifi_hold_path)
+            except OSError:
+                LOGGER.warning("The Recovery hold could not be removed. The next boot keeps Recovery.")
         return commands_run
 
-    def _end_recovery_hold(self) -> None:
+    def _stop_following_router(self) -> None:
         try:
-            self.wifi_hold_path.unlink()
-        except FileNotFoundError:
-            pass
+            wifi_follow.forget(self.wifi_record_path)
         except OSError:
-            LOGGER.warning("The Recovery hold could not be removed. The next boot keeps Recovery.")
+            raise WifiError("Could not stop following the router Wi-Fi. "
+                            "No Wi-Fi change was made.") from None
 
     def recover_wifi(self) -> bool:
         """Restore a Wi-Fi import interrupted before its recovery copy was removed."""
@@ -752,9 +761,8 @@ class NetworkApplier:
     def reset_wifi_name(self) -> Dict[str, str]:
         """Restore the Pi Wi-Fi name without reading or changing its password."""
 
-        controller = WifiController(self._executor, self._topology.test_interface)
-        controller.forget_router_copy()
-        return controller.reset_name()
+        self._stop_following_router()
+        return WifiController(self._executor, self._topology.test_interface).reset_name()
 
     def _try_reset(self) -> Optional[CommandExecutionError]:
         try:

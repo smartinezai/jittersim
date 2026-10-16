@@ -387,23 +387,28 @@ the newer version so the older dashboard restores the reset state.
 
 ## The Pi Wi-Fi follows the router
 
-After **Copy router Wi-Fi to Pi** worked, the Pi remembers that copy in the
-inactive NetworkManager profile `jittersim-ap-router`. Its password stays in
-NetworkManager's root-only file. At every boot `jittersim-ap.service` puts the
-copy back in place of any other profile, for example `JitterSim-Recovery`.
-Only profiles change and the router is never contacted. When the copy does not
-start after ten tries, the profile it replaced comes back for that boot and the
-next boot tries the copy again. A manual Wi-Fi change or **Reset Pi Wi-Fi name**
-forgets the copy, so the owner's own choice stays. Copy the router again after
-changing the router's Wi-Fi name or password.
+After **Copy router Wi-Fi to Pi** worked, the Pi records the router's Wi-Fi
+name and security in `/etc/jittersim/wifi-router-copy.json` (root only, no
+password). The password and security of the copy stay in the Pi Wi-Fi.
+Recovery changes only the name, so returning is a rename. At every boot
+`jittersim-ap.service` renames a saved Wi-Fi with another name, for example
+`JitterSim-Recovery`, back to the router name before the start. Only the saved
+name changes and the router is never contacted. When the router name does not
+start after ten tries, the previous name comes back for that boot and the next
+boot tries again. A manual Wi-Fi change or **Reset Pi Wi-Fi name** deletes the
+record, so the owner's own choice stays. A changed security type is left alone
+because the password may not be the router's any more. Copy the router again
+after changing the router's Wi-Fi name or password.
 
-Use the supported commands instead of renaming the profile by hand:
+Use the supported commands instead of renaming the profile by hand. They refuse
+while a dashboard Wi-Fi change is unfinished. Do not start one from the
+dashboard while they run.
 
 ```sh
 F="sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow"
-$F status     # router, recovery-hold, returns-at-boot or not-remembered
+$F status     # router, recovery-hold, returns-at-boot, not-remembered or security-differs
 $F recovery   # JitterSim-Recovery, same password and security, held across reboots
-$F router     # end the hold and return to the router copy now
+$F router     # end the hold and rename back to the router name now
 ```
 
 `recovery` writes `/etc/jittersim/wifi-recovery-hold`. A router copy or

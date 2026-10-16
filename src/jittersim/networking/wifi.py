@@ -1,6 +1,5 @@
 """Fixed-profile Wi-Fi changes with bounded recovery."""
 
-from pathlib import Path
 from typing import Dict, Mapping, Optional, Tuple
 
 from .commands import Command
@@ -10,15 +9,8 @@ from .wifi_security import PREFIX, SECURITY_PROPERTIES, saved_security, security
 DEFAULT_WIFI_NAME = "TestNet"
 AP_CONNECTION = "jittersim-ap"
 RECOVERY_CONNECTION = "jittersim-ap-recovery"
-# The last router Wi-Fi copy that started and passed the radio check on this Pi. It is an
-# inactive NetworkManager profile, so its password stays in NetworkManager's root-only file.
-ROUTER_COPY_CONNECTION = "jittersim-ap-router"
-# The profile a boot-time return to the router copy replaced, kept until the copy starts.
-BOOT_PREVIOUS_CONNECTION = "jittersim-ap-boot-previous"
-# The fallback name. It keeps the password and security of the current Wi-Fi.
+# The fallback name. Only the name changes: password and security stay.
 RECOVERY_WIFI_NAME = "JitterSim-Recovery"
-# Present while an operator keeps the Pi on Recovery. Boot then leaves the Wi-Fi alone.
-HOLD_PATH = Path("/etc/jittersim/wifi-recovery-hold")
 WPA3_SETTINGS = security_settings("WPA3")
 SSID_PROPERTY = "802-11-wireless.ssid"
 PROFILE_PROPERTIES = ("connection.type", "connection.interface-name", SSID_PROPERTY,
@@ -183,60 +175,10 @@ class WifiController:
             raise WifiError("The Pi cannot offer the requested Wi-Fi security type. Previous settings will be restored.")
         return mode
 
-    def _exists(self, connection: str) -> bool:
-        try:
-            name = self._run(("-g", "connection.id", "connection", "show", "id", connection),
-                             ignore_failure=True).strip()
-        except CommandExecutionError:
-            return False
-        return name == connection
-
     def _backup_exists(self) -> bool:
-        return self._exists(RECOVERY_CONNECTION)
-
-    def _delete(self, connection: str) -> bool:
-        """Delete an inactive helper profile. True only when it is confirmed gone."""
-        try:
-            self._run(("connection", "delete", "id", connection), ignore_failure=True)
-        except CommandExecutionError:
-            pass
-        return not self._exists(connection)
-
-    def _clone_inactive(self, source: str, target: str) -> None:
-        self._run(("connection", "clone", source, target))
-        self._run(("connection", "modify", "id", target, "connection.autoconnect", "no"))
-
-    def router_copy(self) -> Optional[Dict[str, str]]:
-        """The remembered router copy without its password, or None."""
-        if not self._exists(ROUTER_COPY_CONNECTION):
-            return None
-        return self._settings(ROUTER_COPY_CONNECTION)
-
-    def remember_router_copy(self) -> None:
-        """Keep the verified running Wi-Fi as the router copy. Never reads the password."""
-        try:
-            if not self._delete(ROUTER_COPY_CONNECTION):
-                raise WifiError("The old router copy could not be replaced.")
-            self._clone_inactive(AP_CONNECTION, ROUTER_COPY_CONNECTION)
-            if not matches(self._settings(ROUTER_COPY_CONNECTION), self._settings()):
-                raise WifiError("The remembered router copy did not match the Pi Wi-Fi.")
-        except (CommandExecutionError, WifiError):
-            # Never keep an old or partial copy that a later boot would bring back.
-            self._delete(ROUTER_COPY_CONNECTION)
-            raise WifiError("The router copy works but could not be remembered for the next boot.",
-                            reason="wifi-not-remembered") from None
-
-    def forget_router_copy(self) -> None:
-        """Stop following the router. Raises when the copy may still exist.
-
-        The Pi profile is checked first so a change that cannot run forgets nothing.
-        """
-        try:
-            self._settings()
-        except (CommandExecutionError, WifiError):
-            raise WifiError("Could not inspect the Pi Wi-Fi connection. No Wi-Fi change was made.") from None
-        if not self._delete(ROUTER_COPY_CONNECTION):
-            raise WifiError("Could not stop following the router Wi-Fi. No Wi-Fi change was made.")
+        name = self._run(("-g", "connection.id", "connection", "show", "id", RECOVERY_CONNECTION),
+                         ignore_failure=True).strip()
+        return name == RECOVERY_CONNECTION
 
     def recover_pending(self) -> bool:
         """Restore an interrupted import from a NetworkManager-owned secret copy."""
@@ -286,8 +228,28 @@ class WifiController:
     def reset_name(self) -> Dict[str, str]:
         return self.rename(DEFAULT_WIFI_NAME)
 
+    def identity(self) -> Dict[str, str]:
+        """Name and security of the saved Pi Wi-Fi. Never reads the password."""
+        try:
+            settings = self._settings()
+            return {"ssid": settings[SSID_PROPERTY], "security": saved_security(settings)}
+        except (CommandExecutionError, ValueError):
+            raise WifiError("Could not inspect the Pi Wi-Fi connection. No Wi-Fi change was made.") from None
+
+    def rename_saved(self, name: str) -> None:
+        """Change only the saved name with one NetworkManager write. The radio is not touched.
+
+        For boot, before jittersim-ap.service starts the Wi-Fi.
+        """
+        if not 1 <= len(name.encode("utf-8")) <= 32 or any(ord(char) < 32 for char in name):
+            raise WifiError("The Wi-Fi name is invalid.")
+        self._settings()
+        self._run(("connection", "modify", "id", AP_CONNECTION, SSID_PROPERTY, name))
+        if self._settings()[SSID_PROPERTY] != name:
+            raise WifiError("The saved Pi Wi-Fi name did not change.")
+
     def rename(self, name: str) -> Dict[str, str]:
-        """Change only the name of the running Wi-Fi. Password and security stay."""
+        """Change only the name of the running Wi-Fi with radio checks and rollback."""
         try:
             self.recover_pending()
             previous = self._settings()
@@ -311,122 +273,3 @@ class WifiController:
             raise WifiError("Wi-Fi name reset failed. The previous Wi-Fi settings were restored.",
                             reason="wifi-restored") from None
         return {"ssid": name, "security": mode}
-
-    def use_router_copy(self) -> Dict[str, str]:
-        """Bring back the remembered router copy now, without contacting the router.
-
-        Uses the same safety copy as a Wi-Fi change, so an interrupted switch is undone by the
-        helper at its next start and a failed one restores the previous Wi-Fi at once.
-        """
-        try:
-            self.recover_pending()
-            remembered = self.router_copy()
-            if remembered is None:
-                raise WifiError("No router copy is remembered. Use Copy router Wi-Fi to Pi once.",
-                                reason="not-remembered")
-            security = saved_security(remembered)
-            self._settings()
-            self._run(("connection", "clone", AP_CONNECTION, RECOVERY_CONNECTION))
-        except WifiError as error:
-            if error.reason == "not-remembered":
-                raise
-            raise WifiError("Could not preserve the previous Pi Wi-Fi. No Wi-Fi change was made.") from None
-        except (CommandExecutionError, ValueError):
-            raise WifiError("Could not preserve the previous Pi Wi-Fi. No Wi-Fi change was made.") from None
-        try:
-            self._run(("connection", "modify", "id", RECOVERY_CONNECTION,
-                       "connection.autoconnect", "no"))
-            self._run(("connection", "delete", "id", AP_CONNECTION))
-            self._clone_inactive(ROUTER_COPY_CONNECTION, AP_CONNECTION)
-            self._activate()
-            self._verify(remembered, security=security)
-            self._run(("connection", "delete", "id", RECOVERY_CONNECTION))
-        except (CommandExecutionError, WifiError, ValueError):
-            try:
-                self.recover_pending()
-            except (CommandExecutionError, WifiError, ValueError):
-                raise WifiError("Return to the router copy failed and recovery failed. Use management access to repair jittersim-ap.",
-                                reason="wifi-restore-failed") from None
-            raise WifiError("Return to the router copy failed. The previous Wi-Fi settings were restored.",
-                            reason="wifi-restored") from None
-        return {"ssid": remembered[SSID_PROPERTY], "security": security}
-
-    def prepare_boot(self, held: bool) -> str:
-        """Before the boot start: put the remembered router copy in place of another profile.
-
-        Only profiles change. The radio is started by jittersim-ap.service afterwards, which
-        calls boot_fallback when the router copy does not start.
-        """
-        if self._exists(RECOVERY_CONNECTION):
-            return "pending-change"  # The helper restores the interrupted change first.
-        previous_kept = self._exists(BOOT_PREVIOUS_CONNECTION)
-        if previous_kept and not self._ap_exists():
-            self._restore_boot_previous()
-            return "restored"
-        remembered = self.router_copy()
-        if remembered is None:
-            return "not-remembered"
-        if held:
-            return "recovery-hold"
-        if matches(self._settings(), remembered):
-            return "router"
-        if previous_kept and not self._delete(BOOT_PREVIOUS_CONNECTION):
-            raise WifiError("An old boot copy of the Pi Wi-Fi could not be removed.")
-        self._clone_inactive(AP_CONNECTION, BOOT_PREVIOUS_CONNECTION)
-        if not matches(self._settings(BOOT_PREVIOUS_CONNECTION), self._settings()):
-            self._delete(BOOT_PREVIOUS_CONNECTION)
-            raise WifiError("The Pi Wi-Fi could not be preserved before the boot switch.")
-        try:
-            self._run(("connection", "delete", "id", AP_CONNECTION))
-            self._clone_inactive(ROUTER_COPY_CONNECTION, AP_CONNECTION)
-            if not matches(self._settings(), remembered):
-                raise WifiError("The router copy did not match after the boot switch.")
-        except (CommandExecutionError, WifiError):
-            self._restore_boot_previous()
-            raise WifiError("The boot switch to the router copy failed. The previous Wi-Fi was kept.",
-                            reason="wifi-restored") from None
-        return "switched"
-
-    def _ap_exists(self) -> bool:
-        try:
-            self._settings()
-        except (CommandExecutionError, WifiError):
-            return False
-        return True
-
-    def _restore_boot_previous(self) -> None:
-        try:
-            self._run(("connection", "delete", "id", AP_CONNECTION), ignore_failure=True)
-        except CommandExecutionError:
-            pass
-        self._clone_inactive(BOOT_PREVIOUS_CONNECTION, AP_CONNECTION)
-        self._settings()
-        self._run(("connection", "delete", "id", BOOT_PREVIOUS_CONNECTION))
-
-    def boot_fallback(self) -> bool:
-        """Put back the profile a boot switch replaced. False when there is none."""
-        if not self._exists(BOOT_PREVIOUS_CONNECTION):
-            return False
-        try:
-            self._run(("--wait", "2", "connection", "down", "id", AP_CONNECTION),
-                      ignore_failure=True)
-        except CommandExecutionError:
-            pass
-        self._restore_boot_previous()
-        return True
-
-    def finish_boot(self) -> None:
-        """The started Wi-Fi no longer needs the profile it replaced."""
-        if self._exists(BOOT_PREVIOUS_CONNECTION) and not self._delete(BOOT_PREVIOUS_CONNECTION):
-            raise WifiError("The boot copy of the previous Pi Wi-Fi could not be removed.")
-
-
-def matches(actual: Mapping[str, str], expected: Mapping[str, str]) -> bool:
-    """Same name, interface and security. Lists of ciphers compare as sets."""
-    for name in PROFILE_PROPERTIES:
-        if name in (PREFIX + "proto", PREFIX + "pairwise", PREFIX + "group"):
-            if set(actual[name].split(",")) != set(expected[name].split(",")):
-                return False
-        elif actual[name] != expected[name]:
-            return False
-    return True
