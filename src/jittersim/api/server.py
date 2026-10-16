@@ -5205,7 +5205,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         # An Everyone that does not run, for example after a failed Start,
                         # would start for every device as a side effect of this Apply.
                         raise ValueError(
-                            f"Everyone is saved as {general.name} but is not running right now. "
+                            f"Everyone is saved as {general.name} but is not running. "
                             "Nothing was saved. Choose Start to run it, Reset network first to "
                             "start only this device, or stop Everyone."
                         )
