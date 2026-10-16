@@ -14,9 +14,11 @@ import pytest
 from jittersim.api.server import DASHBOARD_HTML
 from tests.browser import gui_stats
 
-# The only addresses outside the Pi that the page may name. Both are plain links the person
-# clicks, never requests the page makes by itself (the page's policy blocks those at runtime).
-# The w3.org address is the SVG namespace name that the speed test QR code needs. It is never fetched.
+# The only addresses outside the Pi that the page may name. The first two are plain links the
+# person clicks, never requests the page makes by itself (the page's policy blocks those at
+# runtime). The third is the SVG XML namespace identifier that every inline SVG data URI in the
+# stylesheet needs to render (the navigation icons), and the speed test QR code uses it too. It
+# names a namespace, nothing is fetched.
 ALLOWED_OFF_ORIGIN_URLS = {"http://192.168.0.1", "https://duckduckgo.com/?q=", "http://www.w3.org/2000/svg"}
 
 
@@ -26,7 +28,7 @@ def test_the_dashboard_stays_within_its_committed_static_budget():
 
 
 def test_the_page_names_only_the_allowed_off_origin_addresses():
-    found = set(re.findall(r"https?://[^\s\"'<>)`\\]+", DASHBOARD_HTML))
+    found = set(re.findall(r"https?://[^\s\"'<>)`\\%]+", DASHBOARD_HTML))
     assert found <= ALLOWED_OFF_ORIGIN_URLS, sorted(found - ALLOWED_OFF_ORIGIN_URLS)
 
 

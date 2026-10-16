@@ -1,0 +1,19 @@
+{
+  "name": "jittersim-ui-prototype",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Experiment only. Not part of the product or the wheel.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "sizes": "node build.mjs --sizes"
+  },
+  "dependencies": {
+    "preact": "^10.29.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  }
+}

@@ -313,8 +313,11 @@ the first plan (September 2026) and is historical too.
 
 ## Screenshots
 
-The README uses these five images. They show sample data. The
-[staged update screenshot](screenshots/staged-update-check.png) predates the
+The README uses these five images. They show sample data. The two overview
+images were retaken on 2026-10-09 with the refreshed look (see
+[ui-overhaul-proposal-2026-10-09.md](ui-overhaul-proposal-2026-10-09.md)). The
+other three show the earlier look. The
+[staged update screenshot](screenshots/staged-update-check.png) also predates the
 current **Updates** page wording (**Install update**).
 
 - [experience-overview-desktop.png](screenshots/experience-overview-desktop.png)
@@ -322,3 +325,5 @@ current **Updates** page wording (**Install update**).
 - [dns-failure-controls.png](screenshots/dns-failure-controls.png)
 - [router-outage-persistence.png](screenshots/router-outage-persistence.png)
 - [staged-update-check.png](screenshots/staged-update-check.png)
+
+Icons in the dashboard come from Lucide. Its licence is in [third-party-notices.md](third-party-notices.md).
