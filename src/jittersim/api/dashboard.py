@@ -19,7 +19,7 @@ def assemble_dashboard() -> str:
             raise ValueError(f"Dashboard template must contain {marker} exactly once")
     for marker, filename in _INLINE_ASSETS:
         page = page.replace(marker, (_ASSET_DIRECTORY / filename).read_text(encoding="utf-8"))
-    for filename in ("workflows.css", "access.css", "phone.css"):
+    for filename in ("workflows.css", "access.css", "phone.css", "refresh.css"):
         page = page.replace(
             "</style>",
             (_ASSET_DIRECTORY / filename).read_text(encoding="utf-8") + "</style>",
