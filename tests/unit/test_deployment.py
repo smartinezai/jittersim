@@ -181,9 +181,12 @@ class AccessPointStartTests(unittest.TestCase):
                     self.assertNotIn("jittersim-ap.service", line, f"{path.name} {name}")
         self.assertIn("RemainAfterExit=yes", self.unit)
         # The one safety check that stays: no test Wi-Fi without the management firewall.
-        self.assertIn(
-            "ExecStartPre=/usr/sbin/nft list table inet jittersim_control", self.unit
-        )
+        # It still fails the unit when the table is missing (no leading "-"). The listing
+        # itself goes to /dev/null: see test_boot_noise.py for what it does at run time.
+        pre = [line for line in self.unit.splitlines() if line.startswith("ExecStartPre=")]
+        self.assertEqual(len(pre), 1)
+        self.assertIn("/usr/sbin/nft list table inet jittersim_control >/dev/null", pre[0])
+        self.assertFalse(pre[0].startswith("ExecStartPre=-"))
 
     def test_the_start_retries_a_bounded_number_of_times_and_never_takes_the_wifi_down(self):
         # NetworkManager counts as started before wlan0 may be ready. Autoconnect is off

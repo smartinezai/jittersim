@@ -10,8 +10,10 @@ After=NetworkManager.service jittersim-access-boot.service jittersim-control-fir
 
 [Service]
 Type=oneshot
-# Never open the test Wi-Fi without the management firewall.
-ExecStartPre=/usr/sbin/nft list table inet jittersim_control
+# Never open the test Wi-Fi without the management firewall. The listing is only the
+# existence check, so it is not sent to the journal (it was about 27 lines per start).
+# A missing table still fails the unit, with nft's own error, and one line says it is there.
+ExecStartPre=/bin/sh -c '/usr/sbin/nft list table inet jittersim_control >/dev/null && echo "Management firewall table inet jittersim_control is loaded."'
 # NetworkManager counts as started before wlan0 may be ready and autoconnect is off,
 # so the start tries up to ten times 3 s apart. A connection that is already active
 # counts as success and is never brought up again or taken down.
