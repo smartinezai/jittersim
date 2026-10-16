@@ -240,6 +240,13 @@ check_and_record() {
         python="$state/venv/bin/python"
     fi
     : >"$record_dir/checks.tsv"
+    # The checks use this python without activating its environment. Some tests start "python3"
+    # themselves and need the package importable there, so the environment's bin folder goes
+    # first on PATH, as scripts/local-ci.sh does.
+    check_path=$PATH
+    case ${python:-} in
+        */*) check_path="$(CDPATH='' cd -- "$(dirname -- "$python")" && pwd):$PATH" ;;
+    esac
     run_check() {
         name=$1
         shift
@@ -249,7 +256,7 @@ check_and_record() {
         if [ "$dry_run" = yes ] && [ "${JITTERSIM_RELEASE_FAKE_CHECKS:-}" = 1 ]; then
             printf 'fake check for the dry run: %s\n' "$*" >"$log"
         else
-            (cd "$src" && "$@") >"$log" 2>&1 || status=$?
+            (cd "$src" && PATH=$check_path && export PATH && "$@") >"$log" 2>&1 || status=$?
         fi
         printf '%s\t%s\t%s\t%s\n' "$name" "$*" "$status" "$(shasum -a 256 "$log" | cut -d ' ' -f 1)" \
             >>"$record_dir/checks.tsv"

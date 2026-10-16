@@ -346,6 +346,9 @@ def run_release(source, key, tmp_path, *args, env=None):
     environment = dict(os.environ, PATH=str(fake) + os.pathsep + os.environ["PATH"], HOME=str(tmp_path / "home"),
                        JITTERSIM_RELEASE_FAKE_CHECKS="1")
     environment.pop("SSH_AUTH_SOCK", None)
+    # The owner's own settings for a real run must not leak into these runs.
+    for name in ("JITTERSIM_RELEASE_PYTHON", "JITTERSIM_RELEASE_LOCAL_CI"):
+        environment.pop(name, None)
     environment.update(env or {})
     return subprocess.run(["sh", str(source / "scripts/release.sh"), "--dry-run", "--home", str(tmp_path / "releases"),
                            "--key", str(key), *args], cwd=source, env=environment, capture_output=True,
@@ -474,6 +477,24 @@ def test_release_script_asks_for_an_expired_key_before_it_writes_a_half_record(s
     assert "ssh-agent" in result.stderr, result.stdout + result.stderr
     evidence = tmp_path / "releases/0.3.0/evidence"
     assert not (evidence / "local-verification.json").exists()
+
+
+def test_checks_run_with_the_check_python_first_on_the_path(source, key, tmp_path):
+    """Some tests start 'python3' themselves and expect the package to be importable. In a real run
+    the checks use a virtual environment's python that nobody activated, so 'python3' was another
+    interpreter and test_local_ca failed in every real release. local-ci.sh puts the environment's
+    bin folder first on PATH. The release script does the same."""
+    bin_folder = tmp_path / "check-env" / "bin"
+    bin_folder.mkdir(parents=True)
+    seen = tmp_path / "seen-path"
+    tool = bin_folder / "fake-python"
+    tool.write_text(f"#!/bin/sh\nprintf '%s' \"$PATH\" > {seen}\nexit 0\n")
+    tool.chmod(0o755)
+    result = run_release(source, key, tmp_path, "0.3.0",
+                         env={"JITTERSIM_RELEASE_PYTHON": str(tool), "JITTERSIM_RELEASE_FAKE_CHECKS": "0",
+                              "JITTERSIM_RELEASE_LOCAL_CI": "none"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert seen.read_text().split(os.pathsep)[0] == str(bin_folder)
 
 
 def test_release_script_refuses_an_old_or_malformed_version(source, key, tmp_path):
