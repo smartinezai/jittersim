@@ -253,10 +253,15 @@ How it works:
   service uses the system Python and the `python3-dbus` package that the
   installer adds.
 - Avahi's own publishing is switched off (`publish-addresses=no`,
-  `publish-workstation=no`, `publish-hinfo=no`, `publish-domain=no`,
-  `disable-user-service-publishing=yes`, no reflector, and the SSH, SFTP and
-  other `*.service` files in `/etc/avahi/services` are renamed to
-  `*.jittersim-disabled`) because Avahi cannot limit these to one network.
+  `publish-workstation=no`, `publish-hinfo=no`, `publish-domain=no`, no
+  reflector, and the SSH, SFTP and other `*.service` files in
+  `/etc/avahi/services` are renamed to `*.jittersim-disabled`) because Avahi
+  cannot limit these to one network. `disable-user-service-publishing` stays
+  `no`: with `yes` Avahi refuses every record from every D-Bus client, the name
+  service included, and the name is never announced. Releases before 16 October
+  2026 wrote `yes`. Installing or updating corrects it and restarts Avahi. The
+  name service reports "Avahi is set to refuse records from other programs"
+  until then.
   The Pi's host name is not changed. Fresh settings announce no host or product
   aliases. Existing `.local` aliases required by the retained certificate stay
   reachable on Ethernet only. Nothing but the one neutral name is announced on

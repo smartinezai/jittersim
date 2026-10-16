@@ -7,9 +7,12 @@ else about the Pi.
 """
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from jittersim import mdnsname
 from jittersim.mdnsname import (
@@ -19,6 +22,7 @@ from jittersim.mdnsname import (
     REGISTERING,
     AvahiCollision,
     AvahiError,
+    AvahiNotPermitted,
     Publisher,
 )
 
@@ -76,7 +80,8 @@ class AvahiConfigTests(unittest.TestCase):
             ("publish-addresses", "no"),
             ("publish-hinfo", "no"),
             ("publish-domain", "no"),
-            ("disable-user-service-publishing", "yes"),
+            # "yes" would make Avahi refuse every record the publisher adds over D-Bus.
+            ("disable-user-service-publishing", "no"),
             ("disable-publishing", "no"),
         ):
             self.assertEqual(values[("publish", key)], wanted, key)
@@ -108,6 +113,20 @@ class AvahiConfigTests(unittest.TestCase):
         self.assertEqual(values[("publish", "disable-publishing")], "no")
         self.assertEqual(values[("publish", "publish-workstation")], "no")
         self.assertEqual(values[("reflector", "enable-reflector")], "no")
+
+    def test_a_setting_written_by_an_earlier_release_is_corrected(self) -> None:
+        # Earlier releases wrote "yes". Avahi then answers every EntryGroupNew from
+        # the publisher with NotPermitted, so nothing was ever announced.
+        earlier = DEBIAN_CONFIG.replace(
+            "#disable-user-service-publishing=no",
+            "# Set by JitterSim. The original file is avahi-daemon.conf.jittersim-original\n"
+            "disable-user-service-publishing=yes")
+
+        values = active(mdnsname.render_avahi_config(earlier))
+
+        self.assertEqual(values[("publish", "disable-user-service-publishing")], "no")
+        self.assertEqual(mdnsname.render_avahi_config(mdnsname.render_avahi_config(earlier)),
+                         mdnsname.render_avahi_config(earlier))
 
     def test_missing_sections_are_added(self) -> None:
         values = active(mdnsname.render_avahi_config("[server]\nuse-ipv4=yes\n"))
@@ -160,6 +179,20 @@ class AvahiFilesTests(unittest.TestCase):
 
         self.assertFalse(self.configure(interfaces=("eth0", "wlan0")))
         self.assertEqual(backup.read_text(), DEBIAN_CONFIG)
+
+    def test_a_configured_avahi_with_the_old_setting_is_fixed_and_the_backup_kept(self) -> None:
+        self.configure(interfaces=("eth0", "wlan0"))
+        backup = self.root / "avahi-daemon.conf.jittersim-original"
+        configured = self.config.read_text()
+        self.config.write_text(configured.replace(
+            "disable-user-service-publishing=no", "disable-user-service-publishing=yes"))
+
+        self.assertTrue(self.configure(interfaces=("eth0", "wlan0")))
+
+        values = active(self.config.read_text())
+        self.assertEqual(values[("publish", "disable-user-service-publishing")], "no")
+        self.assertEqual(backup.read_text(), DEBIAN_CONFIG)
+        self.assertFalse(self.configure(interfaces=("eth0", "wlan0")))
 
     def test_a_service_added_later_is_switched_off_on_the_next_run(self) -> None:
         self.configure()
@@ -470,6 +503,23 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(status["state"], "published")
         self.assertEqual(len(self.neutral()), 2)
 
+    def test_records_that_avahi_refuses_are_reported_with_the_real_cause(self) -> None:
+        self.bus.new_group = lambda: (_ for _ in ()).throw(
+            AvahiNotPermitted("Avahi refuses records from other programs"))
+
+        status = self.publisher.step()
+
+        self.assertEqual(status["state"], "unavailable")
+        self.assertEqual(self.bus.live(), [])
+        self.assertNotIn("not answering", status["message"])
+        self.assertIn("refuse", status["message"])
+        self.assertIn("IP address", status["message"])
+        self.assertIn("disable-user-service-publishing=no", status["fix"])
+        self.assertIn("avahi-daemon.conf", status["fix"])
+        self.assertIn("restart avahi-daemon", status["fix"])
+        self.assertLessEqual(len(status["message"]), 400)
+        self.assertLessEqual(len(status["fix"]), 400)
+
     def test_starting_without_avahi_is_not_a_crash(self) -> None:
         self.bus.broken = True
 
@@ -509,6 +559,44 @@ class PublisherTests(unittest.TestCase):
         self.publisher.close()
 
         self.assertEqual(self.bus.live(), [])
+
+
+class DbusRefusalTests(unittest.TestCase):
+    """What the adapter makes of Avahi's answers to a new record group."""
+
+    def adapter(self, error_name: str):
+        class BusError(Exception):
+            def get_dbus_name(self):
+                return error_name
+
+        class Bus:
+            def call_blocking(self, service, path, interface, method, *rest, **kwargs):
+                if method == "EntryGroupNew":
+                    raise BusError("refused")
+                return "0.8"
+
+        module = SimpleNamespace(SystemBus=Bus, DBusException=BusError, Int32=int, UInt32=int)
+        with patch.dict(sys.modules, {"dbus": module}):
+            return mdnsname.DbusAvahi()
+
+    def test_not_permitted_means_avahi_is_set_to_refuse_records(self) -> None:
+        # Avahi answers EntryGroupNew with NotPermitted for every D-Bus client while
+        # disable-user-service-publishing=yes.
+        adapter = self.adapter("org.freedesktop.Avahi.NotPermittedError")
+
+        with self.assertRaises(AvahiNotPermitted) as caught:
+            adapter.new_group()
+
+        self.assertIn("disable-user-service-publishing", str(caught.exception))
+        self.assertIsInstance(caught.exception, AvahiError)
+
+    def test_other_refusals_stay_plain_avahi_errors(self) -> None:
+        adapter = self.adapter("org.freedesktop.Avahi.TooManyObjectsError")
+
+        with self.assertRaises(AvahiError) as caught:
+            adapter.new_group()
+
+        self.assertNotIsInstance(caught.exception, AvahiNotPermitted)
 
 
 class AddressLookupTests(unittest.TestCase):
