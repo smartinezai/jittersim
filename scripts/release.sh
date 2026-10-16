@@ -181,6 +181,17 @@ print("v%d.%d.%d" % max(found) if found else "")')
 import sys
 from pathlib import Path
 path, tag, day, notes = Path(sys.argv[1]), sys.argv[2], sys.argv[3], Path(sys.argv[4]).read_text().strip()
+# GitHub's generated notes start with "## What's Changed". Left at that level the line would end
+# this release's section: build-release.sh cuts the archive's notes at the next "## " line, so the
+# Pi would never see the list, and CHANGELOG.md would get a stray top-level section.
+fenced, kept = False, []
+for line in notes.splitlines():
+    if line.startswith("```"):
+        fenced = not fenced
+    elif not fenced and (line.startswith("# ") or line.startswith("## ")):
+        line = "### " + line.split(" ", 1)[1]
+    kept.append(line)
+notes = "\n".join(kept)
 text = path.read_text() if path.exists() else "# Changelog\n\nEvery JitterSim release. The newest is first.\n"
 if f"\n## {tag} " in text or f"\n## {tag}\n" in text:
     sys.exit(f"CHANGELOG.md already has {tag}")

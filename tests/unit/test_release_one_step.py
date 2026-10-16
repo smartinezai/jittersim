@@ -246,8 +246,19 @@ class Publisher(HostedCI):
             return self.rows
         if "/git/ref/tags/" in path:
             return {"object": {"type": "commit", "sha": COMMIT}}
-        if "/releases/tags/" in path or path.endswith("releases/latest"):
-            return self.rows[0]
+        if "/releases/tags/" in path:
+            # GitHub documents this lookup as "a published release". A draft is a 404 here, so the
+            # tool must find a draft it just created in the list of releases instead.
+            tag = path.rsplit("/", 1)[1]
+            found = [row for row in self.rows if row["tag_name"] == tag and not row["draft"]]
+            if not found:
+                raise self.release.ReleaseError("A release command failed. No stable release was approved.")
+            return found[0]
+        if path.endswith("releases/latest"):
+            found = [row for row in self.rows if not row["draft"] and not row["prerelease"]]
+            if not found:
+                raise self.release.ReleaseError("A release command failed. No stable release was approved.")
+            return found[0]
         return super().api(path)
 
     def call(self, *args):
@@ -395,6 +406,31 @@ def test_release_script_gives_local_ci_a_command_it_accepts(release, source, key
         assert check.returncode == 0, check.stdout + check.stderr
     # The three checks the policy requires are always recorded, whatever the local-ci scope is.
     assert {"lint", "python-tests", "browser-journeys"} <= set(recorded_checks(tmp_path))
+
+
+def test_generated_github_notes_stay_inside_the_release_section(release, source, key, tmp_path):
+    """GitHub's generated notes start with a '## What's Changed' heading. Put into CHANGELOG.md as
+    they are, that line ends the release's section, so the archive (cut at the next '## ' line)
+    lost the whole generated list and CHANGELOG.md got a stray top-level section."""
+    notes = tmp_path / "github-notes.md"
+    notes.write_text("## What's Changed\n* Add a thing by @owner in https://github.com/o/r/pull/1\n\n"
+                     "## New Contributors\n* @someone made their first contribution\n\n"
+                     "**Full Changelog**: https://github.com/o/r/commits/v0.3.0\n")
+    result = run_release(source, key, tmp_path, "0.3.0", "--notes-file", str(notes))
+    assert result.returncode == 0, result.stdout + result.stderr
+    state = tmp_path / "releases/0.3.0"
+    manifest = release.inspect(state / "package" / release.ASSET, str(key) + ".pub")
+    with tarfile.open(state / "package" / release.ASSET) as bundle:
+        archived = bundle.extractfile("deploy/RELEASE-NOTES.md").read().decode()
+    assert archived.startswith("## v0.3.0 - ")
+    for line in ("Add a thing by @owner", "someone made their first", "**Full Changelog**"):
+        assert line in archived, line
+    changelog = git(state / "source", "show", manifest["commit"] + ":CHANGELOG.md")
+    headings = [line for line in changelog.splitlines() if line.startswith("## ")]
+    assert sum(line.startswith("## v0.3.0 - ") for line in headings) == 1
+    assert not any(line.startswith("## What's Changed") or line.startswith("## New Contributors")
+                   for line in headings)
+    assert "### What's Changed" in changelog and "### New Contributors" in changelog
 
 
 def test_release_script_refuses_an_old_or_malformed_version(source, key, tmp_path):
