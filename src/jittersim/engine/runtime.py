@@ -39,6 +39,7 @@ from jittersim.config.storage import (
 )
 from jittersim.networking.helper import HelperClient, HelperClientError
 from jittersim.request_workers import WorkersStillRunning
+from jittersim.router_canary import RouterCanary
 
 from .access import build_access_plan
 from .activity import Source, TargetState, activity_records
@@ -190,6 +191,8 @@ class RuntimeScheduler:
     # change or a manual apply starts again at once and a success clears the wait.
     retry_base_seconds = 1.0
     retry_max_seconds = 30.0
+    # Tries to reset the helper after a device-only start ended before giving up.
+    cleanup_attempts = 8
 
     def __init__(
         self,
@@ -245,6 +248,11 @@ class RuntimeScheduler:
         self._unresolved_names: Tuple[str, ...] = ()
         # The last reason logged for each kind of failure, so a repeat is not logged again.
         self._reported_failures: Dict[str, Tuple[str, str]] = {}
+        # Read-only router health checks for the persistent outage log. Only
+        # with hardware control, like the other workers.
+        self._router_canary = (
+            None if helper_client is None else RouterCanary(profiles=self._active_profile_names)
+        )
         self._service_addresses = (
             None
             if helper_client is None
@@ -280,6 +288,15 @@ class RuntimeScheduler:
                 raise
             if self._service_addresses is not None:
                 self._service_addresses.start()
+            if self._router_canary is not None:
+                self._router_canary.start()
+
+    def _active_profile_names(self):
+        """Name the profiles of the last applied plan for the router canary's records."""
+
+        with self._lock:
+            states = dict(self._applied_states or {})
+        return [state.source.profile for state in states.values() if state.source.profile]
 
     def begin_shutdown(self) -> None:
         """Permanently stop admission before draining any shared-state owner."""
@@ -290,6 +307,8 @@ class RuntimeScheduler:
             self._stop_event.set()
         if self._service_addresses is not None:
             self._service_addresses.begin_shutdown()
+        if self._router_canary is not None:
+            self._router_canary.begin_shutdown()
 
     def stop(self, timeout: float = 5.0) -> None:
         """Drain actual workers or keep their handles and report incomplete shutdown."""
@@ -311,6 +330,8 @@ class RuntimeScheduler:
                 self._service_addresses.stop(timeout=max(0.0, deadline - time.monotonic()))
             except WorkersStillRunning:
                 unresolved = True
+        if self._router_canary is not None:
+            self._router_canary.stop(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
         if unresolved:
             raise WorkersStillRunning("Scheduler workers did not stop. Their state remains owned.")
 
@@ -780,10 +801,14 @@ class RuntimeScheduler:
                 # A device-only start keeps the Reset for everything outside its scope.
                 device_scope = active_repository.get_device_start_scope()
                 if device_scope is None:
+                    # A saved change marks the state unknown, an outside reset says
+                    # resetting or reset.
+                    scope_ended = runtime_state.observed_state not in ("reset", "resetting")
+                    if scope_ended and self._plan_retry_is_waiting(
+                            now=current_time, configuration_version=configuration_version):
+                        return False
                     self._honor_external_reset(
-                        repository=active_repository, now=current_time,
-                        # A saved change marks the state unknown, an outside reset says reset.
-                        scope_ended=runtime_state.observed_state != "reset",
+                        repository=active_repository, now=current_time, scope_ended=scope_ended,
                     )
                     return False
             self._follow_device_addresses(repository=active_repository, now=current_time)
@@ -1075,14 +1100,35 @@ class RuntimeScheduler:
         # Someone reset the network outside the dashboard, for example with
         # `jittersim reset`. Stop applying, and reset once more in case a
         # scheduled apply raced that reset. A device-only start whose devices
-        # were all deleted ends the same way.
-        self.pause()
+        # were all deleted ends the same way, but its cleanup stays pending:
+        # the scheduler keeps running and retries the reset with growing waits.
+        if not scope_ended:
+            self.pause()
         try:
             self._helper_client.reset()
-        except HelperClientError:
+        except HelperClientError as error:
             LOGGER.warning("could not repeat an external network reset", exc_info=True)
             message = "Network reset requested outside the dashboard; repeating it failed"
+            if scope_ended:
+                message = "Ending a device-only start failed; trying the reset again"
+                with self._lock:
+                    attempts = self._plan_failures
+                if attempts + 1 >= self.cleanup_attempts:
+                    self.pause()
+                    message = "Ending a device-only start failed. Retry Panic"
+                self._note_plan_failure(
+                    error, now=now,
+                    configuration_version=repository.get_runtime_state().configuration_version)
+                try:
+                    repository.update_runtime_state(
+                        observed_state="error", last_action="reset", last_result="failure",
+                        last_error="device-only cleanup failed",
+                    )
+                except StorageError:
+                    LOGGER.warning("could not record the failed cleanup", exc_info=True)
         else:
+            if scope_ended:
+                self.pause()
             message = (
                 "Device-only start ended because its devices were removed"
                 if scope_ended else "Network reset outside the dashboard"

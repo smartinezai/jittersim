@@ -221,11 +221,6 @@ def test_unknown_fields_are_ignored_and_do_not_come_back(dashboard, rich_setting
     assert "surprise" not in json.dumps(export(dashboard))
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "an import that carries an unknown field in policies.options is refused with the bare sentence "
-    "'invalid settings import' and one with an unknown field in a site block is refused with Python's own "
-    "text 'SiteBlock.__init__() got an unexpected keyword argument' (server.py _settings_from_payload "
-    "passes **value straight to the dataclass). The person cannot tell which field to fix"))
 def test_a_refused_import_says_what_is_wrong_in_plain_words(dashboard, rich_settings):
     messages = []
     options = copy.deepcopy(rich_settings)
@@ -235,8 +230,32 @@ def test_a_refused_import_says_what_is_wrong_in_plain_words(dashboard, rich_sett
     blocks["policies"]["site_blocks"] = [{"surprise": 1}]
     messages.append(post(dashboard, "/api/import", blocks)[1]["error"])
     for message in messages:
-        assert message != "invalid settings import", messages
+        assert 'unknown field "surprise"' in message, messages
         assert "__init__" not in message and "keyword argument" not in message, messages
+    assert "policies.options" in messages[0] and "dns_failure_percent" in messages[0]
+    assert "policies.site_blocks[0]" in messages[1] and "domains" in messages[1]
+
+
+def test_a_site_block_or_option_of_the_wrong_shape_or_with_a_missing_field_is_named(dashboard, rich_settings):
+    shapes = (
+        (("policies", "options"), "not an object", "policies.options: must be an object"),
+        (("policies", "site_blocks"), [{"id": "x", "name": "X"}], "policies.site_blocks[0] is missing domains"),
+        (("policies", "site_blocks"), ["text"], "policies.site_blocks[0]: must be an object"),
+    )
+    for (section, key), value, wanted in shapes:
+        document = copy.deepcopy(rich_settings)
+        document[section][key] = value
+        status, data = post(dashboard, "/api/import", document)
+        assert status == 400 and wanted in data["error"], (wanted, data)
+
+
+def test_the_policies_route_names_an_unknown_field_too(dashboard):
+    status, data = post(dashboard, "/api/policies", {"options": {"surprise": 1}})
+    assert status == 400 and 'options: unknown field "surprise"' in data["error"], data
+    status, data = post(dashboard, "/api/policies", {"site_blocks": [{"id": "x", "name": "X", "oops": 1}]})
+    assert status == 400 and 'site_blocks[0]: unknown field "oops"' in data["error"], data
+    status, data = post(dashboard, "/api/policies", {"site_blocks": [{"id": "x", "name": "X"}]})
+    assert status == 400 and "missing site_blocks[0].domains" in data["error"], data
 
 
 def test_a_body_over_one_megabyte_is_refused_in_json(dashboard, rich_settings):

@@ -229,7 +229,8 @@ class InstallerNoticeTests(unittest.TestCase):
         assert script.index(call) < script.index("replace-source.py") < script.index("systemctl restart")
 
     def test_the_readme_explains_the_clearing_in_its_upgrade_notes(self) -> None:
-        readme = " ".join((ROOT / "README.md").read_text().split())
+        # The long guide moved to deploy/raspberry-pi/README.md when the main README became a short page.
+        readme = " ".join((ROOT / "deploy" / "raspberry-pi" / "README.md").read_text().split())
         for phrase in ("clears the DNS names listed under Traffic once when any device is protected",
                        "prints a notice with the number of names before it happens",
                        "Names are kept for 30 days from their last sighting"):
