@@ -1,6 +1,6 @@
 import unittest
 
-from jittersim.engine.activity import Source, TargetState, activity_events
+from jittersim.engine.activity import Source, TargetState, activity_records
 
 OWN = Source("profile", "profile", profile="Normal")
 SCHEDULE = Source("schedule", "schedule:work-hours", label="work-hours", profile="Slow")
@@ -9,6 +9,10 @@ STEP_ONE = Source("scenario", "scenario:run-1:0", "Commute", "step 1 of 2", "3G"
 STEP_TWO = Source("scenario", "scenario:run-1:1", "Commute", "step 2 of 2", "Edge")
 LIMIT = Source("data-limit", "data-limit", profile="Trickle")
 PROGRESSION = Source("progression", "progression:p1", label="from Normal to Slow")
+
+
+def activity_events(old, new) -> list:
+    return [(kind, message) for kind, message, _ in activity_records(old, new)]
 
 
 def change(before: Source, after: Source, **changes) -> list:

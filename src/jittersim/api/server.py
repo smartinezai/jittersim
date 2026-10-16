@@ -66,7 +66,7 @@ from jittersim.config.device_names import (
 )
 from jittersim.config.domain_labels import group_domain, label_domain, seen_with
 from jittersim.config.exemptions import AddressMove, UnaffectedDevice, normalize_exempt_mac
-from jittersim.config.payloads import impairment_payload, profile_payload
+from jittersim.config.payloads import profile_payload
 from jittersim.engine.randomizer import impairment_range_preview
 from jittersim.config.models import (
     MAX_LISTED_DOMAINS,
@@ -425,10 +425,6 @@ DASHBOARD_CONTENT_SECURITY_POLICY = "; ".join(
         "frame-ancestors 'none'",
     )
 )
-
-
-def _impairment_payload(impairment: Impairment) -> Dict[str, Any]:
-    return impairment_payload(impairment)
 
 
 def _profile_payload(profile: Profile) -> Dict[str, Any]:
