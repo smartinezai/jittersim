@@ -3831,7 +3831,7 @@ class ControlServerTests(unittest.TestCase):
             ["clearActivity"],
             self.activity_page()
             + "let answer = false;\n"
-            "const window = {confirm: () => answer};\n"
+            "async function confirmFromButton() { return answer; }\n"
             "const posted = [];\n"
             "async function request(path) { posted.push(path); return {}; }\n"
             "let reloads = 0;\n"
