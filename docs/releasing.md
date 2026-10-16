@@ -37,7 +37,10 @@ It does this and stops only where you must act:
 
 1. Checks the version is newer than the last tag, reserves it, sets it in the
    two version files and adds GitHub's generated notes (the merged PRs since
-   the last tag) to `CHANGELOG.md` in a release commit.
+   the last tag) to `CHANGELOG.md` in a release commit. Notes longer than
+   15000 bytes stop the run before anything is kept: approval accepts 16000
+   characters and the Pi shows 16 KB. For a first release, whose generated list
+   is the whole history, give a short text with `--notes-file FILE`.
 2. Runs the checks on that commit (lint, the full Python tests, the browser
    journeys and `scripts/local-ci.sh` when it exists) and signs a local
    verification record with your key. A failing check stops here, before

@@ -497,6 +497,24 @@ def test_checks_run_with_the_check_python_first_on_the_path(source, key, tmp_pat
     assert seen.read_text().split(os.pathsep)[0] == str(bin_folder)
 
 
+def test_too_long_release_notes_stop_before_anything_is_left_behind(source, key, tmp_path):
+    """Approval accepts release notes of at most 16000 characters, and the Pi shows 16 KB of them.
+    GitHub's generated list for a first release is already near that, so a longer text would make
+    `accept` fail at the end, after the owner typed the evidence for every gate. It stops at the
+    start instead and leaves no half-made release behind."""
+    notes = tmp_path / "long-notes.md"
+    notes.write_text("## What's Changed\n" + "* A merged change by @owner in https://github.com/o/r/pull/1\n" * 250)
+    assert notes.stat().st_size > 15000
+    result = run_release(source, key, tmp_path, "0.3.0", "--notes-file", str(notes))
+    assert result.returncode != 0
+    assert "--notes-file" in result.stderr and "bytes" in result.stderr, result.stdout + result.stderr
+    assert not (tmp_path / "releases/0.3.0").exists()
+    # The same version can be started again with shorter notes.
+    notes.write_text("## What's Changed\n* One change.\n")
+    again = run_release(source, key, tmp_path, "0.3.0", "--notes-file", str(notes))
+    assert again.returncode == 0, again.stdout + again.stderr
+
+
 def test_release_script_refuses_an_old_or_malformed_version(source, key, tmp_path):
     git(source, "tag", "v0.3.0")
     result = run_release(source, key, tmp_path, "0.3.0")

@@ -184,6 +184,18 @@ print("v%d.%d.%d" % max(found) if found else "")')
         [ -z "$previous" ] || set -- "$@" -f "previous_tag_name=$previous"
         gh api "$@" -q .body >"$evidence/notes.md" || fail "GitHub could not generate the release notes"
     fi
+    # Approval accepts release notes of at most 16000 characters (the install sentence is added to
+    # them) and the Pi shows 16 KB. A longer text would fail at the end, after the evidence of every
+    # gate was typed, so stop now and leave nothing behind.
+    notes_size=$(wc -c <"$evidence/notes.md" | tr -d ' ')
+    if [ "$notes_size" -gt 15000 ]; then
+        if [ "$dry_run" = no ]; then
+            git -C "$REPO_ROOT" worktree remove --force "$src" >/dev/null 2>&1 || true
+            git -C "$REPO_ROOT" branch -D "release/$tag" >/dev/null 2>&1 || true
+        fi
+        rm -rf "$state"
+        fail "the release notes are $notes_size bytes and the limit is 15000. Nothing was kept. Run again with --notes-file and a shorter text"
+    fi
     python3 - "$src/CHANGELOG.md" "$tag" "$(date +%Y-%m-%d)" "$evidence/notes.md" <<'EOF'
 import sys
 from pathlib import Path
