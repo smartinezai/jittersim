@@ -5314,10 +5314,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         # The profile that runs must be the one saved. After a failed Apply to all the old
         # one still runs, and this Apply must not switch every other device to the new one.
         applied = self.scheduler.applied_plan()
+        saved = self.repository.get_general_profile()
         return (
             applied is not None
             and applied.general_profile is not None
-            and applied.general_profile.profile_id == self.repository.get_general_profile().id
+            and applied.general_profile.profile_id == saved.id
+            # An edit of the saved profile that never reached the network is not running.
+            and self.scheduler.applied_general_profile() == saved
         )
 
     def _stop_state(self) -> str:

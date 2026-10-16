@@ -142,7 +142,7 @@ Behaviour:
 | State when Apply is pressed on one device | Result |
 | --- | --- |
 | Everyone running | The device leaves Everyone. Other saved devices stay under Everyone. |
-| Everyone saved but not running: never started, a failed apply, or the applied plan has no Everyone or a different Everyone profile than the saved one | Refused before saving (409). Start would run Everyone for every device, which this Apply must not do. Choose Start, Reset network first or stop Everyone. |
+| Everyone saved but not running: never started, a failed apply, or the applied plan has no Everyone, or a different Everyone profile, or a profile whose saved definition was edited without reaching the network | Refused before saving (409). Start would run Everyone for every device, which this Apply must not do. Choose Start, Reset network first or stop Everyone. |
 | A Stop for everyone that was saved but failed, so Everyone still runs | Refused before saving (409): applying the saved settings would finish the Stop and start every paused device setting. Choose Start first. |
 | Panic or outage stop latched, or the Pi does not say | Refused before saving (409), as after a Reset. |
 | Device protected | Refused before saving, as before. |

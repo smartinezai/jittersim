@@ -637,6 +637,13 @@ class RuntimeScheduler:
         with self._lock:
             return self._halt_count
 
+    def applied_general_profile(self):
+        """Return the saved profile the applied Everyone plan was built from, if any."""
+
+        with self._lock:
+            roll = self._rolls.get("@general")
+            return None if roll is None else roll.source_profiles
+
     def roll_snapshot(self):
         """Copy the randomization state that belongs to the plan that runs."""
 

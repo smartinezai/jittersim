@@ -38,7 +38,8 @@ class EveryoneRunningFixture(DeviceApplyFixture):
         # been running since that apply, so it knows the plan that runs.
         scheduler = super().use_scheduler()
         if self.helper.applied_plan is not None:
-            scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan))
+            prepared = scheduler.prepare_plan(repository=self.repository)
+            scheduler.activate_plan(repository=self.repository, prepared=prepared)
         return scheduler
 
     def delays(self, plan, device_id, direction=Direction.UPLOAD):
@@ -351,6 +352,24 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
         self.assertIsNone(self.repository.get_device(PHONE_ID))
         self.assertEqual(len(self.helper.plans), applied_before)
         self.assertEqual(self.helper.applied_plan.general_profile.profile_id, "low")
+
+    def test_a_device_apply_never_installs_an_edit_of_everyones_profile(self) -> None:
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan))
+        # The saved Everyone profile was edited but the edit never reached the network.
+        self.repository.save_profile(Profile(
+            id="low", name="daily climb manual", upload=Impairment(loss_percent=100)))
+        self.mark_applied()
+        applied_before = len(self.helper.plans)
+
+        status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 409)
+        self.assertIn("not running", result["error"])
+        self.assertIsNone(self.repository.get_device(PHONE_ID))
+        self.assertEqual(len(self.helper.plans), applied_before)
+        self.assertEqual(self.delays(self.helper.applied_plan, GENERAL_QUEUE_ID), {50})
 
     def test_a_device_apply_never_finishes_a_failed_stop_for_everyone(self) -> None:
         from jittersim.networking.helper import HelperClientError
