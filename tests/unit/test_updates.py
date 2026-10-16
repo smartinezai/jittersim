@@ -370,13 +370,16 @@ class UpdateTests(unittest.TestCase):
         self.assertIn("RECOVERY_FORMAT = 2", self.manager.read_text())
         self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
 
-    def intake_system(self, *, fail=None, ingress=True, ifb=True):
+    def intake_system(self, *, fail=None, ingress=True, ifb=True, proof=True):
         """A Pi with the upload intake and ifb device of a newer release.
 
         Answers pass the production answer limit, and a full filter dump of a
-        plan with 15 classes is larger than that limit.
+        plan with 15 classes is larger than that limit. `proof` is JitterSim's
+        connmark filter on the intake. Without it the ingress qdisc belongs to
+        another tool, as far as the cleanup can tell.
         """
-        state = {"ingress": ingress, "ifb": ifb, "removed_while_new_code": [], "queries": []}
+        state = {"ingress": ingress, "ifb": ifb, "proof": proof,
+                 "removed_while_new_code": [], "queries": []}
         test_interface = updates.runtime_interfaces(self.config)[1]
 
         def bounded(answer):
@@ -390,17 +393,26 @@ class UpdateTests(unittest.TestCase):
                 return bounded(json.dumps(
                     [{"kind": "ingress", "handle": "ffff:", "parent": "ffff:fff1"}]
                     if state["ingress"] else []))
-            if command[:3] == ["tc", "filter", "show"]:
-                return bounded("filter parent ffff: protocol ip pref 11 fw handle 0x1 "
-                               "action order 1: mirred (Egress Redirect to device jittersim-ifb)\n"
-                               * 30 if state["ingress"] else "")
+            if command[:4] == ["tc", "-j", "filter", "show"]:
+                if not (state["ingress"] and state["proof"]):
+                    return bounded("[]")
+                if command[-2:] != ["pref", updates.UPLOAD_INTAKE_PROOF_PREF]:
+                    # Every filter of a plan with 15 classes.
+                    return bounded(json.dumps([{"kind": "fw", "pref": 11 + index, "options": {
+                        "actions": [{"kind": "mirred", "to_dev": "jittersim-ifb"}]}}
+                        for index in range(30)]))
+                return bounded(json.dumps([
+                    {"protocol": "all", "pref": 2, "kind": "matchall", "chain": 0},
+                    {"protocol": "all", "pref": 2, "kind": "matchall", "chain": 0, "options": {
+                        "handle": 1, "actions": [{"order": 1, "kind": "connmark", "zone": 0}]}},
+                ]))
             return self.wifi
 
         def run(command, timeout):
             if command[:3] == ["tc", "qdisc", "del"] and command[-1] == "ingress":
                 if fail == "ingress":
                     raise UpdateError("simulated tc failure")
-                state["ingress"] = False
+                state["ingress"] = state["proof"] = False
                 state["removed_while_new_code"].append((self.code / "src").exists())
             if command[:3] == ["ip", "link", "del"]:
                 state["ifb"] = False
@@ -426,7 +438,7 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse(state["ingress"] or state["ifb"])
         # The intake goes first, then the device, both before the older code returns.
         self.assertEqual(state["removed_while_new_code"], [True, True])
-        self.assertFalse(any(command[:3] == ["tc", "filter", "show"] for command in state["queries"]))
+        self.assertFalse((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
         self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
 
     def test_a_failed_update_removes_the_upload_intake_before_the_recovery_copy(self):
@@ -463,19 +475,75 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse((self.code / "src").exists(), "the older package was not restored")
         self.assertFalse(state["ifb"])
         self.assertTrue(any("upload intake could not be removed" in message for message in messages))
-        self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
+        status = update_status(root=self.root, code=self.code, config=self.config)
+        self.assertEqual(status["phase"], "rolled-back")
+        # The final status keeps the warning instead of a plain success.
+        self.assertIn("upload intake could not be removed", status["message"])
+        self.assertIn("Previous installation restored", status["message"])
 
     def test_a_retry_removes_a_redirect_whose_device_is_already_gone(self):
         # A first attempt removed the ifb device but not the intake. Its
         # redirect no longer names the device. The retry still removes it.
         state, run, query = self.intake_system(ifb=False)
-        updates.remove_upload_intake(self.config, run, query, link_present=state["link_present"])
+        updates.remove_upload_intake(self.config, run, query, root=self.root,
+                                     link_present=state["link_present"])
         self.assertFalse(state["ingress"])
+
+    def test_another_tools_ingress_qdisc_is_left_in_place(self):
+        state, run, query = self.intake_system(proof=False)
+        commands = []
+
+        def recording(command, timeout):
+            commands.append(command)
+            run(command, timeout)
+
+        updates.remove_upload_intake(self.config, recording, query, root=self.root,
+                                     link_present=state["link_present"])
+        self.assertTrue(state["ingress"])
+        self.assertFalse(state["ifb"])
+        self.assertEqual(commands, [["ip", "link", "del", "dev", "jittersim-ifb"]])
+        self.assertFalse((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
+
+    def test_the_ownership_proof_survives_a_partial_cleanup(self):
+        state, run, query = self.intake_system(fail="ingress")
+        with self.assertRaisesRegex(UpdateError, "simulated tc failure"):
+            updates.remove_upload_intake(self.config, run, query, root=self.root,
+                                         link_present=state["link_present"])
+        self.assertTrue((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
+        # The filters went but the qdisc stayed. The saved record still proves it.
+        retry_state, retry_run, retry_query = self.intake_system(proof=False, ifb=False)
+        updates.remove_upload_intake(self.config, retry_run, retry_query, root=self.root,
+                                     link_present=retry_state["link_present"])
+        self.assertFalse(retry_state["ingress"])
+        self.assertFalse((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
+
+    def test_unstopped_or_unowned_commands_are_never_turned_into_a_restore(self):
+        for error in (updates.CommandNotStopped("tc", None),
+                      updates.OperationOwnershipUnknown("tc")):
+            for where in ("query", "run"):
+                state, run, query = self.intake_system()
+
+                def failing_run(command, timeout, error=error, where=where):
+                    if where == "run":
+                        raise error
+                    run(command, timeout)
+
+                def failing_query(command, timeout, error=error, where=where):
+                    if where == "query":
+                        raise error
+                    return query(command, timeout)
+
+                with patch.object(updates, "_link_present", state["link_present"]):
+                    with self.assertRaises(type(error)):
+                        updates.remove_upload_intake_before_restore(
+                            self.config, failing_run, failing_query, lambda *args: None,
+                            root=self.root)
 
     def test_a_failed_intake_removal_still_removes_the_ifb_device_and_is_raised(self):
         state, run, query = self.intake_system(fail="ingress")
         with self.assertRaisesRegex(UpdateError, "simulated tc failure"):
-            updates.remove_upload_intake(self.config, run, query, link_present=state["link_present"])
+            updates.remove_upload_intake(self.config, run, query, root=self.root,
+                                         link_present=state["link_present"])
         self.assertFalse(state["ifb"])
         self.assertTrue(state["ingress"])
 
@@ -483,7 +551,8 @@ class UpdateTests(unittest.TestCase):
         commands = []
         updates.remove_upload_intake(
             self.config, lambda command, timeout: commands.append(command),
-            lambda command, timeout: "[]", link_present=lambda name: name != "jittersim-ifb")
+            lambda command, timeout: "[]", root=self.root,
+            link_present=lambda name: name != "jittersim-ifb")
         self.assertEqual(commands, [])
 
     def test_failed_health_check_restores_the_previous_installation(self):
