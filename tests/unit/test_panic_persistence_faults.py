@@ -501,6 +501,66 @@ def test_a_stalled_stop_record_sync_does_not_keep_the_rules_in_place(monkeypatch
         assert leftovers(rig.directory) == []
 
 
+def test_a_stalled_gateway_write_does_not_hold_the_household_release(monkeypatch):
+    # Review of PR 138: the reset's own gateway.json write waited for the same stalled
+    # storage before the household rules were released.
+    monkeypatch.setattr(helper_module, "PANIC_STOP_RECORD_WAIT_SECONDS", 0.3)
+    with fault_rig(monkeypatch, "gateway", "write", stalled=True) as rig:
+        rig.plan.armed = True
+        try:
+            started = time.monotonic()
+            answer = rig.service.handle_payload({"action": "normal-access"})
+            assert time.monotonic() - started < 5.0
+            assert answer["ok"] is False
+            assert answer["access_disabled"] is True
+            assert_effects_stopped(rig)
+        finally:
+            rig.plan.armed = False
+            rig.plan.release.set()
+        for thread in threading.enumerate():
+            if thread.name == "panic-stop-records":
+                thread.join(10)
+
+
+class LateSaveFailure(Exception):
+    pass
+
+
+def test_an_error_of_a_late_stop_save_never_confirms_panic(monkeypatch):
+    # Review of PR 138: an error that the stalled saves raised during the reset was lost
+    # and Panic answered a confirmed recovery.
+    monkeypatch.setattr(helper_module, "PANIC_STOP_RECORD_WAIT_SECONDS", 0.2)
+    with fault_rig(monkeypatch, "guard", "write") as rig:
+        service = rig.service
+        release = threading.Event()
+        original_guard, original_reset = service._write_panic_guard, service._handle_reset
+        calls = []
+
+        def late_failing_guard(**options):
+            calls.append(options)
+            if len(calls) == 1:
+                release.wait(5)
+                raise LateSaveFailure("late")
+            return original_guard(**options)
+
+        def reset(**options):
+            release.set()
+            for thread in threading.enumerate():
+                if thread.name == "panic-stop-records":
+                    thread.join(5)
+            return original_reset(**options)
+
+        monkeypatch.setattr(service, "_write_panic_guard", late_failing_guard)
+        monkeypatch.setattr(service, "_handle_reset", reset)
+        try:
+            answer = service.handle_payload({"action": "normal-access"})
+        except LateSaveFailure:
+            answer = {"ok": False}
+        assert answer.get("ok") is not True
+        assert service._panic_recovery_failed is True
+        assert_effects_stopped(rig)
+
+
 # Restart rule: the guard and gateway.json are combined so that a stop in either
 # record wins. An unreadable record counts as stopped and unconfirmed. A missing
 # gateway.json (as after a reboot, since it lives under /run) defers to the guard.

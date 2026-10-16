@@ -102,6 +102,16 @@ def read_access_api(server, path):
 
 @recorded("panic", "dashboard")
 def normal_access(server):
+    try:
+        return _normal_access(server)
+    finally:
+        # A step that fenced the scheduler without its lock ends here, unconfirmed.
+        end = getattr(server.scheduler, "end_forced_recovery", None)
+        if end is not None:
+            end()
+
+
+def _normal_access(server):
     repository = server.repository
     if server.helper_client is None or not hasattr(server.helper_client, "normal_access"):
         return response(

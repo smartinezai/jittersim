@@ -118,6 +118,23 @@ class PanicSchedulerLockTests(unittest.TestCase):
         self.scheduler.finish_recovery(ticket, lambda overlap_failed=False: (None, True))
         self.assertFalse(self.scheduler.can_apply(self.scheduler.apply_generation))
 
+    def test_a_newer_panic_cannot_confirm_while_a_forced_one_is_unfinished(self):
+        # Review of PR 138: a forced recovery had no owner, so a newer Panic confirmed
+        # it while its helper call was still running.
+        release, thread = self.hold_scheduler_lock()
+        self.assertIsNone(self.scheduler.begin_recovery(timeout=0))
+        release.set()
+        thread.join(5)
+        ticket = self.scheduler.begin_recovery()
+        self.scheduler.finish_recovery(ticket, lambda overlap_failed=False: (None, True))
+        self.assertFalse(self.scheduler.can_apply(self.scheduler.apply_generation))
+        # The forced owner ends unconfirmed: still no apply until a later recovery.
+        self.scheduler.end_forced_recovery()
+        self.assertFalse(self.scheduler.can_apply(self.scheduler.apply_generation))
+        ticket = self.scheduler.begin_recovery()
+        self.scheduler.finish_recovery(ticket, lambda overlap_failed=False: (None, True))
+        self.assertTrue(self.scheduler.can_apply(self.scheduler.apply_generation))
+
     def test_the_scheduler_wait_fits_the_panic_database_allowance(self):
         worst = (access_module.PANIC_SCHEDULER_WAIT_SECONDS
                  + access_module.PANIC_SCHEDULER_STEP_FLOOR_SECONDS

@@ -30,3 +30,18 @@ S3: none reported. The reviewer found no change of recovery snapshot digests.
 - The stalled-save fix (item b) bounds only the saves before the rules are removed. A
   stall in the result saves after the reset still holds the network lock, but the
   rules are already gone then.
+
+## Second review (17 October 2026, head a35e045 against main)
+
+Reviewer: Sol (GPT-6.1, high, read-only), full diff `origin/main...a35e045`, focused on the
+pinned `networking/helper.py`. It confirmed that the new read-only actions match the helper
+handlers and that writes still invalidate a client scan. All three findings were fixed in one
+commit after a35e045.
+
+| # | Sev | Finding | Disposition |
+| --- | --- | --- | --- |
+| R2-1 | S1 | After a stalled stop save, the reset's own `gateway.json` write still waited for the same storage before the household rules were released. | Fixed: Panic skips that bookkeeping write while its stop saves stall. |
+| R2-2 | S2 | An error the stalled saves raised during the reset was lost and Panic could answer a confirmed recovery. | Fixed: the saver's errors are kept with its thread and raised before any confirmation. |
+| R2-3 | S2 | A forced recovery had no owner, so a newer Panic could confirm while the forced one was still running, and its later failure did not restore the fence. | Fixed: forced recoveries are counted per request until they end, and each ends as one more unconfirmed halt. |
+
+S3: none.

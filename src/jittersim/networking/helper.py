@@ -296,7 +296,7 @@ class HelperService:
         self._panic_guard_error = False
         # The thread of Panic's first saves while they wait for storage. A later Panic
         # never confirms a recovery while it may still replace the newer records.
-        self._stop_record_saver: Optional[threading.Thread] = None
+        self._stop_record_saver: Optional[Tuple[threading.Thread, List[BaseException]]] = None
         if panic_guard is not None:
             try:
                 guard = panic_guard.provision(gateway_state_path)
@@ -972,8 +972,8 @@ class HelperService:
             self._panic_stop_latched = True
             self._household_stop_latched = True
             self._panic_recovery_failed = True
-        stalled = self._save_stop_records(deadline)
-        reset = self._handle_reset(deadline=deadline)
+        stalled, save_errors = self._save_stop_records(deadline)
+        reset = self._handle_reset(deadline=deadline, record_state=not stalled.is_alive())
         access_ok = False
         incomplete = None
         try:
@@ -994,6 +994,10 @@ class HelperService:
             LOGGER.error("Panic stop records are still being saved; recovery is unconfirmed")
             return {"ok": False, "error": "normal access recovery state could not be saved",
                     "experiments_stopped": reset["ok"], "access_disabled": access_ok}
+        if save_errors:
+            # The stalled saves ended during the reset with an error that is not a
+            # storage error. The rules are released; the error ends Panic unconfirmed.
+            raise save_errors[0]
         saved = self._write_gateway_state(durable=True, panic_recovery_failed=failed)
         saved = self._write_panic_guard(panic_recovery_failed=failed or not saved,
                                         deadline=deadline) and saved
@@ -1013,16 +1017,18 @@ class HelperService:
                     "experiments_stopped": reset["ok"], "access_disabled": access_ok}
         return {"ok": True, "action": "normal-access", "experiments_stopped": True, "access_disabled": True}
 
-    def _save_stop_records(self, deadline: float) -> threading.Thread:
+    def _save_stop_records(self, deadline: float) -> Tuple[threading.Thread, List[BaseException]]:
         """Save the latched stop before the reset, waiting a bounded time for storage.
 
-        Returns the thread of the saves. It is still alive when they stalled. While
-        the saves of an earlier Panic are still stalled, no new ones start: that
-        thread is returned, so this Panic also stays unconfirmed.
+        Returns the thread of the saves and the errors they raised (other than
+        storage errors, which they handle). The thread is still alive when they
+        stalled, and errors can still arrive until it ends. While the saves of an
+        earlier Panic are still stalled, no new ones start: that thread and its
+        errors are returned, so this Panic also stays unconfirmed.
         """
 
         previous = self._stop_record_saver
-        if previous is not None and previous.is_alive():
+        if previous is not None and previous[0].is_alive():
             LOGGER.error("earlier Panic stop records are still being saved; removing the rules first")
             return previous
         raised: List[BaseException] = []
@@ -1037,7 +1043,7 @@ class HelperService:
         # The saves keep the deadline scope of this request.
         saver = threading.Thread(target=contextvars.copy_context().run, args=(save,),
                                  name="panic-stop-records", daemon=True)
-        self._stop_record_saver = saver
+        self._stop_record_saver = (saver, raised)
         saver.start()
         saver.join(bounded_wait(PANIC_STOP_RECORD_WAIT_SECONDS, deadline,
                                 floor=PANIC_STEP_FLOOR_SECONDS))
@@ -1047,7 +1053,7 @@ class HelperService:
             # The saves handle storage errors themselves. Anything else ends Panic as
             # it did before the saves ran in their own thread.
             raise raised[0]
-        return saver
+        return saver, raised
 
     def _release_incomplete(self):
         """The error of a household release that left a restriction in force, else None."""
@@ -1767,7 +1773,8 @@ class HelperService:
         return {"ok": True, "action": "router-check"}
 
     def _handle_reset(self, *, pause_ad_blocking: bool = True,
-                      deadline: Optional[float] = None) -> Dict[str, Any]:
+                      deadline: Optional[float] = None,
+                      record_state: bool = True) -> Dict[str, Any]:
         blocking_failed = False
         if pause_ad_blocking and self._ad_blocking_store is not None:
             # Panic's ad pause leaves time for the household release after it.
@@ -1787,7 +1794,10 @@ class HelperService:
             return {"ok": False, "error": "network reset failed"}
         self._recovery_pending = False
         self._outage_observed = False
-        self._write_gateway_state()
+        if record_state:
+            # Panic skips this while its stop saves stall: it would wait for the same
+            # storage before the household rules are released.
+            self._write_gateway_state()
         if blocking_failed:
             return {"ok": False, "error": "Profiles are off but ad-blocking bypass could not be confirmed. Retry Panic."}
         return {"ok": True, "action": "reset", "commands_run": commands_run}

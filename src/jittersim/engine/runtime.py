@@ -232,6 +232,9 @@ class RuntimeScheduler:
         self._forced_lock = threading.Lock()
         self._forced_halts = 0
         self._confirmed_forced_halts = 0
+        # Requests that fenced the scheduler without the lock and have not finished.
+        self._forced_owners = 0
+        self._forced_local = threading.local()
         # Tickets whose owner gave up waiting for the lock. Dropped under the lock.
         self._dropped_recoveries: List[object] = []
         self._stop_event = threading.Event()
@@ -463,7 +466,8 @@ class RuntimeScheduler:
         with self._lock:
             return (not self._closed and generation == self._generation()
                     and not self._recoveries and not self._recovery_required
-                    and self._forced_halts == self._confirmed_forced_halts)
+                    and self._forced_halts == self._confirmed_forced_halts
+                    and not self._forced_owners)
 
     def publish_if_current(self, generation: int, publish):
         """Publish a short local result under the same fence that Panic changes."""
@@ -492,9 +496,25 @@ class RuntimeScheduler:
             return True
         with self._forced_lock:
             self._forced_halts += 1
+            if not getattr(self._forced_local, "owner", False):
+                # This thread now owns an unconfirmed recovery until it calls
+                # end_forced_recovery(). No recovery can be confirmed meanwhile.
+                self._forced_local.owner = True
+                self._forced_owners += 1
         self._paused = True
         self._current_payload = None
         return False
+
+    def end_forced_recovery(self) -> None:
+        """End this thread's forced recovery, if any. Its result was never confirmed,
+        so it counts as one more forced halt that only a later recovery can confirm."""
+
+        if not getattr(self._forced_local, "owner", False):
+            return
+        self._forced_local.owner = False
+        with self._forced_lock:
+            self._forced_owners -= 1
+            self._forced_halts += 1
 
     def begin_recovery(self, *, cancel: bool = True, timeout: Optional[float] = None):
         """Block new work until emergency cleanup has a known saved result.
