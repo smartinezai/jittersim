@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from jittersim.config.models import Impairment, MacPolicy, Profile, WebsitePolicy
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.networking.commands import CommandResult
 from tests.integration import test_api_helper
 
 
@@ -111,6 +112,28 @@ class AccessApiTests(unittest.TestCase):
             if command.executable == "nft" and command.stdin
         )
         self.assertNotIn("deny listed test client", rules)
+
+    def test_disable_with_join_limits_left_is_not_recorded_as_disabled(self):
+        # N4: the firewall opens but hostapd refuses to clear the join limits.
+        self.repository.save_access_policies(
+            MacPolicy("denylist", (), ("02:00:00:00:00:01",)), WebsitePolicy())
+        self.assertEqual(self.write("/api/access/apply")[0], 200)
+        executor = self.access_manager.executor
+        original = executor.run
+
+        def refuse(command):
+            if command.executable == "hostapd_cli":
+                original(command)
+                return CommandResult(return_code=0, stdout="FAIL\n")
+            return original(command)
+
+        with patch.object(self.access_manager, "admission_supported", return_value=True), \
+                patch.object(executor, "run", refuse), self.assertLogs(level="WARNING"):
+            status, _, body = self.write("/api/access/disable", {"confirmed": True})
+        self.assertEqual(status, 503)
+        self.assertIn("join limits could not be cleared", json.loads(body)["error"])
+        messages = [event["message"] for event in self.repository.list_activity()]
+        self.assertNotIn("Household access rules disabled.", messages)
 
     def test_failed_rule_change_reports_pending_without_replacing_working_policy(self):
         self.write(

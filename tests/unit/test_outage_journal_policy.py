@@ -275,3 +275,43 @@ def test_unexpected_failure_text_never_reaches_the_installer_output(capsys):
         output = capsys.readouterr().out
         assert "fake-secret" not in output and "/etc/private" not in output
         assert "optional setup is unavailable" in output
+
+
+def test_failed_removal_of_an_already_persistent_journal_is_finished_by_a_retry(layout):
+    options, _ = layout
+    (options["disk"] / "journal").mkdir()
+    assert policy.install(**options) == "configured"
+    target = options["config"] / policy.TARGET_NAME
+    receipt = options["config"] / policy.STATE_NAME
+    link = options["vendor"] / policy.NAME
+    def broken(deadline): raise policy.PolicyError("activation-unavailable")
+    with pytest.raises(policy.PolicyError, match="activation-unavailable"):
+        policy.remove(config=options["config"], vendor=options["vendor"], activate=broken, roots=options["roots"])
+    # journald still runs with the project limits, so the owned files stay as proof.
+    assert target.exists() and receipt.exists()
+    assert policy._matches_state(options["config"])
+    restarts = []
+    assert policy.remove(config=options["config"], vendor=options["vendor"],
+                         activate=restarts.append, roots=options["roots"]) == "removed"
+    assert len(restarts) == 1
+    assert not link.exists() and not link.is_symlink()
+    assert not target.exists() and not receipt.exists()
+    assert (options["disk"] / "journal").exists()
+    # A finished removal is a no-op and restarts nothing.
+    assert policy.remove(config=options["config"], vendor=options["vendor"],
+                         activate=restarts.append, roots=options["roots"]) == "unchanged"
+    assert len(restarts) == 1
+    assert policy.install(**options) == "configured"
+
+
+def test_interrupted_volatile_install_is_not_mistaken_for_an_unfinished_removal(layout):
+    options, _ = layout
+    def broken(deadline): raise policy.PolicyError("activation-unavailable")
+    options_broken = dict(options, activate=broken)
+    with pytest.raises(policy.PolicyError):
+        policy.install(**options_broken)
+    restarts = []
+    # The link is active here, so removal writes the memory-storage file as before.
+    assert policy.remove(config=options["config"], vendor=options["vendor"], activate=restarts.append,
+                         roots=options["roots"]) == "previous-memory-storage-restored"
+    assert len(restarts) == 1

@@ -465,13 +465,35 @@ class BrowserProxyServer(SafeServerErrors, socketserver.ThreadingMixIn, socketse
         super().server_close()
 
 
+# One helper client for the whole proxy process. Its single in-flight scan then
+# covers every concurrent CONNECT, so a burst of tunnels costs one helper
+# `clients` scan instead of one each and cannot fill the helper's slots.
+# A COMPLETED scan is never reused (snapshot window 0): the scan decides the
+# tunnel's protected identity, and within any reuse window another device can
+# take the same IPv4 address and inherit the previous device's identity.
+_HELPER_CLIENT = None
+_HELPER_CLIENT_LOCK = threading.Lock()
+
+
+def _helper_client():
+    global _HELPER_CLIENT
+    from .helper import HelperClient
+
+    with _HELPER_CLIENT_LOCK:
+        if _HELPER_CLIENT is None:
+            client = HelperClient(
+                socket_path=Path("/run/jittersim/helper.sock"), timeout_seconds=3
+            )
+            client.snapshot_ttl_seconds = 0
+            _HELPER_CLIENT = client
+        return _HELPER_CLIENT
+
+
 def _live_client_mac(address: IPv4Address) -> Optional[str]:
-    from .helper import HelperClient, HelperClientError
+    from .helper import HelperClientError
 
     try:
-        snapshot = HelperClient(
-            socket_path=Path("/run/jittersim/helper.sock"), timeout_seconds=3
-        ).connected_device_snapshot()
+        snapshot = _helper_client().connected_device_snapshot()
         matches = [
             client["mac_address"]
             for client in snapshot["devices"]
