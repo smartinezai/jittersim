@@ -11,13 +11,15 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import unittest
+from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import GeneralProfileRule
+from jittersim.engine.plan import GeneralProfileRule, ServiceListRule
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.helper import HelperService
 
@@ -41,6 +43,7 @@ ENABLED = (
     and all(shutil.which(tool) for tool in ("ip", "tc", "nft", "ping"))
 )
 NORMAL = Impairment()
+NORMAL_PROFILE = Profile(id="normal", name="normal")
 SLOW = Impairment(delay_ms=100)
 LOSSY = Impairment(loss_percent=100)
 EXCEPTION = "192.168.50.10"
@@ -233,35 +236,78 @@ class EveryoneExceptionDatapathTests(unittest.TestCase):
 
         self.assertEqual(state(), first)
 
+    def test_listed_downloads_of_the_device_are_not_everyones_traffic(self) -> None:
+        service = HelperService(self.applier)
+        listed = ServiceListRule("router", ("router.example",), 0, NORMAL_PROFILE.upload,
+                                 NORMAL_PROFILE.download)
+        plan = compile_plan(
+            devices=[Device("phone-10", "phone-10", EXCEPTION, "own")],
+            profiles={"everyone": profile("everyone"), "own": profile("own")},
+            general_profile=GeneralProfileRule("everyone"), service_list_rules=(listed,))
+        self.applier.apply(plan=plan, service_addresses={"router": [IPv4Address(ROUTER_ADDRESS)]})
+
+        for source in (EXCEPTION, FOLLOWER):
+            _in(CLIENT, "ping", "-n", "-q", "-c", "50", "-i", "0.01", "-W", "1",
+                "-I", source, ROUTER_ADDRESS, check=False)
+        counters = service.handle_payload({"action": "traffic-counters"})["counters"]
+
+        directions = counters["directions"]["devices"]
+        # Every download to the router address is a listed download. Everyone counts the
+        # follower's 50 and the device's own counter counts the device's 50.
+        self.assertEqual(directions["general-profile"]["download_packets"], 50)
+        self.assertEqual(directions["phone-10"]["download_packets"], 50)
+
     def test_switching_the_device_never_disturbs_the_other_clients(self) -> None:
         everyone = profile("everyone", upload=SLOW)
         self.apply(everyone_only_plan(everyone))
 
-        def ping(source):
-            return subprocess.Popen(
-                ["ip", "netns", "exec", CLIENT, "ping", "-n", "-c", "60", "-i", "0.1",
-                 "-I", source, ROUTER_ADDRESS],
-                stdout=subprocess.PIPE, text=True)
+        class Ping:
+            """One ping process: one connection, so later replies show the new rules."""
 
-        def times(process):
-            output = process.communicate(timeout=60)[0]
-            return [float(value) for value in re.findall(r"time=([\d.]+) ms", output)]
+            def __init__(self, source):
+                self.times = []
+                self.process = subprocess.Popen(
+                    ["ip", "netns", "exec", CLIENT, "ping", "-n", "-c", "80", "-i", "0.1",
+                     "-I", source, ROUTER_ADDRESS],
+                    stdout=subprocess.PIPE, text=True)
+                self.reader = threading.Thread(target=self.read, daemon=True)
+                self.reader.start()
 
-        # One ping process keeps one connection, so its later replies show the new rules.
-        device_ping, follower_ping = ping(EXCEPTION), ping(FOLLOWER)
-        time.sleep(1.5)
+            def read(self):
+                for line in self.process.stdout:
+                    match = re.search(r"time=([\d.]+) ms", line)
+                    if match:
+                        self.times.append(float(match.group(1)))
+
+            def wait_for(self, count, timeout=30):
+                deadline = time.monotonic() + timeout
+                while len(self.times) < count and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                return len(self.times)
+
+            def finish(self):
+                self.process.wait(timeout=60)
+                self.reader.join(10)
+                return self.times
+
+        device_ping, follower_ping = Ping(EXCEPTION), Ping(FOLLOWER)
+        # Each change waits for packets the device already got, not for a fixed time.
+        device_ping.wait_for(12)
         self.apply(mixed_plan(everyone, profile("own")))
-        time.sleep(2.0)
+        left = len(device_ping.times)
+        device_ping.wait_for(left + 30)
         self.apply(everyone_only_plan(everyone))
-        device_times, follower_times = times(device_ping), times(follower_ping)
+        back = len(device_ping.times)
+        device_times, follower_times = device_ping.finish(), follower_ping.finish()
 
-        self.assertGreaterEqual(len(device_times), 55, device_times)
-        self.assertGreater(min(device_times[:5]), 90, device_times)
-        self.assertTrue(any(value < 50 for value in device_times[20:45]), device_times)
-        self.assertGreater(min(device_times[-5:]), 90, device_times)
+        self.assertGreaterEqual(len(device_times), 70, device_times)
+        self.assertGreater(min(device_times[:8]), 90, device_times)
+        # A few packets settle while the new rules replace the old.
+        self.assertLess(max(device_times[left + 8:back - 2]), 50, device_times)
+        self.assertGreater(min(device_times[back + 8:]), 90, device_times)
         slow = [value for value in follower_times if value > 90]
         self.assertGreaterEqual(len(slow), len(follower_times) - 2, follower_times)
-        self.assertGreaterEqual(len(follower_times), 55, follower_times)
+        self.assertGreaterEqual(len(follower_times), 70, follower_times)
 
 
 if __name__ == "__main__":

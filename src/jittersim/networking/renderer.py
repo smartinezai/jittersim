@@ -538,9 +538,20 @@ def _render_nft_script(
             f'add rule inet {PROJECT_TABLE} forward oifname "{test_interface}" '
             f"ip saddr @{set_name} meta mark set {download_mark} counter "
             f'comment "service-list {list_rule.list_id} download"',
-            f"add rule netdev {DOWNLOAD_TABLE} download meta mark {download_mark} "
-            f"meta mark set {list_rule.mark}{general_download_count}",
         ))
+        if plan.general_profile is not None and plan.mark_rules:
+            # A listed download of a device beside Everyone is not Everyone's traffic.
+            # It is rewritten first and without Everyone's counter. The device's own
+            # download counter counts it by address.
+            exceptions = _render_set([mark_rule.ipv4_address for mark_rule in plan.mark_rules])
+            lines.append(
+                f"add rule netdev {DOWNLOAD_TABLE} download ip daddr {exceptions} "
+                f"meta mark {download_mark} meta mark set {list_rule.mark}"
+            )
+        lines.append(
+            f"add rule netdev {DOWNLOAD_TABLE} download meta mark {download_mark} "
+            f"meta mark set {list_rule.mark}{general_download_count}"
+        )
     return "\n".join(lines) + "\n"
 
 

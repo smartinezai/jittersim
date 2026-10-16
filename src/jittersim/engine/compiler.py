@@ -114,15 +114,19 @@ def compile_plan(
 
     mark_rules = []
     queues = []
-    # Everyone's shared queue keeps mark 1, so devices beside it start at mark 2.
     first_device_mark = 1
     if general_profile is not None:
+        if GENERAL_QUEUE_ID in devices_by_id:
+            raise PlanError(f"a device cannot use the id {GENERAL_QUEUE_ID} beside Everyone")
         profile = profiles[general_profile.profile_id]
         queues.extend((
             QueueSpec(GENERAL_QUEUE_ID, Direction.UPLOAD, 1, profile.upload),
             QueueSpec(GENERAL_QUEUE_ID, Direction.DOWNLOAD, 1, profile.download),
         ))
-        first_device_mark = 2
+        # Everyone keeps mark 1 and the service lists keep the marks they have under
+        # Everyone alone, so a device that leaves Everyone never moves them. The
+        # devices beside Everyone and their service rules come after the lists.
+        first_device_mark = 2 + len(service_list_rules)
     for index, device_id in enumerate(sorted(devices_by_id), start=first_device_mark):
         device = devices_by_id[device_id]
         profile = profiles[device.profile_id]
@@ -347,10 +351,11 @@ def compile_plan(
     normalized_lists = []
     list_domains = []
     first_list_mark = (
-        len(mark_rules)
+        2
+        if general_profile is not None
+        else len(mark_rules)
         + len(service_quota_rules)
         + len(service_assignment_rules)
-        + (1 if general_profile is not None else 0)
         + (1 if everyone_else is not None else 0)
         + 1
     )

@@ -5231,16 +5231,21 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         runtime_action = "reset" if scope is not None else "apply"
         keep = {"keep_device_scope": True} if scope is not None else {}
         planning = {}
+        applied_keep = keep
         if scope is not None:
             planning["device_scope"] = scope
         elif self.repository.get_general_profile() is not None:
             # Everyone is saved: name the devices beside it, or none for a whole-scope plan.
-            exceptions = (
-                self.repository.get_everyone_exceptions() if keep_exceptions else frozenset()
-            )
+            running = self.repository.get_everyone_exceptions()
+            exceptions = running if keep_exceptions else frozenset()
             planning["everyone_exceptions"] = exceptions
-            if exceptions:
+            if running:
+                # The devices that run beside Everyone now stay recorded until the helper
+                # accepted the new plan. A failed Start or retry keeps the running policy
+                # and the usage of those devices is still sampled before the counters restart.
                 keep = {"keep_everyone_exceptions": True}
+            if exceptions:
+                applied_keep = keep
         try:
             prepared = (
                 self.scheduler.prepare_plan(
@@ -5325,7 +5330,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 self.repository.rebase_quota_counters(now=int(time.time()))
             state = self.repository.update_runtime_state(
                 observed_state="applied", last_action=runtime_action, last_result="success",
-                last_error=None, **keep,
+                last_error=None, **applied_keep,
             )
             if self.scheduler is not None:
                 self.scheduler.activate_plan(repository=self.repository, prepared=prepared,

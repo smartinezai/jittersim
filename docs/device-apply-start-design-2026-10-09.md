@@ -158,6 +158,11 @@ How long the device stays beside Everyone:
   covers the device again on the next apply. Nothing paused resumes.
 - A saved change, a scheduled apply and a restart of the dashboard keep the
   exceptions. A scheduled apply never adds a device.
+- A whole-scope action ends them only after the helper accepted its plan. A
+  failed Start keeps them, so the record, the retry and the running policy agree.
+  The usage of the devices is sampled before the counters restart.
+- Traffic progressions sample and advance only for the devices that run beside
+  Everyone. The others stay paused.
 - Importing settings replaces the saved devices, so every exception goes.
 - Everyone's own roll, outage and website choices are unchanged by an exception.
 
@@ -185,9 +190,12 @@ code never reads it.
 
 Plan, helper and kernel:
 
-- Everyone keeps mark 1. Exception devices get marks from 2, then service limits,
-  browser service rules and lists. Everyone plus its exceptions share the 15
-  classes.
+- Everyone keeps mark 1 and the service lists keep the marks they have under
+  Everyone alone, so a device that leaves Everyone never moves them or the queues
+  of the clients that stay. Exception devices and their service limits and browser
+  service rules take the marks after the lists. Everyone, the lists and the
+  exceptions share the 15 classes. A saved device cannot use the id
+  `general-profile` beside Everyone: it is Everyone's queue identity.
 - The plan codec accepts devices beside Everyone, never lets a device or service
   rule take mark 1 and still refuses everyone-else beside Everyone. No helper
   source changed: the helper and the applier only follow the plan they receive. A
@@ -202,7 +210,9 @@ Plan, helper and kernel:
 - An Everyone outage cannot name the device's IPv6 address, so while Everyone is
   in an outage all IPv6 uploads are dropped, as they already are when a service
   list guards the outage rule. IPv4, which JitterSim shapes, stays connected for
-  the device.
+  the device. The supported test Wi-Fi offers no client IPv6 (`ipv6.method
+  disabled`, see deploy/raspberry-pi/README.md), so this never meets a client in
+  the supported setup. A saved MAC address in the plan would remove the limit.
 - The browser proxy gives a device beside Everyone its own queue and website
   rules and gives every other client Everyone's.
 - The generated rules without exceptions are the rules they always were.
@@ -217,9 +227,9 @@ line says how many devices run their own profile. The Everyone card explains it.
 ## Not covered
 
 - A service list covers every affected client, so listed traffic of an exception
-  device uses the list's profile, as it does for any device. Listed downloads of
-  the device also add to Everyone's shared usage figure, which counts all
-  listed downloads.
+  device uses the list's profile, as it does for any device. Its listed
+  downloads are not counted as Everyone's traffic. The device's own counter
+  counts them.
 - Device speed tests, the traffic page's per-device view and per-device limits
   other than data limits are unchanged by this change.
 - A running helper needs no new capability flag: that would change a Panic

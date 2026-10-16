@@ -297,6 +297,37 @@ class WholeScopeActionTests(EveryoneRunningFixture):
         self.assertEqual(self.exceptions(), frozenset())
         self.assertEqual(self.repository.get_device(AIR_ID).profile_id, "slow-test")
 
+    def test_a_failed_start_keeps_the_running_exceptions(self) -> None:
+        self.helper.fail_action = "apply"
+
+        with self.assertLogs("jittersim.api.server", "ERROR"):
+            status, _ = self.write("/api/apply", {})
+
+        self.assertEqual(status, 502)
+        # The network still runs what it ran. The record and the retry say the same.
+        self.assertEqual(self.exceptions(), {AIR_ID})
+        state = self.repository.get_runtime_state()
+        self.assertEqual((state.observed_state, state.last_action), ("error", "apply"))
+        self.helper.fail_action = ""
+        self.assertEqual(self.write("/api/apply", {})[0], 200)
+        self.assertEqual(self.exceptions(), frozenset())
+        self.assertEqual(self.helper.applied_plan.mark_rules, ())
+
+    def test_start_records_the_devices_usage_before_it_ends_the_exception(self) -> None:
+        scheduler = self.use_scheduler()
+        seen = []
+        original = scheduler.sample_usage
+
+        def sample(**arguments):
+            seen.append(self.exceptions())
+            return original(**arguments)
+
+        with patch.object(scheduler, "sample_usage", side_effect=sample):
+            self.assertEqual(self.write("/api/apply", {})[0], 200)
+
+        self.assertEqual(seen, [frozenset({AIR_ID})])
+        self.assertEqual(self.exceptions(), frozenset())
+
     def test_apply_to_everyone_ends_the_exception(self) -> None:
         self.assertEqual(self.write("/api/general-profile", {"profile_id": "slow-test"})[0], 200)
 

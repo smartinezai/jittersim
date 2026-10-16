@@ -1926,6 +1926,12 @@ class RuntimeScheduler:
         if _only_everyone_runs(repository) or now - self._last_traffic_sample_at < 5:
             return
         progressions = repository.list_active_progressions(now=int(now))
+        # Beside Everyone only the devices that run their own profile run progressions.
+        # The others are paused, so their progressions neither sample nor advance.
+        running_ids = repository.get_everyone_exceptions() if _general_profile_runs(
+            repository) else None
+        if running_ids is not None:
+            progressions = tuple(item for item in progressions if item.device_id in running_ids)
         if not any(progression.mode == "traffic" for progression in progressions):
             return
         observe_dns_queries = getattr(self._helper_client, "observe_dns_queries", None)
@@ -1943,6 +1949,15 @@ class RuntimeScheduler:
             blocked = protected_addresses(repository, stations)
             macs_by_address = station_macs_by_address(stations)
             observed_at = int(now)
+            if running_ids is not None:
+                running_addresses = {
+                    str(device.ipv4_address)
+                    for device in repository.list_devices() if device.id in running_ids
+                }
+                observations = [
+                    observation for observation in observations
+                    if str(observation["ipv4_address"]) in running_addresses
+                ]
             sampled = tuple(
                 DomainObservation(
                     ipv4_address=observation["ipv4_address"],

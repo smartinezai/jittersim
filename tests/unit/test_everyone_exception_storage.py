@@ -158,6 +158,7 @@ class EveryoneExceptionStorageTests(unittest.TestCase):
 
 
 class EveryoneExceptionMigrationTests(unittest.TestCase):
+    @unittest.skipIf(sqlite3.sqlite_version_info < (3, 35), "needs ALTER TABLE DROP COLUMN")
     def test_an_older_database_gains_the_table_column_and_trigger_once(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "jittersim.db"

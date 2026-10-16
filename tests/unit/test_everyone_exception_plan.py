@@ -97,13 +97,43 @@ class MixedPlanCompilationTests(unittest.TestCase):
             (AIR, PHONE), service_quota_rules=(quota,),
             service_assignment_rules=(assignment,), service_list_rules=(service_list,))
 
-        marks = [rule.mark for rule in plan.mark_rules]
+        marks = [rule.mark for rule in plan.service_list_rules]
+        marks += [rule.mark for rule in plan.mark_rules]
         marks += [rule.mark for rule in plan.service_quota_rules]
         marks += [rule.mark for rule in plan.service_assignment_rules]
-        marks += [rule.mark for rule in plan.service_list_rules]
         self.assertEqual(marks, [2, 3, 4, 5, 6])
         queue_marks = sorted({queue.mark for queue in plan.queues})
         self.assertEqual(queue_marks, [1, 2, 3, 4, 5, 6])
+
+    def test_a_device_leaving_everyone_never_moves_the_list_marks_of_everyone(self) -> None:
+        lists = (
+            ServiceListRule("lists", ("list.example",), 0, OWN.upload, OWN.download),
+            ServiceListRule("more", ("more.example",), 0, OWN.upload, OWN.download),
+        )
+        alone = compile_plan(
+            devices=(), profiles=PROFILES, general_profile=GeneralProfileRule("everyone"),
+            service_list_rules=lists)
+
+        for devices in ((AIR,), (AIR, PHONE)):
+            beside = mixed(devices, service_list_rules=lists)
+            self.assertEqual(
+                [(rule.list_id, rule.mark) for rule in beside.service_list_rules],
+                [(rule.list_id, rule.mark) for rule in alone.service_list_rules])
+            self.assertEqual(
+                [queue for queue in beside.queues if queue.device_id.startswith("servicelist:")],
+                [queue for queue in alone.queues if queue.device_id.startswith("servicelist:")])
+            self.assertEqual(
+                [queue for queue in beside.queues if queue.device_id == GENERAL_QUEUE_ID],
+                [queue for queue in alone.queues if queue.device_id == GENERAL_QUEUE_ID])
+
+    def test_a_device_cannot_borrow_everyones_queue_identity(self) -> None:
+        clash = Device(GENERAL_QUEUE_ID, "Clash", "192.168.50.50", "own")
+        with self.assertRaises(PlanError):
+            mixed((clash,))
+        # Without Everyone the id is an ordinary device id, as before.
+        self.assertEqual(
+            [rule.device_id for rule in compile_plan(devices=(clash,), profiles=PROFILES).mark_rules],
+            [GENERAL_QUEUE_ID])
 
     def test_website_rules_and_outages_of_the_device_are_kept(self) -> None:
         website = WebsiteFilter(AIR.ipv4_address, (IPv4Address("203.0.113.9"),))
@@ -270,10 +300,24 @@ class MixedPlanRuleTests(unittest.TestCase):
         script, _ = render(mixed(service_list_rules=(service_list,)))
 
         (listed,) = only(script, "service-list lists upload")
-        self.assertIn("ip daddr @svc_3 meta mark set 3", listed)
-        # Mark 2 is the device. Mark 3 is the list.
-        (device,) = only(script, 'ip saddr 192.168.50.178 meta mark set 2 counter')
+        self.assertIn("ip daddr @svc_2 meta mark set 2", listed)
+        # The list keeps the mark it has under Everyone alone. The device comes after it.
+        (device,) = only(script, 'ip saddr 192.168.50.178 meta mark set 3 counter')
         self.assertIn('comment "usage-device air upload"', device)
+
+    def test_listed_downloads_of_the_device_do_not_count_as_everyones(self) -> None:
+        service_list = ServiceListRule("lists", ("list.example",), 0, OWN.upload, OWN.download)
+        script, _ = render(mixed(service_list_rules=(service_list,)))
+
+        rewrites = only(script, f"meta mark {0x20000000 + 2} meta mark set 2")
+        self.assertEqual(len(rewrites), 2)
+        device_first, everyone = rewrites
+        self.assertIn("ip daddr { 192.168.50.178 }", device_first)
+        self.assertNotIn("counter", device_first)
+        self.assertNotIn("ip daddr", everyone)
+        self.assertIn('counter comment "usage-device general-profile download"', everyone)
+        # The device's own counter counts every download to its address.
+        self.assertEqual(len(only(script, 'comment "usage-device air download"')), 1)
 
     def test_without_exceptions_the_everyone_rules_are_the_rules_they_always_were(self) -> None:
         script, _ = render(compile_plan(

@@ -423,6 +423,8 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         # Devices may run their own profile beside Everyone. Mark 1 is Everyone's queue.
         if 1 in marks_by_device.values() or 1 in service_marks.values():
             raise PlanCodecError("mark 1 belongs to the general profile")
+        if GENERAL_QUEUE_ID in marks_by_device:
+            raise PlanCodecError("a device cannot use the general profile's queue identity")
         general_profile = GeneralProfileRule(profile_id, addresses, data["outage_active"])
         service_marks[GENERAL_QUEUE_ID] = 1
 

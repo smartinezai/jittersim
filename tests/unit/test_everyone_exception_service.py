@@ -9,6 +9,7 @@ from jittersim.config.models import (
     DeviceGroup,
     Impairment,
     Profile,
+    Progression,
     ServiceList,
     Timer,
 )
@@ -81,7 +82,11 @@ class StoredPlanTests(ExceptionPlanFixture):
         plan = compile_stored_plan(repository=self.repository)
 
         self.assertEqual([rule.list_id for rule in plan.service_list_rules], ["video"])
-        self.assertEqual(plan.service_list_rules[0].mark, 3)
+        # The list keeps the mark it has under Everyone alone. The device comes after it.
+        self.assertEqual(plan.service_list_rules[0].mark, 2)
+        self.assertEqual(plan.mark_rules[0].mark, 3)
+        alone = compile_stored_plan(repository=self.repository, everyone_exceptions=frozenset())
+        self.assertEqual(alone.service_list_rules, plan.service_list_rules)
 
     def test_the_device_keeps_its_group_profile_and_limit_fallback(self) -> None:
         self.repository.save_device_group(
@@ -173,6 +178,42 @@ class SchedulerPlanTests(ExceptionPlanFixture):
         self.assertEqual(plan.general_profile.profile_id, "runtime-1")
         self.assertEqual(self.delays(plan, "air"), [3_000])
         self.assertEqual(self.delays(plan, GENERAL_QUEUE_ID), [50])
+
+    def test_only_the_exceptions_progressions_sample_traffic(self) -> None:
+        class Observer:
+            def __init__(self):
+                self.calls = 0
+
+            def observe_dns_queries(self, excluded_macs=()):
+                self.calls += 1
+                return [
+                    {"ipv4_address": "192.168.50.21", "domain": "air.example", "query_count": 3},
+                    {"ipv4_address": "192.168.50.20", "domain": "tv.example", "query_count": 5},
+                ]
+
+            def connected_device_snapshot(self):
+                return {"devices": [], "association_status_available": False}
+
+        def progression(device_id):
+            return Progression(
+                id=f"{device_id}-climb", device_id=device_id, start_profile_id="low",
+                end_profile_id="slow", started_at=0, duration_seconds=3_600, mode="traffic",
+                traffic_target_queries=100)
+
+        helper = Observer()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        # A paused progression of a device that follows Everyone does not sample.
+        self.repository.save_progression(progression("tv"))
+        scheduler._sample_traffic_if_needed(repository=self.repository, now=100)
+        self.assertEqual(helper.calls, 0)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+        # One on the exception does, and only its own queries are kept.
+        self.repository.save_progression(progression("air"))
+        scheduler._sample_traffic_if_needed(repository=self.repository, now=200)
+        self.assertEqual(helper.calls, 1)
+        kept = {str(item.ipv4_address) for item in self.repository.list_domain_observations()}
+        self.assertEqual(kept, {"192.168.50.21"})
 
     def test_exception_counters_count_while_everyone_alone_has_none(self) -> None:
         scheduler = self.scheduler()
