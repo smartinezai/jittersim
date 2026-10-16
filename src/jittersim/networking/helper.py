@@ -2241,6 +2241,14 @@ READ_ONLY_ACTIONS = frozenset((
     # client scan in flight, and /api/connected-devices answered 502.
     "update-online-status", "ad-blocking",
 ))
+# Actions that only read when their payload carries no changes.
+READ_WITHOUT_CHANGES_ACTIONS = frozenset(("update-online-settings",))
+
+
+def _reads_only(payload: Dict[str, Any]) -> bool:
+    action = payload.get("action")
+    return action in READ_ONLY_ACTIONS or (
+        action in READ_WITHOUT_CHANGES_ACTIONS and payload.get("changes") is None)
 
 
 class _SnapshotFlight:
@@ -2971,7 +2979,7 @@ class HelperClient:
                                         reason="helper-busy")
             timeout_seconds = min(self.timeout_seconds if timeout_seconds is None else timeout_seconds,
                                   left)
-        if payload.get("action") in READ_ONLY_ACTIONS:
+        if _reads_only(payload):
             return self._send(payload, timeout_seconds=timeout_seconds)
         # Anything else may change who is connected, so no earlier scan stays valid.
         self.invalidate_connected_devices()
