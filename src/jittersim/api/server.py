@@ -5251,7 +5251,10 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 if beside_everyone and self.scheduler is not None:
                     applied, sources = self.scheduler.applied_snapshot()
                     if applied is not None:
-                        ran_before = (applied, sources, self.scheduler.roll_snapshot())
+                        ran_before = (
+                            applied, sources, self.scheduler.roll_snapshot(),
+                            self.repository.get_runtime_state().observed_state,
+                        )
                 if self.scheduler:
                     self.scheduler.sample_before_control_change(repository=self.repository)
                 # Refuse a Panic or a changed helper intent before saving, on both paths.
@@ -5797,7 +5800,10 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 and self.scheduler is not None and self.repository.everyone_exception_rows()):
             applied, sources = self.scheduler.applied_snapshot()
             if applied is not None:
-                ran_before = (applied, sources, self.scheduler.roll_snapshot())
+                ran_before = (
+                    applied, sources, self.scheduler.roll_snapshot(),
+                    self.repository.get_runtime_state().observed_state,
+                )
         try:
             if restore_plan is not None:
                 # The randomization state of the plan that ran comes back with it.
@@ -5908,8 +5914,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         def publish():
             if result.get("counters_preserved") is not True:
                 self.repository.rebase_quota_counters(now=int(time.time()))
+            # A plan put back after a failure leaves unapplied saved settings unapplied: the
+            # state keeps saying so instead of claiming that the saved settings run.
+            observed = (
+                "unknown" if restore_plan is not None and restore_plan[3] == "unknown"
+                else "applied"
+            )
             state = self.repository.update_runtime_state(
-                observed_state="applied", last_action=runtime_action, last_result="success",
+                observed_state=observed, last_action=runtime_action, last_result="success",
                 last_error=None, **applied_keep,
             )
             if self.scheduler is not None:

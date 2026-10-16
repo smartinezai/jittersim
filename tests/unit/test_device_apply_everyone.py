@@ -348,10 +348,17 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
         status, result = self.apply_to(PHONE, "low")
 
         self.assertEqual(status, 409)
-        self.assertIn("Everyone is saved as Slow test", result["error"])
+        # The new choice was saved and never applied, so the state says so.
+        self.assertIn("waiting to be applied", result["error"])
         self.assertIsNone(self.repository.get_device(PHONE_ID))
         self.assertEqual(len(self.helper.plans), applied_before)
         self.assertEqual(self.helper.applied_plan.general_profile.profile_id, "low")
+        # Once that state is cleared the saved Everyone still is not the one that runs.
+        self.mark_applied()
+        status, result = self.apply_to(PHONE, "low")
+        self.assertEqual(status, 409)
+        self.assertIn("Everyone is saved as Slow test", result["error"])
+        self.assertEqual(len(self.helper.plans), applied_before)
 
     def test_a_device_apply_waits_for_saved_settings_that_nothing_applied(self) -> None:
         self.use_scheduler()
@@ -492,6 +499,37 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         # Nothing changed: the Air keeps the profile it had, saved and running.
         self.assertEqual(self.repository.get_device(AIR_ID).profile_id, "slow-test")
         self.assertEqual(self.exceptions(), {AIR_ID})
+
+    def test_putting_back_keeps_unapplied_saved_settings_unapplied(self) -> None:
+        from jittersim.networking.helper import HelperClientError
+
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        # An edit of the Air's profile was saved by another writer and never applied.
+        self.repository.save_profile(Profile(
+            id="slow-test", name="Slow test", upload=Impairment(loss_percent=100)))
+        real = self.helper.apply
+        calls = []
+
+        def apply(**arguments):
+            calls.append(arguments["plan"])
+            if len(calls) == 1:
+                raise HelperClientError("simulated helper failure")
+            return real(**arguments)
+
+        with patch.object(self.helper, "apply", side_effect=apply), \
+                self.assertLogs("jittersim.api.server", "ERROR"):
+            self.assertEqual(self.write("/api/apply", {})[0], 502)
+        self.assertEqual(self.repository.get_runtime_state().observed_state, "unknown")
+        applied_before = len(self.helper.plans)
+
+        status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 409)
+        self.assertIn("waiting to be applied", result["error"])
+        self.assertEqual(len(self.helper.plans), applied_before)
+        self.assertEqual(self.delays(self.helper.applied_plan, AIR_ID), {3_000})
+        self.assertIsNotNone(scheduler)
 
     def test_a_later_device_apply_never_installs_an_earlier_failed_choice(self) -> None:
         self.use_scheduler()

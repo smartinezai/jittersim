@@ -166,7 +166,9 @@ How long the device stays beside Everyone:
 - A whole-scope action ends them only after the helper accepted its plan. A
   failed Start, Apply to all or Stop for everyone keeps them and applies the plan
   that ran again with its randomization state, outage deadlines and sessions, so
-  the record, the retry, the next tick and the running policy agree.
+  the record, the retry, the next tick and the running policy agree. The state
+  keeps saying unknown when saved settings were waiting to be applied before the
+  failure, so the put-back never claims that they run.
   The usage of the devices is sampled before the counters restart.
 - Traffic progressions sample and advance only for the devices that run beside
   Everyone. The others stay paused.
