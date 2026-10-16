@@ -7,6 +7,8 @@ import pytest
 from jittersim.networking.commands import Command
 from jittersim.networking.helper import HelperClient, HelperClientError
 from tests.browser import fixture
+from tests.unit.test_helper_snapshot_cache import CLIENT
+from tests.unit.test_snapshot_status_poll import overlap_a_scan_with_a_status_poll
 
 
 def script_requests(monkeypatch, answers):
@@ -58,6 +60,51 @@ def test_a_helper_that_stays_busy_still_fails_in_the_end(monkeypatch):
         client()._request({"action": "apply"})
     assert error.value.reason == "helper-busy"
     assert len(calls) == fixture.BUSY_ATTEMPTS
+
+
+def test_a_scan_that_overlaps_a_status_poll_is_asked_again_not_failed(monkeypatch):
+    # The page reads the clients and the update status in the same breath. The status read
+    # invalidates the running scan, the scan reports "network changed" and the dashboard
+    # answered 502. A person reloads. tests/qa/test_browser_explore.py failed 1 run in 10 on that.
+    monkeypatch.setattr(fixture, "BUSY_WAIT_SECONDS", 0)
+
+    outcome, scans = overlap_a_scan_with_a_status_poll(
+        client(), monkeypatch, lambda helper_client: helper_client.online_status())
+
+    assert not isinstance(outcome, Exception), outcome
+    assert outcome["devices"][0]["mac_address"] == CLIENT["mac_address"]
+    assert scans == 2
+
+
+def test_a_scan_that_keeps_losing_the_race_still_fails_in_the_end(monkeypatch):
+    calls = []
+
+    def always_changed(self):
+        calls.append("scan")
+        raise HelperClientError("network changed during client scan", reason="helper-busy")
+
+    monkeypatch.setattr(HelperClient, "connected_device_snapshot", always_changed)
+    monkeypatch.setattr(fixture, "BUSY_WAIT_SECONDS", 0)
+
+    with pytest.raises(HelperClientError) as error:
+        client().connected_device_snapshot()
+    assert error.value.reason == "helper-busy"
+    assert len(calls) == fixture.BUSY_ATTEMPTS
+
+
+def test_a_scan_that_fails_for_another_reason_is_not_asked_again(monkeypatch):
+    calls = []
+
+    def broken(self):
+        calls.append("scan")
+        raise HelperClientError("client scan timed out")
+
+    monkeypatch.setattr(HelperClient, "connected_device_snapshot", broken)
+    monkeypatch.setattr(fixture, "BUSY_WAIT_SECONDS", 0)
+
+    with pytest.raises(HelperClientError, match="timed out"):
+        client().connected_device_snapshot()
+    assert calls == ["scan"]
 
 
 class FakeClock:
