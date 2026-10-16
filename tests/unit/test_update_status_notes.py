@@ -64,3 +64,26 @@ def test_a_link_in_place_of_the_notes_is_not_followed(pi, tmp_path):
     path.unlink()
     os.symlink(secret, path)
     assert updates.staged_notes(root) is None
+
+
+def test_a_pipe_in_place_of_the_notes_is_not_waited_for(pi):
+    # A plain open() of a pipe with no writer blocks the helper for ever.
+    _, _, root, _, _ = pi
+    stage(pi, "## v0.3.0\n", version="0.3.0")
+    path = root / "staged" / NOTES
+    path.unlink()
+    os.mkfifo(path)
+    assert updates.staged_notes(root) is None
+
+
+def test_the_largest_possible_notes_still_fit_in_one_helper_message(pi):
+    # Every byte of a control character becomes a six character JSON escape, so 16 KB of notes
+    # can take about 96 KB of the helper's 256 KB answer limit.
+    import json
+
+    from jittersim.networking.helper import MAX_MESSAGE_BYTES
+
+    status = stage(pi, "\x01" * 40000, version="0.3.0")
+    assert len(status["notes"]) == updates.MAX_NOTES
+    encoded = (json.dumps({"ok": True, **status}, sort_keys=True) + "\n").encode("utf-8")
+    assert len(encoded) < MAX_MESSAGE_BYTES // 2
