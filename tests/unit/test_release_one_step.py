@@ -433,6 +433,49 @@ def test_generated_github_notes_stay_inside_the_release_section(release, source,
     assert "### What's Changed" in changelog and "### New Contributors" in changelog
 
 
+@pytest.mark.skipif(shutil.which("ssh-agent") is None or shutil.which("ssh-add") is None,
+                    reason="the passphrase key path needs ssh-agent and ssh-add")
+def test_release_script_asks_for_an_expired_key_before_it_writes_a_half_record(source, tmp_path):
+    """The passphrase key lives in ssh-agent for one hour. The checks can take longer, so the key can
+    be gone when the record is signed. The script wrote the unsigned record first and signing
+    failed after it, which left a record that later steps refused with no way to continue. It now
+    makes sure the key is in the agent before it writes anything that needs the signature."""
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    protected = keys / "protected"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "throwaway-passphrase", "-C", "test",
+                    "-f", str(protected)], check=True, capture_output=True, stdin=subprocess.DEVNULL)
+    askpass = tmp_path / "askpass.sh"
+    askpass.write_text("#!/bin/sh\necho throwaway-passphrase\n")
+    askpass.chmod(0o755)
+    agent = subprocess.run(["ssh-agent", "-s"], check=True, capture_output=True, text=True).stdout
+    values = dict(line.split(";")[0].split("=", 1) for line in agent.splitlines() if "=" in line.split(";")[0])
+    agent_env = {"SSH_AUTH_SOCK": values["SSH_AUTH_SOCK"]}
+    try:
+        subprocess.run(["ssh-add", str(protected)], check=True, capture_output=True, stdin=subprocess.DEVNULL,
+                       env=dict(os.environ, **agent_env, SSH_ASKPASS=str(askpass), SSH_ASKPASS_REQUIRE="force"))
+        # Stands in for the check tools. The first call ends the agent's hold on the key like the
+        # one hour lifetime does, so the key is gone when the checks are done.
+        tool = tmp_path / "fake-python"
+        tool.write_text(f"#!/bin/sh\nssh-add -d {protected}.pub >/dev/null 2>&1 || true\nexit 0\n")
+        tool.chmod(0o755)
+        # The script asks for the passphrase again. This answer is wrong, so the test never waits for
+        # a person, also when it runs in a terminal.
+        wrong = tmp_path / "wrong-askpass.sh"
+        wrong.write_text("#!/bin/sh\necho not-the-passphrase\n")
+        wrong.chmod(0o755)
+        result = run_release(source, protected, tmp_path, "0.3.0",
+                             env=dict(agent_env, JITTERSIM_RELEASE_PYTHON=str(tool),
+                                      JITTERSIM_RELEASE_LOCAL_CI="none", JITTERSIM_RELEASE_FAKE_CHECKS="0",
+                                      SSH_ASKPASS=str(wrong), SSH_ASKPASS_REQUIRE="force"))
+    finally:
+        subprocess.run(["ssh-agent", "-k"], capture_output=True, env=dict(os.environ, **values))
+    assert result.returncode != 0
+    assert "ssh-agent" in result.stderr, result.stdout + result.stderr
+    evidence = tmp_path / "releases/0.3.0/evidence"
+    assert not (evidence / "local-verification.json").exists()
+
+
 def test_release_script_refuses_an_old_or_malformed_version(source, key, tmp_path):
     git(source, "tag", "v0.3.0")
     result = run_release(source, key, tmp_path, "0.3.0")

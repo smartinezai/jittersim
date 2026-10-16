@@ -118,13 +118,20 @@ set_version() {
     || fail "no release signing key at $key. Create it once with deploy/raspberry-pi/make-release-key.sh"
 [ -O "$key" ] || fail "the signing key $key belongs to another user"
 [ "$(ls -lLd "$key" | cut -c 5-10)" = '------' ] || fail "fix the key permissions: chmod 600 $key"
-if ! ssh-keygen -y -P '' -f "$key" >/dev/null 2>&1; then
-    fingerprint=$(ssh-keygen -l -f "$key.pub" | cut -d ' ' -f 2)
-    if ! ssh-add -l 2>/dev/null | grep -qF "$fingerprint"; then
-        say "The signing key has a passphrase. ssh-agent keeps it for one hour."
-        ssh-add -t 3600 "$key" </dev/tty || fail "the signing key could not be added to ssh-agent"
+# A passphrase key is kept by ssh-agent for one hour and every signature after that needs it
+# again, but the checks alone can take longer. So the key is made sure of before each step that
+# signs, not only once at the start. The step that signs may write its record first and sign
+# after, so a key that is gone then would leave an unsigned record that nothing can continue from.
+ensure_key() {
+    if ! ssh-keygen -y -P '' -f "$key" >/dev/null 2>&1; then
+        fingerprint=$(ssh-keygen -l -f "$key.pub" | cut -d ' ' -f 2)
+        if ! ssh-add -l 2>/dev/null | grep -qF "$fingerprint"; then
+            say "The signing key has a passphrase. ssh-agent keeps it for one hour."
+            ssh-add -t 3600 "$key" </dev/tty || fail "the signing key could not be added to ssh-agent"
+        fi
     fi
-fi
+}
+ensure_key
 
 if [ "$dry_run" = no ]; then
     login=$(gh api user -q .login 2>/dev/null) || fail "sign in to GitHub first: gh auth login"
@@ -267,6 +274,7 @@ runner = "scripts/release.sh" + (" --dry-run (fake checks)" if sys.argv[3] == "y
 checks = [{"name": n, "command": c[:500], "exit_code": int(s), "log_sha256": h} for n, c, s, h in rows]
 json.dump({"runner": runner, "checks": checks}, open(sys.argv[2], "w"), indent=2)
 EOF
+    ensure_key
     rs record-local --ref "$checked" --results "$record_dir/results.json" --key "$key" \
         --output "$record_dir/local-verification.json"
 }
@@ -311,6 +319,7 @@ git -C "$src" checkout -q --detach "$commit"
 
 # --- 4. The exact package, signed.
 if [ ! -f "$package/release.json" ]; then
+    ensure_key
     if [ "$dry_run" = yes ]; then
         sequence=$(python3 -c 'import json, sys; print([r for r in json.load(open(sys.argv[1]))["reservations"] if r["version"] == sys.argv[2]][0]["sequence"])' \
             "$src/docs/releases/registry.json" "$number")
@@ -364,6 +373,7 @@ EOF
         { cat "$evidence/notes.md"; printf '\nInstall from the dashboard Updates page or run sudo jittersim update on the Pi. A failed install restores the previous installation automatically.\n'; } >"$evidence/release-notes.md"
         rs accept --bundle "$package" --notes-file "$evidence/release-notes.md" --target "$target" "$@"
     fi
+    ensure_key
     say "Signing the approval of $tag with $key"
     rs approve --bundle "$package" --evidence "$package/acceptance.json" --key "$key" --confirm-version "$number"
 fi
