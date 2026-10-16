@@ -278,20 +278,12 @@ def test_a_failed_first_save_alone_does_not_fail_a_panic_that_saved_its_result(
         assert_effects_stopped(rig)
 
 
-LOST_LATCH = (
-    "A guard save that fails before its rename leaves the previous clear record. A restarted "
-    "helper trusts the guard over gateway.json (HelperService.__init__ reads the guard after "
-    "_load_gateway_state), so the latch and the unconfirmed-recovery marker of a Panic that "
-    "reported failure are forgotten until the owner presses Panic again."
-)
-
-
 def restart_cases():
+    # A guard save that fails before its rename leaves the previous clear record. The
+    # restarted helper must still keep the stop that gateway.json recorded.
     for phase in ("whole", "completion"):
         for target, stage in FAILING:
-            forgotten = target == "guard" and stage in BEFORE_RENAME and phase == "whole"
-            marks = [pytest.mark.xfail(strict=True, reason=LOST_LATCH)] if forgotten else []
-            yield pytest.param(target, stage, phase, marks=marks, id=f"{target}-{stage}-{phase}")
+            yield pytest.param(target, stage, phase, id=f"{target}-{stage}-{phase}")
 
 
 @pytest.mark.parametrize("target,stage,phase", list(restart_cases()))
@@ -412,7 +404,10 @@ def test_stale_gateway_temporary_is_never_loaded_as_committed_state(tmp_path):
 
 
 def test_stalled_state_sync_blocks_a_second_panic_with_helper_busy_then_recovers(monkeypatch):
-    monkeypatch.setattr(helper_module, "WRITE_LOCK_WAIT_SECONDS", 0.6)
+    # The second Panic waits on the network lock that the first one holds.
+    monkeypatch.setattr(helper_module, "PANIC_NETWORK_LOCK_WAIT_SECONDS", 0.6)
+    # This test checks the helper's own busy answer, not the client's retry.
+    monkeypatch.setattr(helper_module, "NORMAL_ACCESS_BUSY_RETRY_SECONDS", 0)
     with fault_rig(monkeypatch, "guard", "file-sync", stalled=True) as rig:
         socket_path = rig.directory / "helper.sock"
         outcome = {}
@@ -462,3 +457,226 @@ def test_stalled_state_sync_blocks_a_second_panic_with_helper_busy_then_recovers
         assert rig.guard.read() == STOPPED
         assert leftovers(rig.directory) == []
         assert_effects_stopped(rig)
+
+
+# Restart rule: the guard and gateway.json are combined so that a stop in either
+# record wins. An unreadable record counts as stopped and unconfirmed. A missing
+# gateway.json (as after a reboot, since it lives under /run) defers to the guard.
+MISSING = "missing"
+CORRUPT = "corrupt"
+RECORDS = (MISSING, CORRUPT, CLEAR, STOPPED, STOPPED_UNCONFIRMED)
+# Start clears only the Panic latch. Household rules stay stopped until they are
+# applied again, and a once-required control revision stays required.
+STARTED = {**STOPPED, "panic_stop_latched": False}
+
+
+def meaning(record, *, unreadable_missing):
+    if record == CORRUPT or (record == MISSING and unreadable_missing):
+        return STOPPED_UNCONFIRMED
+    if record == MISSING:
+        return CLEAR
+    return record
+
+
+def place_records(directory, gateway, guard_record):
+    persistent = PanicGuard(directory / "control" / "panic-state.json", owner_uid=os.getuid())
+    persistent.write(CLEAR)
+    base = restarted_service(directory, None)
+    assert base._write_gateway_state(durable=True)
+    path = directory / "gateway.json"
+    if gateway == MISSING:
+        path.unlink()
+    elif gateway == CORRUPT:
+        path.write_text("{")
+    else:
+        path.write_text(json.dumps({**json.loads(path.read_text()), **flags(gateway)}))
+    if guard_record == MISSING:
+        persistent.path.unlink()
+    elif guard_record == CORRUPT:
+        persistent.path.write_text("{")
+    else:
+        persistent.write(guard_record)
+    return persistent
+
+
+def start(service):
+    return service.handle_payload(
+        {
+            **apply_payload(AccessPlan()),
+            "explicit_apply": True,
+            "expected_control_revision": service._control_revision,
+        }
+    )
+
+
+def record_id(record):
+    names = {MISSING: "missing", CORRUPT: "corrupt"}
+    if isinstance(record, str):
+        return names[record]
+    return {False: "clear", True: "stopped"}[record["panic_stop_latched"]] + (
+        "-unconfirmed" if record["panic_recovery_failed"] else ""
+    )
+
+
+@pytest.mark.parametrize("guard_record", RECORDS, ids=lambda r: "guard-" + record_id(r))
+@pytest.mark.parametrize("gateway", RECORDS, ids=lambda r: "gateway-" + record_id(r))
+def test_restart_keeps_a_stop_from_either_record_and_panic_then_start_still_recovers(
+    tmp_path, gateway, guard_record
+):
+    persistent = place_records(tmp_path, gateway, guard_record)
+    one = meaning(gateway, unreadable_missing=False)
+    other = meaning(guard_record, unreadable_missing=True)
+    expected = {name: one[name] or other[name] for name in FLAGS}
+
+    service = restarted_service(tmp_path, persistent)
+    status = service._gateway_status()
+    assert flags(status) == expected
+    assert status["state_error"] is (CORRUPT in (gateway, guard_record) or guard_record == MISSING)
+
+    if expected["panic_recovery_failed"]:
+        assert start(service)["ok"] is False
+    final = CLEAR
+    if expected != flags(CLEAR):
+        final = STARTED
+        # The way out: Panic records a confirmed stop in both files.
+        assert service.handle_payload({"action": "normal-access"})["ok"] is True
+        assert flags(service._gateway_status()) == flags(STOPPED)
+        assert persistent.read() == STOPPED
+        if gateway == CORRUPT:
+            # An unreadable gateway.json also latched the outage stop, which needs a
+            # reachable router before Start. The gateway monitor supplies that.
+            service._gateway_state = "available"
+        assert start(service)["ok"] is True
+    assert flags(service._gateway_status()) == flags(final)
+    assert persistent.read() == final
+    if gateway != MISSING or final is STARTED:
+        assert flags(json.loads((tmp_path / "gateway.json").read_text())) == flags(final)
+    assert flags(restarted_service(tmp_path, persistent)._gateway_status()) == flags(final)
+
+
+class Crash(BaseException):
+    """The helper process dies at this point; nothing after it runs."""
+
+
+def crash_on(monkeypatch, owner, name, call):
+    original = getattr(owner, name)
+    seen = []
+
+    def stop_here(*args, **kwargs):
+        seen.append(kwargs)
+        if len(seen) == call:
+            raise Crash()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, stop_here)
+    return lambda: monkeypatch.setattr(owner, name, original)
+
+
+def stopped_helper(directory):
+    persistent = PanicGuard(directory / "control" / "panic-state.json", owner_uid=os.getuid())
+    persistent.write(CLEAR)
+    service = restarted_service(directory, persistent)
+    assert service._write_gateway_state(durable=True)
+    assert start(service)["ok"] is True
+    return service, persistent
+
+
+def test_crash_after_panic_latched_only_the_guard_restarts_stopped_and_unconfirmed(
+    tmp_path, monkeypatch
+):
+    # Panic saves the guard first. The process dies before gateway.json is saved.
+    service, persistent = stopped_helper(tmp_path)
+    crash_on(monkeypatch, service, "_write_gateway_state", 1)
+    with pytest.raises(Crash):
+        service.handle_payload({"action": "normal-access"})
+    assert flags(json.loads((tmp_path / "gateway.json").read_text())) == flags(CLEAR)
+    assert persistent.read() == STOPPED_UNCONFIRMED
+
+    monkeypatch.undo()
+    restarted = restarted_service(tmp_path, persistent)
+    assert flags(restarted._gateway_status()) == flags(STOPPED_UNCONFIRMED)
+    assert start(restarted)["ok"] is False
+    assert restarted.handle_payload({"action": "normal-access"})["ok"] is True
+    assert start(restarted)["ok"] is True
+
+
+def test_crash_between_the_panic_result_saves_restarts_unconfirmed(tmp_path, monkeypatch):
+    # gateway.json already holds the confirmed result; the guard still holds the latch.
+    service, persistent = stopped_helper(tmp_path)
+    crash_on(monkeypatch, persistent, "write", 2)
+    with pytest.raises(Crash):
+        service.handle_payload({"action": "normal-access"})
+    assert flags(json.loads((tmp_path / "gateway.json").read_text())) == flags(STOPPED)
+    assert persistent.read() == STOPPED_UNCONFIRMED
+
+    monkeypatch.undo()
+    restarted = restarted_service(tmp_path, persistent)
+    assert flags(restarted._gateway_status()) == flags(STOPPED_UNCONFIRMED)
+    assert start(restarted)["ok"] is False
+    assert restarted.handle_payload({"action": "normal-access"})["ok"] is True
+    assert flags(restarted._gateway_status()) == flags(STOPPED)
+
+
+def test_crash_between_the_start_saves_restarts_with_panic_still_latched(tmp_path, monkeypatch):
+    # Start saves gateway.json first. The older latched guard must still win.
+    service, persistent = stopped_helper(tmp_path)
+    assert service.handle_payload({"action": "normal-access"})["ok"] is True
+    assert persistent.read() == STOPPED
+    crash_on(monkeypatch, persistent, "write", 1)
+    with pytest.raises(Crash):
+        start(service)
+    assert flags(json.loads((tmp_path / "gateway.json").read_text()))["panic_stop_latched"] is False
+    assert persistent.read() == STOPPED
+
+    monkeypatch.undo()
+    restarted = restarted_service(tmp_path, persistent)
+    status = restarted._gateway_status()
+    assert status["panic_stop_latched"] is True and status["panic_recovery_failed"] is False
+    # A restarted helper never starts profiles on its own; the explicit Start still works.
+    refused = restarted.handle_payload(
+        {**apply_payload(AccessPlan()), "expected_control_revision": restarted._control_revision}
+    )
+    assert refused["ok"] is False and "Panic stopped profiles" in refused["error"]
+    assert start(restarted)["ok"] is True
+    assert persistent.read() == STARTED
+
+
+def test_crash_between_the_household_saves_keeps_household_rules_stopped(tmp_path, monkeypatch):
+    service, persistent = stopped_helper(tmp_path)
+    assert service.handle_payload({"action": "normal-access"})["ok"] is True
+    crash_on(monkeypatch, persistent, "write", 1)
+    with pytest.raises(Crash):
+        service.handle_payload(
+            {
+                "action": "access-apply",
+                "policy": AccessPlan().payload(),
+                "expected_control_revision": service._control_revision,
+            }
+        )
+    assert json.loads((tmp_path / "gateway.json").read_text())["household_stop_latched"] is False
+    assert persistent.read()["household_stop_latched"] is True
+
+    monkeypatch.undo()
+    restarted = restarted_service(tmp_path, persistent)
+    assert restarted._gateway_status()["household_stop_latched"] is True
+
+
+def test_a_successful_panic_and_start_are_not_undone_by_a_restart(tmp_path):
+    service, persistent = stopped_helper(tmp_path)
+    assert service.handle_payload({"action": "normal-access"})["ok"] is True
+    assert flags(restarted_service(tmp_path, persistent)._gateway_status()) == flags(STOPPED)
+    assert start(service)["ok"] is True
+    restarted = restarted_service(tmp_path, persistent)
+    assert flags(restarted._gateway_status()) == flags(STARTED)
+    # A plain apply (as from the scheduler) is accepted again after a confirmed Start.
+    assert restarted.handle_payload(
+        {**apply_payload(AccessPlan()), "expected_control_revision": restarted._control_revision}
+    )["ok"] is True
+
+
+@pytest.mark.parametrize("stage", BEFORE_RENAME)
+def test_failed_guard_result_save_is_recorded_unconfirmed_in_gateway_state(monkeypatch, stage):
+    with fault_rig(monkeypatch, "guard", stage) as rig:
+        assert run_panic(rig, "whole")["ok"] is False
+        assert rig.guard.read() == CLEAR
+        assert flags(json.loads(rig.gateway_path.read_text())) == flags(STOPPED_UNCONFIRMED)
