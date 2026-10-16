@@ -2644,7 +2644,7 @@ ONLINE_FILE = "online.json"
 ONLINE_REQUEST = "online-request.json"
 ONLINE_SETTINGS = "online-settings.json"
 ONLINE_SEEN = "online-seen.json"
-# When the schedule last started a check. A check someone asked for does not change it.
+# When the schedule's own check last ended. A check someone asked for does not change it.
 ONLINE_DAILY = "online-daily.json"
 ONLINE_LOCK = "online.lock"
 # The dashboard asks GitHub at most this often unless the owner presses Check now.
@@ -3138,10 +3138,6 @@ def request_online_check(*, force=False, root=UPDATE_ROOT, config=CONFIG_ROOT, r
             return _view(record, current)
         record = {"job": job, "state": "running", "requested_at": int(current),
                   "checked_at": None, "result": None, "message": "Checking GitHub for a release."}
-        if check_only is False:
-            # The daily timer follows the checks the schedule started and nothing else, so
-            # checking by hand every day cannot keep the one check that may install waiting.
-            atomic_json(root / ONLINE_DAILY, {"started_at": int(current)})
         # A check someone asked for only checks. Only the daily check may install by itself
         # (when Install automatically is on), so a manual check never interrupts the Pi.
         atomic_json(root / ONLINE_REQUEST, {"job": job, "requested_at": int(current),
@@ -3153,6 +3149,8 @@ def request_online_check(*, force=False, root=UPDATE_ROOT, config=CONFIG_ROOT, r
             (root / ONLINE_REQUEST).unlink(missing_ok=True)
             record.update(state="done", result="failed", checked_at=int(current), contacted=False,
                           message="The online check service could not start.")
+            if check_only is False:
+                atomic_json(root / ONLINE_DAILY, {"checked_at": int(current)})
             atomic_json(root / ONLINE_FILE, record)
         return _view(record, current)
 
@@ -3168,7 +3166,7 @@ def scheduled_online_check(*, root=UPDATE_ROOT, config=CONFIG_ROOT, run=run_comm
     if record.get("state") == "running" and current - record.get("requested_at", 0) <= STALE_SECONDS:
         return False
     try:
-        last = _record(root / ONLINE_DAILY).get("started_at")
+        last = _record(root / ONLINE_DAILY).get("checked_at")
     except UpdateError:
         last = None  # An unreadable marker must not stop the daily check for good.
     if isinstance(last, (int, float)) and 0 <= current - last < DAILY_SECONDS:
@@ -3179,9 +3177,10 @@ def scheduled_online_check(*, root=UPDATE_ROOT, config=CONFIG_ROOT, run=run_comm
 
 
 def perform_online_check(job, *, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, source=None,
-                         run=run_command, now=time.time, auto_install=True):
+                         run=run_command, now=time.time, auto_install=True, daily=False):
     """Run one check, record the answer under JOB and, when the owner turned Install
-    automatically on, queue the install of a release that is staged and installable."""
+    automatically on, queue the install of a release that is staged and installable. DAILY
+    says the schedule asked for it: only then does the daily timer start again from its end."""
     result = check_online(root=root, code=code, config=config, source=source)
     if result.get("busy"):
         return result
@@ -3205,6 +3204,11 @@ def perform_online_check(job, *, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG
                 except UpdateError as error:
                     message += " It was not installed automatically: " + str(error)
     finished = int(now())
+    if daily:
+        # The daily timer follows the schedule's own checks and nothing else, so checking by
+        # hand every day cannot keep the one check that may install waiting. A schedule check
+        # that never ended leaves it alone, so the next tick after STALE_SECONDS tries again.
+        atomic_json(root / ONLINE_DAILY, {"checked_at": finished})
     record = {"job": job, "state": "done", "requested_at": finished, "checked_at": finished,
               "result": result["result"], "message": message, "available": result["available"],
               "tag": result["tag"], "contacted": result["contacted"], "install_queued": queued}
@@ -3224,8 +3228,9 @@ def run_fetch_job(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, sourc
     if not isinstance(job, str) or not JOB.fullmatch(job):
         return None
     (root / ONLINE_REQUEST).unlink(missing_ok=True)
+    scheduled = request.get("check_only") is False
     return perform_online_check(job, root=root, code=code, config=config, source=source, run=run,
-                                now=now, auto_install=request.get("check_only") is False)
+                                now=now, auto_install=scheduled, daily=scheduled)
 
 
 # A copied recovery manager must understand these records before they are published.

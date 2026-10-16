@@ -296,7 +296,63 @@ def test_a_damaged_daily_marker_does_not_stop_the_daily_check(online):
     (root / updates.ONLINE_DAILY).write_text("not json")
     assert updates.scheduled_online_check(root=root, config=online.pi.config, run=online.run,
                                           now=lambda: online.clock[0]) is True
-    assert updates.read_json(root / updates.ONLINE_DAILY) == {"started_at": int(online.clock[0])}
+    fetch(online)
+    assert updates.read_json(root / updates.ONLINE_DAILY) == {"checked_at": int(online.clock[0])}
+
+
+def test_a_daily_check_that_never_ended_is_tried_again_after_the_stale_time(online):
+    root = online.pi.root
+    updates.set_online_settings({"daily_check": True}, root=root)
+
+    def tick():
+        return updates.scheduled_online_check(root=root, config=online.pi.config,
+                                              run=online.run, now=lambda: online.clock[0])
+
+    assert tick() is True
+    # The fetch unit took the request and was killed (for example by a reboot) before it ended.
+    (root / updates.ONLINE_REQUEST).unlink()
+    online.clock[0] += updates.STALE_SECONDS - 1
+    assert tick() is False
+    online.clock[0] += 2
+    assert tick() is True
+    assert len(online.run_calls) == 2
+
+
+def test_a_manual_check_that_never_ended_does_not_repeat_the_daily_check(online):
+    root = online.pi.root
+    updates.set_online_settings({"daily_check": True}, root=root)
+
+    def tick():
+        return updates.scheduled_online_check(root=root, config=online.pi.config,
+                                              run=online.run, now=lambda: online.clock[0])
+
+    assert tick() is True
+    fetch(online)
+    online.clock[0] += 3600
+    assert request(online, force=True)["state"] == "running"
+    (root / updates.ONLINE_REQUEST).unlink()  # killed before it ended
+    online.clock[0] += updates.STALE_SECONDS + 1
+    assert tick() is False
+    online.clock[0] += updates.DAILY_SECONDS
+    assert tick() is True
+
+
+def test_a_daily_check_whose_unit_cannot_start_waits_a_day(online):
+    root = online.pi.root
+    updates.set_online_settings({"daily_check": True}, root=root)
+
+    def broken(command, timeout=0):
+        raise updates.UpdateError("no systemd")
+
+    def tick(run):
+        return updates.scheduled_online_check(root=root, config=online.pi.config, run=run,
+                                              now=lambda: online.clock[0])
+
+    assert tick(broken) is False
+    online.clock[0] += 900
+    assert tick(online.run) is False and online.run_calls == []
+    online.clock[0] += updates.DAILY_SECONDS
+    assert tick(online.run) is True
 
 
 def test_the_command_line_check_never_installs_on_its_own(online):
