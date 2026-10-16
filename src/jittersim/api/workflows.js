@@ -754,8 +754,9 @@ function renderUpdates(failedRead) {
   element('update-available').textContent = !state ? 'Unknown. Check for updates to try again.'
     : ready ? releaseLabel(state) : blocked ? releaseLabel(state) + ' (cannot be installed)' : 'No newer release staged';
   element('update-signer').textContent = ready && state.signed_by ? state.signed_by : 'Not applicable';
-  element('update-recovery').textContent = !state ? 'Unknown'
+  element('update-recovery').textContent = !state || typeof state.rollback_available !== 'boolean' ? 'Unknown'
     : state.rollback_available ? 'Kept. Restore previous installation is available.'
+    : state.recovery_problem ? 'Could not be checked. Read the update log on the Pi.'
     : 'Made automatically before the next install.';
   const notes = ready && typeof state.notes === 'string' ? state.notes.trim().slice(0, 16384) : '';
   element('update-notes').textContent = notes;
@@ -1235,7 +1236,7 @@ function installReleaseControls() {
       <div><dt>Signed by</dt><dd id="update-signer">Not applicable</dd></div>
       <div><dt>Recovery copy</dt><dd id="update-recovery">Unknown</dd></div>
     </dl>
-    <details id="update-notes-box" hidden><summary>Release notes</summary><pre id="update-notes" class="update-notes"></pre></details>
+    <details id="update-notes-box" hidden><summary>Release notes</summary><pre id="update-notes" class="update-notes" tabindex="0" role="region" aria-label="Release notes text"></pre></details>
     <p id="release-status" role="status" aria-live="polite">Check for an approved release on this Pi.</p>
     <p id="online-check-status" class="form-note" role="status" aria-live="polite">Loading the online check…</p>
     <p id="github-access-hint" class="form-note" hidden></p>
