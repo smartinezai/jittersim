@@ -11,9 +11,19 @@ next release takes them over.
 - Applying a profile to one connected device while a profile for Everyone runs now
   starts it for that device. The device leaves Everyone and runs its own profile,
   and Everyone keeps running for every other device. Before, the dashboard refused
-  with "Everyone uses ... right now". Start, Apply to all, Stop for everyone, Reset
-  network and Panic end it for every device. The change adds a table to the
-  settings database and needs the Pi helper restarted with the update.
+  with "Everyone uses ... right now". It is refused while Everyone is saved but not
+  the profile that runs. A failed start changes nothing. Start, Apply to all, Stop
+  for everyone, Reset network and Panic end it for every device. The change adds a
+  table to the settings database and needs the Pi helper restarted with the update.
+- The Pi Wi-Fi follows the router. After a **Copy router Wi-Fi to Pi** that
+  worked, the Pi records the router's Wi-Fi name and security (no password).
+  Every boot renames a saved Wi-Fi with another name, such as
+  `JitterSim-Recovery`, back to the router name. The router is not contacted.
+  If the router name does not start, the previous name comes back for that
+  boot. A manual Wi-Fi change or a name reset stops the following.
+  `sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow`
+  `recovery` holds Recovery across reboots, `router` returns now and `status`
+  names the state.
 - `sudo jittersim update` and `jittersim remote update now` report success only
   when their install request reached `complete` and the Pi runs the new
   version. A rollback is reported only when the Pi confirmed it.
