@@ -9,7 +9,7 @@ import pytest
 
 from jittersim.api.server import ControlServer
 from jittersim.config.storage import ConfigRepository
-from jittersim.networking.helper import MAX_HELPER_CONNECTIONS, UnixHelperServer
+from jittersim.networking.helper import MAX_PENDING_HELPER_INPUT, UnixHelperServer
 from jittersim.request_workers import WorkersStillRunning
 
 
@@ -72,7 +72,7 @@ def test_partial_start_keeps_one_socket_and_capacity_owner(socket_folder, monkey
         if kind == "dashboard":
             assert server.active_workers == (0 if immediate else 1)
         else:
-            assert server._request_slots._value == MAX_HELPER_CONNECTIONS - (0 if immediate else 1)
+            assert server._input_slots._value == MAX_PENDING_HELPER_INPUT - (0 if immediate else 1)
         assert request.closed == (1 if immediate else 0)
     finally:
         release.set()
@@ -85,7 +85,7 @@ def test_partial_start_keeps_one_socket_and_capacity_owner(socket_folder, monkey
     if kind == "dashboard":
         assert server.active_workers == 0
     else:
-        assert server._request_slots._value == MAX_HELPER_CONNECTIONS
+        assert server._input_slots._value == MAX_PENDING_HELPER_INPUT
 
 
 @pytest.mark.parametrize("kind", ["dashboard", "helper"])
@@ -105,7 +105,7 @@ def test_constructor_failure_can_release_proven_unstarted_ownership(socket_folde
         if kind == "dashboard":
             assert server.active_workers == 0
         else:
-            assert server._request_slots._value == MAX_HELPER_CONNECTIONS
+            assert server._input_slots._value == MAX_PENDING_HELPER_INPUT
     finally:
         server.server_close()
         repository.close()
@@ -133,7 +133,7 @@ def test_unknown_start_retains_ownership_until_child_really_exits(socket_folder,
         if kind == "dashboard":
             assert server.active_workers == 1
         else:
-            assert server._request_slots._value == MAX_HELPER_CONNECTIONS - 1
+            assert server._input_slots._value == MAX_PENDING_HELPER_INPUT - 1
         with pytest.raises(WorkersStillRunning):
             server._request_workers.close(timeout=0.01)
         assert request.closed == 0

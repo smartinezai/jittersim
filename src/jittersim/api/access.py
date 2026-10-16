@@ -7,7 +7,7 @@ from dataclasses import replace
 
 from jittersim.diagnostic_records import recorded
 from jittersim.config.models import MacPolicy, SiteBlock, normalize_mac_address
-from jittersim.config.storage import DeviceConflictError, StorageError
+from jittersim.config.storage import DeviceConflictError, RepositoryBusy, StorageError
 from jittersim.engine.access import build_access_plan
 from jittersim.networking.helper import HelperClientError
 
@@ -21,6 +21,18 @@ ACCESS_WRITES = frozenset(
         "/api/normal-access",
     )
 )
+
+
+# A database backup or slow commit holds the repository lock (review N3). Panic's
+# bookkeeping waits for it at most this long per step and then goes on without it:
+# the helper still stops everything and the answer says the stop was not saved.
+# The steps are the version read before the route, the stop intent, the saved
+# result (PANIC_RESULT_WAIT_SECONDS), the activity record, the state in the answer,
+# the history checkpoint and the action record. Together they stay inside
+# PANIC_DATABASE_ALLOWANCE_SECONDS (api/server.py).
+PANIC_REPOSITORY_WAIT_SECONDS = 0.5
+PANIC_RESULT_WAIT_SECONDS = 1.5
+PANIC_REPOSITORY_STEPS = 6
 
 
 def response(value, status=200):
@@ -87,18 +99,28 @@ def normal_access(server):
     if server.scheduler is not None:
         ticket = server.scheduler.begin_recovery()
     persisted = True
+    # A backup or slow commit holds the repository (review N3). The stop intent is
+    # then saved after the helper call instead of before it: the scheduler fence of
+    # this recovery already keeps automation from applying anything meanwhile.
+    deferred = False
+
+    def save_stop_intent():
+        settings = repository.access_settings()
+        repository.save_access_policies(
+            settings.mac_policy, settings.website_policy,
+            options=replace(settings.access_options, enabled=False),
+        )
 
     def prepare():
-        nonlocal persisted
+        nonlocal persisted, deferred
         try:
-            settings = repository.access_settings()
-            repository.save_access_policies(
-                settings.mac_policy, settings.website_policy,
-                options=replace(settings.access_options, enabled=False),
-            )
-            repository.update_runtime_state(
-                observed_state="resetting", last_action="reset", last_result=None, last_error=None
-            )
+            with server.bounded_repository(PANIC_REPOSITORY_WAIT_SECONDS):
+                save_stop_intent()
+                repository.update_runtime_state(
+                    observed_state="resetting", last_action="reset", last_result=None, last_error=None
+                )
+        except RepositoryBusy:
+            deferred = True
         except (StorageError, sqlite3.Error):
             persisted = False
 
@@ -114,9 +136,13 @@ def normal_access(server):
     error = None
     try:
         result = server.helper_client.normal_access()
-    except HelperClientError:
+    except HelperClientError as helper_error:
         result = None
         error = "Normal access was not fully restored. Automation is paused. Retry the panic button."
+        # The helper's own reason (fixed wording, never command output) says what is left.
+        detail = str(helper_error).strip()[:300]
+        if detail:
+            error += " Pi helper: " + detail
     except BaseException:
         if ticket:
             server.scheduler.abandon_recovery(ticket)
@@ -130,11 +156,15 @@ def normal_access(server):
             error = "Traffic restrictions are off but the stopped state could not be saved. Retry before restarting."
         state = None
         try:
-            state = repository.update_runtime_state(
-                observed_state="error" if error else "reset", last_action="reset",
-                last_result="failure" if error else "success", last_error=error,
-            )
+            with server.bounded_repository(PANIC_RESULT_WAIT_SECONDS):
+                if deferred:
+                    save_stop_intent()
+                state = repository.update_runtime_state(
+                    observed_state="error" if error else "reset", last_action="reset",
+                    last_result="failure" if error else "success", last_error=error,
+                )
         except (StorageError, sqlite3.Error):
+            # RepositoryBusy too: the stop is not saved, so recovery stays unconfirmed.
             persisted = False
         if not persisted and error is None:
             error = "Traffic restrictions are off but the stopped state could not be saved. Retry before restarting."
@@ -142,10 +172,11 @@ def normal_access(server):
 
     state = server.scheduler.finish_recovery(ticket, publish, failed=error is not None or not persisted) if ticket else publish()[0]
     try:
-        server._record_activity(
-            "access",
-            error or "Normal access restored. All profiles and household restrictions are off.",
-        )
+        with server.bounded_repository(PANIC_REPOSITORY_WAIT_SECONDS):
+            server._record_activity(
+                "access",
+                error or "Normal access restored. All profiles and household restrictions are off.",
+            )
     except (StorageError, sqlite3.Error):
         pass
     if error:
@@ -153,7 +184,11 @@ def normal_access(server):
     body = {"normal_access": True, "result": result}
     if state is not None:
         # The sidebar Panic button shows this like the answer to a Reset.
-        body["state"] = server._runtime_state_with_running(state)
+        try:
+            with server.bounded_repository(PANIC_REPOSITORY_WAIT_SECONDS):
+                body["state"] = server._runtime_state_with_running(state)
+        except (StorageError, sqlite3.Error):
+            pass
     return response(body)
 
 
@@ -276,6 +311,10 @@ def write_access_api(server, path, payload, *, control_intent=None):
         refused = server._apply_refused(generation, undo=True)
         if refused is not None:
             return refused
+        if error.reason == "release-incomplete":
+            # The rules are off but a restriction such as the Wi-Fi join limits
+            # remains, so this is neither a completed disable nor a plain failure.
+            return response({"error": str(error)}, 503)
         return response(
             {"error": "Access update failed. Check access status before retrying."}, 503
         )
