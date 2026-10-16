@@ -185,7 +185,7 @@ def read_workflow(server, path):
     return None
 
 
-def write_workflow(server, path, payload, parse_settings):
+def write_workflow(server, path, payload, parse_settings, before_replace=None):
     if path not in WORKFLOW_WRITES:
         return None
     store = WorkflowStore(server.repository)
@@ -290,6 +290,9 @@ def write_workflow(server, path, payload, parse_settings):
                 max_traffic_classes=MAX_SHAPED_MARKS_PER_PLAN,
                 max_service_domains=MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
             )
+            refused = before_replace(settings) if before_replace is not None else None
+            if refused is not None:
+                return refused
             if server.scheduler:
                 server.scheduler.sample_usage(repository=server.repository)
             server.repository.replace_settings(

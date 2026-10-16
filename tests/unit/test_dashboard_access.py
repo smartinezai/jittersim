@@ -225,6 +225,46 @@ def test_status_read_wait_is_bounded_and_access_writes_remain_serialized(tmp_pat
     assert remove["reason"] == "helper-busy"
 
 
+def test_panic_device_check_is_busy_not_blocked_while_a_grant_save_stalls(tmp_path):
+    # G7: a grant write holds the store lock through fsync. Panic's emergency check
+    # answers helper-busy within its bound and never decides without the saved list.
+    import time
+
+    store = AccessStore(tmp_path / "access.json")
+    store.add(MAC, "Phone")
+    service = HelperService(PeerApplier(), access_store=store)
+    emergency = {"action": "dashboard-access", "operation": "emergency-status", "peer": PEER}
+    stalled, release = threading.Event(), threading.Event()
+    real_fsync = os.fsync
+
+    def stalled_fsync(descriptor):
+        stalled.set()
+        release.wait(10)
+        real_fsync(descriptor)
+
+    answers = []
+    with patch("jittersim.networking.dashboard_access.os.fsync", stalled_fsync):
+        writer = threading.Thread(target=store.add, args=("02:00:00:00:00:02", "Mac"))
+        writer.start()
+        try:
+            assert stalled.wait(5)
+            checker = threading.Thread(
+                target=lambda: answers.append((service.handle_payload(emergency), time.monotonic())))
+            started = time.monotonic()
+            checker.start()
+            checker.join(3)
+            assert answers, "the emergency check waited for the stalled save"
+        finally:
+            release.set()
+            writer.join(10)
+            checker.join(10)
+    answer, finished = answers[0]
+    assert answer["ok"] is False and answer["reason"] == "helper-busy"
+    assert "allowed" not in answer
+    assert finished - started < 2
+    assert service.handle_payload(emergency)["allowed"] is True
+
+
 def test_concurrent_changes_duplicates_limits_and_failed_replace(tmp_path):
     store = AccessStore(tmp_path / "access.json")
     addresses = ["02:00:00:00:00:" + f"{number:02x}" for number in range(64)]
