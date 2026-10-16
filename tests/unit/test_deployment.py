@@ -22,6 +22,17 @@ class DeploymentFirewallTests(unittest.TestCase):
         self.assertIn("fc00::/7", firewall)
         self.assertIn("fe80::/10", firewall)
 
+    def test_test_wifi_cannot_forward_to_link_local_or_carrier_grade_nat(self) -> None:
+        # Some ISP modems and their management pages sit in these ranges.
+        firewall = (
+            REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-control-firewall.nft"
+        ).read_text()
+        forward = firewall[firewall.index("chain forward"):]
+        private = forward[:forward.index('comment "deny test Wi-Fi access to private upstream networks"')]
+        for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                        "169.254.0.0/16", "100.64.0.0/10"):
+            self.assertIn(network, private)
+
     def test_pi_service_uses_tls_and_installer_protects_the_private_key(self) -> None:
         service = (
             REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-dashboard.service"
@@ -33,6 +44,30 @@ class DeploymentFirewallTests(unittest.TestCase):
         # The helper sets root:jittersim 0640 on the key (tests/unit/test_local_ca.py).
         self.assertIn("-m jittersim.localca ensure", installer)
         self.assertIn("--group jittersim", installer)
+
+    def test_the_helper_starts_after_boot_restoration_has_finished(self) -> None:
+        # O5: the helper's startup decision is applied last and Panic is only
+        # served once access-boot can no longer restore rules behind it.
+        def ordered_after(unit):
+            text = (REPOSITORY_ROOT / "deploy" / "raspberry-pi" / unit).read_text()
+            return {name for line in text.splitlines() if line.startswith("After=")
+                    for name in line[len("After="):].split()}
+
+        self.assertIn("jittersim-access-boot.service", ordered_after("jittersim-helper.service"))
+        self.assertNotIn("jittersim-helper.service", ordered_after("jittersim-access-boot.service"))
+
+    def test_a_hung_boot_restoration_cannot_keep_the_helper_and_panic_from_starting(self) -> None:
+        # The helper is ordered after the one-shot access-boot, whose start timeout is
+        # unlimited by default. A bounded timeout lets systemd stop it and start the
+        # helper, which then applies its own startup decision. After= is only ordering
+        # (no Requires=), so a failed or timed-out access-boot does not block the helper.
+        unit = (REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-access-boot.service").read_text()
+        timeouts = [line.split("=", 1)[1] for line in unit.splitlines() if line.startswith("TimeoutStartSec=")]
+        self.assertEqual(len(timeouts), 1)
+        self.assertTrue(timeouts[0].isdigit() and 0 < int(timeouts[0]) <= 120, timeouts)
+        helper = (REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-helper.service").read_text()
+        self.assertNotIn("Requires=jittersim-access-boot", helper)
+        self.assertNotIn("BindsTo=jittersim-access-boot", helper)
 
     def test_dns_watcher_runs_unprivileged_with_only_packet_capture(self) -> None:
         service = (

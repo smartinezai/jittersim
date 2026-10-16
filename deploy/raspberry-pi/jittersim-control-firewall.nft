@@ -36,8 +36,12 @@ table inet jittersim_control {
 
         # Test-network clients may use the Pi for public internet access, but
         # must not reach the router or other private networks through uplink.
+        # Link-local and carrier-grade NAT addresses count as private: some ISP
+        # modems and their management pages sit there.
         iifname "@TEST_INTERFACE@" oifname "@UPLINK_INTERFACE@" ip daddr {
             10.0.0.0/8,
+            100.64.0.0/10,
+            169.254.0.0/16,
             172.16.0.0/12,
             192.168.0.0/16
         } counter drop comment "deny test Wi-Fi access to private upstream networks"

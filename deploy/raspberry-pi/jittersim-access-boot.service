@@ -14,6 +14,9 @@ RuntimeDirectoryPreserve=yes
 EnvironmentFile=/etc/jittersim/runtime.env
 ExecStart=/opt/jittersim/.venv/bin/jittersim-access-restore --uplink ${JITTERSIM_UPLINK} --test-interface ${JITTERSIM_TEST_INTERFACE}
 RemainAfterExit=yes
+# The helper (and with it Panic) starts after this unit. Never let a hung restore
+# keep it waiting: each command is capped at 20 s, the whole restore at 90 s.
+TimeoutStartSec=90
 
 [Install]
 WantedBy=multi-user.target
