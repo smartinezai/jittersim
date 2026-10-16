@@ -30,6 +30,7 @@ from jittersim.updates import (
     update_status,
 )
 from tests.release_support import have_ssh_keygen, make_key, manifest, sign
+from tests.tls_support import needs_openssl
 
 PI = Path(__file__).resolve().parents[2] / "deploy" / "raspberry-pi"
 WATCHER = "jittersim-service-watch.service"
@@ -1194,6 +1195,7 @@ class UpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(UpdateError, "not newer"):
             self.apply(run, lambda: True)
         self.assertEqual(commands, [])
+    @needs_openssl
     def test_health_trusts_a_dashboard_certificate_issued_by_the_local_authority(self):
         from jittersim import localca
         from jittersim.api.server import ControlServer
