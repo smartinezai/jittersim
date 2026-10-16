@@ -5216,6 +5216,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                             "profile."
                         )
                 if general is not None and not stopped:
+                    if (last_action is not None
+                            and self.repository.get_runtime_state().observed_state == "unknown"):
+                        # A saved change that nothing applied yet, for example one written by
+                        # another process. This Apply would install it for other devices too.
+                        raise ValueError(
+                            "Saved settings are still waiting to be applied. Nothing was saved. "
+                            "Try again in a moment."
+                        )
                     if not self._everyone_runs():
                         # An Everyone that does not run, for example after a failed Start,
                         # would start for every device as a side effect of this Apply.
@@ -5300,17 +5308,15 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         """Whether the helper really runs the saved Everyone profile right now.
 
         A saved Everyone that never started, or whose apply failed, does not run. A device
-        Apply must not start it for every other device as a side effect. A saved change
-        that waits for its apply leaves the state unknown, so the applied plan decides.
+        Apply must not start it for every other device as a side effect.
         """
 
         if self.repository.get_general_profile() is None:
             return False
-        state = self.repository.get_runtime_state().observed_state
-        if self.scheduler is None:
-            return state == "applied"
-        if state not in ("applied", "unknown"):
+        if self.repository.get_runtime_state().observed_state != "applied":
             return False
+        if self.scheduler is None:
+            return True
         # The profile that runs must be the one saved. After a failed Apply to all the old
         # one still runs, and this Apply must not switch every other device to the new one.
         applied = self.scheduler.applied_plan()

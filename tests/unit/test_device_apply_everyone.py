@@ -353,6 +353,22 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
         self.assertEqual(len(self.helper.plans), applied_before)
         self.assertEqual(self.helper.applied_plan.general_profile.profile_id, "low")
 
+    def test_a_device_apply_waits_for_saved_settings_that_nothing_applied(self) -> None:
+        self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        # Another writer changed the Air's profile. No apply ran, so the state is unknown.
+        self.repository.save_profile(Profile(
+            id="slow-test", name="Slow test", upload=Impairment(loss_percent=100)))
+        applied_before = len(self.helper.plans)
+
+        status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 409)
+        self.assertIn("waiting to be applied", result["error"])
+        self.assertIsNone(self.repository.get_device(PHONE_ID))
+        self.assertEqual(len(self.helper.plans), applied_before)
+        self.assertEqual(self.delays(self.helper.applied_plan, AIR_ID), {3_000})
+
     def test_a_device_apply_never_installs_an_edit_of_everyones_profile(self) -> None:
         scheduler = self.use_scheduler()
         self.assertEqual(self.apply_to()[0], 200)
@@ -460,6 +476,7 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         self.repository.save_profile(Profile(
             id="blocked", name="Blocked", upload=Impairment(loss_percent=100),
             download=Impairment(loss_percent=100)))
+        self.mark_applied()
         self.assertEqual(self.apply_to()[0], 200)
         ran_before = self.helper.applied_plan
         patcher, calls = self.fail_first_apply()
