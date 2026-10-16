@@ -29,6 +29,9 @@ from jittersim.engine.plan import (
     EVERYONE_ELSE_QUEUE_ID,
     GENERAL_QUEUE_ID,
     Direction,
+    EveryoneElseRule,
+    GeneralProfileRule,
+    MarkRule,
     NetworkPlan,
     QueueSpec,
     ServiceAssignmentRule,
@@ -395,7 +398,16 @@ class FakeScheduler:
             for queue_id in queue_ids
             for direction in (Direction.UPLOAD, Direction.DOWNLOAD)
         )
-        self.plan = NetworkPlan(mark_rules=(), queues=queues)
+        # The lab phone's address is marked into its own queue. The shared rules are present so
+        # every source can be tested with one plan; each test narrows the plan where it matters.
+        self.plan = NetworkPlan(
+            mark_rules=(MarkRule(device_id="lab", ipv4_address=IPv4Address("192.168.50.10"),
+                                 mark=1),),
+            queues=queues,
+            general_profile=GeneralProfileRule(profile_id="slow"),
+            everyone_else=EveryoneElseRule(mark=2, upload_impairment=Impairment(),
+                                           download_impairment=Impairment()),
+        )
 
     def set_source(self, key, kind, profile, label=""):
         self.states[key] = TargetState(name=key, source=Source(kind, kind, label, "", profile))
@@ -829,6 +841,50 @@ class StartChecksTests(ManagerBase):
         self.assertEqual(status, 201, run)
         self.assertEqual(run["source"], "device")
         self.assertEqual(self.manager.runs[run["id"]].profile["profile_name"], "Slow")
+
+    def test_the_queue_that_marks_the_current_address_is_measured(self) -> None:
+        # The phone is saved at .20 but uses .10 now. The scheduler kept .10 with a saved
+        # device that has no MAC address, so the phone's traffic goes through that queue.
+        self.repository.save_profile(
+            Profile(id="fast", name="Fast", download=Impairment(bandwidth_kbit=5000)))
+        self.repository.save_device(
+            Device("lab", "Lab phone", "192.168.50.20", "fast", mac_address=PHONE))
+        self.repository.save_device(Device("old", "Old tablet", "192.168.50.10", "slow"))
+        self.scheduler.plan = replace(self.scheduler.plan, mark_rules=(
+            MarkRule(device_id="old", ipv4_address=IPv4Address("192.168.50.10"), mark=1),
+            MarkRule(device_id="lab", ipv4_address=IPv4Address("192.168.50.20"), mark=2)),
+            queues=self.scheduler.plan.queues + tuple(
+                QueueSpec(device_id="old", direction=direction, mark=1, impairment=Impairment())
+                for direction in (Direction.UPLOAD, Direction.DOWNLOAD)))
+        self.scheduler.set_source("old", "profile", "Slow")
+        self.scheduler.set_source("lab", "profile", "Fast")
+        reading = self.helper.queue_stats
+        self.helper.queue_stats = lambda: reading() + [
+            dict(entry, device_id="old") for entry in reading() if entry["device_id"] == "lab"]
+
+        _, run = self.start_short()
+        manager_run = self.manager.runs[run["id"]]
+
+        self.assertEqual(run["source"], "device")
+        self.assertEqual(manager_run.queue_id, "old")
+        self.assertEqual(manager_run.profile["profile_name"], "Slow")
+        self.assertIn("Old tablet", run["source_note"])
+
+    def test_a_saved_device_id_like_a_shared_queue_is_not_taken_for_it(self) -> None:
+        # In a per-device plan there is no general profile rule. A saved device whose id looks
+        # like the general queue must not be measured as the profile for everyone.
+        self.repository.save_device(Device(GENERAL_QUEUE_ID, "Odd name", "192.168.50.30", "slow",
+                                           mac_address="02:00:00:00:00:30"))
+        self.scheduler.plan = replace(self.scheduler.plan, general_profile=None)
+        reading = self.helper.queue_stats
+        self.helper.queue_stats = lambda: [
+            dict(entry, device_id=queue_id) for entry in reading()
+            if entry["device_id"] == "lab"
+            for queue_id in (GENERAL_QUEUE_ID, EVERYONE_ELSE_QUEUE_ID)]
+
+        _, run = self.write("/api/speed-tests/start", {"mac_address": OTHER})
+
+        self.assertEqual(run["source"], "everyone-else")
 
     def test_a_queue_reading_with_one_direction_keeps_status_and_finish_working(self) -> None:
         reading = self.helper.queue_stats

@@ -313,8 +313,23 @@ class SpeedTestManager:
                 "The Pi could not read the queue counters just now. Try again in a moment.",
                 503) from error
         now, mono = self.clock(), self.monotonic()
-        source, entries = pick_queues(queues or [], device.id if device else None)
+        plan, states = self._applied_snapshot()
+        # Which saved device's queue carries this client's traffic. The applied plan marks
+        # traffic by address, so its mark rule for the client's current address decides, not
+        # the saved row (the scheduler can keep an address with an older device).
+        owner, queue_id = device, (device.id if device else None)
         notes: List[str] = []
+        if plan is not None:
+            queue_id = _address_owner(plan, ipv4)
+            if queue_id is None:
+                owner = None
+            elif device is None or queue_id != device.id:
+                owner = repository.get_device(queue_id)
+                notes.append(
+                    "This device's current address is shaped by the queue of the saved device "
+                    f"{owner.name if owner else queue_id}, so that queue and its profile are "
+                    "measured.")
+        source, entries = pick_queues(queues or [], queue_id, plan=plan)
         if queues is None:
             notes.append("The network is reset or the helper cannot read queues.")
         elif source == "none":
@@ -325,8 +340,7 @@ class SpeedTestManager:
         elif source in SHARED_SOURCES:
             notes.append("Other devices share this queue, so their traffic is counted too. "
                          + SHARED_LATENCY_NOTE)
-        plan, states = self._applied_snapshot()
-        service_rules = self._service_rules_apply(device, source, plan, states)
+        service_rules = self._service_rules_apply(queue_id, source, plan, states)
         if service_rules is True:
             notes.append(SERVICE_RULES_NOTE)
         elif service_rules is None and source != "none":
@@ -335,6 +349,7 @@ class SpeedTestManager:
             id=secrets.token_hex(8),
             mac_address=mac_address,
             device_id=device.id if device else None,
+            queue_id=queue_id,
             device_name=name[:64],
             ipv4_address=ipv4,
             provider=provider,
@@ -346,7 +361,7 @@ class SpeedTestManager:
             source=source,
             source_note=" ".join(notes) or None,
             service_rules=service_rules,
-            profile=self._profile_snapshot(device, source, entries, plan, states),
+            profile=self._profile_snapshot(owner, queue_id, source, entries, plan, states),
         )
         if source != "none":
             run.identity = {direction: _identity(entry) for direction, entry in entries.items()}
@@ -392,13 +407,13 @@ class SpeedTestManager:
             return None
         return getattr(plan, "general_profile", None)
 
-    def _service_rules_apply(self, device, source, plan, states) -> Optional[bool]:
+    def _service_rules_apply(self, queue_id, source, plan, states) -> Optional[bool]:
         """Whether the applied plan diverts some traffic from the measured queue."""
 
         if source == "none":
             return None
         key = {
-            "device": device.id if device is not None else None,
+            "device": queue_id,
             "everyone": GENERAL_QUEUE_ID,
             "everyone-else": EVERYONE_ELSE_QUEUE_ID,
         }.get(source)
@@ -411,12 +426,12 @@ class SpeedTestManager:
 
         if getattr(plan, "service_list_rules", ()):
             return True
-        if device is None:
+        if queue_id is None:
             return False
-        if any(rule.device_id == device.id for rule in getattr(
+        if any(rule.device_id == queue_id for rule in getattr(
                 plan, "service_assignment_rules", ())):
             return True
-        return any(rule.device_id == device.id and rule.active for rule in getattr(
+        return any(rule.device_id == queue_id and rule.active for rule in getattr(
             plan, "service_quota_rules", ()))
 
     def _applied_profile(self, key, saved, plan, states):
@@ -445,12 +460,13 @@ class SpeedTestManager:
         matches = [profile for profile in self.repository.list_profiles() if profile.name == name]
         return matches[0] if len(matches) == 1 else None
 
-    def _profile_snapshot(self, device, source, entries, plan, states) -> Dict[str, Any]:
+    def _profile_snapshot(self, owner, queue_id, source, entries, plan, states) -> Dict[str, Any]:
         repository = self.repository
         profile, name, applied_by, applied_label = None, "No profile", "profile", ""
-        if source == "device" and device is not None:
+        if source == "device" and queue_id is not None:
             profile, name, applied_by, applied_label = self._applied_profile(
-                device.id, repository.get_profile(device.profile_id), plan, states)
+                queue_id, repository.get_profile(owner.profile_id) if owner else None,
+                plan, states)
         elif source == "everyone":
             rule = self._general_rule(plan, states)
             if rule is not None:
@@ -537,7 +553,7 @@ class SpeedTestManager:
             if queues is None:
                 changed = True
             elif queues is not False:
-                _, entries = pick_queues(queues, run.device_id, prefer=run.source)
+                _, entries = pick_queues(queues, run.queue_id, prefer=run.source)
                 identity = {direction: _identity(entry) for direction, entry in entries.items()}
                 sample = _sample(entries, now)
                 previous = run.samples[-1] if run.samples else None
@@ -693,14 +709,21 @@ class SpeedTestManager:
             return run.payload(self.monotonic())
 
 
-def pick_queues(queues, device_id, prefer=None):
+def pick_queues(queues, device_id, prefer=None, plan=None):
     """Which queues carry this device's traffic: its own, the profile for everyone, or
-    Everyone else. Returns (source, {direction: entry})."""
+    Everyone else. Returns (source, {direction: entry}).
 
+    A saved device id may look like a shared queue id, so a shared queue is only chosen when
+    the applied plan (if known) has its rule, and a device queue never uses a shared id.
+    """
+
+    shared = (GENERAL_QUEUE_ID, EVERYONE_ELSE_QUEUE_ID)
+    general = plan is None or getattr(plan, "general_profile", None) is not None
+    everyone_else = plan is None or getattr(plan, "everyone_else", None) is not None
     choices = (
-        ("device", device_id),
-        ("everyone", GENERAL_QUEUE_ID),
-        ("everyone-else", EVERYONE_ELSE_QUEUE_ID),
+        ("device", None if device_id in shared else device_id),
+        ("everyone", GENERAL_QUEUE_ID if general else None),
+        ("everyone-else", EVERYONE_ELSE_QUEUE_ID if everyone_else else None),
     )
     for source, queue_id in choices:
         if queue_id is None or (prefer is not None and source != prefer):
@@ -712,6 +735,15 @@ def pick_queues(queues, device_id, prefer=None):
         if entries:
             return source, entries
     return (prefer or "none"), {}
+
+
+def _address_owner(plan, ipv4) -> Optional[str]:
+    """The device id whose mark rule in the applied plan matches this address, if any."""
+
+    for rule in getattr(plan, "mark_rules", ()):
+        if ipv4 is not None and str(rule.ipv4_address) == str(ipv4):
+            return rule.device_id
+    return None
 
 
 def _identity(entry: Dict[str, Any]) -> Dict[str, Any]:
