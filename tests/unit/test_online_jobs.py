@@ -2,6 +2,7 @@
 check and the automatic install. The root fetch unit does the work; the dashboard never does."""
 
 import json
+from unittest import mock
 
 import pytest
 
@@ -226,7 +227,7 @@ def test_install_automatically_queues_the_normal_install_with_its_recovery_copy(
 def test_install_automatically_does_not_install_a_refused_release(online):
     updates.set_online_settings({"install_automatically": True}, root=online.pi.root)
     online.github.files[11] = b"nonsense"
-    request(online)
+    request(online, check_only=False)  # the daily check: the only one that may install
     assert fetch(online)["result"] == "failed"
     assert not (online.pi.root / "request.json").exists()
 
@@ -258,10 +259,44 @@ def test_a_check_someone_asked_for_never_installs_on_its_own(online):
 def test_only_the_daily_check_may_install_by_itself(online):
     updates.set_online_settings({"install_automatically": True, "daily_check": True},
                                 root=online.pi.root)
-    with __import__("unittest.mock").mock.patch.object(updates, "token_is_set", return_value=True):
+    with mock.patch.object(updates, "token_is_set", return_value=True):
         assert updates.scheduled_online_check(root=online.pi.root, config=online.pi.config,
                                               run=online.run, now=lambda: online.clock[0])
     assert updates.read_json(online.pi.root / updates.ONLINE_REQUEST)["check_only"] is False
+
+
+def test_checking_by_hand_does_not_keep_the_daily_check_waiting(online):
+    root = online.pi.root
+    updates.set_online_settings({"daily_check": True}, root=root)
+
+    def tick():
+        return updates.scheduled_online_check(root=root, config=online.pi.config,
+                                              run=online.run, now=lambda: online.clock[0])
+
+    assert tick() is True
+    assert fetch(online)["result"] == "staged"
+    updates.set_online_settings({"install_automatically": True}, root=root)
+    # Someone presses Check for updates every day, a little less than a day apart.
+    online.clock[0] += updates.DAILY_SECONDS - 3600
+    assert request(online, force=True)["state"] == "running"
+    record = fetch(online)
+    assert record["result"] == "staged" and record["install_queued"] is False
+    assert tick() is False
+    # An hour later a day passed since the schedule's own check, so it runs and installs.
+    online.clock[0] += 3600 + 60
+    assert tick() is True
+    record = fetch(online)
+    assert record["install_queued"] is True
+    assert json.loads((root / "request.json").read_text())["version"] == "0.7.0"
+
+
+def test_a_damaged_daily_marker_does_not_stop_the_daily_check(online):
+    root = online.pi.root
+    updates.set_online_settings({"daily_check": True}, root=root)
+    (root / updates.ONLINE_DAILY).write_text("not json")
+    assert updates.scheduled_online_check(root=root, config=online.pi.config, run=online.run,
+                                          now=lambda: online.clock[0]) is True
+    assert updates.read_json(root / updates.ONLINE_DAILY) == {"started_at": int(online.clock[0])}
 
 
 def test_the_command_line_check_never_installs_on_its_own(online):

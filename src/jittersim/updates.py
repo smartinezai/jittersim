@@ -2644,6 +2644,8 @@ ONLINE_FILE = "online.json"
 ONLINE_REQUEST = "online-request.json"
 ONLINE_SETTINGS = "online-settings.json"
 ONLINE_SEEN = "online-seen.json"
+# When the schedule last started a check. A check someone asked for does not change it.
+ONLINE_DAILY = "online-daily.json"
 ONLINE_LOCK = "online.lock"
 # The dashboard asks GitHub at most this often unless the owner presses Check now.
 CACHE_SECONDS = 10 * 60
@@ -3136,6 +3138,10 @@ def request_online_check(*, force=False, root=UPDATE_ROOT, config=CONFIG_ROOT, r
             return _view(record, current)
         record = {"job": job, "state": "running", "requested_at": int(current),
                   "checked_at": None, "result": None, "message": "Checking GitHub for a release."}
+        if check_only is False:
+            # The daily timer follows the checks the schedule started and nothing else, so
+            # checking by hand every day cannot keep the one check that may install waiting.
+            atomic_json(root / ONLINE_DAILY, {"started_at": int(current)})
         # A check someone asked for only checks. Only the daily check may install by itself
         # (when Install automatically is on), so a manual check never interrupts the Pi.
         atomic_json(root / ONLINE_REQUEST, {"job": job, "requested_at": int(current),
@@ -3158,10 +3164,13 @@ def scheduled_online_check(*, root=UPDATE_ROOT, config=CONFIG_ROOT, run=run_comm
     if not online_settings(root)["daily_check"] or not token_is_set(config):
         return False
     record = _record(root / ONLINE_FILE)
-    last = record.get("checked_at") if record.get("state") == "done" else None
     current = now()
     if record.get("state") == "running" and current - record.get("requested_at", 0) <= STALE_SECONDS:
         return False
+    try:
+        last = _record(root / ONLINE_DAILY).get("started_at")
+    except UpdateError:
+        last = None  # An unreadable marker must not stop the daily check for good.
     if isinstance(last, (int, float)) and 0 <= current - last < DAILY_SECONDS:
         return False
     started = request_online_check(force=True, root=root, config=config, run=run, now=now,
