@@ -64,6 +64,50 @@ class PanicSchedulerLockTests(unittest.TestCase):
         self.assertEqual(self.helper.normal_access_calls, 2)
         self.assertTrue(self.scheduler.can_apply(self.scheduler.apply_generation))
 
+    def test_panic_calls_the_helper_when_the_lock_is_taken_after_it_began(self):
+        # Review finding: another owner takes the lock between begin_recovery() and
+        # publish_recovery(), then waits for a backup inside its publish.
+        original = self.scheduler.begin_recovery
+        holders = []
+
+        def begin_then_lose_the_lock(*args, **kwargs):
+            ticket = original(*args, **kwargs)
+            holders.append(self.hold_scheduler_lock())
+            return ticket
+
+        self.scheduler.begin_recovery = begin_then_lose_the_lock
+        started = time.monotonic()
+        status, _, data = self.request("POST", "/api/normal-access", {}, timeout=10)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(self.helper.normal_access_calls, 1)
+        self.assertEqual(status, 503, data)
+        self.assertIn("not confirmed", json.loads(data)["error"])
+        release, thread = holders[0]
+        release.set()
+        thread.join(5)
+        self.scheduler.begin_recovery = original
+        self.assertFalse(self.scheduler.can_apply(self.scheduler.apply_generation))
+        status, _, data = self.request("POST", "/api/normal-access", {})
+        self.assertEqual(status, 200, data)
+        self.assertTrue(self.scheduler.can_apply(self.scheduler.apply_generation))
+
+    def test_concurrent_forced_halts_never_reuse_a_generation(self):
+        release, thread = self.hold_scheduler_lock()
+        seen = []
+
+        def force():
+            self.scheduler.begin_recovery(timeout=0)
+            seen.append(self.scheduler._generation())
+
+        workers = [threading.Thread(target=force) for _ in range(20)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(5)
+        self.assertEqual(self.scheduler._forced_halts, 20)
+        release.set()
+        thread.join(5)
+
     def test_a_forced_halt_after_a_ticket_keeps_recovery_pending(self):
         ticket = self.scheduler.begin_recovery()
         release, thread = self.hold_scheduler_lock()
@@ -76,6 +120,7 @@ class PanicSchedulerLockTests(unittest.TestCase):
 
     def test_the_scheduler_wait_fits_the_panic_database_allowance(self):
         worst = (access_module.PANIC_SCHEDULER_WAIT_SECONDS
+                 + access_module.PANIC_SCHEDULER_STEP_FLOOR_SECONDS
                  + access_module.PANIC_REPOSITORY_WAIT_SECONDS * access_module.PANIC_REPOSITORY_STEPS
                  + access_module.PANIC_RESULT_WAIT_SECONDS)
         self.assertLessEqual(worst, server_module.PANIC_DATABASE_ALLOWANCE_SECONDS)

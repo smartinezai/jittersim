@@ -1,6 +1,5 @@
 """Background runtime for schedules, randomized rerolls and outages."""
 
-import itertools
 import logging
 import secrets
 import sqlite3
@@ -147,6 +146,10 @@ def plan_address_moves(
 
 
 @dataclass(frozen=True)
+class SchedulerBusy(Exception):
+    """The scheduler lock was not free in time. The scheduler was fenced without it."""
+
+
 class PreparedRuntimePlan:
     """Network rules and their source descriptions from one evaluation."""
 
@@ -223,11 +226,14 @@ class RuntimeScheduler:
         self._recovery_required = False
         self._recovery_failures = 0
         # Panics that could not take the lock in time (a publish waited for a backup).
-        # Written without the lock: each one changes the generation and keeps recovery
-        # unconfirmed until a recovery that began after it succeeds.
-        self._forced_halt_numbers = itertools.count(1)
+        # Counted under a short lock of their own that never surrounds storage work:
+        # each one changes the generation and keeps recovery unconfirmed until a
+        # recovery that began after it succeeds.
+        self._forced_lock = threading.Lock()
         self._forced_halts = 0
         self._confirmed_forced_halts = 0
+        # Tickets whose owner gave up waiting for the lock. Dropped under the lock.
+        self._dropped_recoveries: List[object] = []
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
@@ -477,6 +483,19 @@ class RuntimeScheduler:
     def _generation(self) -> int:
         return self._halt_count + self._forced_halts
 
+    def _locked_within(self, timeout: Optional[float]) -> bool:
+        """Take the lock, at most `timeout` seconds. Without it, fence like Panic."""
+
+        if self._lock.acquire(timeout=-1 if timeout is None else max(0.0, timeout)):
+            while self._dropped_recoveries:
+                self._recoveries.discard(self._dropped_recoveries.pop())
+            return True
+        with self._forced_lock:
+            self._forced_halts += 1
+        self._paused = True
+        self._current_payload = None
+        return False
+
     def begin_recovery(self, *, cancel: bool = True, timeout: Optional[float] = None):
         """Block new work until emergency cleanup has a known saved result.
 
@@ -485,10 +504,7 @@ class RuntimeScheduler:
         and the recovery stays unconfirmed until a later one succeeds.
         """
 
-        if not self._lock.acquire(timeout=-1 if timeout is None else max(0.0, timeout)):
-            self._forced_halts = next(self._forced_halt_numbers)
-            self._paused = True
-            self._current_payload = None
+        if not self._locked_within(timeout):
             return None
         try:
             if cancel:
@@ -502,13 +518,22 @@ class RuntimeScheduler:
         finally:
             self._lock.release()
 
-    def publish_recovery(self, ticket, publish):
-        """Keep older initial writes from replacing a newer recovery result."""
+    def publish_recovery(self, ticket, publish, *, timeout: Optional[float] = None):
+        """Keep older initial writes from replacing a newer recovery result.
 
-        with self._lock:
+        Raises SchedulerBusy when the lock was not free within `timeout`. The
+        scheduler is then fenced without it and the ticket can no longer confirm.
+        """
+
+        if not self._locked_within(timeout):
+            self._dropped_recoveries.append(ticket)
+            raise SchedulerBusy()
+        try:
             if ticket[0] != self._generation():
                 return False, None
             return True, publish()
+        finally:
+            self._lock.release()
 
     def abandon_recovery(self, ticket) -> None:
         with self._lock:
@@ -516,34 +541,42 @@ class RuntimeScheduler:
             self._recovery_required = True
             self._recoveries.discard(ticket)
 
-    def finish_recovery(self, ticket, publish, *, failed: bool = False):
-        """Ignore older recovery results while retaining every pending owner."""
+    def finish_recovery(self, ticket, publish, *, failed: bool = False,
+                        timeout: Optional[float] = None):
+        """Ignore older recovery results while retaining every pending owner.
 
-        with self._lock:
-            try:
-                if ticket[0] != self._generation():
-                    if failed:
-                        self._recovery_failures += 1
-                        self._recovery_required = True
-                        publish(False)
-                    return None
-                overlap_failed = ticket[2] != self._recovery_failures
-                result, success = publish(overlap_failed)
-                self._recovery_required = not success
-                if success:
-                    # Only Panics up to this ticket are confirmed. A later forced one
-                    # changed the generation and is still pending.
-                    self._confirmed_forced_halts = ticket[3]
-                if not success:
+        Raises SchedulerBusy like publish_recovery. The caller then records an
+        unconfirmed result itself.
+        """
+
+        if not self._locked_within(timeout):
+            self._dropped_recoveries.append(ticket)
+            raise SchedulerBusy()
+        try:
+            if ticket[0] != self._generation():
+                if failed:
                     self._recovery_failures += 1
-                self.finish_halt()
-                return result
-            except BaseException:
+                    self._recovery_required = True
+                    publish(False)
+                return None
+            overlap_failed = ticket[2] != self._recovery_failures
+            result, success = publish(overlap_failed)
+            self._recovery_required = not success
+            if success:
+                # Only Panics up to this ticket are confirmed. A later forced one
+                # changed the generation and is still pending.
+                self._confirmed_forced_halts = ticket[3]
+            if not success:
                 self._recovery_failures += 1
-                self._recovery_required = True
-                raise
-            finally:
-                self._recoveries.discard(ticket)
+            self.finish_halt()
+            return result
+        except BaseException:
+            self._recovery_failures += 1
+            self._recovery_required = True
+            raise
+        finally:
+            self._recoveries.discard(ticket)
+            self._lock.release()
 
     @property
     def is_active(self) -> bool:
