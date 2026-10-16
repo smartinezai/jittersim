@@ -439,3 +439,68 @@ class ProtectedDeviceIntakeTests(unittest.TestCase):
         flow.wait(timeout=30)
         self.assertEqual(ifb_sent_packets(), before,
                          "the protected device's open connection still passed the corruption path")
+
+
+@unittest.skipUnless(ENABLED, "needs root on Linux with JITTERSIM_KERNEL_TESTS=1")
+class RollbackIntakeCleanupTests(unittest.TestCase):
+    """An update rollback removes the intake an older helper cannot see."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        create_lab()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        remove_lab()
+
+    def test_the_rollback_cleanup_removes_the_intake_under_a_running_marked_flow(self) -> None:
+        import tempfile
+
+        from jittersim import updates
+
+        applier = NetworkApplier(executor=NamespaceExecutor(PI), topology=TOPOLOGY)
+        self.addCleanup(applier.reset)
+        corrupting = Profile(id="c", name="C", upload=Impairment(corrupt_percent=30))
+        self.assertTrue(applier.apply(plan=compile_plan(
+            devices=[Device("a", "a", "192.168.50.10", "c")],
+            profiles={"c": corrupting})).upload_corruption_applied)
+        capture = subprocess.Popen(
+            ["ip", "netns", "exec", ROUTER, sys.executable, "-c", CAPTURE, "up0", "8"],
+            stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: capture.poll() is None and capture.kill())
+        self.assertEqual(capture.stdout.readline().strip(), "ready")
+        flow = subprocess.Popen(
+            ["ip", "netns", "exec", CLIENT, sys.executable, "-c", SENDER, ROUTER_ADDRESS, "0", "600"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(flow.kill)
+        time.sleep(1)
+
+        def run(command, timeout):
+            result = _in(PI, *command, check=False)
+            if result.returncode:
+                raise updates.UpdateError(result.stderr.strip() or "command failed")
+
+        def query(command, timeout):
+            result = _in(PI, *command, check=False)
+            if result.returncode:
+                raise updates.UpdateError(result.stderr.strip() or "command failed")
+            return result.stdout
+
+        with tempfile.TemporaryDirectory() as config:
+            # An empty configuration means install.sh's eth0 and wlan0.
+            # The Pi namespace has its own /sys/class/net.
+            updates.remove_upload_intake(
+                Path(config), run, query,
+                link_present=lambda name: _in(PI, "test", "-e", f"/sys/class/net/{name}",
+                                              check=False).returncode == 0)
+        self.assertNotIn("ingress", _in(PI, "tc", "qdisc", "show", "dev", "wlan0").stdout)
+        self.assertNotEqual(_in(PI, "ip", "link", "show", UPLOAD_DEVICE, check=False).returncode, 0)
+        flow.wait(timeout=30)
+        output, _ = capture.communicate(timeout=30)
+        problems, echoes = inspect_frames([bytes.fromhex(item) for item in json.loads(output)],
+                                          pi_mac=_in(PI, "cat", "/sys/class/net/eth0/address").stdout.strip(),
+                                          router_mac=_in(ROUTER, "cat", "/sys/class/net/up0/address").stdout.strip())
+        self.assertEqual(problems, [])
+        sequences = [number for _, number in echoes["udp"]]
+        # The flow kept running after the cleanup, now without the intake.
+        self.assertGreater(max(sequences), 500)

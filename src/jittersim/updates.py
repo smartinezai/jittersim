@@ -3654,6 +3654,83 @@ def check_operation(*, root=UPDATE_ROOT, descriptor=9):
 WRITERS = (WATCHER, *reversed(SERVICES))
 
 
+UPLOAD_DEVICE = "jittersim-ifb"
+
+
+def _link_present(name):
+    return (Path("/sys/class/net") / name).exists()
+
+
+def remove_upload_intake(config, run, query, timeout=10, *, link_present=None):
+    """Remove the Wi-Fi upload intake and its ifb device before other code runs.
+
+    Releases with upload-safe impairments (PR 125) redirect corrupting upload
+    classes from the test interface's ingress to `jittersim-ifb`. An older
+    package's helper and Panic do not know either, so a rollback or a
+    recovery copy would leave corruption running that nothing can stop.
+
+    JitterSim owns the ingress qdisc of its test interface (nothing else on the
+    Pi uses it, as `NetworkApplier` assumes too), so it is identified by its
+    presence, never by the ifb name in a filter dump: a redirect whose device
+    is already gone no longer names it. The ingress qdisc and with it every
+    filter goes first, then the device. Only the one-line ingress lookup is
+    read, so a plan with many classes cannot exceed the command answer limit.
+    Each step is tried even if another fails, the result is read back and the
+    first problem is raised.
+    """
+    link_present = link_present or _link_present
+    _, test_interface = runtime_interfaces(config)
+    problems = []
+
+    def intake_present():
+        if not link_present(test_interface):
+            return False
+        answer = query(["tc", "-j", "qdisc", "show", "dev", test_interface, "ingress"], timeout) or "[]"
+        try:
+            queues = json.loads(answer)
+        except ValueError as error:
+            raise UpdateError("the upload intake could not be read before recovery") from error
+        return isinstance(queues, list) and any(
+            isinstance(queue, dict) and queue.get("kind") == "ingress" for queue in queues)
+
+    steps = (
+        (intake_present, ["tc", "qdisc", "del", "dev", test_interface, "handle", "ffff:", "ingress"]),
+        (lambda: link_present(UPLOAD_DEVICE), ["ip", "link", "del", "dev", UPLOAD_DEVICE]),
+    )
+    for needed, command in steps:
+        try:
+            if needed():
+                run(command, timeout)
+        except UpdateError as error:
+            problems.append(error)
+    try:
+        left = intake_present() or link_present(UPLOAD_DEVICE)
+    except UpdateError as error:
+        problems.append(error)
+    else:
+        if left:
+            problems.append(UpdateError("the upload intake could not be removed before recovery"))
+    if problems:
+        raise problems[0]
+
+
+def remove_upload_intake_before_restore(config, run, query, progress):
+    """Clean up but never stop the older package from being restored.
+
+    A leftover intake only corrupts uploads before the Pi forwards them. Not
+    restoring would leave the Pi without its helper and dashboard. The
+    problem is reported in the update progress instead.
+    """
+    try:
+        remove_upload_intake(config, run, query)
+    except UpdateError as error:
+        progress("rolling-back", "Restoring the previous installation. The upload intake could "
+                 f"not be removed ({error}). After the restore press Panic and check "
+                 "`tc qdisc show` on the test Wi-Fi interface.")
+        return error
+    return None
+
+
 def writers_stopped(names, query, budget):
     for name in names:
         answer = query(["systemctl", "show", "--property=ActiveState", "--property=MainPID",
@@ -3668,7 +3745,7 @@ def writers_stopped(names, query, budget):
 
 
 def quiesce_manual_install(source, *, root=UPDATE_ROOT, descriptor=9, units=UNITS_ROOT,
-                           run=run_command, query=read_command):
+                           run=run_command, query=read_command, config=CONFIG_ROOT):
     """Provision current intent only after the installer's writers have ended."""
     with manual_identity_operation(root, descriptor=descriptor):
         if not _inherited_installer(_operation_record(root, "installer-pending.json")):
@@ -3685,6 +3762,9 @@ def quiesce_manual_install(source, *, root=UPDATE_ROOT, descriptor=9, units=UNIT
         budget.check()
         if not writers_stopped(names, query, budget):
             raise UpdateError("the installer settings writers did not stop")
+        budget.check()
+        remove_upload_intake(config, lambda command, timeout: run(command, budget.limit(timeout)),
+                             lambda command, timeout: query(command, budget.limit(timeout)))
         budget.check()
         # Never publish the earlier preview. The real producer rereads latest
         # intent after stop so a concurrent Panic cannot be lost in migration.
@@ -4269,6 +4349,7 @@ def apply_update(
             panic_safety.provision(*selected)
             if request.get("rollback"):
                 progress("rolling-back", "Restoring the previous installation and settings.")
+                remove_upload_intake_before_restore(config, run, query, progress)
                 restore()
                 if not wait_restarted_healthy():
                     raise UpdateError("recovery health check failed")
@@ -4408,6 +4489,7 @@ def apply_update(
                     run(["systemctl", "stop", *names], 60)
                     if not writers_stopped(names, query, budget):
                         raise UpdateError("the settings writers did not stop before recovery")
+                    remove_upload_intake_before_restore(config, run, query, progress)
                     restore()
                     recovered = wait_restarted_healthy()
                 elif stopped:

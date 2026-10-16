@@ -1,6 +1,7 @@
 """All mutable update and identity work shares physical command ownership."""
 
 import os
+from unittest.mock import patch
 import signal
 import shlex
 import subprocess
@@ -474,8 +475,11 @@ def test_installer_child_rereads_proven_legacy_only_after_physical_writer_stop(r
 
     descriptor = os.open(root / "lock", os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        updates.quiesce_manual_install(tmp_path, root=root, descriptor=descriptor,
-                                      units=units, run=run, query=query)
+        # No upload intake on this machine, so its cleanup runs no command.
+        with patch.object(updates, "_link_present", lambda name: False):
+            updates.quiesce_manual_install(tmp_path, root=root, descriptor=descriptor,
+                                          units=units, run=run, query=query,
+                                          config=tmp_path / "no-config")
     finally:
         os.close(descriptor)
     assert calls == ["inspect", "stop", "proof", "provision"]
