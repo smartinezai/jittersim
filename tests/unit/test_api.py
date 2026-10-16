@@ -1400,17 +1400,16 @@ class ControlServerTests(unittest.TestCase):
 
         non_ascii_token = self._send("GET", "/api/diagnostics", authorization="Bearer t\u00f6ken")
         nested = self._send("POST", "/api/profiles", body=b"[" * 100_000 + b"]" * 100_000)
-        with self.assertLogs("jittersim.api.server", level="ERROR"):
-            list_id = self._send(
-                "POST",
-                "/api/data-limits",
-                body=b'{"device_id": ["alice"], "profile_id": "slow", "limit_bytes": 1}',
-            )
+        list_id = self._send(
+            "POST",
+            "/api/data-limits",
+            body=b'{"device_id": ["alice"], "profile_id": "slow", "limit_bytes": 1}',
+        )
 
         self.assertEqual(non_ascii_token["status"], 401)
         self.assertEqual(nested["status"], 400)
-        self.assertEqual(list_id["status"], 500)
-        self.assertIn("error", json.loads(list_id["body"]))
+        self.assertEqual(list_id["status"], 400)
+        self.assertIn("device_id must be text", json.loads(list_id["body"])["error"])
         self.assertEqual(self.repository.list_recent_actions()[0]["action"], "/api/data-limits")
 
     def test_browser_service_profile_rejections_say_why(self) -> None:

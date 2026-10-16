@@ -4,8 +4,10 @@ import unittest
 from ipaddress import IPv4Address
 from unittest.mock import patch
 
-from jittersim.api.server import ControlServer, _apply_warning
-from jittersim.config.models import Device, Profile
+from jittersim.api import server as server_module
+from jittersim.api.server import ControlServer, _apply_warning, _upstream_warning
+from jittersim.config.models import Device, Impairment, Profile
+from jittersim.engine.compiler import compile_plan
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine import website
 from jittersim.engine.runtime import RuntimeScheduler
@@ -35,6 +37,44 @@ class ApplyWarningTextTests(unittest.TestCase):
 
         self.assertIn("could not be verified: tv. These website names", warning)
         self.assertTrue(warning.endswith("a.example"))
+
+
+class UpstreamWarningTests(unittest.TestCase):
+    def plan(self, upload):
+        return compile_plan(
+            devices=(Device("alice", "Alice", "192.168.50.10", "p"),),
+            profiles={"p": Profile(id="p", name="P", upload=upload,
+                                   download=Impairment(duplicate_percent=5, corrupt_percent=5))},
+        )
+
+    def test_safe_uploads_and_damaging_downloads_need_no_warning(self) -> None:
+        self.assertIsNone(_upstream_warning(self.plan(Impairment(delay_ms=50, loss_percent=5)), False))
+
+    def test_upload_copies_and_reordering_are_named(self) -> None:
+        warning = _upstream_warning(
+            self.plan(Impairment(delay_ms=5, duplicate_percent=7, reorder_percent=10,
+                                 corrupt_percent=6)), True)
+        self.assertEqual(
+            warning,
+            "Upload duplication and reordering are not applied so the household router never "
+            "receives copied or reordered packets",
+        )
+
+    def test_corruption_is_named_when_the_pi_cannot_run_it_before_forwarding(self) -> None:
+        warning = _upstream_warning(self.plan(Impairment(corrupt_percent=6)), False)
+        self.assertTrue(warning.startswith("Upload corruption is not applied because"))
+
+    def test_without_a_helper_report_the_ifb_device_decides(self) -> None:
+        plan = self.plan(Impairment(corrupt_percent=6))
+        with patch.object(server_module, "_upload_device_present", return_value=True):
+            self.assertIsNone(_upstream_warning(plan))
+        with patch.object(server_module, "_upload_device_present", return_value=False):
+            self.assertIn("corruption", _upstream_warning(plan))
+
+    def test_it_joins_the_other_warnings(self) -> None:
+        self.assertEqual(_apply_warning(("tv",), (), "Upload x"),
+                         "Profiles were skipped for devices whose current Wi-Fi identity could "
+                         "not be verified: tv. Upload x")
 
 
 class Helper:

@@ -1,9 +1,10 @@
 # Documentation index
 
 This page lists every file in `docs/` and the guides that live elsewhere in the
-repository. It groups them by status so you can tell what to trust. Nothing was
-moved or renamed to make this index. Checked against main at `add7c87` on
-2026-10-09.
+repository. It groups them by status so you can tell what to trust. The
+overview's detailed feature content now lives in user-guide.md. The rest of
+this index was checked at `add7c87` on 2026-10-09; its README entries were
+updated against main at `4a89f34` on 2026-10-09.
 
 ## What the status words mean
 
@@ -25,7 +26,8 @@ a month (for example `2026-09`) was written in that month.
 
 | Document | Use it for |
 | --- | --- |
-| [README.md](../README.md) | What JitterSim does, the dashboard, the terminal commands, how to set up and how to run the checks |
+| [README.md](../README.md) | A short overview, current features and the Pi quick start |
+| [user-guide.md](user-guide.md) | Detailed feature behavior, network boundaries, terminal commands and local development |
 | [deploy/raspberry-pi/README.md](../deploy/raspberry-pi/README.md) | Installing, updating, securing and recovering the Pi. It starts with a recovery quick reference |
 | [pi-acceptance-checklist.md](pi-acceptance-checklist.md) | The owner's list of physical checks on a real Pi |
 | [runbooks/dashboard-unreachable.md](runbooks/dashboard-unreachable.md) | The dashboard does not open. How to reach the Pi when only the test Wi-Fi is available |
@@ -55,12 +57,14 @@ a month (for example `2026-09`) was written in that month.
 | Document | Use it for |
 | --- | --- |
 | [outage-dossier-2026-10-04-2026-10-09.md](outage-dossier-2026-10-04-2026-10-09.md) | The three router failures during Pi-only Wi-Fi, ranked hypotheses and a read-only capture checklist |
+| [upstream-safe-impairments-2026-10-09.md](upstream-safe-impairments-2026-10-09.md) | Where each impairment runs, why the router never receives damaged, copied or reordered uploads, and the hardware experiment |
 | [router-incident-findings-2026-10-04.md](router-incident-findings-2026-10-04.md) | The Vodafone router outage of 4 October. The cause is unproven |
 | [pi-only-datapath-audit-2026-10-09.md](pi-only-datapath-audit-2026-10-09.md) | Every way a device can end up on the Pi without working internet, and what was fixed |
 | [update-path-audit-2026-10-09.md](update-path-audit-2026-10-09.md) | The update and release path mapped step by step |
 | [research-router-pi-wifi-troubleshooting-2026-10-09.md](research-router-pi-wifi-troubleshooting-2026-10-09.md) | Ranked hypotheses and a safe experiment ladder for the outage |
 | [open-source-gap-review-2026-10-09.md](open-source-gap-review-2026-10-09.md) | Which hand-built parts a free tool would do better |
 | [open-source-adoption-2026-10-09.md](open-source-adoption-2026-10-09.md) | Free tools JitterSim could adopt (research) |
+| [dependency-audit-2026-10-09.md](dependency-audit-2026-10-09.md) | The 22 pip-audit findings in the release locks: reachability, fixes and what was left |
 
 ### Release records
 
@@ -308,8 +312,11 @@ the first plan (September 2026) and is historical too.
 
 ## Screenshots
 
-The README uses these five images. They show sample data. The
-[staged update screenshot](screenshots/staged-update-check.png) predates the
+The README uses these five images. They show sample data. The two overview
+images were retaken on 2026-10-09 with the refreshed look (see
+[ui-overhaul-proposal-2026-10-09.md](ui-overhaul-proposal-2026-10-09.md)). The
+other three show the earlier look. The
+[staged update screenshot](screenshots/staged-update-check.png) also predates the
 current **Updates** page wording (**Install update**).
 
 - [experience-overview-desktop.png](screenshots/experience-overview-desktop.png)
@@ -317,3 +324,5 @@ current **Updates** page wording (**Install update**).
 - [dns-failure-controls.png](screenshots/dns-failure-controls.png)
 - [router-outage-persistence.png](screenshots/router-outage-persistence.png)
 - [staged-update-check.png](screenshots/staged-update-check.png)
+
+Icons in the dashboard come from Lucide. Its licence is in [third-party-notices.md](third-party-notices.md).
