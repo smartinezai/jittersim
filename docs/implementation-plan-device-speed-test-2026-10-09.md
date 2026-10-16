@@ -135,7 +135,10 @@ change to an address or to a stored code has to be made on purpose.
 * The saved profile is the one the scheduler's applied snapshot reports (saved assignment, group
   profile, schedule, timer, scenario, progression or data limit). If the snapshot cannot confirm
   the source, the row says `Unknown (source not confirmed)` instead of showing the saved
-  assignment as applied.
+  assignment as applied. The scheduler's plan for **Same as everyone** has no per-queue source
+  entry, so there the plan's general profile rule and the general queue confirm the profile.
+* A saved device without a MAC address is matched by the address the connected-device snapshot
+  verified for the client right now, because the plan shapes such a device by its address.
 * A service rule or service list sends some traffic through queues the Pi does not read here. The
   run says so, and the cap verdict is replaced by `service-rules` (not judged).
 * A dashboard restart drops a running window (it lives in memory); nothing half-done is saved.

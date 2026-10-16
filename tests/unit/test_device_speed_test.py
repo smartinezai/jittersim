@@ -24,6 +24,7 @@ from jittersim.config.models import Device, Impairment, Profile, ServiceList
 from jittersim.config.speed_tests import SpeedTestStore, clean_label, clean_reported
 from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.activity import Source, TargetState
+from jittersim.engine.general import compile_general_plan
 from jittersim.engine.plan import (
     EVERYONE_ELSE_QUEUE_ID,
     GENERAL_QUEUE_ID,
@@ -801,6 +802,50 @@ class StartChecksTests(ManagerBase):
         self.assertEqual((profile["profile_name"], profile["profile_id"]), ("Night", "night"))
         self.assertEqual((profile["applied_by"], profile["applied_by_label"]),
                          ("schedule", "Weeknights"))
+
+    def test_the_real_general_plan_confirms_the_shared_profile_and_service_rules(self) -> None:
+        # The scheduler's general plan has no per-queue source entry. Its general profile rule
+        # and the general queue are what confirm the shared profile.
+        self.repository.save_general_profile("slow")
+        self.scheduler.plan = compile_general_plan(
+            repository=self.repository, profile=self.repository.get_profile("slow"))
+        self.scheduler.states = {}
+        self.helper.queue_id = GENERAL_QUEUE_ID
+
+        _, run = self.write("/api/speed-tests/start", {"mac_address": OTHER})
+        manager_run = self.manager.runs[run["id"]]
+
+        self.assertEqual(run["source"], "everyone")
+        self.assertEqual((manager_run.profile["profile_name"], manager_run.profile["profile_id"]),
+                         ("Slow", "slow"))
+        self.assertIs(manager_run.service_rules, False)
+
+    def test_a_saved_device_without_a_mac_is_found_by_its_current_address(self) -> None:
+        # The plan shapes a saved device with no MAC address by its address, in its own queue.
+        self.repository.save_device(Device("lab", "Lab phone", "192.168.50.10", "slow"))
+
+        status, run = self.start_short()
+
+        self.assertEqual(status, 201, run)
+        self.assertEqual(run["source"], "device")
+        self.assertEqual(self.manager.runs[run["id"]].profile["profile_name"], "Slow")
+
+    def test_a_queue_reading_with_one_direction_keeps_status_and_finish_working(self) -> None:
+        reading = self.helper.queue_stats
+
+        def download_only():
+            return [entry for entry in reading() if entry["direction"] == "download"]
+
+        self.helper.queue_stats = download_only
+        _, run = self.start_short()
+        self.run_seconds(run["id"], 3)
+
+        status = self.manager.status(run["id"])
+        self.assertIsNone(status["live"]["upload"]["kbit"])
+        self.assertIsNotNone(status["live"]["download"]["kbit"])
+        code, ended = self.write("/api/speed-tests/finish", {"run_id": run["id"]})
+        self.assertEqual(code, 200, ended)
+        self.assertEqual(ended["result"]["summary"]["upload"]["verdict"], "not-measured")
 
     def test_a_missing_applied_plan_does_not_confirm_a_saved_rule_is_absent(self) -> None:
         self.repository.save_service_list(

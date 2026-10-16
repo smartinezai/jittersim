@@ -105,8 +105,10 @@ class SpeedTestRun:
 
         live = {}
         for direction in DIRECTIONS:
-            rates = per_second_rates(self.samples[-2:], direction) if self.source != "none" else []
-            peak = per_second_rates(self.samples, direction) if self.source != "none" else []
+            # The helper can leave out a direction whose queue is missing. It has no live number.
+            measured = self.source != "none" and direction in (self.identity or {})
+            rates = per_second_rates(self.samples[-2:], direction) if measured else []
+            peak = per_second_rates(self.samples, direction) if measured else []
             live[direction] = {
                 "kbit": round(rates[-1], 1) if rates else None,
                 "peak_kbit": round(max(peak), 1) if peak else None,
@@ -292,12 +294,18 @@ class SpeedTestManager:
 
         repository = self.repository
         client = self._connected_client(mac_address)
+        # The address the device has now. The saved row may still hold an older one.
+        ipv4 = client.get("ipv4_address")
         device = repository.get_device_by_mac_address(mac_address)
+        if device is None and isinstance(ipv4, str):
+            # A saved device without a MAC address is shaped by its address in its own queue.
+            # The connected-device snapshot verified this client holds that address now.
+            candidate = repository.get_device_by_ipv4_address(ipv4)
+            if candidate is not None and candidate.mac_address is None:
+                device = candidate
         labels = repository.list_connected_device_labels()
         name = (labels.get(mac_address, {}).get("display_name") or (device.name if device else "")
                 or mac_address)
-        # The address the device has now. The saved row may still hold an older one.
-        ipv4 = client.get("ipv4_address")
         try:
             queues = self._retry(self._read_queues)
         except HelperClientError as error:
@@ -372,6 +380,18 @@ class SpeedTestManager:
     def _plan_has_queue(plan, key):
         return any(queue.device_id == key for queue in getattr(plan, "queues", ()))
 
+    def _general_rule(self, plan, states):
+        """The applied plan's rule for the profile for everyone, when the plan confirms it.
+
+        The scheduler's general plan keeps no per-queue source entry. Its general profile rule
+        together with the general queue is what confirms the shared profile.
+        """
+
+        if (plan is None or states is None or states.get(GENERAL_QUEUE_ID) is not None
+                or not self._plan_has_queue(plan, GENERAL_QUEUE_ID)):
+            return None
+        return getattr(plan, "general_profile", None)
+
     def _service_rules_apply(self, device, source, plan, states) -> Optional[bool]:
         """Whether the applied plan diverts some traffic from the measured queue."""
 
@@ -382,10 +402,11 @@ class SpeedTestManager:
             "everyone": GENERAL_QUEUE_ID,
             "everyone-else": EVERYONE_ELSE_QUEUE_ID,
         }.get(source)
-        if (key is None or plan is None or states is None or states.get(key) is None
-                or not self._plan_has_queue(plan, key)):
-            return None
-        if source == "everyone" and not self._plan_has_queue(plan, GENERAL_QUEUE_ID):
+        confirmed = (key is not None and plan is not None and states is not None
+                     and states.get(key) is not None and self._plan_has_queue(plan, key))
+        if source == "everyone" and self._general_rule(plan, states) is not None:
+            confirmed = True
+        if not confirmed:
             return None
 
         if getattr(plan, "service_list_rules", ()):
@@ -431,8 +452,14 @@ class SpeedTestManager:
             profile, name, applied_by, applied_label = self._applied_profile(
                 device.id, repository.get_profile(device.profile_id), plan, states)
         elif source == "everyone":
-            profile, name, applied_by, applied_label = self._applied_profile(
-                GENERAL_QUEUE_ID, repository.get_general_profile(), plan, states)
+            rule = self._general_rule(plan, states)
+            if rule is not None:
+                profile = repository.get_profile(rule.profile_id)
+                name = profile.name if profile is not None else UNCONFIRMED_PROFILE
+                applied_by, applied_label = "general", "Profile for everyone"
+            else:
+                profile, name, applied_by, applied_label = self._applied_profile(
+                    GENERAL_QUEUE_ID, repository.get_general_profile(), plan, states)
         elif source == "everyone-else":
             identifier = repository.get_everyone_else_profile_id()
             profile, name, applied_by, applied_label = self._applied_profile(
