@@ -288,6 +288,7 @@ class EveryoneExceptionDatapathTests(unittest.TestCase):
             def finish(self):
                 self.process.wait(timeout=60)
                 self.reader.join(10)
+                self.process.stdout.close()
                 return self.times
 
         device_ping, follower_ping = Ping(EXCEPTION), Ping(FOLLOWER)
