@@ -15,6 +15,7 @@ from jittersim import localca, mdnsname
 from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
 from jittersim.api.trust import dashboard_name_report, easy_address
 from jittersim.config.storage import ConfigRepository
+from tests.tls_support import needs_openssl
 
 TOKEN = "one-address-token"
 ROUTER_PEER = "192.168.0.40"
@@ -278,6 +279,7 @@ class TlsThroughTheNameTests(unittest.TestCase):
                     data += chunk
         return data
 
+    @needs_openssl
     def test_the_router_network_and_the_test_wifi_both_verify_the_one_name(self) -> None:
         for label, network in (("test Wi-Fi", "127.0.0.0/8"), ("router network", "192.168.50.0/24")):
             with self.subTest(network=label):

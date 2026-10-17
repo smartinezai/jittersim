@@ -83,7 +83,6 @@ _MAX_RANDOM_WEBSITE_ANALYTICS_RESPONSE_ROWS = 5_000
 MIN_TRAFFIC_RATE_KBIT = 100
 MAX_TRAFFIC_RATE_KBIT = 1_000_000
 TRAFFIC_RATE_STEP_KBIT = 100
-DEFAULT_ISP_DOWNLOAD_KBIT = 100_000
 # The activity log keeps this many of the newest network events.
 MAX_ACTIVITY_EVENTS = 500
 ACTIVITY_KINDS = frozenset(
@@ -1138,10 +1137,6 @@ class ConfigRepository:
         )
         self._commit()
         return bool(cursor.rowcount)
-
-    def clear_device_start_scope(self) -> None:
-        self._connection.execute("DELETE FROM device_start_scope")
-        self._commit()
 
     def record_action(self, *, action: str, status_code: int) -> None:
         """Store a bounded action name and outcome without request contents."""
@@ -2588,20 +2583,6 @@ class ConfigRepository:
             return True
         return False
 
-    def list_progressions(self) -> tuple:
-        """Return saved progressions in newest-first order."""
-
-        rows = self._connection.execute(
-            """
-            SELECT id, device_id, start_profile_id, end_profile_id, started_at,
-                   duration_seconds, mode, traffic_target_queries,
-                   traffic_baseline_queries, traffic_target_bytes,
-                   traffic_baseline_bytes, website_domains_json, enabled
-            FROM progressions ORDER BY started_at DESC, id DESC
-            """
-        ).fetchall()
-        return tuple(self._progression_from_row(row) for row in rows)
-
     def list_active_progressions(self, *, now: int) -> tuple:
         """Return enabled progressions that have not reached their time limit."""
 
@@ -2740,13 +2721,6 @@ class ConfigRepository:
         except sqlite3.IntegrityError as error:
             self._rollback()
             raise StorageError(f"could not save data limit for {data_limit.device_id}") from error
-
-    def restart_usage_counters(self) -> None:
-        """Record that every helper traffic counter restarted at zero."""
-
-        for table in ("data_limits", "group_data_limits", "service_quotas", "time_quotas"):
-            self._connection.execute(f"UPDATE {table} SET counter_bytes = 0")
-        self._commit()
 
     def delete_data_limit(self, device_id: str) -> bool:
         """Delete one device quota when it exists."""

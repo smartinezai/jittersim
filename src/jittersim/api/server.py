@@ -66,7 +66,7 @@ from jittersim.config.device_names import (
 )
 from jittersim.config.domain_labels import group_domain, label_domain, seen_with
 from jittersim.config.exemptions import AddressMove, UnaffectedDevice, normalize_exempt_mac
-from jittersim.config.payloads import impairment_payload, profile_payload
+from jittersim.config.payloads import profile_payload
 from jittersim.engine.randomizer import impairment_range_preview
 from jittersim.config.models import (
     MAX_LISTED_DOMAINS,
@@ -180,6 +180,9 @@ PROTECTED_ACCESS_SYNC_ATTEMPTS = 3
 STARTUP_HELPER_BUSY_ATTEMPTS = 4
 WIFI_COPY_BUSY_MESSAGE = "The router is busy right now. Try again in a moment."
 MAX_JSON_BODY_BYTES = 64 * 1024
+# The longest integer literal a request body may hold. It is CPython's own default limit, kept here
+# because older patch levels (3.9.13 and before) have none and parse a long literal in quadratic time.
+MAX_JSON_INT_DIGITS = 4300
 # One block or profile call may carry this many names.
 MAX_BATCH_DOMAINS = 64
 TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
@@ -425,10 +428,6 @@ DASHBOARD_CONTENT_SECURITY_POLICY = "; ".join(
         "frame-ancestors 'none'",
     )
 )
-
-
-def _impairment_payload(impairment: Impairment) -> Dict[str, Any]:
-    return impairment_payload(impairment)
 
 
 def _profile_payload(profile: Profile) -> Dict[str, Any]:
@@ -6648,11 +6647,11 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         if len(raw_body) != length:
             raise RequestError("request body is incomplete")
         try:
-            payload = json.loads(raw_body.decode("utf-8"))
+            payload = json.loads(raw_body.decode("utf-8"), parse_int=_bounded_json_int)
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
             raise RequestError("request body must be valid JSON") from error
         except ValueError as error:
-            # Python refuses an integer literal of more than 4300 digits with a plain ValueError.
+            # A plain ValueError: our limit below, or Python's own on an interpreter that has one.
             raise RequestError("a number in the request body has too many digits") from error
         if not isinstance(payload, dict):
             raise RequestError("request body must contain a JSON object")
@@ -6713,6 +6712,14 @@ class RequestError(ValueError):
 
 
 _LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _bounded_json_int(text: str) -> int:
+    """Read one integer literal of a request body, refusing more than MAX_JSON_INT_DIGITS digits."""
+
+    if len(text) - text.startswith("-") > MAX_JSON_INT_DIGITS:
+        raise ValueError("integer literal has too many digits")
+    return int(text)
 
 
 def _has_lone_surrogate(value: Any) -> bool:

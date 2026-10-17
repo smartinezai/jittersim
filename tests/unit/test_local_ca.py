@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from jittersim import localca
+from tests.tls_support import needs_openssl
 
 HAVE_OPENSSL = shutil.which("openssl") is not None
 NAMES = ("pi-lab.local", "jittersim.local", "netlab.local", "pi.home.arpa")
@@ -229,6 +230,7 @@ class LocalAuthorityTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
 
+    @needs_openssl
     def test_a_python_client_trusting_only_the_authority_accepts_the_dashboard(self) -> None:
         self.authority()
         self.leaf()

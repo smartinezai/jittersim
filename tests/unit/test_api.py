@@ -3550,7 +3550,7 @@ class ControlServerTests(unittest.TestCase):
         result = self._run_dashboard_functions(
             ["formatDuration", "scenarioRunText", "renderScenarioRuns"],
             "let scenarioRunKey = '';\n"
-            "const node = () => ({children: [], textContent: '', listeners: {},\n"
+            "const node = () => ({children: [], textContent: '', listeners: {}, dataset: {},\n"
             "  append(...children) { this.children.push(...children); },\n"
             "  appendChild(child) { this.children.push(child); },\n"
             "  addEventListener(type, listener) { this.listeners[type] = listener; },\n"
@@ -3631,7 +3631,7 @@ class ControlServerTests(unittest.TestCase):
             "  steps: [{profile_id: 'slow', duration_seconds: 60}]}];\n"
             "let scenarioListKey = '';\n"
             "let rebuilds = 0;\n"
-            "const node = () => ({children: [], value: '', options: [],\n"
+            "const node = () => ({children: [], value: '', options: [], dataset: {},\n"
             "  append(...children) { this.children.push(...children); },\n"
             "  appendChild(child) { this.children.push(child); },\n"
             "  addEventListener() {},\n"
@@ -3878,7 +3878,7 @@ class ControlServerTests(unittest.TestCase):
             ["clearActivity"],
             self.activity_page()
             + "let answer = false;\n"
-            "const window = {confirm: () => answer};\n"
+            "async function confirmFromButton() { return answer; }\n"
             "const posted = [];\n"
             "async function request(path) { posted.push(path); return {}; }\n"
             "let reloads = 0;\n"
@@ -4588,7 +4588,9 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("/api/uplink", DASHBOARD_HTML)
         self.assertIn("Open router Wi-Fi settings", DASHBOARD_HTML)
         self.assertIn("Copy router Wi-Fi to Pi", DASHBOARD_HTML)
-        self.assertIn("Turn off router Wi-Fi", DASHBOARD_HTML)
+        # The router Wi-Fi switch is read only. It has no click handler and no question to ask.
+        self.assertNotIn("Turn off router Wi-Fi", DASHBOARD_HTML)
+        self.assertNotIn('element("router-wifi-toggle").addEventListener', DASHBOARD_HTML)
         self.assertIn("router-admin-password", DASHBOARD_HTML)
         self.assertIn("/api/router/sync-ap", DASHBOARD_HTML)
         self.assertIn("/api/router/wifi", DASHBOARD_HTML)

@@ -58,12 +58,6 @@ def _read_active_plan(path: Path) -> Tuple[Optional[NetworkPlan], Optional[tuple
         raise ProxyError("active plan is invalid") from error
 
 
-def load_active_plan(path: Path) -> Optional[NetworkPlan]:
-    """Read the active helper plan for diagnostics and tests."""
-
-    return _read_active_plan(path)[0]
-
-
 def _plan_generation(path: Path) -> Optional[tuple]:
     try:
         metadata = path.stat()

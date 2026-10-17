@@ -11,6 +11,7 @@ let reconnectGrace = 0;
 let reconnectHappened = false;
 // The network a person has to join again after a change. Only the name, never a password.
 let wifiJoinHint = null;
+let lastWifiBannerAnnouncement = "";
 
 // All automatic reads share one elapsed deadline and one credential generation.
 const wifiReaders = new Set();
@@ -215,8 +216,6 @@ function showWifiBanner(kind, title, lines, buttons) {
   if (!banner) {
     banner = document.createElement("aside");
     banner.id = "wifi-change-banner";
-    banner.setAttribute("role", "status");
-    banner.setAttribute("aria-live", "polite");
     // At the top of the page content, above the controls, so it never covers them.
     const content = document.getElementById("content") || document.body;
     content.prepend(banner);
@@ -242,6 +241,12 @@ function showWifiBanner(kind, title, lines, buttons) {
   });
   if (buttons && buttons.length) children.push(actions);
   banner.replaceChildren(...children);
+  // The banner is not a live region. The page's one announcer says it once per change.
+  const said = [title].concat(lines || []).join(" ");
+  if (said !== lastWifiBannerAnnouncement) {
+    lastWifiBannerAnnouncement = said;
+    if (typeof announce === "function") announce(said, kind === "error");
+  }
 }
 
 function showReconnectingBanner() {
