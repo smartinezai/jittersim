@@ -21,11 +21,16 @@ def pi(tmp_path):
     return tmp_path, private, root, code, config
 
 
-def stage(pi, notes=None, **options):
+def put_staged(pi, notes=None, **options):
     base, private, root, code, config = pi
     replace = {NOTES: notes} if notes is not None else {}
     archive = signed_release(base, private, replace=replace, **options)
     updates.stage_release(archive, root=root, code=code, config=config)
+
+
+def stage(pi, notes=None, **options):
+    _, _, root, code, config = pi
+    put_staged(pi, notes, **options)
     return updates.update_status(root=root, code=code, config=config, retry_probe=False)
 
 
@@ -87,3 +92,34 @@ def test_the_largest_possible_notes_still_fit_in_one_helper_message(pi):
     assert len(status["notes"]) == updates.MAX_NOTES
     encoded = (json.dumps({"ok": True, **status}, sort_keys=True) + "\n").encode("utf-8")
     assert len(encoded) < MAX_MESSAGE_BYTES // 2
+
+
+def test_a_character_cut_by_the_limit_is_dropped_not_shown_as_a_mark(pi):
+    # 16383 plain bytes then a three byte character: the limit lands inside the character.
+    status = stage(pi, "a" * (updates.MAX_NOTES - 1) + "€" + "tail", version="0.3.0")
+    assert status["notes"] == "a" * (updates.MAX_NOTES - 1)
+
+
+@pytest.mark.parametrize("replaced", ["before the notes are read", "after the notes are read"])
+def test_notes_of_another_release_staged_during_the_read_are_withheld(pi, monkeypatch, replaced):
+    # A check can stage release B while a status request still judges release A.
+    base, private, root, code, config = pi
+    stage(pi, "## A\n", version="0.3.0")
+    real = updates.staged_notes
+
+    def restage_around(path):
+        if replaced.startswith("before"):
+            put_staged(pi, "## B\n", version="0.4.0")
+        notes = real(path)
+        if replaced.startswith("after"):
+            put_staged(pi, "## B\n", version="0.4.0")
+        return notes
+
+    monkeypatch.setattr(updates, "staged_notes", restage_around)
+    status = updates.update_status(root=root, code=code, config=config, retry_probe=False)
+    assert status["available"] == "0.3.0"
+    assert status["notes"] is None
+    # Asked again, the status describes release B and carries its own notes.
+    monkeypatch.setattr(updates, "staged_notes", real)
+    again = updates.update_status(root=root, code=code, config=config, retry_probe=False)
+    assert again["available"] == "0.4.0" and again["notes"] == "## B"

@@ -9,6 +9,7 @@ requests can name only the single release already staged on this Pi.
 import argparse
 import ast
 import base64
+import codecs
 import fcntl
 import contextvars
 import functools
@@ -2036,13 +2037,16 @@ def staged_notes(root=UPDATE_ROOT):
             raw = handle.read(MAX_NOTES)
     except OSError:
         return None
-    text = raw.decode("utf-8", errors="replace").strip()
+    # A character cut in two by the limit is dropped, not shown as a replacement mark.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    text = decoder.decode(raw, final=len(raw) < MAX_NOTES).strip()
     return text or None
 
 
 def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, query=None, retry_probe=True):
     installed = read_json(code / ".jittersim-release.json")
-    staged = _record(root / "staged" / ".jittersim-release.json")
+    staged_file = root / "staged" / ".jittersim-release.json"
+    staged = _record(staged_file)
     status = read_json(root / "status.json")
     try:
         signers = trusted_keys(config)
@@ -2064,6 +2068,16 @@ def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, query
         recovery_problem = str(error)
     retry, retry_reason = _retry_info(root, status, query or read_command) if retry_probe else (None, None)
     orphaned = retry is not None and status.get("phase") != "failed"
+    notes = None
+    if staged and reason is None:
+        notes = staged_notes(root)
+        # A check can stage another release between the two reads above and the notes read.
+        # Notes are shown only when the staged record is still the one that was judged.
+        try:
+            if notes is not None and _record(staged_file) != staged:
+                notes = None
+        except UpdateError:
+            notes = None
     return {
         "installed": installed.get("version", "Unversioned installation"),
         "available": staged.get("version"),
@@ -2083,8 +2097,9 @@ def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, query
         **_operation_fields(status),
         "retry": retry,
         "retry_unavailable_reason": retry_reason,
-        # Only for a release a trusted key signed and that may be installed now.
-        "notes": staged_notes(root) if staged and reason is None else None,
+        # Only for a staged release a trusted key signed and that is newer than the installed
+        # one (the same test as installable). The Panic source check still happens at install.
+        "notes": notes,
     }
 
 
