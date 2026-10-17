@@ -69,9 +69,10 @@ def browser_modules(commands):
             for match in [re.fullmatch(r"python -m tests\.browser\.(\w+)", command)] if match]
 
 
-def run_script(*arguments, cwd=ROOT, script=SCRIPT):
+def run_script(*arguments, cwd=ROOT, script=SCRIPT, path_first=()):
     environment = dict(os.environ)
-    environment["PATH"] = str(Path(sys.executable).parent) + os.pathsep + environment["PATH"]
+    environment["PATH"] = os.pathsep.join(
+        [str(directory) for directory in path_first] + [str(Path(sys.executable).parent), environment["PATH"]])
     environment.pop("JITTERSIM_CI_REEXEC", None)
     return subprocess.run(
         ["bash", str(script)] + list(arguments), cwd=str(cwd), env=environment,
@@ -251,6 +252,45 @@ def test_a_dry_run_writes_nothing(scratch_repository):
     assert not list(repository.glob(".venv-local-ci-*"))
     # The locked packages, the image build and one line for each Docker run.
     assert result.stdout.count("would run release-") == 2 + len(script_array("RELEASE_DOCKER_RUNS"))
+
+
+def fake_python(directory, version):
+    """A program that only answers which version it is, as find_python asks (dry runs need no more)."""
+
+    directory.mkdir(exist_ok=True)
+    program = directory / ("python" + version)
+    program.write_text("#!/bin/sh\necho %s\n" % version)
+    program.chmod(0o755)
+    return directory
+
+
+def test_python_3_9_gets_no_playwright_because_it_cannot_install_it(scratch_repository, tmp_path):
+    # Playwright 1.61 and newer need Python 3.10. The hosted Python 3.9 job installs '.[dev]' only
+    # and the tests that need a browser skip there. Installing the pin made the 3.9 environment fail,
+    # so `unit --python 3.9` (the one way to run the oldest row of the matrix here) never started.
+    repository, _git = scratch_repository
+    script = repository / "scripts" / "local-ci.sh"
+    pin = "playwright==" + script_value("PLAYWRIGHT_VERSION")
+    old = run_script("--dry-run", "--python", "3.9", "unit", cwd=repository, script=script,
+                     path_first=[fake_python(tmp_path / "bin39", "3.9")])
+    assert old.returncode == 0, old.stderr
+    assert "would install" in old.stdout and "no Playwright" in old.stdout
+    assert pin not in old.stdout
+    new = run_script("--dry-run", "--python", "3.12", "unit", cwd=repository, script=script,
+                     path_first=[fake_python(tmp_path / "bin312", "3.12")])
+    assert new.returncode == 0, new.stderr
+    assert pin in new.stdout and "no Playwright" not in new.stdout
+
+
+@pytest.mark.parametrize("command", ["browser", "gui", "homepage"])
+def test_the_browser_steps_refuse_python_3_9_and_say_why(scratch_repository, tmp_path, command):
+    repository, _git = scratch_repository
+    script = repository / "scripts" / "local-ci.sh"
+    refused = run_script("--dry-run", "--python", "3.9", command, cwd=repository, script=script,
+                         path_first=[fake_python(tmp_path / "bin39", "3.9")])
+    assert refused.returncode == 2, refused.stdout + refused.stderr
+    assert "Python 3.10 or newer" in refused.stderr
+    assert "--python 3.13" in refused.stderr
 
 
 def test_lint_plans_the_advisory_checks_unless_they_are_switched_off(scratch_repository):

@@ -77,6 +77,7 @@ PI_BROWSER_MODULES=(
   dns_failure
   page_polling
   update_status_recovery
+  live_regions
 )
 
 # tests.yml, job "GUI baseline".
@@ -437,6 +438,8 @@ VENV=
 VENV_PY=
 PY_VERSION=
 PY_STATE=
+# The Playwright pin this environment gets. Empty on Python 3.9, which cannot install it.
+PLAYWRIGHT_FOR_PY=$PLAYWRIGHT_VERSION
 CHROMIUM_STATE=
 LAST_RESULT=
 ADVISORY_COUNTER=
@@ -600,6 +603,10 @@ prepare_python() {
   PY_SYS=$(find_python "$WANT_PYTHON") || die "no Python ${WANT_PYTHON:-3.9 to 3.13} found. Install one (for example brew install python@3.13), pass --python, or use --docker X.Y for unit tests."
   PY_VERSION=$(python_version_of "$PY_SYS")
   case "$PY_VERSION" in 3.9|3.1[0-9]) ;; *) die "Python $PY_VERSION is outside the supported range 3.9 to 3.13" ;; esac
+  # Playwright 1.61 and newer need Python 3.10. The hosted Python 3.9 job installs the dev extras
+  # only and the tests that need a browser skip there, so the 3.9 environment does the same.
+  PLAYWRIGHT_FOR_PY=$PLAYWRIGHT_VERSION
+  [ "$PY_VERSION" = 3.9 ] && PLAYWRIGHT_FOR_PY=
   VENV=$ROOT/.venv-local-ci-$PY_VERSION
   VENV_PY=$VENV/bin/python
   export PATH="$VENV/bin:$PATH"
@@ -608,6 +615,11 @@ prepare_python() {
   unset PYTHONHOME
   if [ "$DRY_RUN" = 1 ]; then
     printf 'would use the virtual environment %s (Python %s from %s)\n' "$VENV" "$PY_VERSION" "$PY_SYS"
+    if [ -n "$PLAYWRIGHT_FOR_PY" ]; then
+      printf 'would install: the project with its dev extras and playwright==%s\n' "$PLAYWRIGHT_FOR_PY"
+    else
+      printf 'would install: the project with its dev extras and no Playwright (it needs Python 3.10 or newer, and the hosted Python 3.9 job does not install it either)\n'
+    fi
     PY_STATE=ok
     return 0
   fi
@@ -622,7 +634,11 @@ prepare_python() {
     if [ "$(cat "$stamp" 2>/dev/null || true)" != "$wanted" ]; then
       "$venv/bin/python" -m pip install --quiet --upgrade pip
       rm -rf build src/*.egg-info
-      "$venv/bin/python" -m pip install --quiet ".[dev]" "playwright==$want_playwright"
+      if [ -n "$want_playwright" ]; then
+        "$venv/bin/python" -m pip install --quiet ".[dev]" "playwright==$want_playwright"
+      else
+        "$venv/bin/python" -m pip install --quiet ".[dev]"
+      fi
       printf "%s" "$wanted" > "$stamp"
     fi
     # Install the package itself again so the tests see this commit, as CI installs a wheel.
@@ -630,7 +646,7 @@ prepare_python() {
     "$venv/bin/python" -m pip install --quiet --force-reinstall --no-deps .
     rm -rf build src/*.egg-info
     "$venv/bin/python" -c "import jittersim, sys; print(jittersim.__file__); sys.exit(0 if \"site-packages\" in jittersim.__file__ else 1)"
-  ' setup "$PY_SYS" "$VENV" "$PLAYWRIGHT_VERSION"
+  ' setup "$PY_SYS" "$VENV" "$PLAYWRIGHT_FOR_PY"
   if [ "$LAST_RESULT" = PASS ] && [ -x "$VENV_PY" ]; then
     PY_STATE=ok
     return 0
@@ -640,6 +656,9 @@ prepare_python() {
 }
 
 ensure_chromium() {
+  if [ -z "$PLAYWRIGHT_FOR_PY" ]; then
+    die "the browser, gui and homepage steps need Python 3.10 or newer: Playwright $PLAYWRIGHT_VERSION does not install on Python $PY_VERSION, and the workflows run these jobs on Python 3.13. Leave --python unset or pass --python 3.13."
+  fi
   [ -n "$CHROMIUM_STATE" ] && return 0
   CHROMIUM_STATE=checked
   if [ "$DRY_RUN" = 1 ]; then
@@ -654,7 +673,9 @@ collect_tools() {
   local tools="Python $PY_VERSION ($VENV_PY)"
   tools="$tools; ruff $("$VENV_PY" -m ruff --version 2>/dev/null | awk '{print $2}')"
   tools="$tools; pytest $("$VENV_PY" -m pytest --version 2>&1 | awk '{print $2}')"
-  tools="$tools; playwright $("$VENV_PY" -m pip show playwright 2>/dev/null | awk '/^Version:/ {print $2}')"
+  local installed
+  installed=$("$VENV_PY" -m pip show playwright 2>/dev/null | awk '/^Version:/ {print $2}')
+  tools="$tools; playwright ${installed:-not installed}"
   command -v node >/dev/null 2>&1 && tools="$tools; node $(node --version)"
   meta tools "$tools"
   meta python_note "this run covers Python $PY_VERSION only; the workflow matrix is 3.9, 3.11 and 3.13 (see docs/local-ci.md)"

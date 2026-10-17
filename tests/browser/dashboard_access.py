@@ -9,6 +9,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.confirm_dialogs import answer_confirm, cancel_with_escape
 from tests.browser.phone import sidebar_control
 
 
@@ -128,8 +129,12 @@ def run():
                             break
                         page.wait_for_timeout(10)
                     assert len(held_diagnostics) == 1, "the private diagnostics read did not start"
-                    page.once("dialog", lambda dialog: dialog.accept())
-                    page.locator("#dashboard-access-list button").click()
+                    remove = page.locator("#dashboard-access-list button")
+                    remove.click()
+                    cancel_with_escape(page, remove, verb="Remove access", title="Remove dashboard access?",
+                                       text="Removing this device returns it to sign-in.")
+                    remove.click()
+                    answer_confirm(page, "Remove access", title="Remove dashboard access?")
                     expect(page.locator("#private-dashboard")).to_be_hidden()
                     expect(page.locator("#token-check-status")).to_contain_text("Allow this device")
                     # Signed out again, the name goes away again.

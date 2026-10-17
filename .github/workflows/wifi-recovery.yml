@@ -93,6 +93,7 @@ jobs:
       - run: python -m tests.browser.dns_failure
       - run: python -m tests.browser.page_polling
       - run: python -m tests.browser.update_status_recovery
+      - run: python -m tests.browser.live_regions
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: always()
         with:

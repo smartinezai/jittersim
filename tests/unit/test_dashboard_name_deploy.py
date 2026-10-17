@@ -108,8 +108,13 @@ class DispatcherTests(unittest.TestCase):
         self.log = self.root / "systemctl.log"
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
+        # `is-active` answers from a flag file (running unless the test removes it).
+        self.running = self.root / "unit-is-active"
+        self.running.write_text("")
         fake = bin_dir / "systemctl"
-        fake.write_text('#!/bin/sh\necho "$@" >> "%s"\n' % self.log)
+        fake.write_text(
+            '#!/bin/sh\necho "$@" >> "%s"\n'
+            'if [ "$1" = is-active ]; then [ -e "%s" ]; exit $?; fi\n' % (self.log, self.running))
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
         self.runtime = self.root / "runtime.env"
         script = (PI / "jittersim-mdns-dispatcher").read_text().replace(
@@ -120,9 +125,11 @@ class DispatcherTests(unittest.TestCase):
         self.runtime.write_text("JITTERSIM_UPLINK=eth0\nJITTERSIM_TEST_INTERFACE=wlan0\n")
 
     def call(self, *arguments: str) -> list:
+        """The systemctl calls that were not the question whether the unit runs."""
         subprocess.run(["sh", str(self.script), *arguments], check=True, env=self.env,
                        capture_output=True, timeout=10)
-        return self.log.read_text().splitlines() if self.log.exists() else []
+        lines = self.log.read_text().splitlines() if self.log.exists() else []
+        return [line for line in lines if not line.startswith("is-active")]
 
     def test_an_ethernet_address_change_wakes_the_publisher_without_restarting_it(self) -> None:
         for action in ("up", "down", "dhcp4-change", "reapply"):
@@ -161,6 +168,26 @@ class DispatcherTests(unittest.TestCase):
 
     def test_a_missing_or_stopped_service_never_fails_the_network_event(self) -> None:
         (self.root / "bin" / "systemctl").write_text("#!/bin/sh\nexit 5\n")
+        subprocess.run(["sh", str(self.script), "eth0", "up"], check=True, env=self.env,
+                       capture_output=True, timeout=10)
+
+    def test_the_wake_up_is_sent_only_after_asking_whether_the_service_runs(self) -> None:
+        self.call("eth0", "up")
+
+        raw = self.log.read_text().splitlines()
+        self.assertEqual(len(raw), 2)
+        self.assertRegex(raw[0], r"^is-active\b.*jittersim-mdns\.service$")
+        self.assertIn("kill", raw[1])
+
+    def test_a_stopped_or_restarting_publisher_is_not_signalled(self) -> None:
+        self.running.unlink()
+        for action in ("up", "down", "dhcp4-change", "reapply"):
+            with self.subTest(action=action):
+                self.assertEqual(self.call("eth0", action), [])
+
+    def test_a_signal_that_cannot_be_sent_never_fails_the_network_event(self) -> None:
+        (self.root / "bin" / "systemctl").write_text(
+            '#!/bin/sh\n[ "$1" = kill ] && exit 5\nexit 0\n')
         subprocess.run(["sh", str(self.script), "eth0", "up"], check=True, env=self.env,
                        capture_output=True, timeout=10)
 

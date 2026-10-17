@@ -16,6 +16,7 @@ import pytest
 
 from jittersim import localca, localname, updates
 from tests.unit import test_updates as update_fixture
+from tests.tls_support import needs_openssl
 
 pytestmark = pytest.mark.skipif(shutil.which("openssl") is None, reason="OpenSSL is required")
 
@@ -360,6 +361,7 @@ def test_expired_budget_prevents_capture_and_its_side_effects(tmp_path):
     assert not (tmp_path / "recovery").exists()
 
 
+@needs_openssl
 def test_restored_identity_serves_tls_to_a_client_with_only_the_retained_root(tmp_path):
     config, root = tmp_path / "config", tmp_path / "recovery"
     prepare(config)

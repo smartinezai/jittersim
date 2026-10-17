@@ -11,8 +11,10 @@ After=NetworkManager.service jittersim-access-boot.service jittersim-control-fir
 [Service]
 Type=oneshot
 EnvironmentFile=-/etc/jittersim/runtime.env
-# Never open the test Wi-Fi without the management firewall.
-ExecStartPre=/usr/sbin/nft list table inet jittersim_control
+# Never open the test Wi-Fi without the management firewall. The listing is only the
+# existence check, so it is not sent to the journal (it was about 27 lines per start).
+# A missing table still fails the unit, with nft's own error, and one line says it is there.
+ExecStartPre=/bin/sh -c '/usr/sbin/nft list table inet jittersim_control >/dev/null && echo "Management firewall table inet jittersim_control is loaded."'
 # The Pi Wi-Fi follows the router. After a Copy router Wi-Fi to Pi that worked, a saved
 # Wi-Fi with another name (such as JitterSim-Recovery, which keeps the copy's password
 # and security) is renamed back to the router name before the start. Only the saved

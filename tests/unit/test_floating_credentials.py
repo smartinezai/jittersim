@@ -56,7 +56,6 @@ const blocked = () => {if (storageBroken) throw new Error("storage blocked")};
 const windowListeners = new Map();
 const window = {innerHeight: 800, setInterval() {}, setTimeout(callback, delay) {const id = ++timerSerial; timers.set(id, {callback, delay}); return id},
   clearTimeout(id) {timers.delete(id)},
-  confirm() {return true},
   addEventListener(type, callback) {windowListeners.set(type, callback)}, localStorage: {
   getItem(key) {blocked(); return storage.has(key) ? storage.get(key) : null},
   setItem(key, value) {blocked(); storage.set(key, String(value))},
@@ -89,6 +88,8 @@ function element(id) {
   return nodes.get(id);
 }
 function setButtonBusy(button, busy) {button.disabled = busy}
+// The in-page question answers yes, like the browser's confirm box did here.
+async function confirmWorkflow() {return true}
 function showMessage(text, kind) {messages.push({text, kind})}
 function stopTrafficSampling() {}
 function renderSidebarStatus() {}
@@ -222,8 +223,8 @@ CASES = {
       assert.match(element("router-wifi-toggle").title, /disabled for recovery safety/);
       clock += 46000;
       const before = networkCalls.length;
-      element("router-wifi-toggle").listeners.get("click")({
-        currentTarget:element("router-wifi-toggle")});
+      // The switch is read only: nothing listens for a click, so nothing can write.
+      assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
       await Promise.resolve();
       assert.equal(networkCalls.length, before);
       assert.equal(element("router-wifi-toggle").disabled, true);

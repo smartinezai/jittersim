@@ -15,6 +15,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.confirm_dialogs import answer_confirm, cancel_with_button, cancel_with_escape
 from tests.browser.phone import is_phone, sidebar_control
 
 ADMIN_TOKEN = "browser-test"
@@ -172,20 +173,17 @@ def check_again_is_refused_with_a_wait(page, requests, responses):
     page.locator("#close-credentials").click()
 
 
-def check_confirmation(dialog, accept):
-    assert f"{WIFI_NAME} using WPA2 (2.4 GHz)" in dialog.message
-    for warning in (
+CONFIRMATION = dict(
+    title="Copy the router Wi-Fi to the Pi?",
+    text=[
+        f"{WIFI_NAME} using WPA2 (2.4 GHz)",
         "Wi-Fi will restart now", "lose its connection for up to a minute",
         "cannot rejoin by itself", "choose the network again in the Wi-Fi menu",
         "waits for the Pi", "shows how the change went",
         "Keep a separate management connection",
-    ):
-        assert warning in dialog.message
-    assert WIFI_PASSWORD not in dialog.message
-    if accept:
-        dialog.accept()
-    else:
-        dialog.dismiss()
+    ],
+    absent=WIFI_PASSWORD,
+)
 
 
 def run_width(browser, base, width, height):
@@ -288,8 +286,8 @@ def run_width(browser, base, width, height):
     expect(button).to_be_visible()
     button.focus()
     expect(button).to_be_focused()
-    page.once("dialog", lambda dialog: check_confirmation(dialog, False))
     page.keyboard.press("Enter")
+    cancel_with_escape(page, button, verb="Copy Wi-Fi", **CONFIRMATION)
     expect(page.locator("#router-action-message")).to_contain_text("Copy cancelled")
     expect(page.locator("#router-action-message")).to_be_visible()
     assert api_calls(requests, SYNC_PATH) == []
@@ -308,12 +306,14 @@ def run_width(browser, base, width, height):
     assert api_calls(requests, SYNC_PATH) == []
     held[0].continue_()
     page.unroute("**" + PREVIEW_PATH)
-    # Playwright dismisses this preview after the pending request is released.
+    # The preview is back, so the question opens. Cancel is the button that has focus, and
+    # pressing it cancels the copy.
+    cancel_with_button(page, button, **CONFIRMATION)
     expect(button).to_be_enabled()
     expect(page.locator("#router-action-message")).to_contain_text("Copy cancelled")
 
-    page.once("dialog", lambda dialog: check_confirmation(dialog, True))
     sidebar_control(page, "#sync-router-ap").click()
+    answer_confirm(page, "Copy Wi-Fi", **CONFIRMATION)
     expect(page.locator("#router-action-message")).to_contain_text(
         f"Copied {WIFI_NAME} using WPA2"
     )
