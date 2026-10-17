@@ -69,3 +69,39 @@ parser, not the Panic path. Like the neighbouring fields it is required, a missi
 out-of-range value is rejected as invalid queue statistics. Tests:
 `QueueStatsClientTests.test_keeps_the_burst_length_of_the_loss` and the new rejection and
 largest-value cases in `tests/unit/test_helper.py`.
+
+## Third review round (17 October 2026, head 2cac16d3)
+
+Reviewers: Sol (GPT-6.1, high, read-only) and an independent Claude Opus review of the full
+PR at 2cac16d3. One fix round. Each claim was first checked against the code, with a test
+that failed before the fix where one could be written. `networking/helper.py`,
+`panic_guard.py` and `networking/access.py` are unchanged in this round.
+
+| # | Sev | Finding | Check | Disposition |
+| --- | --- | --- | --- | --- |
+| Sol 1 | S3 | The installer stops the helper and dashboard, then removes the upload intake. On an ordinary cleanup error nothing starts them again, and `install.sh` runs under `set -eu`, so the Pi is left without its helper and Panic. | Verified. The new test failed: only `systemctl stop` ran. | Fixed in cabb21dd. On an ordinary cleanup error the installer starts the unchanged installation again, then fails. A command that may still run, or whose ownership is unknown, is raised without a restart. Tests in `tests/unit/test_update_operation_lock.py`. |
+| Sol 2 | S3 | Panic pauses ad blocking before it removes any rule. The pause saves its stop intent with a plain `fsync`, and its `wait` bounds only the settings lock, so a storage stall holds the network lock with every restriction in force. | Verified. The new test (real `AdStore` in the Panic fault rig, stalled file sync) failed: the rules were still in place two seconds into the stall. | Fixed in 2842447f, in `networking/adblocking.py` only. The pause bounds the lock wait and its saves together. Saves that outlive that finish in their own thread, which keeps the settings lock, and the pause raises, so Panic still releases both network layers and answers unconfirmed. A second pause while they still stall fails at once. A retry after storage answers confirms. |
+| Sol 5 | S2 | A forced Panic raised its halt count before it counted itself as an owner. A newer Panic between the two writes could confirm the new count, and `can_apply()` admitted a Start while the forced Panic was unfinished. | Verified. The interleaving test (the forced Panic stopped between its two writes, a full newer recovery run there) failed: the Start was admitted. | Fixed in 9729ac7c. The owner is published before the halt count. |
+| Opus O3 | S2 | `remove_upload_intake`: the final record removal raised a bare `OSError`, and `proven()` called `item.get()` before checking the item is an object. Both skipped the rollback restore, which only catches `UpdateError`. | Verified. Both new tests failed (`OSError`, `AttributeError`). | Fixed in cabb21dd. Both are now ordinary cleanup problems. A filter item that is not an object proves nothing, so that qdisc stays. |
+| Opus O4 | S1 | No test for the unsynced `gateway.json` fallback after a failed synced save. | Refuted. Two mutations of `helper.py` in a scratch copy were each caught by existing cases: without `_gateway_state_error = True`, `test_failed_save_is_reported_and_stopped_effects_stay_stopped[gateway-flush-whole]` fails; without the unsynced write, `test_failed_save_leaves_only_whole_records_and_no_stale_temporary[gateway-flush-whole]` and `[gateway-file-sync-whole]` fail. | No change. |
+| Opus O1 | S1 | The stop-record saver keeps a late error without a log line. | Not changed. The brief allowed it only if `helper.py` changed for Sol 2, and that fix needed no helper change. | Carried forward. |
+| Opus O2 | S3 class | An early save error that is not a storage error ends Panic before any rule is removed. | Pre-existing and not made worse. Not changed: it would change the pinned helper only for this. | Carried forward. |
+| Sol 3 | S3 | Rollback to a package without intake support can leave an intake that the restored Panic cannot remove. | Pre-existing (finding 2 of the first round). | Owner decision, unchanged. |
+| Sol 4 | S3 | Rollback restores the database, so protection-derived dashboard access for a device whose protection was later removed comes back. | Pre-existing (finding 3 of the first round). | Owner decision, unchanged. |
+
+### Carried forward from this round
+
+- Owner decision 1 (Sol 3). Recommended default: keep the current behaviour (clean up before
+  the restore, retry after it, warn with reboot advice) and do not block the rollback. A
+  reboot removes the intake because tc state and the ifb device never survive it.
+- Owner decision 2 (Sol 4). Recommended default: keep restoring the database as it is and
+  tell the owner in the rollback notes to check protected devices after a rollback. The
+  alternative is to keep the current protected device list or ask before restored
+  protection grants dashboard access.
+- Same class as Sol 2, not reported by the reviewers: the household release enters
+  `AdStore.access_transition()`, which saves its suspension with a plain `fsync` once it
+  holds the settings lock. A stall that begins there still holds the household release. A
+  stall left by the Panic pause does not, because that thread holds the settings lock and
+  the transition then gives up after its short wait. Fixing it needs care with the
+  suspension semantics, so it is left for a later change.
+- O1 and O2 above, the next time `networking/helper.py` changes for another reason.
