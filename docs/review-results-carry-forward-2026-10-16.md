@@ -92,12 +92,14 @@ that failed before the fix where one could be written. `networking/helper.py`,
 ### Carried forward from this round
 
 - Owner decision 1 (Sol 3). Recommended default: keep the current behaviour (clean up before
-  the restore, retry after it, warn with reboot advice) and do not block the rollback. A
-  reboot removes the intake because tc state and the ifb device never survive it.
-- Owner decision 2 (Sol 4). Recommended default: keep restoring the database as it is and
-  tell the owner in the rollback notes to check protected devices after a rollback. The
-  alternative is to keep the current protected device list or ask before restored
-  protection grants dashboard access.
+  the restore, retry after it, warn with reboot advice), never block a rollback, and reboot
+  the Pi after such a warning. A reboot removes the intake because tc state and the ifb
+  device never survive it. The alternative is to block the rollback or to keep a
+  cleanup-capable Panic path until the intake is gone.
+- Owner decision 2 (Sol 4). Recommended default: accept for now (a rollback reverts all
+  settings) and remove the device again after a rollback. The alternative is to keep the
+  current protected device list across rollbacks, or to ask before restored protection
+  grants dashboard access.
 - Same class as Sol 2, not reported by the reviewers: the household release enters
   `AdStore.access_transition()`, which saves its suspension with a plain `fsync` once it
   holds the settings lock. A stall that begins there still holds the household release. A
