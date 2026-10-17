@@ -33,6 +33,10 @@ next release takes them over.
 - The Pi's update status carries the signed release notes of a release that can
   be installed now, and a development build (`X.Y.Z.dev+COMMIT`) that stopped
   can be retried.
+- The Updates page names the staged release on its install button (**Install
+  v1.1.0**), shows whether a recovery copy is kept, shows the release notes when
+  the Pi reports them, and the install confirmation names the signer and the
+  automatic restore.
 - The dashboard asks before deleting a profile, device or group, clearing the
   activity log, importing settings, changing the Pi Wi-Fi, restoring its name,
   reversing an address move, copying the router Wi-Fi, removing dashboard
