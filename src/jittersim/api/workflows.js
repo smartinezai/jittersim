@@ -367,6 +367,7 @@ function renderDeviceCards() {
     const state = Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id) ? deviceConditions.devices[device.id] : null;
     const card = document.createElement('article');
     card.className = 'device-card';
+    card.dataset.key = device.id;
     const profile = deviceProfileCell(device);
     // The name is the title and the address is small text under it.
     card.append(textNode('h3', deviceDisplayName(device)), textNode('p', device.ipv4_address, 'form-note'),
@@ -378,7 +379,7 @@ function renderDeviceCards() {
   });
   const others = everyoneElseRow();
   if (others) {
-    const card = document.createElement('article'); card.className='device-card';
+    const card = document.createElement('article'); card.className='device-card'; card.dataset.key='everyone-else';
     card.append(textNode('h3', 'Everyone else'), textNode('p', others.cells[2].join(' · ')),
       actionButton('Edit everyone else', () => element('everyone-else-profile').focus()));
     container.append(card);
@@ -805,7 +806,8 @@ function renderUpdates(failedRead) {
   element('update-retry-status').hidden = !retryReason;
   const progress = updateProgressText(failedRead);
   element('update-progress').hidden = !progress;
-  element('update-progress').textContent = progress;
+  // The progress line speaks (role="status"), so it is only written when its words change.
+  if (element('update-progress').textContent !== progress) element('update-progress').textContent = progress;
   element('sidebar-update-link').hidden = !ready;
   element('sidebar-update-link').textContent = ready ? 'Update available: ' + releaseLabel(state) : '';
   element('update-available-badge').hidden = !ready;
@@ -1258,20 +1260,20 @@ function installReleaseControls() {
       <div><dt>Newest release</dt><dd id="update-available">No newer release found</dd></div>
       <div><dt>Signed by</dt><dd id="update-signer">Not applicable</dd></div>
     </dl>
-    <p id="release-status" role="status" aria-live="polite">Check for an approved release on this Pi.</p>
-    <p id="online-check-status" class="form-note" role="status" aria-live="polite">Loading the online check…</p>
+    <p id="release-status">Check for an approved release on this Pi.</p>
+    <p id="online-check-status" class="form-note">Loading the online check…</p>
     <p id="github-access-hint" class="form-note" hidden></p>
     <div id="release-actions"></div>
     <p id="update-retry-status" class="form-note" hidden></p>
-    <p id="update-progress" class="update-progress" role="status" aria-live="polite" hidden></p>
+    <p id="update-progress" class="update-progress" role="status" hidden></p>
     <h3 class="online-heading">Settings</h3>
     <label class="update-auto-check"><input id="online-daily-check" type="checkbox" disabled><span>Check automatically every day</span></label>
     <label class="update-auto-check"><input id="online-install-automatically" type="checkbox" disabled><span>Install automatically</span></label>
     <p class="form-note">Install automatically installs a new signed release without anyone pressing Install. It uses the same checks and the same recovery copy as a manual install. Both settings are off until you turn them on.</p>
-    <p id="online-setting-status" class="form-note" role="status" aria-live="polite"></p>
+    <p id="online-setting-status" class="form-note" role="status"></p>
     <details><summary>The GitHub token</summary><p>The repository is private, so the Pi needs a read-only token for this one repository. Create it on GitHub (Settings, Developer settings, Fine-grained tokens, only this repository, Contents read-only, with an expiry date). Then run <code id="update-token-command">the setup command shown after sign-in</code> on the Pi, paste the token and press Ctrl-D. This page never asks for the token and never shows it.</p></details>
     <label class="update-auto-check"><input id="check-staged-updates-on-open" type="checkbox" disabled><span>Look for a release staged on this Pi when the dashboard opens</span></label>
-    <p id="update-preference-status" class="form-note update-preference-status" role="status" aria-live="polite">Loading the saved preference…</p>
+    <p id="update-preference-status" class="form-note update-preference-status">Loading the saved preference…</p>
     <details><summary>How releases reach this private Pi</summary><p>The owner builds and signs a release on the Mac and deploy-from-mac.sh stages it over SSH. The Pi can also fetch the newest signed release from GitHub itself. The Pi stages only a release signed by a key it trusts and newer than the one it runs. The admin token cannot stage a release: it can only install the one already staged. See Signed releases in the deployment guide.</p></details>`);
   wireReleaseControls();
 }

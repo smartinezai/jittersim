@@ -32,3 +32,8 @@ next release takes them over.
   access or stopping protection of the device in use in its own dialog instead
   of the browser's. The dialog names the action on its button, Escape
   cancels it and focus returns to the control that opened it.
+- A screen reader hears each result once. The dashboard has one status region
+  and one alert region for results and errors, and lists that refresh every few
+  seconds (devices, saved profiles, groups, schedules, timers, limits,
+  observations and the router connection) no longer announce themselves. A
+  refresh keeps keyboard focus on the button you were on.

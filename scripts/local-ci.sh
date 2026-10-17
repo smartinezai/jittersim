@@ -77,6 +77,7 @@ PI_BROWSER_MODULES=(
   dns_failure
   page_polling
   update_status_recovery
+  live_regions
 )
 
 # tests.yml, job "GUI baseline".

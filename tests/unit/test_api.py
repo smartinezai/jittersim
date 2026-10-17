@@ -3550,7 +3550,7 @@ class ControlServerTests(unittest.TestCase):
         result = self._run_dashboard_functions(
             ["formatDuration", "scenarioRunText", "renderScenarioRuns"],
             "let scenarioRunKey = '';\n"
-            "const node = () => ({children: [], textContent: '', listeners: {},\n"
+            "const node = () => ({children: [], textContent: '', listeners: {}, dataset: {},\n"
             "  append(...children) { this.children.push(...children); },\n"
             "  appendChild(child) { this.children.push(child); },\n"
             "  addEventListener(type, listener) { this.listeners[type] = listener; },\n"
@@ -3631,7 +3631,7 @@ class ControlServerTests(unittest.TestCase):
             "  steps: [{profile_id: 'slow', duration_seconds: 60}]}];\n"
             "let scenarioListKey = '';\n"
             "let rebuilds = 0;\n"
-            "const node = () => ({children: [], value: '', options: [],\n"
+            "const node = () => ({children: [], value: '', options: [], dataset: {},\n"
             "  append(...children) { this.children.push(...children); },\n"
             "  appendChild(child) { this.children.push(child); },\n"
             "  addEventListener() {},\n"

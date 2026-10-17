@@ -47,10 +47,12 @@ def test_measuring_is_deterministic_and_covers_every_metric():
     # A number that is always zero would never catch anything: the counts below are the
     # ones the GUI plan lowers, so they must be seen on the real page.
     for name in ("page_bytes", "distinct_colors", "distinct_font_sizes", "important_declarations",
-                 "aria_live_in_markup", "aria_live_flip_sites", "element_ids"):
+                 "element_ids"):
         assert first[name] > 0, name
-    # The page asks every question in its own dialog, so no native confirm is left. The count
-    # is still real: the next test adds one and sees it.
+    # The live-region counts and the native confirm count reached zero (two fixed regions, no
+    # aria-live attribute, every question in the page's own dialog). They are real counts all the
+    # same: the next test adds one of each and sees it.
+    assert first["aria_live_in_markup"] == 0 and first["aria_live_flip_sites"] == 0
     assert first["window_confirm_calls"] == 0
 
 
