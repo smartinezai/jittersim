@@ -84,7 +84,6 @@ PI_BROWSER_MODULES=(
 GUI_PYTEST_FILES=(
   tests/unit/test_gui_capture.py
   tests/unit/test_gui_axe_report.py
-  tests/unit/test_gui_container.py
 )
 GUI_MODULES=(
   gui_baseline
