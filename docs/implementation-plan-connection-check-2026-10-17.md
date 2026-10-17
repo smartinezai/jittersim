@@ -105,13 +105,18 @@ it (O3).
   progression, data limit) and the service rules.
 * **Changes during the check.** The check promises to catch changes it observes, not every
   transient one. It compares, with no verdict as the result (status `changed`, the numbers are
-  kept): (a) once per second during the burst, from the scheduler's applied plan **in memory**
-  (no helper call): the address owner, the impairment of the device's download queue, the source
-  (kind, profile, label) and the service-rule state, so a progression or timer that moves A to B
-  is seen; (b) after the burst, from the helper: the queue identity (generation, interface, handle,
-  kind, impairment), the device's association and its current address, and from the repository
-  its protection. A change that goes away again between two readings is not seen (A to B to A
-  within a second).
+  kept), for **every** run including a baseline or shared one (a device that starts without a
+  profile and gets one during the burst is not a baseline): (a) once per second during the burst
+  and once more at the end, from the scheduler's applied plan **in memory** (no helper call): the
+  saved device whose queue the plan marks this address into, the impairment of that download
+  queue, its source (kind, profile, label), the shared rules and the service-rule state, so a
+  progression, timer, new apply or reset is seen; (b) after the burst, from the helper, for a
+  device with its own profile: the queue identity (generation, interface, handle, kind,
+  impairment); for every run: whether the device is still associated and **whether it still has
+  the address that was probed** (a connected device whose address is missing or different is
+  changed), and from the repository its protection. A change that goes away again between two
+  readings is not seen (A to B to A within a second). A cancel or a dashboard stop during the
+  final reads starts no further helper read.
 * **Unverified end state.** If the final helper reads fail for a device with its own profile
   (queue read or association status), the settings might have changed in the meantime. The result
   is then saved with the numbers and the verdict `unverified` (no accusation). This is a different
@@ -137,10 +142,13 @@ The overall verdict combines them:
 | `out-of-range` | the set delay plus jitter is over 4.5 seconds or the speed cap is under 16 kbit/s: a burst cannot measure it |
 | `no-answer` | the device did not answer a single probe and the profile does not explain it |
 | `changed` | the profile, the address, the association or the protection changed during the check |
-| `unverified` | the final helper reads failed, so a change cannot be ruled out |
+| `fault` | the check stopped after an error: whatever matched so far is not a verdict |
+| `unverified` | the final helper reads failed for a device with its own profile, so a change cannot be ruled out |
 
-The order of the checks is: `changed`, `unverified`, probes unavailable, `out-of-range`,
-`no-answer`, `not-comparable`, `baseline`, service rules, then the combination above.
+The order of the checks is: `changed`, `fault`, `unverified`, probes unavailable, `out-of-range`,
+`no-answer`, `not-comparable`, `baseline`, service rules, then the combination above. A change
+or a fault comes first for every kind of run, so a baseline is never shown for a device that
+left the Wi-Fi or got a profile during the burst.
 
 ### Per-number rules
 
@@ -151,11 +159,11 @@ Loss uses the exact binomial model below.
 
 | Number | What is measured | What the profile is expected to give | Judged when |
 | --- | --- | --- | --- |
-| Loss | probes without a reply by the end of the grace time | `L(1-Pd)` to `1-(1-L)(1-C)` (see below), plus 2 points Wi-Fi allowance on the high side | always (a set loss of 0 is judged against the allowance) |
+| Loss | probes without a reply by the end of the grace time | the exact independent model of netem (see below) with the corruption drop between `0.9C` and `C`, plus 2 points Wi-Fi allowance on the high side | always (a set loss of 0 is judged against the allowance). Not judged when duplication, corruption and bursty loss are all set |
 | Delay | median round trip | `D - J` to `D + J + serialization + max(30 ms, 0.3 D)`. Below the range is `less`. **Above the range is not an accusation**: status `extra` ("the delay is in effect, the round trip is X ms above it, which the link or the device adds") because a phone can add 100 ms by itself | `D > 0`, no reordering set, at least 5 replies |
-| Jitter | mean absolute difference of the round trips of probes that were sent one after another and both answered (the first answer of each) | simulated from `D`, `J` and the probe spacing with netem's ordered scheduling (see below), tolerance 0.6 to 1.4 times plus 5 ms. Above is `extra` like delay | `J > 0`, no reordering set, at least 20 replies **and** at least 10 adjacent pairs |
+| Jitter | mean absolute difference of the round trips of probes that were sent one after another and both answered (the first answer of each) | simulated from `D`, `J`, the loss and the probe spacing with netem's ordered scheduling (see below), tolerance 0.6 to 1.4 times plus 5 ms. Above is `extra` like delay | `J > 0`, no reordering, duplication or corruption set, at least 20 replies **and** at least 10 adjacent pairs |
 | Duplicates | probes answered more than once, among the probes answered | `Pd(1-L)^2 / (1-(1-Pd)L)` to `Pd` plus 2 points | always when `Pd = 0` (judged against the allowance). With `Pd > 0` only when loss is independent (no burst, length known) and corruption is 0. Otherwise "not judged: the share of doubled answers is uncertain" |
-| Reordering | answers that arrived after the first answer to a probe sent later (RFC 4737 style, first answers only, so a late duplicate never counts) | simulated for the probe spacing, tolerance 0.7 to 1.3 times plus 2 points | `D > 0` and the simulation expects at least 3 reordered answers. Otherwise "not judged: the delay is shorter than the probe spacing, so probes cannot overtake each other". With `R = 0` it is judged against the 2 point allowance |
+| Reordering | answers that arrived after the first answer to a probe sent later (RFC 4737 style, first answers only, so a late duplicate never counts) | simulated for the probe spacing and the loss (an answer that never comes is no evidence), tolerance 0.7 to 1.3 times plus 2 points | no duplication or corruption set, `D > 0` and the simulation expects at least 3 reordered answers. Otherwise "not judged: the delay is shorter than the probe spacing, so probes cannot overtake each other". With `R = 0` it is judged against the 2 point allowance |
 | Corruption | not a separate number | a damaged ping is dropped by the device, so it is counted in the loss range | never separately |
 | Speed cap | nothing | a burst of 98 byte frames at 10 per second is about 8 kbit/s, far below a normal cap | never. Says "use Test speed". Its serialization time is added to the expected delay |
 
@@ -167,7 +175,9 @@ loss). The probe is 56 bytes of data, 98 bytes on the wire.
 
 **Delay and jitter with reordering.** Netem sends a share `R` of packets without the delay, so the
 median round trip no longer shows the delay. When reordering is set, delay and jitter are not
-judged (the reordering number is).
+judged (the reordering number is). **Jitter and reordering with duplication or corruption.** A
+clone can come back before the original and a corrupted probe never comes back, so which answer
+is the first one changes: both numbers are not judged then.
 
 The **jitter and reordering simulations** reproduce netem's scheduling and use a fixed random seed,
 so a result is repeatable: delay and jitter uniform around the set delay and never negative; a
@@ -178,10 +188,15 @@ prove the model, the kernel test compares the real kernel's jitter and reorderin
 
 Why the loss and duplicate ranges look like this (netem, `net/sched/sch_netem.c`): the duplicate
 decision comes first, then the loss decision. A duplicated packet that is also "lost" still leaves
-one copy, and the clone goes through the queue again with its own loss decision. So a packet is
-answered at least once with probability `1-(1-Pd)L`, not `1-L`, and answered twice with
-probability `Pd(1-L)^2`. The ranges above are those two exact values and the plain setting.
-Corruption raises the lost share by up to `C`.
+one copy (the original passes the loss decision), and when the original is not lost its clone goes
+through the queue again with its own loss and corruption decisions. With independent decisions and
+a corruption drop `c` per delivered copy the probe is unanswered with probability
+`(1-Pd)(L+(1-L)c) + Pd(L c + (1-L) c (L+(1-L)c))` and answered twice with probability
+`Pd(1-L)^2` when `c = 0`. Without corruption that is `L(1-Pd)` unanswered. Corruption flips one
+bit of the 98 byte frame. The device drops the frame unless the bit is in the source MAC address
+(6 bytes), so `c` lies between `0.9C` and `C`: those two give the low and high end of the loss
+range. (The first plan version put corruption on one surviving copy only, which wrongly accused a
+correct profile with duplication and corruption: both copies must be damaged to lose the probe.)
 
 ### Statistics
 

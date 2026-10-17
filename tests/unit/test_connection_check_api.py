@@ -465,6 +465,49 @@ class ChangeTests(CheckBase):
         self.assertEqual(result["summary"]["verdict"], "changed")
         self.assertIn("protection changed", result["summary"]["notes"][0])
 
+    def test_a_profile_applied_during_a_baseline_check_is_seen(self) -> None:
+        # The device has no profile when the check starts. The scheduler then marks its address.
+        def apply_profile(index):
+            if index == 50:
+                rule = replace(self.scheduler.plan.mark_rules[0],
+                               ipv4_address=type(self.scheduler.plan.mark_rules[0].ipv4_address)(
+                                   "192.168.50.77"))
+                self.scheduler.plan = replace(self.scheduler.plan, mark_rules=(rule,))
+
+        self.on_send = apply_profile
+        _, run = self.start(mac=OTHER)
+        self.assertEqual(run["source"], "none")
+        ended = self.finish(run["id"])
+        result = ended["result"]
+        self.assertEqual((result["status"], result["summary"]["verdict"]), ("changed", "changed"))
+        self.assertIn("changed during the check", ended["ended_reason"])
+
+    def test_a_missing_final_address_is_not_taken_as_unchanged(self) -> None:
+        def lose_address(index):
+            if index == 99:
+                self.helper.addresses[PHONE] = None
+
+        self.on_send = lose_address
+        _, run = self.start()
+        result = self.finish(run["id"])["result"]
+        self.assertEqual((result["status"], result["summary"]["verdict"]), ("changed", "changed"))
+        self.assertIn("address changed", result["summary"]["notes"][0])
+
+    def test_a_cancel_during_the_final_reads_starts_no_further_read(self) -> None:
+        _, run = self.start()
+        reads = self.helper.queue_reads
+        original = self.helper.connected_device_snapshot
+
+        def snapshot_then_cancel():
+            snapshot = original()
+            self.write("/api/connection-checks/cancel", {"run_id": run["id"]})
+            return snapshot
+
+        self.helper.connected_device_snapshot = snapshot_then_cancel
+        ended = self.finish(run["id"])
+        self.assertEqual((ended["state"], ended["result"]), ("ended", None))
+        self.assertEqual(self.helper.queue_reads, reads)
+
     def test_final_reads_that_fail_give_no_verdict(self) -> None:
         def break_queues(index):
             if index == 99:
@@ -532,6 +575,21 @@ class EndingTests(CheckBase):
             result = self.finish(run["id"])["result"]
         self.assertEqual(result["status"], "fault")
         self.assertEqual(result["summary"]["ended_reason"], "The check stopped after an error.")
+        self.assertEqual(result["summary"]["verdict"], "fault")
+
+    def test_a_fault_after_matching_probes_gives_no_verdict(self) -> None:
+        def explode_late(index):
+            if index == 80:
+                raise RuntimeError("socket gone")
+            return typical(index)
+
+        self.script = explode_late
+        _, run = self.start()
+        with self.assertLogs(checks_module.LOGGER, level="ERROR"):
+            result = self.finish(run["id"])["result"]
+        self.assertEqual((result["status"], result["summary"]["verdict"]), ("fault", "fault"))
+        self.assertEqual(result["summary"]["probes"]["sent"], 80)
+        self.assertTrue(all(row["status"] == "not-judged" for row in result["summary"]["metrics"]))
 
     def test_shutdown_stops_a_running_check_without_saving(self) -> None:
         _, run = self.start()

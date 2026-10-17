@@ -146,11 +146,18 @@ def test_probes_needed_follows_the_verdict_rule():
 def test_loss_range_with_duplication_and_corruption():
     assert check.expected_loss_range(0.10, 0.0, 0.0) == pytest.approx((0.10, 0.12))
     # A duplicated and lost packet still leaves one copy.
-    assert check.expected_loss_range(0.10, 0.5, 0.0) == pytest.approx((0.05, 0.12))
+    assert check.expected_loss_range(0.10, 0.5, 0.0) == pytest.approx((0.05, 0.07))
     # Corruption adds 90 to 100 percent of itself to the loss.
     assert check.expected_loss_range(0.10, 0.0, 0.20) == pytest.approx(
         (1 - 0.9 * 0.82, 1 - 0.9 * 0.8 + 0.02))
     assert check.expected_loss_range(1.0, 0.0, 0.0) == (1.0, 1.0)
+    # With duplication every copy needs its own corruption: both are damaged only 25 percent
+    # of the time at 50 percent corruption and 100 percent duplication.
+    assert check.expected_loss_range(0.0, 1.0, 0.5) == pytest.approx((0.2025, 0.27))
+    # Without duplication or loss the unanswered share is the corruption.
+    assert check.unanswered_share(0.0, 0.0, 0.3) == pytest.approx(0.3)
+    assert check.unanswered_share(0.2, 0.0, 0.0) == pytest.approx(0.2)
+    assert check.unanswered_share(0.2, 0.5, 0.0) == pytest.approx(0.1)
 
 
 def test_duplicate_range():
@@ -419,6 +426,85 @@ def test_corruption_and_the_speed_cap_get_rows_but_no_status():
         "loss", "delay", "jitter", "duplicate", "reorder"}
 
 
+def test_duplication_with_corruption_does_not_accuse_a_correct_profile():
+    # Both copies of a probe must be damaged to lose it: 25 percent at 50 percent corruption.
+    result = summary(records(100, lost=range(0, 100, 4)),
+                     impairment=setting(duplicate_percent=100, corrupt_percent=50))
+    assert metric(result, "loss")["status"] == "matches"
+    assert metric(result, "duplicate")["status"] == "not-judged"
+    assert result["verdict"] == "matches"
+
+
+def test_bursty_loss_with_duplication_and_corruption_is_not_judged_for_loss():
+    result = summary(records(100), burst_packets=4,
+                     impairment=setting(loss_percent=20, duplicate_percent=50, corrupt_percent=5))
+    assert metric(result, "loss")["status"] == "not-judged"
+    assert "uncertain" in metric(result, "loss")["sentence"]
+
+
+def test_a_loss_that_answers_are_missing_for_does_not_hide_reordering():
+    # With 80 percent loss most answers that would show reordering never come back.
+    without = check.simulated_timing(250, 0, 0.5, 0.0)["reorder_share"]
+    with_loss = check.simulated_timing(250, 0, 0.5, 0.8)["reorder_share"]
+    assert with_loss < without / 2
+    band = (check.REORDER_LOW_FACTOR * with_loss,
+            min(1.0, check.REORDER_HIGH_FACTOR * with_loss + check.WIFI_SHARE_ALLOWANCE))
+    # The seeded reproduction of the review: 61 answers, 4 out of order.
+    assert check.share_status(4, 61, band)[0] == "matches"
+    # The loss is used by the verdict as well: 60 answers of 300 are enough to judge it.
+    result = summary(records(300, lost=[i for i in range(300) if i % 5]),
+                     impairment=setting(delay_ms=250, reorder_percent=50, loss_percent=80))
+    assert metric(result, "reorder")["status"] in ("less", "borderline", "inconclusive", "matches")
+    # With 20 answers of 100 it would expect fewer than 3 reordered, so it says so.
+    thin = summary(records(100, lost=[i for i in range(100) if i % 5]),
+                   impairment=setting(delay_ms=250, reorder_percent=50, loss_percent=80))
+    assert metric(thin, "reorder")["status"] == "not-judged"
+
+
+def test_jitter_and_reordering_are_not_judged_with_duplication_or_corruption():
+    for changes in ({"duplicate_percent": 10}, {"corrupt_percent": 5}):
+        result = summary(records(100, rtt=lambda index: 100.0),
+                         impairment=setting(delay_ms=100, jitter_ms=20, reorder_percent=0,
+                                            loss_percent=0, **changes))
+        assert metric(result, "jitter")["status"] == "not-judged", changes
+        assert "cannot be compared" in metric(result, "jitter")["sentence"]
+    result = summary(records(100), impairment=setting(delay_ms=300, reorder_percent=25,
+                                                      duplicate_percent=10))
+    assert metric(result, "reorder")["status"] == "not-judged"
+
+
+def test_a_corruption_only_profile_gets_the_right_guidance():
+    # 4 percent of the probes lost against 5 percent corruption: the answer names 121 probes.
+    result = summary(records(100, lost=range(4)), impairment=setting(corrupt_percent=5))
+    loss = metric(result, "loss")
+    assert loss["status"] == "inconclusive"
+    assert "at least 121 probes" in loss["sentence"]
+    assert result["probes_needed"] == 121
+    # Seven lost are clearly more than a healthy link, and not "no more loss than a healthy link".
+    clear = summary(records(100, lost=range(7)), impairment=setting(corrupt_percent=5))
+    assert metric(clear, "loss")["status"] == "matches"
+    assert "healthy" not in metric(clear, "loss")["sentence"]
+
+
+def test_a_change_is_never_hidden_by_a_baseline_or_a_shared_profile():
+    for source, protected in (("none", False), ("everyone", False), ("everyone-else", False),
+                              ("none", True)):
+        result = summary(records(100), source=source, protected=protected, impairment=None,
+                         changed_reason="The device's address changed during the check.")
+        assert result["verdict"] == "changed", (source, protected)
+        assert "address changed" in result["notes"][0]
+
+
+def test_a_fault_gives_no_verdict_even_when_every_number_matched():
+    recs = records(80, lost=range(0, 80, 10), rtt=lambda index: 100.0)
+    result = summary(recs, impairment=setting(delay_ms=100, loss_percent=10),
+                     fault_reason="The check stopped after an error.")
+    assert result["verdict"] == "fault"
+    assert all(row["status"] == "not-judged" for row in result["metrics"])
+    assert result["probes"]["lost"] == 8
+    assert "stopped after an error" in result["notes"][0]
+
+
 def test_the_summary_is_small_and_has_no_secrets():
     result = summary(records(300, lost=range(0, 300, 7)), planned=300,
                      impairment=setting(delay_ms=100, jitter_ms=20, loss_percent=10,
@@ -435,7 +521,7 @@ def test_the_summary_is_small_and_has_no_secrets():
 def test_every_verdict_and_status_has_a_label():
     for verdict in ("matches", "less", "more", "differs", "borderline", "inconclusive",
                     "baseline", "not-comparable", "service-rules", "service-rules-unknown",
-                    "out-of-range", "unverified", "no-answer", "unavailable", "changed"):
+                    "out-of-range", "unverified", "no-answer", "unavailable", "changed", "fault"):
         assert verdict in check.VERDICT_LABELS
     for status in ("matches", "less", "more", "extra", "borderline", "inconclusive",
                    "not-judged"):

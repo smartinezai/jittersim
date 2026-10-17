@@ -104,6 +104,7 @@ VERDICT_LABELS = {
     "service-rules-unknown": "Not judged: the active service rules could not be confirmed",
     "out-of-range": "Not judged: the set delay or speed cap is beyond what a probe burst can measure",
     "unverified": "Not judged: the Pi could not confirm at the end that nothing changed",
+    "fault": "Not judged: the check stopped after an error",
     "no-answer": "The device did not answer ping",
     "unavailable": "The Pi could not send probes",
     "changed": "Not judged: the profile, the Wi-Fi connection or the protection changed",
@@ -247,18 +248,33 @@ def _share(percent: Any) -> float:
     return max(0.0, min(1.0, float(percent or 0) / 100.0))
 
 
+def unanswered_share(loss: float, duplicate: float, drop: float) -> float:
+    """The share of probes that get no answer when losses and drops are independent.
+
+    `drop` is the share of delivered copies the device drops because netem corrupted them.
+    Netem decides duplication first. With no duplicate the probe is lost with probability L, or
+    delivered and dropped. When a duplicated probe is also lost one copy still goes on (it only
+    loses the loss decision), so that copy is dropped with probability `drop` alone. When the
+    original is not lost its clone goes through the queue again with its own loss and
+    corruption decisions, and the probe is unanswered only if both copies are gone.
+    """
+
+    single = loss + (1 - loss) * drop
+    return (1 - duplicate) * single + duplicate * (
+        loss * drop + (1 - loss) * drop * single)
+
+
 def expected_loss_range(loss: float, duplicate: float, corrupt: float) -> Tuple[float, float]:
     """The share of probes that get no answer (shares from 0 to 1).
 
-    Netem decides duplication first. A duplicated packet that is also lost still leaves one copy,
-    so a probe is unanswered with probability L * (1 - Pd), not L. Corruption makes the device
-    drop a damaged packet: at least 90 percent of it and at most all of it is added. The high end
+    A duplicated and lost packet still leaves one copy, so duplication lowers the loss. A
+    corrupted frame is dropped by the device unless the flipped bit is in the source MAC
+    address: at least 90 percent of the corrupted copies and at most all of them. The high end
     also allows a healthy Wi-Fi link.
     """
 
-    lost = loss * (1 - duplicate)
-    low = 1 - (1 - lost) * (1 - CORRUPT_DROP_FLOOR * corrupt)
-    high = 1 - (1 - loss) * (1 - corrupt)
+    low = unanswered_share(loss, duplicate, CORRUPT_DROP_FLOOR * corrupt)
+    high = unanswered_share(loss, duplicate, corrupt)
     return low, min(1.0, high + WIFI_SHARE_ALLOWANCE)
 
 
@@ -312,23 +328,28 @@ def expected_delay_range(delay_ms: float, jitter_ms: float, bandwidth_kbit: Opti
 
 
 def simulated_timing(
-    delay_ms: float, jitter_ms: float, reorder_share: float,
+    delay_ms: float, jitter_ms: float, reorder_share: float, loss_share: float = 0.0,
     interval: float = PROBE_INTERVAL_SECONDS, count: int = SIMULATED_PROBES,
 ) -> Dict[str, float]:
     """What netem should do to probes one interval apart: jitter and the share reordered.
 
     Delay and jitter are uniform around the set delay and never negative. A rate (the renderer
     always sets one with jitter) keeps delayed packets in order. With reordering a share of
-    packets skips the delay and jumps to the head of the queue, so they overtake delayed ones.
-    The random numbers are seeded, so the answer is the same every time.
+    packets skips the delay and jumps to the head of the queue, so they overtake delayed ones. A
+    lost packet never enters the queue, and an answer that never comes is no evidence of
+    reordering, so only the packets that get through count (jitter over probes in a row that
+    both got through, reordering among the answered). The random numbers are seeded, so the
+    answer is the same every time.
     """
 
     generator = random.Random(SIMULATION_SEED)
     step = interval * 1000.0
     last_delayed = float("-inf")
     arrivals: List[Tuple[float, int]] = []
-    round_trips: List[float] = []
+    round_trips: Dict[int, float] = {}
     for index in range(count):
+        if loss_share and generator.random() < loss_share:
+            continue
         sent = index * step
         if reorder_share and delay_ms > 0 and generator.random() < reorder_share:
             arrival = sent
@@ -342,8 +363,9 @@ def simulated_timing(
                 arrival = sent + delay
                 last_delayed = max(last_delayed, arrival)
         arrivals.append((arrival, index))
-        round_trips.append(arrival - sent)
-    differences = [abs(after - before) for before, after in zip(round_trips, round_trips[1:])]
+        round_trips[index] = arrival - sent
+    differences = [abs(round_trips[index + 1] - round_trips[index])
+                   for index in round_trips if index + 1 in round_trips]
     highest = -1
     reordered = 0
     for _, index in sorted(arrivals):
@@ -353,7 +375,7 @@ def simulated_timing(
             highest = index
     return {
         "jitter_ms": sum(differences) / len(differences) if differences else 0.0,
-        "reorder_share": reordered / count if count else 0.0,
+        "reorder_share": reordered / len(arrivals) if arrivals else 0.0,
     }
 
 
@@ -513,6 +535,8 @@ class _Burst:
         self.jitter = float(setting.get("jitter_ms") or 0)
         self.bandwidth = setting.get("bandwidth_kbit")
         self.inflation = burst_inflation(self.loss, burst_packets)
+        # Loss that is independent from one probe to the next: no burst, with the length known.
+        self.independent_loss = burst_packets is not None and burst_packets < 2
         self.notes: List[str] = []
 
     def percent_set(self, key: str, share: float) -> str:
@@ -560,18 +584,23 @@ def _loss_row(burst: _Burst) -> Tuple[Dict[str, Any], Optional[int]]:
     set_text = burst.percent_set("loss_percent", burst.loss)
     if burst.burst_packets and burst.burst_packets >= 2 and burst.loss:
         set_text += f", in bursts of about {burst.burst_packets}"
-    need = probes_needed(band[0], inflation=burst.inflation) if burst.loss else None
+    affects_loss = bool(burst.loss or burst.corrupt)
+    need = probes_needed(band[0], inflation=burst.inflation) if affects_loss else None
     if not burst.judging:
         return burst.unjudged("loss", set_text, measured), need
+    if burst.duplicate and burst.corrupt and burst.loss and not burst.independent_loss:
+        return _row("loss", set_text, measured, "not-judged",
+                    "Not judged: duplication, corruption and bursty loss together make the "
+                    "loss uncertain."), need
     if status == "less":
         sentence = "Less loss than the profile sets, so the loss is not fully in effect."
     elif status == "more":
         sentence = ("More loss than the profile sets. The Wi-Fi link or the device may be "
                     "losing packets too.")
-    elif status == "matches" and not burst.loss:
+    elif status == "matches" and not affects_loss:
         sentence = "No more loss than a healthy Wi-Fi link has."
     else:
-        sentence = _share_sentence(status, direction, burst.loss, "loss", need)
+        sentence = _share_sentence(status, direction, band[0], "loss", need)
     return _row("loss", set_text, measured, status, sentence, direction), need
 
 
@@ -625,10 +654,14 @@ def _jitter_row(burst: _Burst) -> Tuple[Dict[str, Any], Optional[float]]:
                     ), None
     if not jitter:
         return _row("jitter", set_text, measured, "not-judged", "No jitter is set."), None
+    if burst.duplicate or burst.corrupt:
+        return _row("jitter", set_text, measured, "not-judged",
+                    "Not judged: duplication or corruption changes which answer comes first, "
+                    "so the jitter cannot be compared."), None
     if burst.received < MIN_REPLIES_FOR_JITTER or stats["jitter_pairs"] < MIN_PAIRS_FOR_JITTER:
         return _row("jitter", set_text, measured, "not-judged",
                     "Too few answers in a row to judge the jitter."), None
-    expected = simulated_timing(burst.delay, jitter, 0.0)["jitter_ms"]
+    expected = simulated_timing(burst.delay, jitter, 0.0, burst.loss)["jitter_ms"]
     about = f" (about {_ms_text(expected)})"
     low = JITTER_LOW_FACTOR * expected
     high = JITTER_HIGH_FACTOR * expected + JITTER_SLACK_MS
@@ -655,7 +688,7 @@ def _duplicates_are_predictable(burst: _Burst) -> bool:
 
     if burst.corrupt:
         return False
-    return not burst.loss or (burst.burst_packets is not None and burst.burst_packets < 2)
+    return not burst.loss or burst.independent_loss
 
 
 def _duplicate_row(burst: _Burst) -> Tuple[Dict[str, Any], Optional[int]]:
@@ -668,7 +701,7 @@ def _duplicate_row(burst: _Burst) -> Tuple[Dict[str, Any], Optional[int]]:
         f"{_percent_text(interval[0])} to {_percent_text(interval[1])}%)")
     set_text = burst.percent_set("duplicate_percent", burst.duplicate)
     need = (probes_needed(band[0], answered_factor=max(0.0, 1 - burst.loss))
-            if burst.duplicate else None)
+            if burst.duplicate and not burst.corrupt else None)
     if not burst.judging:
         return burst.unjudged("duplicate", set_text, measured), need
     if not received:
@@ -691,7 +724,12 @@ def _reorder_row(burst: _Burst) -> Dict[str, Any]:
         return burst.unjudged("reorder", set_text, measured)
     if not received:
         return _row("reorder", set_text, measured, "not-judged", "No probe was answered.")
-    expected = (simulated_timing(burst.delay, burst.jitter, burst.reorder)["reorder_share"]
+    if burst.duplicate or burst.corrupt:
+        return _row("reorder", set_text, measured, "not-judged",
+                    "Not judged: duplication or corruption changes which answer comes first, "
+                    "so the order cannot be compared.")
+    expected = (simulated_timing(burst.delay, burst.jitter, burst.reorder,
+                                 burst.loss)["reorder_share"]
                 if burst.reorder and burst.delay else 0.0)
     if burst.reorder and received * expected < MIN_EXPECTED_EVENTS:
         why = ("reordering needs a delay longer than the 100 ms between probes, so probes "
@@ -710,7 +748,7 @@ def build_summary(
     records: Sequence[Dict[str, Any]], *, planned: int, source: str, protected: bool = False,
     impairment: Optional[Dict[str, Any]] = None, burst_packets: Optional[int] = None,
     service_rules: Optional[bool] = False, changed_reason: Optional[str] = None,
-    unverified_reason: Optional[str] = None,
+    unverified_reason: Optional[str] = None, fault_reason: Optional[str] = None,
     probe_status: str = "measured", probe_reason: Optional[str] = None,
     notes: Iterable[str] = (), seconds: Optional[float] = None,
     profile_unchanged: Optional[bool] = None, grace: Optional[float] = None,
@@ -731,10 +769,14 @@ def build_summary(
     too_much = (window_limit(float(setting.get("delay_ms") or 0), float(
         setting.get("jitter_ms") or 0), setting.get("bandwidth_kbit")) if shaped else None)
     withheld, reason = None, None
-    if not shaped:
-        reason = "no profile shapes the Pi's probes for this device."
-    elif changed_reason is not None:
+    # A change or a fault comes first for every run: a baseline of a device that left the Wi-Fi
+    # or whose profile was applied during the burst is not a baseline.
+    if changed_reason is not None:
         withheld, reason = "changed", changed_reason
+    elif fault_reason is not None:
+        withheld, reason = "fault", fault_reason
+    elif not shaped:
+        reason = "no profile shapes the Pi's probes for this device."
     elif unverified_reason is not None:
         withheld, reason = "unverified", unverified_reason
     elif too_much is not None:
@@ -775,7 +817,7 @@ def build_summary(
         notes.insert(0, SHARED_NOTE)
     elif verdict == "baseline":
         notes.insert(0, BASELINE_NOTE)
-    elif verdict in ("changed", "unverified", "out-of-range"):
+    elif verdict in ("changed", "fault", "unverified", "out-of-range"):
         notes.insert(0, reason or "")
     if verdict == "inconclusive" and burst.bandwidth and not set_ids:
         notes.append("This profile sets only a speed cap, which a burst of probes cannot "
@@ -785,7 +827,7 @@ def build_summary(
         if burst.loss and burst_packets is None:
             notes.append("The burst length of the set loss is not known, so the loss range may "
                          "be narrower than it should be.")
-    needs = [(burst.loss, loss_need), (burst.duplicate, duplicate_need)]
+    needs = [(burst.loss or burst.corrupt, loss_need), (burst.duplicate, duplicate_need)]
     wanted = [need for share, need in needs if share and need]
     out_of_reach = any(share and need is None for share, need in needs)
     if verdict in ("inconclusive", "borderline") and (wanted or out_of_reach):
@@ -833,7 +875,7 @@ def _unique(values: Iterable[str]) -> List[str]:
 def _overall(statuses: Sequence[str], confirmed: Sequence[str], *, received: int, sent: int,
              source: str, shaped: bool, protected: bool, withheld: Optional[str],
              probe_status: str, loss_status: str, only_cap: bool) -> str:
-    if withheld in ("changed", "unverified"):
+    if withheld in ("changed", "fault", "unverified"):
         return withheld
     if probe_status == "unavailable":
         return "unavailable"
