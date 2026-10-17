@@ -13,8 +13,13 @@ contacted. Earlier records: `outage-dossier-2026-10-04-2026-10-09.md`,
 - The upload impairment fix of PR 125/135 holds: with every impairment type,
   every scope, protected devices, Panic, Reset and a Wi-Fi restart, the router
   receives no damaged, foreign, copied or reordered frame (capture test below).
+  For corruption the strong evidence is still `tests/kernel/test_upstream_safety.py`:
+  the new wire guard checks IPv4 header and ICMP checksums but not TCP or UDP
+  payload checksums (on the lab's veths those are filled in after the
+  corruption point).
 - Three real gaps were found by a new router-side capture and are **fixed in
-  this PR** (deploy files only, no Panic-pinned file):
+  this PR** (deploy files only, no Panic-pinned file). Severity on the owner's
+  scale: 1 is S2, 2 and 3 are S3.
   1. **Un-NATed test Wi-Fi packets with no profile running.** TCP resets, FINs
      and SYN-ACKs that connection tracking does not follow left `eth0` with
      their `192.168.50.x` source: 16 of 16 in the lab. The renderer's
@@ -37,19 +42,21 @@ contacted. Earlier records: `outage-dossier-2026-10-04-2026-10-09.md`,
 - No defect needs a Panic-pinned file change. The fixes live in the
   management firewall, which is loaded in every mode.
 - Biggest remaining risk is a design one, not a wire defect: since PR 140 the
-  Pi comes up on the router's Wi-Fi name at every boot, so after a household
-  power cut both radios advertise the same name and password with two subnets
-  (owner decision D1 below).
+  Pi comes up on the router's Wi-Fi name at every boot without checking whether
+  the router's own Wi-Fi is on. When the router Wi-Fi is on again both radios
+  advertise the same name and password with two subnets (owner decision D1
+  below).
 
 ## Fixes in this PR
 
 | File | Change | Why |
 | --- | --- | --- |
-| `deploy/raspberry-pi/jittersim-control-firewall.nft` | New `postrouting` chain (priority 300, after NAT): `oifname uplink ip saddr 192.168.50.0/24 fib saddr type != local drop` | One invariant for every cause: nothing leaves toward the router with a test Wi-Fi client source. The Pi's own addresses pass, so its Ethernet traffic keeps working on a router LAN that also uses 192.168.50.0/24 |
+| `deploy/raspberry-pi/jittersim-control-firewall.nft` | New `postrouting` chain (priority 300, after NAT): `oifname uplink ip saddr 192.168.50.0/24 fib saddr . oif type != local drop` | One invariant for every cause: nothing leaves toward the router with a test Wi-Fi source, not even the Pi's own `192.168.50.1`. Only an address of the uplink itself passes, so the Pi's Ethernet traffic keeps working on a router LAN that also uses 192.168.50.0/24 |
 | same | The file starts with `add table` and `delete table`, so loading it replaces the table in one transaction | An install or update reload never leaves a moment without the rules, and a file that fails to load keeps the old ones |
 | same | `forward`: `iifname uplink oifname uplink drop` | The Pi is a gateway for its Wi-Fi only, never a router for the LAN |
 | `deploy/raspberry-pi/jittersim-control-firewall.service` | `ExecStartPre` sets `net.ipv4.conf.all.arp_ignore=1`, `arp_announce=2` and `send_redirects=0` on every interface | No ARP answer for the Wi-Fi address on the LAN, the uplink address in ARP requests, no ICMP redirects (sent before the forward hook, so nft alone cannot stop them) |
-| same | `Before=NetworkManager.service`; no separate `nft delete` steps and no `ExecStop` | The rules load before any connection starts. A restart (install, update) no longer deletes the table first, and shutdown never removes it while the Wi-Fi still runs |
+| same | `Before=NetworkManager.service`; no separate `nft delete` steps and no `ExecStop`; `TimeoutStartSec=30` | The rules load before any connection starts. A restart (install, update) no longer deletes the table first, and shutdown never removes it while the Wi-Fi still runs. If nft hangs, the unit fails after 30 s: NetworkManager then starts and Ethernet comes up (the dashboard over Ethernet and SSH stay reachable once their own units start), but the test Wi-Fi stays off because `jittersim-ap.service` refuses to start without this table. That is the safe failure |
+| `deploy/raspberry-pi/preflight.py`, `install.sh` | `nft --check -f -` of the rendered rules against the running kernel. The updater already runs the staged `preflight.py` before it stops any service; `install.sh` runs it again with `--firewall-only` right after installing nftables | The rules use `fib` for the first time. A kernel without `nft_fib_inet` or `nft_fib_ipv4` would fail to load the whole file; the dashboard, browser proxy and service watcher need this unit. The check stops the install or update with a clear message before anything is stopped or replaced |
 | `tests/kernel/test_router_wire_guard.py` | The router-side capture test (below) | Closes the gaps with tests, not prose |
 | `tests/unit/test_deployment.py` | Static checks of the new rules and unit lines | Fast guard in the unit suite |
 
@@ -162,16 +169,21 @@ everyone else, service rules, quotas), **S** profiles stopped, Reset or Panic,
 
 ## Prioritized fix list
 
-1. Done here: the four management firewall and kernel setting changes above (S1 wire defects 4, 5, 6).
-2. **D1, owner decision (high).** Dual AP after every boot. A household power
-   cut brings the router Wi-Fi back on by default and the Pi back on the router
-   name. Devices then roam between two subnets under one name ("connected but
+1. Done here: the management firewall and kernel setting changes above (wire
+   defects 4 (S2), 5 and 6 (S3)).
+2. **D1, owner decision (high).** Renaming to the router name at every boot
+   without a check. A power cut does not normally switch router Wi-Fi back on
+   (the router keeps its setting), but the owner switching it on again, the
+   WLAN button, an ISP firmware push or a factory reset all do. Then both
+   radios carry one name and devices roam between two subnets ("connected but
    cannot browse", `pi-only-datapath-audit-2026-10-09.md` item 1). Proposal:
    in `wifi_follow boot` (runs before the AP starts, `wlan0` still idle), run
-   one passive `nmcli -t -f SSID,BSSID device wifi list --rescan yes ifname wlan0`
-   and, when the router name is on the air from another BSSID, keep or switch
-   to `JitterSim-Recovery` and log why. This never contacts the router. It
-   changes what PR 140 does, so it is not implemented here.
+   one `nmcli -t -f SSID,BSSID device wifi list --rescan yes ifname wlan0` and,
+   when the router name is on the air from another BSSID, keep or switch to
+   `JitterSim-Recovery` and log why. This scan is active (the Pi sends Wi-Fi
+   probe requests that the router's radio answers), but it never logs in to
+   or changes the router. It changes what PR 140 does, so it is not
+   implemented here.
 3. **D2, owner decision (medium).** Download corruption in Pi-only mode reaches
    household devices on the Wi-Fi. Option: refuse corruption and duplication
    for the Everyone profile while the Pi uses the router name.
@@ -194,6 +206,13 @@ leak 4; the firewall invariant covers it without touching that file.
 Run on the Pi over Ethernet or SSH from the router network, after this release
 is installed. Nothing here changes the Pi or contacts the router's web page.
 
+Every `tcpdump` here uses `-p` (no promiscuous mode), so it sees only the
+Pi's own frames.
+
+0. The kernel can load the rules (the installer checks this too):
+   `modinfo nft_fib_inet nft_fib_ipv4` lists both modules, and
+   `sudo nft --check -f /etc/jittersim/jittersim-control-firewall.nft` (the
+   rendered copy; `--check` loads nothing) prints nothing and exits 0.
 1. Settings and rules are in place:
    `cat /proc/sys/net/ipv4/conf/all/arp_ignore /proc/sys/net/ipv4/conf/all/arp_announce`
    (expect `1` and `2`), `grep . /proc/sys/net/ipv4/conf/*/send_redirects`
@@ -201,10 +220,12 @@ is installed. Nothing here changes the Pi or contacts the router's web page.
 2. Nothing leaves with a test Wi-Fi address, a foreign MAC or a server answer
    (run for the whole Pi-only trial; each must stay empty):
    `PI_MAC=$(cat /sys/class/net/eth0/address)`
-   `sudo tcpdump -i eth0 -Q out -n -e -c 50 "src net 192.168.50.0/24 or not ether src $PI_MAC or udp src port 67 or udp src port 547 or (icmp6 and ip6[40] == 134) or (icmp and icmp[0] == 5)"`
+   `sudo tcpdump -p -i eth0 -Q out -n -e -c 50 "src net 192.168.50.0/24 or not ether src $PI_MAC or udp src port 67 or udp src port 547 or (icmp6 and ip6[40] == 134) or (icmp and icmp[0] == 5)"`
 3. ARP answers only for the uplink address:
-   `sudo tcpdump -i eth0 -Q out -n -e "arp and not arp src host $(ip -4 -o addr show dev eth0 | awk '{print $4}' | cut -d/ -f1)"`
-   must stay empty.
+   `UPLINK=$(ip -4 -o addr show dev eth0 scope global | awk '{print $4}' | cut -d/ -f1 | head -1)`
+   `sudo tcpdump -p -i eth0 -Q out -n -e "arp and not arp src host $UPLINK and not arp src host 0.0.0.0"`
+   must stay empty. ARP probes with sender `0.0.0.0` are expected noise:
+   NetworkManager sends them when it checks a DHCP address for conflicts.
 4. The drop counters show how often the invariant fired (a number above zero
    means it stopped a leak):
    `sudo nft list ruleset | grep -E "never send a test Wi-Fi address|never route the household LAN"`.
@@ -219,14 +240,24 @@ is installed. Nothing here changes the Pi or contacts the router's web page.
 One full-diff review by Sol (GPT-6.1) ran on `87f7466` before the coordinator
 stopped all OpenAI use; none ran after. It found five issues, all fixed in the
 fix round: the postrouting drop also hit the Pi's own traffic on a same-subnet
-router LAN (now `fib saddr type != local`, and the same-subnet test requires
-the Pi's ping reply); the unit still deleted the table before loading it
+router LAN (fixed with `fib saddr type != local`, and the same-subnet test
+requires the Pi's ping reply); the unit still deleted the table before loading it
 (atomic file, no `ExecStop`); the transition tests could finish their traffic
 before the transition (fresh flows now run inside the gap and the drop counter
 must rise); a crashed generator could pass silently (generators must finish
 with a completion line); the capture did not check order (numbered datagrams
-are now checked). The author's own read-only Claude pass of the final diff is
-in the pull request. A second independent Claude review is still open.
+are now checked). The author then did a read-only Claude pass.
+
+An independent Opus review of `2423694` found no blocker and asked for one more
+round, done here: `fib saddr . oif type != local` so the Pi's own Wi-Fi address
+192.168.50.1 cannot leave without NAT either (new lab case); `TimeoutStartSec=30`
+on the firewall unit and its failure mode written down; an `nft --check`
+preflight of the rendered rules in the installer and the updater, because `fib`
+is new in the shipped rules and the lab kernel is not the Pi kernel; the
+capture now stops only after every generator finished and fails if it reached
+its own deadline; and the documentation corrections in this file (corruption
+evidence, the D1 triggers and the active scan, `tcpdump -p`, the check-3
+filter, severities).
 
 ## Gate
 

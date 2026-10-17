@@ -100,7 +100,10 @@ OTHER_ADDRESS = "192.168.50.20"
 # The rates a household router should never see from one wired client.
 BURST_LIMIT = 10
 ARP_LIMIT = 10
-CAPTURE_SECONDS = 12.0
+# The capture stops one second after the last generator finished; this is only
+# its safety limit, and reaching it fails the test.
+CAPTURE_SECONDS = 90.0
+SETTLE_SECONDS = 1.0
 # Names each client asks the Pi's resolver: one name many times, then distinct ones.
 REPEATED_QUERIES, DISTINCT_NAMES = 30, 10
 PROBE_MAC = "02:00:00:00:77:01"
@@ -111,18 +114,31 @@ receiver = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
 receiver.bind((sys.argv[1], 0))
 receiver.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
 print("ready", flush=True)
+# Records until told to stop (a line or the end of stdin), at the latest at the
+# deadline. "deadline" in the output says the capture ended before the test did.
 deadline = time.monotonic() + float(sys.argv[2])
-frames = []
+frames, ended = [], "stopped"
 while True:
     left = deadline - time.monotonic()
     if left <= 0:
+        ended = "deadline"
         break
-    if not select.select([receiver], [], [], left)[0]:
-        continue
+    ready = select.select([receiver, sys.stdin], [], [], left)[0]
+    if sys.stdin in ready:
+        sys.stdin.readline()
+        receiver.setblocking(False)
+        while True:
+            try:
+                data, address = receiver.recvfrom(65535)
+            except BlockingIOError:
+                break
+            if address[2] != socket.PACKET_OUTGOING:
+                frames.append((time.monotonic(), data.hex()))
+        break
     data, address = receiver.recvfrom(65535)
     if address[2] != socket.PACKET_OUTGOING:
         frames.append((time.monotonic(), data.hex()))
-print(json.dumps(frames), flush=True)
+print(json.dumps({"ended": ended, "frames": frames}), flush=True)
 """
 
 # What a test Wi-Fi client sends: ordinary UDP and TCP, DNS through the Pi,
@@ -683,7 +699,7 @@ class RouterWireGuardTests(unittest.TestCase):
         type(self).run_number += 1
         capture = subprocess.Popen(
             ["ip", "netns", "exec", ROUTER, sys.executable, "-c", CAPTURE, "up0",
-             str(CAPTURE_SECONDS)], stdout=subprocess.PIPE, text=True)
+             str(CAPTURE_SECONDS)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(capture.stdout.readline().strip(), "ready")
             deadline = time.monotonic() + 40
@@ -708,12 +724,16 @@ class RouterWireGuardTests(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     ping.kill()
                     ping.wait()
-            output, _ = capture.communicate(timeout=60)
+            # Delayed and rate-limited frames still in the Pi's queues arrive now.
+            time.sleep(SETTLE_SECONDS)
+            output, _ = capture.communicate("stop\n", timeout=60)
         finally:
             if capture.poll() is None:
                 capture.kill()
                 capture.wait()
-        frames = [(moment, bytes.fromhex(data)) for moment, data in json.loads(output)]
+        result = json.loads(output)
+        self.assertEqual(result["ended"], "stopped", "the capture ended before the traffic")
+        frames = [(moment, bytes.fromhex(data)) for moment, data in result["frames"]]
         return audit_frames(frames, pi_mac=self.pi_mac, router_mac=self.router_mac,
                             pi_ip=PI_UPLINK, pi_ipv6=self.pi_ipv6,
                             clients_distinct_names=len(clients) * (1 + DISTINCT_NAMES))
@@ -870,6 +890,39 @@ class RouterWireGuardTests(unittest.TestCase):
         # The fresh flows without NAT reached the management firewall and stopped there.
         self.assertGreater(self.invariant_drops(), before)
 
+    def test_the_pi_wifi_address_never_leaves_without_nat(self) -> None:
+        # The Pi's own Wi-Fi address is local too, so only an address of the
+        # uplink itself may pass the invariant. Without NetworkManager's NAT
+        # table a socket bound to 192.168.50.1 must still never reach the router.
+        _in(PI, "nft", "delete", "table", "ip", "nm-shared-wlan0")
+        self.addCleanup(lambda: _in(PI, "nft", "-f", "-", stdin=NM_SHARED_TABLE))
+        before = self.invariant_drops()
+        capture = subprocess.Popen(
+            ["ip", "netns", "exec", ROUTER, sys.executable, "-c", CAPTURE, "up0", "30"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(capture.stdout.readline().strip(), "ready")
+            _in(PI, sys.executable, "-c", (
+                "import socket\n"
+                "with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:\n"
+                "    udp.bind(('192.168.50.1', 0))\n"
+                "    for number in range(20):\n"
+                f"        udp.sendto(b'jittersim-wifi-address', ('{INTERNET}', 9999))\n"))
+            # The Pi's uplink address must still pass.
+            _in(PI, "ping", "-n", "-q", "-c", "3", "-i", "0.2", "-W", "1", INTERNET)
+            time.sleep(SETTLE_SECONDS)
+            output, _ = capture.communicate("stop\n", timeout=30)
+        finally:
+            if capture.poll() is None:
+                capture.kill()
+                capture.wait()
+        frames = [(moment, bytes.fromhex(data)) for moment, data in json.loads(output)["frames"]]
+        problems, stats = audit_frames(frames, pi_mac=self.pi_mac, router_mac=self.router_mac,
+                                       pi_ip=PI_UPLINK, pi_ipv6=self.pi_ipv6)
+        self.assertEqual(dict(problems), {}, dict(stats))
+        self.assertGreaterEqual(stats["icmp echo requests"], 3, dict(stats))
+        self.assertGreaterEqual(self.invariant_drops() - before, 20)
+
     def test_a_management_firewall_reload_while_traffic_runs(self) -> None:
         # An install or update restarts jittersim-control-firewall.service, which
         # loads the rules file again. The file replaces the table in one
@@ -934,18 +987,19 @@ class SameSubnetRouterTests(unittest.TestCase):
 
     def test_the_pi_never_claims_the_router_address_or_serves_dhcp_on_the_lan(self) -> None:
         capture = subprocess.Popen(
-            ["ip", "netns", "exec", ROUTER, sys.executable, "-c", CAPTURE, "up0", "4"],
-            stdout=subprocess.PIPE, text=True)
+            ["ip", "netns", "exec", ROUTER, sys.executable, "-c", CAPTURE, "up0", "30"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(capture.stdout.readline().strip(), "ready")
             _in(ROUTER, sys.executable, "-c", PROBES, "up0", self.router_mac, self.pi_mac,
                 self.HOUSEHOLD_DEVICE, self.PI_ON_SAME_SUBNET, PROBE_MAC, INTERNET)
-            output, _ = capture.communicate(timeout=30)
+            time.sleep(SETTLE_SECONDS)
+            output, _ = capture.communicate("stop\n", timeout=30)
         finally:
             if capture.poll() is None:
                 capture.kill()
                 capture.wait()
-        frames = [(moment, bytes.fromhex(data)) for moment, data in json.loads(output)]
+        frames = [(moment, bytes.fromhex(data)) for moment, data in json.loads(output)["frames"]]
         problems, stats = audit_frames(
             frames, pi_mac=self.pi_mac, router_mac=self.router_mac, pi_ip=self.PI_ON_SAME_SUBNET,
             pi_ipv6=tuple(_ipv6_of(PI, "eth0")), test_wifi=IPv4Network("192.0.2.0/24"),

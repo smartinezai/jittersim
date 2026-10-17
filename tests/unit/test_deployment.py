@@ -41,7 +41,7 @@ class DeploymentFirewallTests(unittest.TestCase):
         postrouting = firewall[firewall.index("chain postrouting"):]
         self.assertIn("type filter hook postrouting priority 300;", postrouting)
         self.assertIn('oifname "@UPLINK_INTERFACE@" ip saddr 192.168.50.0/24 '
-                      "fib saddr type != local counter drop", postrouting)
+                      "fib saddr . oif type != local counter drop", postrouting)
         # One transaction replaces the table, so a reload never leaves a gap.
         self.assertIn("delete table inet jittersim_control",
                       firewall.split("table inet jittersim_control {")[0])

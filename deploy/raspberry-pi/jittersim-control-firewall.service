@@ -19,6 +19,11 @@ ExecStartPre=-/bin/sh -c 'echo 1 > /proc/sys/net/ipv4/conf/all/arp_ignore && ech
 # while the test Wi-Fi keeps running, and the table goes with the next boot.
 ExecStart=/usr/sbin/nft -f /etc/jittersim/jittersim-control-firewall.nft
 RemainAfterExit=yes
+# NetworkManager waits for this unit (Before=). Never let a stuck nft hold the
+# network: after 30 s the unit fails, NetworkManager brings up Ethernet and the
+# test Wi-Fi stays off, because jittersim-ap.service refuses to start without
+# this table.
+TimeoutStartSec=30
 
 [Install]
 WantedBy=multi-user.target

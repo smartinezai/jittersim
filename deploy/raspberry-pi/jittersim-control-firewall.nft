@@ -69,9 +69,11 @@ table inet jittersim_control {
         # was skipped: connection tracking did not follow the packet (a TCP reset
         # or FIN for a connection it no longer tracks, for example after a
         # reboot) or NetworkManager's NAT table was gone for a moment while the
-        # Wi-Fi restarted. This table stays loaded when no profile runs. The
-        # Pi's own addresses are left alone, so its Ethernet traffic keeps
-        # working on a router LAN that uses 192.168.50.0/24 too.
-        oifname "@UPLINK_INTERFACE@" ip saddr 192.168.50.0/24 fib saddr type != local counter drop comment "never send a test Wi-Fi address to the router"
+        # Wi-Fi restarted. This table stays loaded when no profile runs. Only
+        # an address of the uplink itself passes (`fib saddr . oif`), so the
+        # Pi's Ethernet traffic keeps working on a router LAN that uses
+        # 192.168.50.0/24 too, while its Wi-Fi address 192.168.50.1 never
+        # leaves without NAT.
+        oifname "@UPLINK_INTERFACE@" ip saddr 192.168.50.0/24 fib saddr . oif type != local counter drop comment "never send a test Wi-Fi address to the router"
     }
 }
