@@ -163,6 +163,40 @@ def test_reads_survive_hostile_query_strings(dashboard, route):
         assert not problems, (route + query[:40], status, problems)
 
 
+# The routes that take a name or an id after a fixed prefix. The fixed lists above never put anything
+# odd after the prefix, and the server reads that part itself.
+FAMILIES = (
+    "/api/router/", "/api/homepage/", "/api/dashboard-access/", "/api/device-workspace/", "/api/test-sessions/",
+    "/api/updates/check-online/", "/api/wifi-operation/", "/api/updates/", "/api/profiles/", "/api/activity/",
+    "/api/observations/", "/api/access-point/", "/api/connected-devices/", "/api/",
+)
+SEGMENTS = (
+    "", "x", "%00", "%ff", "%ED%A0%80", "..", "%2e%2e", "%2e%2e%2f", "a%2fb", "a/b/c", "x" * 5000, "%", "%zz", "a%20b",
+    "ALICE", "%F0%9F%98%80", "%E2%80%AE", "-1", "1e999", "alice", "alice/", "alice/extra", "alice%00", "status",
+    "undefined", "..;", "%252e", "alice?days=1", "x" * 70,
+)
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_odd_names_after_a_route_prefix_and_odd_methods_are_answered_cleanly(dashboard, family):
+    for segment in SEGMENTS:
+        path = family + segment
+        for method in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
+            body = {} if method in ("POST", "PUT", "PATCH") else None
+            status, headers, data, first = call(dashboard, method, path, body)
+            where = (method, path[:60], status)
+            if method in ("HEAD", "OPTIONS"):
+                # The standard library answers a method it does not know with 501, and that is fine.
+                assert status < 500 or status == 501, where
+                assert not [r for r in dashboard.logs.records[first:] if r.exc_info], where
+                continue
+            problems = judge(dashboard, method, path, status, headers, data, first)
+            # A method the server does not implement is answered by the standard library as HTML.
+            problems = [p for p in problems if not (status == 501 and p.startswith("non-JSON"))]
+            assert not problems, (where, problems)
+            assert status != 501 or method in ("PUT", "DELETE", "PATCH"), where
+
+
 def test_random_website_analytics_filters_are_validated(dashboard):
     for query, expected in (("?days=0", 400), ("?days=31", 400), ("?days=abc", 400), ("?days=1&days=2", 400),
                             ("?device_id=" + "d" * 65, 400), ("?days=30", 200), ("", 200), ("?days=1&device_id=alice", 200),
