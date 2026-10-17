@@ -945,6 +945,13 @@ RESET_REQUEST_PATHS = frozenset(("/api/reset", "/api/normal-access"))
 # Recorded when a device-only start failed and the helper cleanup did not succeed yet.
 DEVICE_CLEANUP_ERROR = "device-only cleanup failed"
 
+# A device Apply beside Everyone builds the whole plan from the saved settings, so it waits
+# while what runs is older than what is saved.
+_SAVED_SETTINGS_WAIT = (
+    "Saved settings are still waiting to be applied, so Everyone does not run what is "
+    "saved. Nothing was saved. Try again in a moment, or choose Start to apply the saved "
+    "settings first."
+)
 _RESET_SAVED_ONLY = {
     "live_applied": False,
     "message": "saved; the network is reset, so choose Start to use it",
@@ -5213,11 +5220,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 running = self.scheduler.running_plan() if self.scheduler is not None else None
                 everyone_runs, saved_runs = self._everyone_and_saved_run(running)
                 if everyone_runs and not saved_runs and not stopped:
-                    raise ValueError(
-                        "Saved settings are still waiting to be applied, so Everyone does not "
-                        "run what is saved. Nothing was saved. Try again in a moment, or "
-                        "choose Start to apply the saved settings first."
-                    )
+                    raise ValueError(_SAVED_SETTINGS_WAIT)
                 if general is not None and not stopped:
                     if not everyone_runs:
                         # An Everyone that does not run, for example after a failed Start,
@@ -5259,7 +5262,11 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
                 def save():
                     with self.repository.transaction():
-                        versions.append(self.repository.get_runtime_state().configuration_version)
+                        version = self.repository.get_runtime_state().configuration_version
+                        if ran_before is not None and version != ran_before[0].configuration_version:
+                            # Another process saved settings after the check above.
+                            raise ValueError(_SAVED_SETTINGS_WAIT)
+                        versions.append(version)
                         self.repository.save_device(
                             device, expected=existing, create_only=existing is None
                         )
@@ -5338,7 +5345,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
         status, content_type, body = self._apply_configuration_locked(
             connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
-            keep_exceptions=True,
+            keep_exceptions=True, expected_version=versions[1] if len(versions) == 2 else None,
         )
         response = json.loads(body)
         response.update(fields)
@@ -5366,11 +5373,11 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             try:
                 with self.repository.transaction():
                     # Saved and running agree again after the restore only when nothing
-                    # else was saved since the plan that ran was built.
+                    # else was saved since this Apply saved. Read in the same transaction.
                     clean = (
                         ran_before is not None and len(versions) == 2
-                        and versions[0] == ran_before[0].configuration_version
-                        and failed.configuration_version == versions[1]
+                        and self.repository.get_runtime_state().configuration_version
+                        == versions[1]
                     )
                     if existing is None:
                         self.repository.delete_device(device.id)
@@ -5383,9 +5390,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         last_result=failed.last_result, last_error=failed.last_error,
                         keep_everyone_exceptions=bool(previous_exceptions),
                     )
+                    restored_version = self.repository.get_runtime_state().configuration_version
                 if clean:
-                    put_back_version.append(
-                        self.repository.get_runtime_state().configuration_version)
+                    put_back_version.append(restored_version)
             except StorageError:
                 LOGGER.exception("could not put back the device assignment after a failed start")
                 self.repository.restore_everyone_exceptions(previous_exceptions)
@@ -5738,12 +5745,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
     def _apply_configuration_locked(
         self, connected_snapshot=None, *, sample_usage=True, explicit_apply: bool = False, control_intent=None,
         device_scope: bool = False, keep_exceptions: bool = False, restore_plan=None,
+        expected_version=None,
     ) -> Tuple[int, str, bytes]:
         """Apply the whole saved plan, or with `device_scope` only a device-only start.
 
         `restore_plan` is the scheduler's running plan from before, with its saved version
         and randomization state: a failed apply puts exactly that back, not what the saved
-        settings say now.
+        settings say now. With `expected_version` the plan must be built from exactly that
+        saved version, or nothing is applied.
 
         A device-only start is read here, under the shared lock, so a Reset that ran
         while this call waited leaves nothing to start. Start and Apply to everyone cover
@@ -5835,6 +5844,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 "application/json",
                 _json_bytes({"error": "stored configuration cannot be applied"}),
             )
+        if expected_version is not None and (
+                (prepared is not None and prepared.configuration_version != expected_version)
+                or self.repository.get_runtime_state().configuration_version != expected_version):
+            # Another process saved settings while the plan was built. They were not applied
+            # yet, so this plan must not install them for other devices.
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({
+                "error": _SAVED_SETTINGS_WAIT})
         accepted, _ = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
             observed_state="applying", last_action=runtime_action, last_result=None, last_error=None,
             **keep,

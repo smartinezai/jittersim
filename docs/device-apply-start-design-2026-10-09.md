@@ -143,7 +143,7 @@ Behaviour:
 | --- | --- |
 | Everyone running | The device leaves Everyone. Other saved devices stay under Everyone. |
 | Everyone saved but not running: never started, or its last apply failed, so no plan with Everyone runs | Refused before saving (409). Start would run Everyone for every device, which this Apply must not do. Choose Start, Reset network first or stop Everyone. |
-| Everyone runs, but not what is saved: the plan that runs was built from an older saved version. For example a failed Apply to all or Stop for everyone, an edit of a profile that did not reach the network yet, or settings written by another process | Refused before saving (409): this Apply builds the whole plan from the saved settings, so it would install them for other devices too. Try again in a moment (the scheduler applies saved changes), or choose Start first. |
+| Everyone runs, but not what is saved: the plan that runs was built from an older saved version. For example a failed Apply to all or Stop for everyone, an edit of a profile that did not reach the network yet, or settings written by another process | Refused before saving (409): this Apply builds the whole plan from the saved settings, so it would install them for other devices too. Try again in a moment (a dashboard save applies itself), or choose Start first. |
 | Panic or outage stop latched, or the Pi does not say | Refused before saving (409), as after a Reset. |
 | Device protected | Refused before saving, as before. |
 | More than 15 classes with Everyone, the exceptions, their service limits and the service lists | Refused before saving (409) and the earlier exceptions stay. Service limits count even when the plan is checked without DNS. |
@@ -156,9 +156,13 @@ beside Everyone goes ahead only while that version equals the saved version of n
 the last apply succeeded. Then the saved settings build the plan that runs, so the only
 change the Apply makes is the device's own profile. Earlier drafts compared single
 fields (profile id, profile contents, state unknown, a failed Stop), and each review
-found one more field. A put-back after a failed device Apply carries the saved version
-of after the restore, so a retry is allowed again only when nothing else was saved in
-between. What the version does not cover is the same for every apply: the time of day
+found one more field. Only a full apply from the dashboard records a newer version. A
+scheduled apply keeps the recorded version only while nothing was saved since, because
+it leaves access rule and ad-blocking edits pending. The version is checked again when
+the device is saved and after the plan is built, so a save by another process (the CLI)
+meanwhile refuses the Apply and nothing is started. A put-back after a failed device
+Apply carries the saved version of after the restore, read in the same transaction, so
+a retry is allowed again only when nothing else was saved in between. What the version does not cover is the same for every apply: the time of day
 (schedules, timers), website lookups and the connected devices are read when the plan
 is built.
 

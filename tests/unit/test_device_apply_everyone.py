@@ -381,22 +381,69 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
         self.assertEqual(len(self.helper.plans), applied_before)
         self.assertEqual(self.delays(self.helper.applied_plan, AIR_ID), {3_000})
 
-    def test_once_the_scheduler_applied_the_saved_change_a_device_apply_runs(self) -> None:
+    def test_only_a_full_apply_makes_a_saved_change_count_as_running(self) -> None:
         scheduler = self.use_scheduler()
         self.assertEqual(self.apply_to()[0], 200)
         self.repository.save_profile(Profile(
             id="slow-test", name="Slow test", upload=Impairment(delay_ms=2_000)))
-        self.assertEqual(self.apply_to(PHONE, "low")[0], 409)
 
-        # The next tick builds the plan from the saved settings, so they are what runs.
+        # A scheduled apply leaves access and ad-blocking edits pending, so it does not count.
         self.assertTrue(scheduler.tick(repository=self.repository))
-        self.assertEqual(scheduler.running_plan()[0].configuration_version, self.version())
+        self.assertIsNone(scheduler.running_plan()[0].configuration_version)
+        self.assertEqual(self.apply_to(PHONE, "low")[0], 409)
+        # Apply to all runs the saved settings and puts the Air back on Everyone.
+        self.assertEqual(self.write("/api/apply", {})[0], 200)
         status, _ = self.apply_to(PHONE, "low")
 
         self.assertEqual(status, 200)
         plan = self.last_plan()
-        self.assertEqual(self.delays(plan, AIR_ID), {2_000})
         self.assertEqual(self.delays(plan, PHONE_ID), {50})
+        self.assertEqual(self.exceptions(), {PHONE_ID})
+
+    def test_a_tick_without_a_saved_change_keeps_the_device_apply_open(self) -> None:
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        version = self.version()
+        scheduler.tick(repository=self.repository)
+
+        self.assertEqual(scheduler.running_plan()[0].configuration_version, version)
+        self.assertEqual(self.apply_to(PHONE, "low")[0], 200)
+
+    def test_a_save_by_another_process_during_the_apply_is_never_installed(self) -> None:
+        for moment in ("before saving", "while building"):
+            with self.subTest(moment=moment):
+                self.write("/api/reset", {})
+                self.assertEqual(
+                    self.write("/api/general-profile", {"profile_id": "low"})[0], 200)
+                scheduler = self.use_scheduler()
+                self.repository.delete_device(PHONE_ID) if self.repository.get_device(
+                    PHONE_ID) else None
+                applied_before = len(self.helper.plans)
+
+                def other_writer(*_args, **_kwargs):
+                    self.repository.save_profile(Profile(
+                        id="slow-test", name="Slow test",
+                        upload=Impairment(loss_percent=100)))
+
+                target = ("sample_before_control_change" if moment == "before saving"
+                          else "prepare_plan")
+                original = getattr(scheduler, target)
+
+                def wrapped(*args, **kwargs):
+                    if target == "prepare_plan":
+                        result = original(*args, **kwargs)
+                        other_writer()
+                        return result
+                    other_writer()
+                    return original(*args, **kwargs)
+
+                with patch.object(scheduler, target, side_effect=wrapped):
+                    status, result = self.apply_to(PHONE, "low")
+
+                self.assertEqual(status, 409)
+                self.assertIn("waiting to be applied", result["error"])
+                self.assertEqual(len(self.helper.plans), applied_before)
+                self.assertIsNone(self.repository.get_device(PHONE_ID))
 
     def test_a_device_apply_never_installs_an_edit_of_everyones_profile(self) -> None:
         scheduler = self.use_scheduler()

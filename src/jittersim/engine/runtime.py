@@ -650,6 +650,17 @@ class RuntimeScheduler:
         with self._lock:
             return self._halt_count
 
+    def _keep_applied_version(self, configuration_version: int) -> None:
+        """Keep the saved version of the running plan only while nothing was saved since.
+
+        A scheduled apply changes timed and random effects only: it leaves access rule and
+        ad-blocking edits pending. So it never makes newer saved settings count as running.
+        Only a full apply from the dashboard does.
+        """
+
+        if self._applied_version != configuration_version:
+            self._applied_version = None
+
     def running_plan(self):
         """Return the plan that runs and a copy of its randomization state, or None.
 
@@ -910,8 +921,7 @@ class RuntimeScheduler:
                 # The network already runs this plan, for example one the
                 # dashboard applied after a saved change.
                 def publish_unchanged():
-                    # The saved settings of this version build exactly the plan that runs.
-                    self._applied_version = configuration_version
+                    self._keep_applied_version(configuration_version)
                     self._log_plan_recovery(self._clear_plan_failure())
                     self._record_activity(repository=active_repository, states=states, now=current_time)
                     self._save_patterns(active_repository, current_time)
@@ -937,7 +947,7 @@ class RuntimeScheduler:
                     active_repository.rebase_quota_counters(now=int(current_time))
                     self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
                 self._current_payload = payload
-                self._applied_version = configuration_version
+                self._keep_applied_version(configuration_version)
                 self._log_plan_recovery(self._clear_plan_failure())
                 if not active_repository.record_schedule_result(success=True):
                     self.pause()
