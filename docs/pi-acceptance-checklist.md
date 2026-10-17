@@ -176,8 +176,8 @@ Release tried: ________________  Date: ________________
 ### More features
 
 - [ ] **Staged update flow**
-  - Do: stage a newer signed release from verified official `main` using `--stage-only`. On the **Updates** page press **Check for updates** then **Install update**.
-  - Expect: an **Update available** badge shows on the **Updates** link and in the sidebar, and the page shows the installed and newest release labels and who signed the newest one. After the install the dashboard comes back with the new release label.
+  - Do: stage a newer signed release from verified official `main` using `--stage-only`. On the **Updates** page press **Check for updates** then the install button, which names the staged release (for example **Install v0.3.0**).
+  - Expect: an **Update available** badge shows on the **Updates** link and in the sidebar, and the page shows the installed and newest release labels, who signed the newest one and whether a recovery copy is kept. After the install the dashboard comes back with the new release label.
   - **Warning:** keep independent management access ready. **Restore previous installation** uses the selected complete recovery point. Later ordinary profile, protection, device-access and usage changes can revert. Current signing trust, update token, certificate authority and Panic state have separate protections. Back up current data before trying restore.
 - [ ] **Scenarios**
   - Do: under **Schedules and limits** save a scenario with two or three short steps for one test phone. Start it.

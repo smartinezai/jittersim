@@ -640,6 +640,9 @@ let workflowConfirmSerial = 0;
 async function confirmWorkflow(message, options) {
   const settings = options || {};
   const opener = settings.returnFocus || document.activeElement;
+  // A list that the page polls may be drawn again while the question is open, and then the control
+  // that asked is gone. Its place in the list says which control is its twin.
+  const anchor = rowAnchor(opener);
   const serial = ++workflowConfirmSerial;
   const dialog = document.createElement('dialog');
   dialog.className = 'workflow-confirm';
@@ -665,11 +668,16 @@ async function confirmWorkflow(message, options) {
     document.body.append(dialog); dialog.showModal(); cancel.focus();
   });
   dialog.remove();
-  restoreWorkflowFocus(opener);
+  restoreWorkflowFocus(opener, anchor);
   return answer;
 }
-function restoreWorkflowFocus(opener) {
-  if (!opener || opener === document.body || !opener.isConnected) return;
+function restoreWorkflowFocus(opener, anchor) {
+  if (!opener || opener === document.body) return;
+  if (!opener.isConnected) {
+    const twin = anchor && controlAtAnchor(anchor);
+    if (twin && !twin.disabled) twin.focus({preventScroll:true});
+    return;
+  }
   if (!opener.disabled) { opener.focus({preventScroll:true}); return; }
   // The opener is busy while its own action runs (see actionButton). Give it focus when it is
   // enabled again, unless the person has already moved on.
@@ -791,6 +799,14 @@ function renderUpdates(failedRead) {
   element('update-available').textContent = !state ? 'Unknown. Check for updates to try again.'
     : ready ? releaseLabel(state) : blocked ? releaseLabel(state) + ' (cannot be installed)' : 'No newer release staged';
   element('update-signer').textContent = ready && state.signed_by ? state.signed_by : 'Not applicable';
+  element('update-recovery').textContent = !state || typeof state.rollback_available !== 'boolean' ? 'Unknown'
+    : state.rollback_available ? 'Kept. Restore previous installation is available.'
+    : state.recovery_problem ? 'Could not be checked. Read the update log on the Pi.'
+    : 'Made automatically before the next install.';
+  const notes = ready && typeof state.notes === 'string' ? state.notes.trim().slice(0, 16384) : '';
+  element('update-notes').textContent = notes;
+  element('update-notes-box').hidden = !notes;
+  element('release-install').textContent = ready ? 'Install ' + releaseLabel(state) : 'Install update';
   element('update-last-checked').textContent = onlineView && onlineView.checked_at
     ? new Date(onlineView.checked_at * 1000).toLocaleString() : 'Unknown';
   element('release-check').disabled = working;
@@ -1055,7 +1071,8 @@ async function installUpdate() {
   if (!updateContextCurrent(context) || !stagedReleaseReady(releaseState)) return;
   const version = releaseState.available;
   const label = releaseLabel(releaseState);
-  if (!await confirmWorkflow('Install ' + label + '? The dashboard and test network will restart. Keep an independent management connection available.')) return;
+  const signer = releaseState.signed_by ? ' It is signed by ' + releaseState.signed_by + '.' : '';
+  if (!await confirmWorkflow('Install ' + label + '?' + signer + ' The installation and settings are backed up first and restored automatically if the Pi is not healthy afterwards. The dashboard and test network will restart. Keep an independent management connection available.')) return;
   if (!updateContextCurrent(context) || !stagedReleaseReady(releaseState) || releaseState.available !== version) return;
   updateOutcome = '';
   updateReadRevisions.release += 1;
@@ -1217,6 +1234,10 @@ function clearUpdatePrivateState() {
   element('update-installed').textContent = knownHealthVersion || 'Unknown';
   element('update-available').textContent = 'Sign in to read update status.';
   element('update-signer').textContent = 'Sign in to read update status.';
+  element('update-recovery').textContent = 'Unknown';
+  element('update-notes').textContent = '';
+  element('update-notes-box').hidden = true;
+  element('release-install').textContent = 'Install update';
   element('update-last-checked').textContent = 'Unknown';
 }
 privateDataLockHooks.push(clearUpdatePrivateState);
@@ -1259,7 +1280,9 @@ function installReleaseControls() {
       <div><dt>Last checked</dt><dd id="update-last-checked">Not checked yet</dd></div>
       <div><dt>Newest release</dt><dd id="update-available">No newer release found</dd></div>
       <div><dt>Signed by</dt><dd id="update-signer">Not applicable</dd></div>
+      <div><dt>Recovery copy</dt><dd id="update-recovery">Unknown</dd></div>
     </dl>
+    <details id="update-notes-box" hidden><summary>Release notes</summary><pre id="update-notes" class="update-notes" tabindex="0" role="region" aria-label="Release notes text"></pre></details>
     <p id="release-status">Check for an approved release on this Pi.</p>
     <p id="online-check-status" class="form-note">Loading the online check…</p>
     <p id="github-access-hint" class="form-note" hidden></p>
