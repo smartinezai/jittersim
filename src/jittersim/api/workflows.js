@@ -640,6 +640,9 @@ let workflowConfirmSerial = 0;
 async function confirmWorkflow(message, options) {
   const settings = options || {};
   const opener = settings.returnFocus || document.activeElement;
+  // A list that the page polls may be drawn again while the question is open, and then the control
+  // that asked is gone. Its place in the list says which control is its twin.
+  const anchor = rowAnchor(opener);
   const serial = ++workflowConfirmSerial;
   const dialog = document.createElement('dialog');
   dialog.className = 'workflow-confirm';
@@ -665,11 +668,16 @@ async function confirmWorkflow(message, options) {
     document.body.append(dialog); dialog.showModal(); cancel.focus();
   });
   dialog.remove();
-  restoreWorkflowFocus(opener);
+  restoreWorkflowFocus(opener, anchor);
   return answer;
 }
-function restoreWorkflowFocus(opener) {
-  if (!opener || opener === document.body || !opener.isConnected) return;
+function restoreWorkflowFocus(opener, anchor) {
+  if (!opener || opener === document.body) return;
+  if (!opener.isConnected) {
+    const twin = anchor && controlAtAnchor(anchor);
+    if (twin && !twin.disabled) twin.focus({preventScroll:true});
+    return;
+  }
   if (!opener.disabled) { opener.focus({preventScroll:true}); return; }
   // The opener is busy while its own action runs (see actionButton). Give it focus when it is
   // enabled again, unless the person has already moved on.
