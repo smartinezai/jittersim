@@ -907,7 +907,10 @@ class RouterWireGuardTests(unittest.TestCase):
                 "with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:\n"
                 "    udp.bind(('192.168.50.1', 0))\n"
                 "    for number in range(20):\n"
-                f"        udp.sendto(b'jittersim-wifi-address', ('{INTERNET}', 9999))\n"))
+                "        try:\n"
+                f"            udp.sendto(b'jittersim-wifi-address', ('{INTERNET}', 9999))\n"
+                "        except PermissionError:\n"
+                "            pass  # The firewall drop answers a local socket with EPERM.\n"))
             # The Pi's uplink address must still pass.
             _in(PI, "ping", "-n", "-q", "-c", "3", "-i", "0.2", "-W", "1", INTERNET)
             time.sleep(SETTLE_SECONDS)
