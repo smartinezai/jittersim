@@ -1,6 +1,7 @@
 """Apply and reset operations built on the structured networking boundary."""
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from ipaddress import IPv4Address
@@ -11,6 +12,7 @@ from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt
 from jittersim.config.models import ValidationError
 from jittersim.engine.plan import NetworkPlan
 
+from . import wifi_follow
 from .commands import Command, CommandResult
 from .executor import CommandExecutionError, CommandExecutor
 from .renderer import (
@@ -26,7 +28,9 @@ from .renderer import (
     render_service_address_commands,
 )
 from .topology import Topology
-from .wifi import WifiController
+from .wifi import WifiController, WifiError
+
+LOGGER = logging.getLogger(__name__)
 
 
 # Every protected device must be skippable so the two limits are one number.
@@ -86,6 +90,11 @@ class NetworkApplier:
         # The uplink root was checked once for queues of an older release.
         self._uplink_checked = False
         self._last_commands: Sequence[Command] = ()
+        # The Pi Wi-Fi follows the router (see wifi_follow). Tests point these elsewhere.
+        self.wifi_record_path = wifi_follow.RECORD_PATH
+        self.wifi_hold_path = wifi_follow.HOLD_PATH
+        self.wifi_lock_path = wifi_follow.LOCK_PATH
+        self.wifi_fingerprint = wifi_follow.password_fingerprint
 
     def apply(
         self,
@@ -708,20 +717,54 @@ class NetworkApplier:
             stats[interface] = decoded
         return stats
 
-    def configure_access_point(self, *, ssid: str, password: str, security: str = "WPA3") -> int:
-        """Set the local test AP credentials without touching the upstream router."""
+    def configure_access_point(self, *, ssid: str, password: str,
+                               security: Optional[str] = None) -> int:
+        """Set the local test AP credentials without touching the upstream router.
+
+        The helper passes ``security`` only for a copy of the router Wi-Fi. Its name and
+        security are recorded so a boot returns from Recovery to them. Every change deletes
+        the old record first and is refused when that fails, so a boot never gives the new
+        password an older name. A manual change (no ``security``, always WPA3) is the
+        owner's own choice and stays without a record.
+        """
 
         _validate_access_point_settings(ssid=ssid, password=password)
-        return WifiController(self._executor, self._topology.test_interface).configure(ssid, password, security)
+        controller = WifiController(self._executor, self._topology.test_interface)
+        with wifi_follow.wifi_lock(self.wifi_lock_path, wait=5.0):
+            self._stop_following_router()
+            if security is None:
+                return controller.configure(ssid, password, "WPA3")
+            commands_run = controller.configure(ssid, password, security)
+            try:
+                wifi_follow.remember(ssid, security, self.wifi_record_path,
+                                     fingerprint=self.wifi_fingerprint)
+            except (OSError, ValueError):
+                LOGGER.warning("The router Wi-Fi copy works but is not remembered for the next boot.")
+                return commands_run
+            try:
+                wifi_follow.end_hold(self.wifi_hold_path)
+            except OSError:
+                LOGGER.warning("The Recovery hold could not be removed. The next boot keeps Recovery.")
+            return commands_run
+
+    def _stop_following_router(self) -> None:
+        try:
+            wifi_follow.forget(self.wifi_record_path)
+        except OSError:
+            raise WifiError("Could not stop following the router Wi-Fi. "
+                            "No Wi-Fi change was made.") from None
 
     def recover_wifi(self) -> bool:
         """Restore a Wi-Fi import interrupted before its recovery copy was removed."""
-        return WifiController(self._executor, self._topology.test_interface).recover_pending()
+        with wifi_follow.wifi_lock(self.wifi_lock_path, wait=30.0):
+            return WifiController(self._executor, self._topology.test_interface).recover_pending()
 
     def reset_wifi_name(self) -> Dict[str, str]:
         """Restore the Pi Wi-Fi name without reading or changing its password."""
 
-        return WifiController(self._executor, self._topology.test_interface).reset_name()
+        with wifi_follow.wifi_lock(self.wifi_lock_path, wait=5.0):
+            self._stop_following_router()
+            return WifiController(self._executor, self._topology.test_interface).reset_name()
 
     def _try_reset(self) -> Optional[CommandExecutionError]:
         try:

@@ -19,6 +19,7 @@ from jittersim.api.server import (
     ControlServer,
 )
 from jittersim.config.storage import ConfigRepository
+from tests.tls_support import needs_openssl
 
 TOKEN = "trust-test-token"
 
@@ -127,6 +128,7 @@ class TrustDownloadTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("openssl"), "openssl is required")
 class NeutralCertificateTests(unittest.TestCase):
+    @needs_openssl
     def test_test_wifi_clients_get_the_certificate_without_other_names(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory)

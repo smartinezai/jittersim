@@ -93,12 +93,6 @@ def _ended(source: Source) -> Tuple[str, str, str]:
     return kind, ": ", text
 
 
-def activity_events(
-    old: Mapping[str, TargetState], new: Mapping[str, TargetState]
-) -> List[Tuple[str, str]]:
-    return [(kind, message) for kind, message, _ in activity_records(old, new)]
-
-
 def activity_records(
     old: Mapping[str, TargetState], new: Mapping[str, TargetState]
 ) -> List[Tuple[str, str, Tuple[str, ...]]]:

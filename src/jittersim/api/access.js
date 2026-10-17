@@ -95,6 +95,7 @@ function renderSiteRules() {
   if (!siteRules.length) container.append(textNode('p', 'No named site rules yet. Add a site or a collection of domains for a service.'));
   siteRules.forEach(rule => {
     const row = textNode('article', '', 'access-rule-row');
+    row.dataset.key = 'rule:' + rule.id;
     const owner = rule.device_id ? (devices.some(d => d.id === rule.device_id)
       ? deviceTitle(devices.find(d => d.id === rule.device_id)) : rule.device_id) :
       rule.group_id ? 'Group: ' + (groups.find(g => g.id === rule.group_id)?.name || rule.group_id) : 'Everyone';
@@ -141,6 +142,7 @@ function renderAccessDevices() {
     const blocked = policy.options.enabled && (policy.mac.mode === 'denylist' ? policy.mac.denylist.includes(mac) :
       policy.mac.mode === 'allowlist' && !policy.mac.allowlist.includes(mac));
     const row = textNode('div', '', 'access-rule-row');
+    row.dataset.key = 'device:' + mac;
     const copy = textNode('div', '');
     copy.append(textNode('strong', device.name || mac), textNode('p', mac + ' · ' + (applied ? '' : 'Saved: ') +
       (blocked ? 'Network access blocked' : 'Network access allowed')));
@@ -188,11 +190,11 @@ function installAccessControls() {
   const panicHelp = textNode('span', 'Panic button. Turn off all profiles, schedules and household blocking immediately. Keep saved settings.', 'sr-only');
   panicHelp.id = 'normal-access-help';
   const notice = textNode('p', 'Normal access is on. Profiles, automation and household blocking are off. Re-enable them explicitly when you are ready.', 'normal-access-notice');
-  notice.id = 'normal-access-notice'; notice.hidden = true; notice.setAttribute('role', 'status');
+  notice.id = 'normal-access-notice'; notice.hidden = true;
   noticeAnchor().before(notice);
   const card = element('policy-form').closest('section');
   const summary = textNode('p', 'Checking access rules…', 'access-summary');
-  summary.id = 'access-summary'; summary.tabIndex = -1; summary.setAttribute('role', 'status');
+  summary.id = 'access-summary'; summary.tabIndex = -1;
   card.querySelector('h2').after(summary);
   const options = document.createElement('div'); options.className = 'access-options';
   options.innerHTML = `<label class="quota-check"><input id="access-enabled" type="checkbox" checked>Enable household access rules</label>
@@ -203,7 +205,7 @@ function installAccessControls() {
       <input id="dns-failure-percent" type="number" min="0" max="100" step="1" value="0" required>
     </label>
     <p class="form-note">Each new DNS request from test Wi-Fi can get a quick connection error. Device and browser DNS caches may hide failures on later page visits. At 100%, test Wi-Fi name lookups will fail. This setting does not affect management traffic.</p>
-    <p id="dns-failure-status" class="form-note" role="status">Checking the applied DNS failure chance…</p>`;
+    <p id="dns-failure-status" class="form-note">Checking the applied DNS failure chance…</p>`;
   element('policy-form').prepend(options);
   card.querySelector('.policy-note').textContent = 'These rules persist after an experiment resets. Domain blocks and global blocked domains include subdomains while household access rules are on. VPNs, encrypted DNS over HTTPS and another internet connection can bypass network-only filtering. Existing direct connections or a device’s cached DNS answer can continue until it looks up the name again. The managed browser proxy also checks hostnames and closes tunnels when rules change.';
   const actions = textNode('div', '', 'access-actions');
@@ -329,7 +331,7 @@ function installFieldHelp() {
     button.addEventListener('pointerleave', leave); button.addEventListener('blur', leave);
     tip.addEventListener('pointerenter', () => clearTimeout(closeTimer)); tip.addEventListener('pointerleave', leave);
   });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape' && active) { close(); event.preventDefault(); } });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape' && active && !document.querySelector('dialog[open]')) { close(); event.preventDefault(); } });
   document.addEventListener('pointerdown', event => { if (active && !active.button.contains(event.target) && !active.tip.contains(event.target)) close(); });
   const reposition = () => { if (active) position(active); };
   window.addEventListener('resize', reposition); window.addEventListener('scroll', reposition, true);
