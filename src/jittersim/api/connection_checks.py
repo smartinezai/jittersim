@@ -199,8 +199,8 @@ class ConnectionCheckManager:
             settle=waits_for_late_copies(impairment),
             drift_reason=None,
             last_watch=target.mono,
-            signature=_signature(speed, target.plan, target.states, target.queue_id,
-                                 target.source, target.ipv4) if shaped else None,
+            signature=None if protected else _signature(
+                speed, target.plan, target.states, target.source, target.ipv4),
             source="none" if protected else target.source,
             source_note=" ".join(notes) or None,
             service_rules=target.service_rules,
@@ -250,8 +250,7 @@ class ConnectionCheckManager:
         if run.signature is None or now - run.last_watch < WATCH_SECONDS:
             return False
         run.last_watch = now
-        current = _signature(
-            speed, *speed._applied_snapshot(), run.queue_id, run.source, run.ipv4_address)
+        current = _signature(speed, *speed._applied_snapshot(), run.source, run.ipv4_address)
         if current is not None and current != run.signature:
             run.drift_reason = "The profile applied to this device changed during the check."
             return True
@@ -263,6 +262,8 @@ class ConnectionCheckManager:
         speed = self.speed
         end: Dict[str, Any] = {
             "associated": None, "address": None, "identity": None, "identity_known": False}
+        if run.state != "running":
+            return end
         helper = speed.server.helper_client
         snapshot_read = getattr(helper, "connected_device_snapshot", None) if helper else None
         if snapshot_read is not None:
@@ -276,7 +277,7 @@ class ConnectionCheckManager:
                         and client.get("association_verified") is True]
                 end["associated"] = bool(here)
                 end["address"] = here[0].get("ipv4_address") if here else None
-        if run.identity is not None:
+        if run.identity is not None and run.state == "running":
             try:
                 queues = speed._read_queues()
             except HelperClientError:
@@ -295,12 +296,18 @@ class ConnectionCheckManager:
             return run.drift_reason
         if end.get("associated") is False:
             return "The device left the test Wi-Fi during the check."
-        if end.get("address") not in (None, run.ipv4_address):
+        if end.get("associated") is True and end.get("address") != run.ipv4_address:
+            # A connected device whose address is missing or different is not the one probed.
             return "The device's address changed during the check."
         if self.speed._protected(run.mac_address) != run.protected:
             return "The device's protection changed during the check."
         if run.identity is not None and end.get("identity_known"):
             if end.get("identity") != run.identity:
+                return "The profile applied to this device changed during the check."
+        if run.signature is not None:
+            final = _signature(self.speed, *self.speed._applied_snapshot(), run.source,
+                               run.ipv4_address)
+            if final is not None and final != run.signature:
                 return "The profile applied to this device changed during the check."
         return None
 
@@ -332,6 +339,7 @@ class ConnectionCheckManager:
             run.prober.records(), planned=run.probes_total, source=run.source,
             protected=run.protected, impairment=run.impairment, burst_packets=run.burst_packets,
             service_rules=run.service_rules, changed_reason=changed, unverified_reason=unverified,
+            fault_reason=run.ended_reason if status == "fault" else None,
             probe_status=getattr(run.prober, "status", "measured"),
             probe_reason=getattr(run.prober, "reason", None), notes=notes,
             seconds=round(speed.monotonic() - run.started_mono, 1),
@@ -368,27 +376,34 @@ class ConnectionCheckManager:
         return self.speed.status(run_id, "check")
 
 
-def _signature(speed, plan, states, queue_id, source, ipv4):
-    """What decides the profile on a device's download queue, from the applied plan in memory.
+def _signature(speed, plan, states, source, ipv4):
+    """What decides the shaping of one address, from the applied plan in memory.
 
-    Two readings that differ mean the profile changed in between (a schedule, a timer, a new
-    apply). None when there is no readable plan. A change that went away again between two
-    readings is not seen: the check promises to catch changes it observes, not every transient.
+    It names the saved device whose queue the plan marks this address into (none for a device
+    nothing shapes), the impairment and source of that queue, the shared rules and the service
+    rules. Two readings that differ mean the profile changed in between (a schedule, a timer, a
+    new apply or a reset), also for a device that started without a profile. None when there is
+    no readable plan. A change that went away again between two readings is not seen: the check
+    promises to catch changes it observes, not every transient.
     """
 
-    if plan is None or states is None or queue_id is None:
+    if plan is None or states is None:
         return None
+    owner = _address_owner(plan, ipv4)
     spec = next((queue for queue in getattr(plan, "queues", ())
-                 if queue.device_id == queue_id and queue.direction.value == "download"), None)
-    state = states.get(queue_id)
+                 if owner is not None and queue.device_id == owner
+                 and queue.direction.value == "download"), None)
+    state = states.get(owner) if owner is not None else None
     source_key = None
     if state is not None:
         source_key = (state.source.kind, state.source.profile, state.source.label)
     return (
-        _address_owner(plan, ipv4),
+        owner,
         None if spec is None else tuple(sorted(asdict(spec.impairment).items(), key=str)),
         source_key,
-        speed._service_rules_apply(queue_id, source, plan, states),
+        getattr(plan, "general_profile", None),
+        getattr(plan, "everyone_else", None),
+        speed._service_rules_apply(owner, source, plan, states),
     )
 
 
