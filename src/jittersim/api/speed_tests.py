@@ -87,7 +87,15 @@ def response(value, status=200, content_type="application/json"):
     return status, content_type, body
 
 
+# The two kinds of measurement that share the manager, its limits and its shutdown. A connection
+# check (docs/implementation-plan-connection-check-2026-10-17.md) lives in the same run table, so
+# a device never has both at once and the two together never pass MAX_ACTIVE_RUNS.
+KIND_NAMES = {"speed": "speed test", "check": "connection check"}
+
+
 class SpeedTestRun:
+    kind = "speed"
+
     def __init__(self, **fields):
         self.__dict__.update(fields)
         self.samples: List[Dict[str, Any]] = []
@@ -134,6 +142,13 @@ class SpeedTestRun:
             "live": live,
             "result": self.result,
         }
+
+
+class ResolvedDevice:
+    """What the Pi knows about one connected device at the start of a measurement."""
+
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
 
 
 # Best-effort bound within the server's shared shutdown budget, not a guaranteed reserve.
@@ -189,9 +204,10 @@ class SpeedTestManager:
                     raise
                 self.sleep(READ_RETRY_SECONDS)
 
-    def active(self) -> List[SpeedTestRun]:
+    def active(self, kind: Optional[str] = None) -> List[SpeedTestRun]:
         with self.lock:
-            return [run for run in self.runs.values() if run.state == "running"]
+            return [run for run in self.runs.values()
+                    if run.state == "running" and (kind is None or run.kind == kind)]
 
     # Starting a window.
 
@@ -222,16 +238,22 @@ class SpeedTestManager:
         self._check_room(mac_address)
         # The helper reads can take seconds, so they run without the manager lock.
         run = self._new_run(mac_address, provider, duration, label)
+        return self._register(run, self._loop, name="speed-test", refuse_protected=True)
+
+    def _register(self, run: SpeedTestRun, loop, *, name: str, refuse_protected: bool
+                  ) -> Dict[str, Any]:
+        """Add a built run to the table and start its sampling thread. Takes the manager lock."""
+
         try:
             with self.lock:
-                self._check_room(mac_address)
-                if self._protected(mac_address):
+                self._check_room(run.mac_address)
+                if refuse_protected and self._protected(run.mac_address):
                     raise SpeedTestRequestError(PROTECTED_MESSAGE, 409)
                 self.runs[run.id] = run
                 self._trim()
                 if self.autostart:
                     run.thread = threading.Thread(
-                        target=self._loop, args=(run,), name="speed-test", daemon=True)
+                        target=loop, args=(run,), name=name, daemon=True)
                     try:
                         run.thread.start()
                     except BaseException:
@@ -255,12 +277,14 @@ class SpeedTestManager:
             if self.closed:
                 raise SpeedTestRequestError("The dashboard is stopping.", 503)
             active = self.active()
-            if any(run.mac_address == mac_address for run in active):
-                raise SpeedTestRequestError("A speed test is already running for this device", 409)
+            running = next((run for run in active if run.mac_address == mac_address), None)
+            if running is not None:
+                raise SpeedTestRequestError(
+                    f"A {KIND_NAMES[running.kind]} is already running for this device", 409)
             if len(active) >= MAX_ACTIVE_RUNS:
                 raise SpeedTestRequestError(
-                    f"At most {MAX_ACTIVE_RUNS} speed tests can run at once. "
-                    "Wait for one to end.", 409)
+                    f"At most {MAX_ACTIVE_RUNS} measurements (speed tests and connection "
+                    "checks together) can run at once. Wait for one to end.", 409)
 
     def _connected_client(self, mac_address: str) -> Dict[str, Any]:
         """The station entry of a device that is on the test Wi-Fi right now.
@@ -290,8 +314,14 @@ class SpeedTestManager:
                 return client
         raise SpeedTestRequestError("This device is not connected to the test Wi-Fi right now", 409)
 
-    def _new_run(self, mac_address, provider, duration, label) -> SpeedTestRun:
-        """Read what the Pi knows about the device and build the run. It takes no manager lock."""
+    def _resolve_target(self, mac_address: str, *, with_queues: bool = True) -> "ResolvedDevice":
+        """Read what the Pi knows about a connected device right now. It takes no manager lock.
+
+        This is the part of starting a window that a speed test and a connection check share: the
+        association check, the device's current address, the queue its traffic uses and the
+        applied plan and service rules. `with_queues=False` skips the queue and plan reads (a
+        protected device has none): the source is then `none`.
+        """
 
         repository = self.repository
         client = self._connected_client(mac_address)
@@ -307,6 +337,14 @@ class SpeedTestManager:
         labels = repository.list_connected_device_labels()
         name = (labels.get(mac_address, {}).get("display_name") or (device.name if device else "")
                 or mac_address)
+        now, mono = self.clock(), self.monotonic()
+        target = ResolvedDevice(
+            mac_address=mac_address, client=client, ipv4=ipv4, device=device, name=name,
+            now=now, mono=mono, plan=None, states=None, owner=device,
+            queue_id=device.id if device else None, source="none", entries={}, notes=[],
+            service_rules=None, reset=False)
+        if not with_queues:
+            return target
         try:
             queues = self._retry(self._read_queues)
         except HelperClientError as error:
@@ -314,7 +352,9 @@ class SpeedTestManager:
                 "The Pi could not read the queue counters just now. Try again in a moment.",
                 503) from error
         now, mono = self.clock(), self.monotonic()
+        target.now, target.mono = now, mono
         plan, states = self._applied_snapshot()
+        target.plan, target.states = plan, states
         # Which saved device's queue carries this client's traffic. The applied plan marks
         # traffic by address, so its mark rule for the client's current address decides, not
         # the saved row (the scheduler can keep an address with an older device).
@@ -349,7 +389,19 @@ class SpeedTestManager:
             # other way round. The profile would not describe the counters, so do not start.
             raise SpeedTestRequestError(
                 "The Pi is applying a change right now. Try again in a moment.", 503)
-        if queues is None:
+        target.owner, target.queue_id, target.source, target.entries = (
+            owner, queue_id, source, entries)
+        target.notes = notes
+        target.reset = queues is None
+        target.service_rules = self._service_rules_apply(queue_id, source, plan, states)
+        return target
+
+    def _new_run(self, mac_address, provider, duration, label) -> SpeedTestRun:
+        """Read what the Pi knows about the device and build the run. It takes no manager lock."""
+
+        target = self._resolve_target(mac_address)
+        source, entries, notes = target.source, target.entries, list(target.notes)
+        if target.reset:
             notes.append("The network is reset or the helper cannot read queues.")
         elif source == "none":
             notes.append(
@@ -359,37 +411,37 @@ class SpeedTestManager:
         elif source in SHARED_SOURCES:
             notes.append("Other devices share this queue, so their traffic is counted too. "
                          + SHARED_LATENCY_NOTE)
-        service_rules = self._service_rules_apply(queue_id, source, plan, states)
-        if service_rules is True:
+        if target.service_rules is True:
             notes.append(SERVICE_RULES_NOTE)
-        elif service_rules is None and source != "none":
+        elif target.service_rules is None and source != "none":
             notes.append(SERVICE_RULES_UNKNOWN_NOTE)
         run = SpeedTestRun(
             id=secrets.token_hex(8),
             mac_address=mac_address,
-            device_id=device.id if device else None,
-            queue_id=queue_id,
-            device_name=name[:64],
-            ipv4_address=ipv4,
+            device_id=target.device.id if target.device else None,
+            queue_id=target.queue_id,
+            device_name=target.name[:64],
+            ipv4_address=target.ipv4,
             provider=provider,
             label=label,
             duration_seconds=duration,
-            started_at=now,
-            started_mono=mono,
-            deadline=mono + duration,
+            started_at=target.now,
+            started_mono=target.mono,
+            deadline=target.mono + duration,
             source=source,
             source_note=" ".join(notes) or None,
-            service_rules=service_rules,
-            profile=self._profile_snapshot(owner, queue_id, source, entries, plan, states),
+            service_rules=target.service_rules,
+            profile=self._profile_snapshot(
+                target.owner, target.queue_id, source, entries, target.plan, target.states),
         )
         if source != "none":
             run.identity = {direction: _identity(entry) for direction, entry in entries.items()}
-            run.samples.append(_sample(entries, mono))
+            run.samples.append(_sample(entries, target.mono))
         factory = getattr(self.server, "speed_test_prober_factory", None)
-        if ipv4 is None:
+        if target.ipv4 is None:
             run.prober = NoProber()
         else:
-            run.prober = factory(ipv4) if factory is not None else IcmpProber(ipv4)
+            run.prober = factory(target.ipv4) if factory is not None else IcmpProber(target.ipv4)
         return run
 
     def _applied_snapshot(self):
@@ -552,7 +604,7 @@ class SpeedTestManager:
 
         with self.lock:
             run = self.runs.get(run_id)
-            if run is None or run.state != "running":
+            if run is None or run.state != "running" or run.kind != "speed":
                 return
         if self._protected(run.mac_address):
             with self.lock:
@@ -712,19 +764,19 @@ class SpeedTestManager:
             raise WorkersStillRunning(
                 "A speed test sampler start is unresolved. Its repository remains in use.")
 
-    def _running(self, run_id: Any) -> SpeedTestRun:
+    def _running(self, run_id: Any, kind: str = "speed") -> SpeedTestRun:
         run = self.runs.get(run_id) if isinstance(run_id, str) else None
-        if run is None:
-            raise SpeedTestRequestError("This speed test is not running", 404)
+        if run is None or run.kind != kind:
+            raise SpeedTestRequestError(f"This {KIND_NAMES[kind]} is not running", 404)
         if run.state != "running":
-            raise SpeedTestRequestError("This speed test has already ended", 409)
+            raise SpeedTestRequestError(f"This {KIND_NAMES[kind]} has already ended", 409)
         return run
 
-    def status(self, run_id: Optional[str]) -> Dict[str, Any]:
+    def status(self, run_id: Optional[str], kind: str = "speed") -> Dict[str, Any]:
         with self.lock:
             run = self.runs.get(run_id) if run_id else None
-            if run is None:
-                raise SpeedTestRequestError("This speed test is not known", 404)
+            if run is None or run.kind != kind:
+                raise SpeedTestRequestError(f"This {KIND_NAMES[kind]} is not known", 404)
             return run.payload(self.monotonic())
 
 
@@ -850,7 +902,7 @@ def _read(server, path, query):
     store = SpeedTestStore(server.repository)
     if path == "/api/speed-tests":
         mac_address = _query_mac(query)
-        runs = [run.payload(manager.monotonic()) for run in manager.active()
+        runs = [run.payload(manager.monotonic()) for run in manager.active("speed")
                 if mac_address is None or run.mac_address == mac_address]
         return response({
             "providers": provider_payload(),
