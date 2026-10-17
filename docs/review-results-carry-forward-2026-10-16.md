@@ -57,3 +57,15 @@ Two findings, both fixed in the next commit:
   `gateway.json` still records the stop (the state error stays reported).
 - S2: `end_forced_recovery()` removed the owner before it counted the halt, so a lock-free reader
   could see a short gap. The order is now: halt first, then owner.
+
+## Burst-loss length through the client cleaner (17 October 2026)
+
+PR 121 (device speed test) found that its start check could not see the burst length of the
+loss, because `_clean_queue_impairment` in `networking/helper.py` kept only the other
+impairment numbers. The fix is one entry in `_QUEUE_IMPAIRMENT_LIMITS`
+(`"loss_burst_packets": 100`, the same 0 to 100 range as `Impairment`). The helper already
+sends the field (`asdict(queue.impairment)`), so only the client side changes: the answer
+parser, not the Panic path. Like the neighbouring fields it is required, a missing or
+out-of-range value is rejected as invalid queue statistics. Tests:
+`QueueStatsClientTests.test_keeps_the_burst_length_of_the_loss` and the new rejection and
+largest-value cases in `tests/unit/test_helper.py`.

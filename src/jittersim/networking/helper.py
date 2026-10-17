@@ -172,6 +172,7 @@ _QUEUE_IMPAIRMENT_LIMITS = {
     "delay_ms": 60_000,
     "jitter_ms": 60_000,
     "loss_percent": 100,
+    "loss_burst_packets": 100,
     "reorder_percent": 100,
     "duplicate_percent": 100,
     "corrupt_percent": 100,
