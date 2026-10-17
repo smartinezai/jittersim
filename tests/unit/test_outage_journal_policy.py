@@ -277,6 +277,192 @@ def test_unexpected_failure_text_never_reaches_the_installer_output(capsys):
         assert "optional setup is unavailable" in output
 
 
+# ---------------------------------------------------------------------------
+# Raspberry Pi OS ships a volatile default. It is a distribution default, not an
+# administrator's choice, and it sorts before the project's drop-in's name.
+# ---------------------------------------------------------------------------
+
+# A byte-for-byte copy of /usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf
+# from the Pi (27 bytes).
+PI_OS_VOLATILE_DEFAULT = "[Journal]\nStorage=volatile\n"
+PI_OS_VOLATILE_NAME = "40-rpi-volatile-storage.conf"
+
+
+def pi_os_default(options, text=PI_OS_VOLATILE_DEFAULT, root=0, name=PI_OS_VOLATILE_NAME):
+    path = options["roots"][root] / "journald.conf.d" / name
+    path.write_text(text)
+    return path
+
+
+def effective_value(options, key):
+    """The last value systemd would use: drop-ins merge by file name, in order.
+
+    A file in a later directory replaces an earlier one with the same name.
+    """
+    names = {}
+    for root in options["roots"]:
+        directory = root / "journald.conf.d"
+        for path in directory.iterdir():
+            names[path.name] = path
+    value = None
+    for name in sorted(names):
+        for line in names[name].read_text().splitlines():
+            if line.startswith(key + "="):
+                value = line.split("=", 1)[1]
+    return value
+
+
+def test_the_project_drop_in_sorts_after_the_raspberry_pi_os_default():
+    assert policy.NAME > PI_OS_VOLATILE_NAME
+
+
+def test_the_raspberry_pi_os_volatile_default_does_not_stop_the_setup(layout):
+    options, calls = layout
+    vendor_file = pi_os_default(options)
+
+    assert policy.install(**options) == "configured"
+
+    assert vendor_file.read_text() == PI_OS_VOLATILE_DEFAULT
+    assert effective_value(options, "Storage") == "persistent"
+    assert effective_value(options, "SystemMaxUse") == "64M"
+    assert len(calls) == 1
+    assert policy.install(**options) == "unchanged"
+
+
+def test_removal_also_works_on_raspberry_pi_os(layout):
+    options, _ = layout
+    pi_os_default(options)
+    policy.install(**options)
+
+    assert policy.remove(config=options["config"], vendor=options["vendor"],
+                         activate=options["activate"], roots=options["roots"]) \
+        == "previous-memory-storage-restored"
+    assert effective_value(options, "Storage") == "volatile"
+
+
+@pytest.mark.parametrize("text", [
+    "[Journal]\nStorage=none\n",
+    "[Journal]\nStorage=persistent\n",
+    "[Journal]\nStorage=volatile\nSystemMaxUse=1M\n",
+    "[Journal]\nStorage=volatile\nRuntimeMaxUse=4M\n",
+])
+def test_a_changed_distribution_file_is_still_a_decision_we_respect(layout, text):
+    options, _ = layout
+    path = pi_os_default(options, text)
+
+    with pytest.raises(policy.PolicyError, match="administrator-policy"):
+        policy.install(**options)
+
+    assert path.read_text() == text
+    assert not options["config"].exists()
+
+
+@pytest.mark.parametrize("name", ["50-other.conf", "zz-local.conf", "20-jittersim-outage.conf"])
+def test_only_the_known_distribution_file_is_accepted(layout, name):
+    options, _ = layout
+    pi_os_default(options, name=name)
+
+    with pytest.raises(policy.PolicyError, match="administrator-policy"):
+        policy.install(**options)
+    assert not options["config"].exists()
+
+
+@pytest.mark.parametrize("root", [1, 2, 3])
+def test_the_same_file_outside_the_distribution_directory_is_an_administrator_file(layout, root):
+    options, _ = layout
+    pi_os_default(options, root=root)
+
+    with pytest.raises(policy.PolicyError, match="administrator-policy"):
+        policy.install(**options)
+    assert not options["config"].exists()
+
+
+def test_an_administrator_file_next_to_the_distribution_default_still_wins(layout):
+    options, _ = layout
+    pi_os_default(options)
+    admin = options["roots"][-1] / "journald.conf.d" / "50-keep-small.conf"
+    admin.write_text("[Journal]\nSystemMaxUse=16M\n")
+
+    with pytest.raises(policy.PolicyError, match="administrator-policy"):
+        policy.install(**options)
+
+    assert admin.read_text() == "[Journal]\nSystemMaxUse=16M\n"
+    assert not options["config"].exists()
+
+
+def test_an_administrator_copy_of_the_default_replaces_it_and_is_respected(layout):
+    # The manual fix from the triage: the same name in /etc replaces the vendor file.
+    options, _ = layout
+    pi_os_default(options)
+    pi_os_default(options, "[Journal]\nStorage=persistent\n", root=3)
+
+    with pytest.raises(policy.PolicyError, match="administrator-policy"):
+        policy.install(**options)
+    assert not options["config"].exists()
+
+
+def test_an_administrator_mask_of_the_default_leaves_nothing_to_override(layout):
+    options, _ = layout
+    pi_os_default(options)
+    (options["roots"][-1] / "journald.conf.d" / PI_OS_VOLATILE_NAME).symlink_to("/dev/null")
+
+    assert policy.install(**options) == "configured"
+
+
+def test_an_unreadable_distribution_default_is_refused_not_guessed(layout):
+    options, _ = layout
+    path = pi_os_default(options)
+    path.write_bytes(b"[Journal]\nStorage=vol\\\natile\n")
+
+    with pytest.raises(policy.PolicyError, match="ambiguous"):
+        policy.install(**options)
+
+
+# -- the drop-in used to be called 20-jittersim-outage.conf --------------------
+
+def owned_old_link(options):
+    link = options["vendor"] / "20-jittersim-outage.conf"
+    link.symlink_to(options["config"] / policy.TARGET_NAME)
+    return link
+
+
+def test_an_install_by_the_earlier_name_moves_to_the_new_name(layout):
+    options, calls = layout
+    policy.install(**options)
+    (options["vendor"] / policy.NAME).unlink()
+    old = owned_old_link(options)
+
+    assert policy.install(**options) == "configured"
+
+    assert not old.is_symlink()
+    assert (options["vendor"] / policy.NAME).is_symlink()
+    assert policy.install(**options) == "unchanged"
+
+
+def test_removal_cleans_up_the_earlier_name_too(layout):
+    options, _ = layout
+    (options["disk"] / "journal").mkdir()
+    policy.install(**options)
+    (options["vendor"] / policy.NAME).unlink()
+    old = owned_old_link(options)
+
+    assert policy.remove(config=options["config"], vendor=options["vendor"],
+                         activate=options["activate"], roots=options["roots"]) == "removed"
+
+    assert not old.is_symlink()
+    assert not (options["vendor"] / policy.NAME).is_symlink()
+
+
+def test_a_foreign_file_with_the_earlier_name_is_not_ours_to_remove(layout):
+    options, _ = layout
+    foreign = options["vendor"] / "20-jittersim-outage.conf"
+    foreign.write_text("[Journal]\nForwardToConsole=no\n")
+
+    assert policy.install(**options) == "configured"
+
+    assert foreign.read_text() == "[Journal]\nForwardToConsole=no\n"
+
+
 def test_failed_removal_of_an_already_persistent_journal_is_finished_by_a_retry(layout):
     options, _ = layout
     (options["disk"] / "journal").mkdir()

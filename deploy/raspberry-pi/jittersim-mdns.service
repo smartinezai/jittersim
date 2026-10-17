@@ -12,7 +12,10 @@ Type=simple
 Environment=PYTHONPATH=/opt/jittersim/src
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/python3 -m jittersim.mdnsname publish
-Restart=on-failure
+# Always, not on-failure: systemd counts a death by SIGHUP, SIGINT, SIGTERM or
+# SIGPIPE as a clean exit, and a stray SIGHUP from the network hook once left
+# the name silent for days. `systemctl stop` still stops it for good.
+Restart=always
 RestartSec=5
 # The status report that the dashboard and `jittersim diagnostics` read.
 RuntimeDirectory=jittersim-mdns
