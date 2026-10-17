@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 from jittersim.diagnostic_records import Operation
+from jittersim.config.address_follow import follow_automatically
 from jittersim.config.device_names import saved_device_title
 from jittersim.config.models import (
     DataLimit,
@@ -811,7 +812,9 @@ class RuntimeScheduler:
                         repository=active_repository, now=current_time, scope_ended=scope_ended,
                     )
                     return False
-            self._follow_device_addresses(repository=active_repository, now=current_time)
+            self._follow_device_addresses(
+                repository=active_repository, now=current_time, halts_at_start=halts_at_start
+            )
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
             if current_time - self._last_analytics_cleanup_at >= 24 * 60 * 60:
@@ -979,7 +982,9 @@ class RuntimeScheduler:
                 "attempt" if failed_tries == 1 else "attempts",
             )
 
-    def _follow_device_addresses(self, *, repository: ConfigRepository, now: float) -> None:
+    def _follow_device_addresses(
+        self, *, repository: ConfigRepository, now: float, halts_at_start: Optional[int] = None
+    ) -> None:
         """Move saved devices to the addresses their MAC addresses use now.
 
         DHCP can hand a device a new address, and a saved device is matched by
@@ -999,6 +1004,16 @@ class RuntimeScheduler:
             return
         if not snapshot.get("association_status_available"):
             return
+        # A saved device that came back with a new private address moves first when the
+        # owner chose Automatic, so the IP follow below moves it in this same check.
+        generation = self.apply_generation if halts_at_start is None else halts_at_start
+        try:
+            follow_automatically(
+                repository, snapshot, now=int(now),
+                allowed=lambda: self.can_apply(generation) and not self._paused,
+            )
+        except (StorageError, sqlite3.Error):
+            LOGGER.warning("could not check for changed private addresses", exc_info=True)
         # Only a reachable neighbour entry confirms an address. Otherwise the
         # helper falls back to a DHCP lease or an old neighbour entry, which
         # can be stale and would move a device back and forth.

@@ -51,6 +51,7 @@ a month (for example `2026-09`) was written in that month.
 | [planned-fixes.md](planned-fixes.md) | Known problems and what changed since the last tested candidate |
 | [../ROADMAP.md](../ROADMAP.md) | Milestones and known limits |
 | [feature-proposals-2026-10-09.md](feature-proposals-2026-10-09.md) | Thirty researched feature proposals with sizes and risks. They are proposals and not started work |
+| [implementation-plan-follow-address-changes-2026-10-17.md](implementation-plan-follow-address-changes-2026-10-17.md) | Following a device to its new private Wi-Fi address: evidence, scoring, what may move automatically and what stays manual |
 
 ### Open investigations and reviews
 

@@ -1,0 +1,284 @@
+"""Dashboard routes for following a saved device to its new private Wi-Fi address.
+
+The matching rules live in jittersim.engine.address_follow and the stored data in
+jittersim.config.address_follow. This module only reads the live station list,
+checks a request against a suggestion computed again on the server and calls the
+existing moves:
+
+- the profile and the name move with the same database change as a device edit;
+- protection moves only through ControlServer.move_device_address, the code the
+  verified self-service move uses, with its own undo;
+- a saved dashboard access grant never moves here. Only the device itself can
+  move it with the verified move under Dashboard access.
+"""
+
+import json
+import time
+
+from jittersim.config.address_follow import (
+    MODES,
+    UNDO_SECONDS,
+    AddressFollowStore,
+    FollowConflict,
+    automatic_allowed,
+    check_undo,
+    current_suggestions,
+    move_profile_and_label,
+    undo_profile_and_label,
+)
+from jittersim.config.exemptions import normalize_exempt_mac
+from jittersim.config.storage import StorageError
+from jittersim.engine.address_follow import describe
+from jittersim.engine.eligibility import station_snapshot
+
+ADDRESS_FOLLOW_READ = "/api/address-follow"
+ADDRESS_FOLLOW_WRITES = frozenset(
+    (
+        "/api/address-follow/settings",
+        "/api/address-follow/accept",
+        "/api/address-follow/dismiss",
+        "/api/address-follow/undo",
+    )
+)
+HISTORY_SHOWN = 20
+DISMISS_SECONDS = {"later": 24 * 60 * 60, "never": 90 * 24 * 60 * 60}
+
+
+def _response(value, status=200):
+    return status, "application/json", (json.dumps(value, allow_nan=False) + "\n").encode()
+
+
+def _snapshot(server, mode):
+    """The live station list. Off reads nothing from the helper."""
+
+    if mode == "off" or server.helper_client is None:
+        return None
+    return station_snapshot(server.helper_client)
+
+
+def _manual_only(server, repository, suggestions):
+    """What stays at the old address for each suggestion, and why."""
+
+    if not suggestions:
+        return {}
+    access = {
+        str(entry.get("mac_address") or "").lower() for entry in server._active_access_entries()
+    }
+    try:
+        policy = repository.get_mac_policy()
+        listed = set(policy.allowlist) | set(policy.denylist)
+        if policy.mode == "disabled":
+            listed = set()
+    except (StorageError, AttributeError):
+        listed = set()
+    return {
+        item.old.mac_address: {
+            "dashboard_access": item.old.mac_address in access,
+            "mac_list": item.old.mac_address in listed,
+        }
+        for item in suggestions
+    }
+
+
+def _suggestion_payload(item, manual, store, *, now, mode):
+    old, new = item.old, item.new
+    waiting = None
+    if mode == "automatic":
+        if old.protected:
+            waiting = "Protected devices are never moved automatically."
+        elif not automatic_allowed(store, item, now=now):
+            waiting = "The evidence is not strong enough to move it automatically."
+    return {
+        "old_mac": old.mac_address,
+        "new_mac": new.mac_address,
+        "name": old.name,
+        "hostname": new.hostname,
+        "new_ipv4": new.ipv4_address,
+        "points": item.evidence.points,
+        "strong": item.evidence.strong,
+        "reasons": list(item.evidence.reasons),
+        "evidence": describe(item.evidence, hostname=new.hostname),
+        "moves": {
+            "profile": bool(old.device_id),
+            "name": old.labelled,
+            "protection": old.protected,
+        },
+        "stays": manual.get(old.mac_address, {"dashboard_access": False, "mac_list": False}),
+        "automatic_waiting": waiting,
+    }
+
+
+def _history_payload(store, *, now):
+    return [
+        {
+            "id": entry["id"],
+            "happened_at": entry["happened_at"],
+            "mode": entry["mode"],
+            "name": entry["name"],
+            "old_mac": entry["old_mac"],
+            "new_mac": entry["new_mac"],
+            "moved_profile": entry["device_after"] is not None,
+            "moved_label": entry["label_after"] is not None,
+            "moved_protection": bool(entry["protection_move_id"]),
+            "undone_at": entry["undone_at"],
+            "can_undo": entry["undone_at"] is None and now - entry["happened_at"] <= UNDO_SECONDS,
+        }
+        for entry in store.history(limit=HISTORY_SHOWN)
+    ]
+
+
+def read_address_follow(server, path):
+    if path != ADDRESS_FOLLOW_READ:
+        return None
+    repository = server.repository
+    store = AddressFollowStore(repository)
+    now = int(time.time())
+    mode, suggestions = current_suggestions(
+        repository, _snapshot(server, store.mode()), now=now
+    )
+    manual = _manual_only(server, repository, suggestions)
+    return _response({
+        "mode": mode,
+        "suggestions": [
+            _suggestion_payload(item, manual, store, now=now, mode=mode) for item in suggestions
+        ],
+        "history": _history_payload(store, now=now),
+        "undo_days": UNDO_SECONDS // 86400,
+    })
+
+
+def _pair(payload, *keys):
+    if set(payload) != set(keys) | {"old_mac", "new_mac"}:
+        raise ValueError("Name the saved device and the new address.")
+    try:
+        return normalize_exempt_mac(payload["old_mac"]), normalize_exempt_mac(payload["new_mac"])
+    except (TypeError, ValueError) as error:
+        raise ValueError("Name the saved device and the new address.") from error
+
+
+def _accept(server, store, payload, *, now):
+    old_mac, new_mac = _pair(payload, "move_protection")
+    if type(payload["move_protection"]) is not bool:
+        raise ValueError("move_protection must be true or false")
+    repository = server.repository
+    mode, suggestions = current_suggestions(
+        repository, _snapshot(server, store.mode()), now=now
+    )
+    item = next(
+        (item for item in suggestions
+         if item.old.mac_address == old_mac and item.new.mac_address == new_mac),
+        None,
+    )
+    if mode == "off" or item is None:
+        return _response({
+            "error": "This suggestion is no longer current. Nothing was moved.", "saved": False,
+        }, 409)
+    if store.history_full(now=now):
+        return _response({
+            "error": "Too many recent moves to keep their Undo. Wait or undo one first.",
+            "saved": False,
+        }, 409)
+    if not item.old.protected:
+        try:
+            done = move_profile_and_label(repository, store, item, mode="ask", now=now)
+        except FollowConflict as error:
+            return _response({"error": str(error), "saved": False}, 409)
+        return _response({"saved": True, "moved": done})
+    if not payload["move_protection"]:
+        return _response({
+            "error": "This device is protected. Moving it moves its protection too. "
+                     "Confirm that to continue.",
+            "saved": False,
+        }, 409)
+    # The write route holds the scheduler's exclusive lock for this whole request, so no
+    # other write runs between the protection move and the profile move below.
+    status, _, body = server.move_device_address(old_mac, new_mac, access_moved=False)
+    result = json.loads(body)
+    if result.get("saved") is not True:
+        return _response({"error": result.get("error") or "Protection could not be moved.",
+                          "saved": False}, status)
+    warning = result.get("error") if status != 200 else None
+    record = repository.get_address_move(old_mac)
+    move_id = record.move_id if record is not None and record.new_mac == new_mac else ""
+    try:
+        done = move_profile_and_label(repository, store, item, mode="ask", now=now,
+                                      protection_move_id=move_id)
+    except (FollowConflict, StorageError) as error:
+        # Put protection back so nothing is left half moved.
+        status, _, body = server.undo_device_address_move(old_mac, "")
+        reversed_ok = json.loads(body).get("saved") is True
+        return _response({
+            "error": str(error) + (" Protection was put back." if reversed_ok else
+                                   " Protection moved and could not be put back. Undo it under "
+                                   "Dashboard access."),
+            "saved": not reversed_ok,
+        }, 409)
+    response = {"saved": True, "moved": done}
+    if warning:
+        response["warning"] = warning
+    return _response(response)
+
+
+def _undo(server, store, payload, *, now):
+    if set(payload) != {"id"} or type(payload["id"]) is not int:
+        raise ValueError("Choose a move to undo.")
+    entry = store.history_entry(payload["id"])
+    if entry is None:
+        return _response({"error": "There is no such move.", "saved": False}, 404)
+    repository = server.repository
+    try:
+        check_undo(repository, store, entry, now=now)
+    except FollowConflict as error:
+        return _response({"error": str(error), "saved": False}, 409)
+    protection_undone = False
+    if entry["protection_move_id"]:
+        record = repository.get_address_move(entry["old_mac"])
+        if (record is None or record.move_id != entry["protection_move_id"]
+                or record.new_mac != entry["new_mac"] or record.moved_access):
+            return _response({
+                "error": "Protection changed since this move. Nothing was undone.", "saved": False,
+            }, 409)
+        status, _, body = server.undo_device_address_move(entry["old_mac"], "")
+        result = json.loads(body)
+        if result.get("saved") is not True:
+            return _response({"error": result.get("error") or "Protection could not be undone.",
+                              "saved": False}, status)
+        protection_undone = True
+    try:
+        undo_profile_and_label(repository, store, entry, now=now)
+    except (FollowConflict, StorageError) as error:
+        message = str(error)
+        if protection_undone:
+            message += " Protection is back at the old address."
+        return _response({"error": message, "saved": protection_undone}, 409)
+    # The owner said this was wrong, so the same pair is not suggested again.
+    store.dismiss(entry["old_mac"], entry["new_mac"], until=now + DISMISS_SECONDS["never"], now=now)
+    return _response({"saved": True, "undone": entry["id"]})
+
+
+def write_address_follow(server, path, payload):
+    if path not in ADDRESS_FOLLOW_WRITES:
+        return None
+    store = AddressFollowStore(server.repository)
+    now = int(time.time())
+    try:
+        if path.endswith("/settings"):
+            mode = payload.get("mode")
+            if set(payload) != {"mode"} or mode not in MODES:
+                raise ValueError("Choose Off, Ask or Automatic.")
+            store.set_mode(mode)
+            return _response({"saved": True, "mode": mode})
+        if path.endswith("/dismiss"):
+            old_mac, new_mac = _pair(payload, "scope")
+            seconds = DISMISS_SECONDS.get(payload["scope"])
+            if seconds is None:
+                raise ValueError("scope must be later or never")
+            store.dismiss(old_mac, new_mac, until=now + seconds, now=now)
+            return _response({"saved": True})
+        if path.endswith("/accept"):
+            return _accept(server, store, payload, now=now)
+        return _undo(server, store, payload, now=now)
+    except ValueError as error:
+        return _response({"error": str(error), "saved": False}, 400)
+    except StorageError as error:
+        return _response({"error": str(error), "saved": False}, 409)

@@ -49,6 +49,11 @@ from jittersim.api.access import (
 )
 from jittersim.api.trust import TRUST_DOWNLOADS, dashboard_name_report, easy_address, read_trust_api
 from jittersim.localname import read_local_name
+from jittersim.api.address_follow import (
+    ADDRESS_FOLLOW_WRITES,
+    read_address_follow,
+    write_address_follow,
+)
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.adblocking import MAX_STATE_BYTES as MAX_AD_BLOCKING_BODY_BYTES
 from jittersim.config.device_labels import (
@@ -287,7 +292,7 @@ RELEASE_UPLOAD_HEADER = "X-Jittersim-Archive-Bytes"
 # dashboard serves one request at a time so a slow sender cannot hold it for longer.
 RELEASE_UPLOAD_SECONDS = 120.0
 WRITE_PATHS = (WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/preview"}
-               | {RELEASE_UPLOAD_PATH})
+               | {RELEASE_UPLOAD_PATH} | ADDRESS_FOLLOW_WRITES)
 ACTION_PATHS = frozenset(
     ("/api/apply", "/api/reset", "/api/observations/scan", "/api/update-preferences",
      "/api/access-point/reset-name", "/api/updates/check-online", "/api/updates/retry")
@@ -1825,6 +1830,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         workflow = read_workflow(self, path)
         if workflow is not None:
             return workflow
+        follow = read_address_follow(self, path)
+        if follow is not None:
+            return follow
         trust = read_trust_api(self, path)
         if trust is not None:
             return trust
@@ -2548,6 +2556,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                                           before_replace=before_replace)
                 if workflow is not None:
                     return workflow
+                follow = write_address_follow(self, path, payload)
+                if follow is not None:
+                    return follow
                 if device_apply:
                     return self._apply_profile_to_connected_device(
                         payload, control_intent=control_intent, resets_at_entry=resets_at_entry)

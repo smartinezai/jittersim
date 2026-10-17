@@ -1,6 +1,7 @@
 # Implementation plan: follow private address changes (2026-10-17)
 
-Status: plan for review. Branch `feat/follow-address-changes`.
+Status: reviewed plan, implemented on branch `feat/follow-address-changes`. The
+"Plan review" section at the end lists what the review changed.
 
 ## Summary for review
 
@@ -68,24 +69,31 @@ profile assignment to a new MAC except a manual edit.
   device ID, not the MAC.
 - **D6 Ask's Yes also moves protection** (with ad blocking) when the saved
   device was protected, after a confirm dialog that names the risk. The owner
-  can already protect any address by hand, so this gives no new power. Dashboard
-  access is never moved from a suggestion. The card says to open the dashboard
+  can already protect any address by hand, so this gives no new power.
+  Protection brings dashboard reachability with it, and the dialog says so. A
+  saved dashboard access grant is never moved from a suggestion. The card says to open the dashboard
   on that device and use the existing verified move.
 - **D7 Undo window: 7 days.** After that the history entry stays readable but
   Undo is gone. Undo refuses when the device was edited since.
 - **D8 Rate limit and no flapping.** Automatic moves one saved device at most
   once per 10 minutes and 3 times per 24 hours. A new address must have been
   connected for at least 60 seconds. Beyond the limit the suggestion falls back
-  to Ask.
-- **D9 Absent means not in the current station list.** A saved device last seen
-  more than 30 days ago is not offered by timing, and its host name memory is
-  deleted.
+  to Ask. Automatic never moves a protected device: its profile is dormant and
+  moving only the profile would start shaping it.
+- **D9 Absent means not in a current, verified station list.** When the helper
+  cannot say which stations are associated (`association_status_available` is
+  false) or the list is a stale copy, nothing is suggested and nothing is
+  recorded. A saved device last seen more than 30 days ago is not offered by
+  timing, and its host name memory is deleted.
 - **D10 Dismissals.** No hides that pair for 24 hours. Not this device hides
   that pair for 90 days. At most 256 dismissals are kept.
 - **D11 Privacy and retention.** Host names are personal data. The Pi keeps the
   last host name, IPv4 address and last-seen time only for addresses that belong
-  to a saved device, for at most 30 days after they were last seen. History is
-  kept for 90 days and at most 100 entries. Nothing here is in the settings
+  to a saved device, for at most 30 days after they were last seen. Pairs seen
+  online together are kept as a veto for 30 days (addresses only). History is
+  kept for 90 days. Beyond 100 entries only entries whose Undo has run out are
+  removed; when 100 entries are still undoable a new move is refused. The
+  history keeps reason codes such as "hostname", never the host name itself. Nothing here is in the settings
   export, import or version history (like `address_moves`, it is runtime
   evidence). The database backup copies the whole database and so includes it.
   Off clears the stored host names.
@@ -103,9 +111,10 @@ profile assignment to a new MAC except a manual edit.
 | Client-id (61) | 5th lease column, parsed but dropped by the helper | No | Needs a helper change (Panic-pinned). |
 | Vendor class (60), request list (55) | Not in the lease file | No | Would need dnsmasq scripting. |
 | mDNS or NetBIOS name | Not collected for clients | No | Would need a listener. |
-| IPv4 continuity | Saved device's `ipv4_address` and the last seen IPv4 | Yes | dnsmasq usually gives a new MAC a new address, so a match is a good sign. |
+| IPv4 continuity | Saved device's `ipv4_address` and the last seen IPv4 | Yes, only when a reachable neighbour entry confirms the new address and no other station claims it | A DHCP lease or an old neighbour entry can be stale, as the existing IP follow already knows. |
 | Association time | `connected_seconds` from `iw station dump` | Yes | Join time is now minus connected seconds. |
-| Last seen of the old MAC | New small table, written by the address check | Yes | Gives "left shortly before the new one joined" and "both were online together". |
+| Last seen of the old MAC | New small table, written by the address check and by the dashboard while it is open | Yes | Gives "left shortly before the new one joined". |
+| Seen online together | New small table of address pairs | Yes | Two addresses connected at the same time are two devices. The veto survives reconnects. |
 | Saved name | Device name, label or protection name | Yes | Compared with the host name after removing punctuation. |
 | OUI vendor | MAC prefix | No | A private address has no vendor prefix by definition. |
 | Signal strength | `signal_dbm` | No | Changes with position. Too noisy to identify a device. |
@@ -118,13 +127,15 @@ Points for one saved device (old) and one new private address (new):
 | --- | --- |
 | H1: the host names are equal (ignoring case) and the name is distinctive | 4 |
 | H2: the host names are equal but generic (for example "iPhone", "android-1a2b3c4d", "localhost") | 1 |
-| N: the new host name matches the saved name after removing spaces and punctuation | 2 |
-| I: the new IPv4 address is the old one's saved or last seen IPv4 address | 2 |
+| N: the new host name is distinctive and matches the saved name after removing spaces and punctuation | 2 |
+| I: the new, confirmed IPv4 address is the old one's saved or last seen IPv4 address | 2 |
 | T: the old address was last seen at most 15 minutes before the new one joined | 1 |
-| X: the old address was seen after the new one joined (both online together) | rules the pair out |
+| X: the old address was seen more than 90 seconds after the new one joined | rules the pair out |
+| V: both addresses were in one station list at some point in the last 30 days | rules the pair out |
 
 - Ask threshold: at least 3 points and at least one of H1, H2, N or I. Timing
-  alone never suggests anything.
+  alone never suggests anything. A protected saved device also needs H1 or N,
+  because Yes would move its protection.
 - Strong (Automatic): H1 and at least one of I or T, the new address connected
   for 60 seconds, the rate limit allows it and the saved device has a profile
   assignment.
@@ -152,7 +163,7 @@ Examples:
 | Data limits, groups, website rules, schedules | saved device ID | Follow the device | Follow the device | Nothing is copied. They belong to the device ID. |
 | Name and type | MAC label | Yes, with the profile | Yes | Wording only. |
 | Protection and ad blocking | MAC | Never | Yes, after a confirm dialog | A wrong move exempts a stranger from every profile. A copied host name is enough to fake the evidence. |
-| Protection's dashboard access | follows protection | Never | Only through protection | Same as protection. |
+| Protection's dashboard access | follows protection | Never | Only through protection, and the confirm dialog says so | Protecting a device also lets it open the dashboard (the admin token is still needed). A wrong move gives a stranger that network path too. |
 | Saved dashboard access grant | MAC, in the helper | Never | Never | A wrong move gives a stranger the network path to the admin page. Only the verified self-service move on the device itself may move it. |
 | MAC allow or deny list | MAC | Never | Never | It is a household access rule. The card says when the old address is on it. |
 
@@ -175,7 +186,11 @@ Examples:
 - **No DHCP host name.** Only IPv4 and timing remain, at most 3 points, so only
   Ask.
 - **The device was edited meanwhile.** The move uses `save_device(expected=...)`
-  and refuses a stale edit. Undo refuses too.
+  and refuses a stale edit. Undo compares the device and the name with the exact
+  values saved after the move (the IPv4 address may differ, because the address
+  check moves it) and refuses when anything else changed or a later move touched
+  the same device or addresses. After an Undo the same pair is not suggested for
+  90 days.
 - **Settings import or restore.** An import replaces saved devices. A pending
   suggestion is checked again at the moment of Yes, so it cannot act on an old
   device.
@@ -206,15 +221,33 @@ them, a newer one creates them on first use):
 - `address_sightings (mac_address PRIMARY KEY, hostname, ipv4_address, last_seen)`,
   only for MACs of saved devices, labels or protection.
 - `address_follow_history (id, happened_at, mode, device_id, name, old_mac,
-  new_mac, old_ipv4, new_ipv4, moved_profile, moved_label, moved_protection,
-  evidence, undone_at)`.
+  new_mac, device_before, device_after, label_after, protection_move_id,
+  evidence, undone_at)`. `device_*` and `label_after` are the exact saved
+  values, `protection_move_id` links the `address_moves` row of the existing
+  protection move, `evidence` holds reason codes only.
 - `address_follow_dismissals (old_mac, new_mac, until, PRIMARY KEY (old_mac, new_mac))`.
+- `address_follow_vetoes (old_mac, new_mac, seen_at, PRIMARY KEY (old_mac, new_mac))`,
+  at most 1024 rows.
 
 The code lives in new modules: `engine/address_follow.py` (pure scoring and
 matching), `config/address_follow.py` (the store), and `api/address_follow.py`
 (routes). `server.py` only adds the route list and two dispatch calls.
 `runtime.py` calls the check from `_follow_device_addresses` before the IP
 follow, so a moved device gets its new IPv4 address in the same tick.
+
+How a move runs:
+
+- The profile move changes only the saved device's MAC address, with
+  `save_device(expected=...)`, in one transaction with the name, the history
+  entry and the activity log line. The existing IP follow then moves the IPv4
+  address with its grouped rules (swaps, traffic progression baselines).
+- Yes on a protected device runs the existing `move_device_address` first, then
+  the profile move. Both happen under the scheduler's exclusive lock that every
+  dashboard write holds, so no other write lands between them. When the profile
+  move fails, the existing Undo puts protection back.
+- An automatic move asks the scheduler's Panic fence (`can_apply` with the tick's
+  generation, and not paused) again just before its commit, so a Panic that
+  starts while the station list is read stops it.
 
 ## API
 
@@ -259,3 +292,25 @@ All need the admin token like every other write.
   cannot alone cause a move.
 - **Owner decisions:** D1 (default Ask), D6 (Ask moves protection after a
   confirm), D7 (7-day undo), D8 (rate limits).
+
+## Plan review (Sol, 2026-10-17)
+
+One independent review of this plan found ten points. All were taken:
+
+1. Moving protection and the profile must not leave a half move: protection
+   moves first, the profile second, both under the exclusive lock, and a failed
+   profile move puts protection back with the existing Undo.
+2. Unknown observations: a station list without association status or a stale
+   copy suggests nothing. The IPv4 point needs a reachable neighbour entry.
+3. Panic fence: the automatic commit asks the scheduler's fence again.
+4. Undo stores exact before and after values and the protection move ID, and
+   refuses stale or superseded moves.
+5. IPv4 changes go through the existing grouped IP follow, not `save_device`.
+6. A generic host name never also counts as the saved name.
+7. Pairs seen online together are vetoed across reconnects.
+8. The confirm dialog says that protection brings dashboard reachability.
+9. History retention never drops an undoable entry and refuses new moves
+   instead. The existing `address_moves` limit of 64 still applies to protection
+   moves and is reported as their error.
+10. No host name in the history. Observation also runs while the dashboard page
+    is open, so Ask works while the network is stopped.
