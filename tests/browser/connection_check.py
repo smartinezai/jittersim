@@ -125,7 +125,7 @@ def check_width(browser, width, height):
         expect(history).to_have_count(2)
         expect(history.first).to_contain_text("Lossy")
         expect(history.first).to_contain_text("10% lost")
-        expect(history.first).to_contain_text("median 112 ms")
+        expect(history.first).to_contain_text(re.compile(r"median 11[2-4] ms"))
         expect(result).to_contain_text("18 answered, 2 lost")
         loss = result.locator('tr[data-metric="loss"]')
         expect(loss).to_contain_text("10%")

@@ -277,6 +277,9 @@ See
 - A **Test speed** button on each connected device that measures its real speed
   through the Pi while it runs a public speed test, keeps the results and compares
   a result before a profile with one after it.
+- A **Check connection** button on each connected device that sends a short burst
+  of pings from the Pi and compares the loss, round trip, jitter, duplicates and
+  order with the profile that applies to the device.
 
 ### Data quotas
 
@@ -890,6 +893,68 @@ Limits:
 
 The design and the open decisions are in
 [implementation-plan-device-speed-test-2026-10-09.md](implementation-plan-device-speed-test-2026-10-09.md).
+
+### Connection check
+
+**Check connection** on a connected device in **Devices** shows whether the profile
+applied to the device really takes effect. The Pi sends 100 small ping packets,
+10 per second (20 to 300 allowed), to the device and counts what comes back.
+
+1. Wake the device (turn on the screen): a sleeping phone answers slowly.
+2. Choose the number of probes and an optional label, then **Start check**. It takes
+   about 12 seconds with the default. **Cancel check** saves nothing and closing the
+   window keeps the check running.
+3. The result gives one verdict and one row per number: the value the profile sets,
+   what the Pi measured, and a status in words.
+
+What the numbers are and how they are judged:
+
+| Number | Measured | Judged against |
+| --- | --- | --- |
+| Packet loss | probes with no answer, with a 95% range | the profile's loss (with the duplication and corruption that change it) plus up to 2 points for a healthy link |
+| Round trip delay | median, lowest and 95th percentile | the profile's delay, plus or minus its jitter. Longer than that is shown as extra path delay and never held against the profile |
+| Jitter | the average change of the round trip between two probes in a row | what netem gives for the profile's delay and jitter |
+| Duplicated answers | probes answered twice | the profile's duplication |
+| Answers out of order | answers that came after an answer to a later probe | the profile's reordering, when the delay is long enough for probes to overtake each other |
+
+The verdict is `Matches the profile`, `Less than set` (a number is below what the
+profile gives, so the profile is not fully in effect), `More than set` or `Some numbers
+are less and some more than set`. A number matches when what the profile sets lies
+inside the 95% range of what was measured. It is called less or more only when the
+set value lies outside the 99% range. Close to that line the answer is `Close, but not
+sure: run it again with more probes`. A small set value cannot be told from a healthy
+link: with 100 probes a loss of about 5% or more can, and below about 4% more than
+300 probes would be needed. The result says how many probes would tell it apart.
+
+What the check cannot do:
+
+- It checks the **download** side of the profile only. The Pi's probes pass the
+  device's download queue, but the device's answers pass no upload queue. Use **Test
+  speed** to check the upload and the speed cap. A speed cap is never judged by a
+  burst of pings.
+- A device with **Same as everyone** or **Everyone else** is not shaped for the Pi's
+  own packets, so the result is `Unshaped Wi-Fi round trip, not comparable with the
+  profile`. A device with no profile, a reset network or a protected device shows the
+  plain Wi-Fi path as a `Baseline`.
+- A service rule, service list or active quota on the device withholds the verdict.
+  The numbers stay.
+- If the profile, the device's address, its Wi-Fi connection or its protection changes
+  during the check, or the Pi cannot confirm at the end that nothing changed, the
+  result is saved without a verdict. A set delay over 4.5 seconds and a speed cap
+  under 16 kbit/s cannot be measured with pings.
+- A device that does not answer ping at all (Windows blocks it by default) is reported
+  as `The device did not answer ping`, not as 100% loss. Use **Test speed** or the
+  Impact check for it.
+- The device must be connected to the test Wi-Fi. At most two measurements run at once
+  (speed tests and checks together), one per device. A dashboard restart drops a
+  running check.
+
+**Export CSV** and **Export JSON** download the device's checks without any token or
+password. The Pi keeps the newest 50 checks per device and 500 in total. They are part
+of the configuration backup.
+
+The design and the open decisions are in
+[implementation-plan-connection-check-2026-10-17.md](implementation-plan-connection-check-2026-10-17.md).
 
 ## Network layout
 
