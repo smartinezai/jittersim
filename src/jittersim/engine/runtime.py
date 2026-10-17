@@ -495,12 +495,14 @@ class RuntimeScheduler:
                 self._recoveries.discard(self._dropped_recoveries.pop())
             return True
         with self._forced_lock:
-            self._forced_halts += 1
             if not getattr(self._forced_local, "owner", False):
                 # This thread now owns an unconfirmed recovery until it calls
                 # end_forced_recovery(). No recovery can be confirmed meanwhile.
                 self._forced_local.owner = True
                 self._forced_owners += 1
+            # Readers take no lock: publish the owner before the new halt count, so a
+            # recovery that copies this count into its ticket can never confirm it.
+            self._forced_halts += 1
         self._paused = True
         self._current_payload = None
         return False

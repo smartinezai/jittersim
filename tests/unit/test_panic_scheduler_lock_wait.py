@@ -135,6 +135,52 @@ class PanicSchedulerLockTests(unittest.TestCase):
         self.scheduler.finish_recovery(ticket, lambda overlap_failed=False: (None, True))
         self.assertTrue(self.scheduler.can_apply(self.scheduler.apply_generation))
 
+    def test_a_forced_panic_owns_its_recovery_before_it_changes_the_generation(self):
+        # Sol review of PR 138, finding 5: the forced halt count was published before
+        # its owner. A newer Panic that ran in between copied the new count into its
+        # ticket and confirmed it, so can_apply() admitted a Start while the forced
+        # Panic was unfinished. This stops the forced Panic between its two writes.
+        scheduler = self.scheduler
+        stopped, resume = threading.Event(), threading.Event()
+        forcing = []
+
+        class StepByStep(type(scheduler)):
+            def __setattr__(inner, name, value):
+                object.__setattr__(inner, name, value)
+                if (name in ("_forced_halts", "_forced_owners") and forcing
+                        and threading.current_thread() is forcing[0] and not stopped.is_set()):
+                    stopped.set()
+                    resume.wait(10)
+
+        original_class = scheduler.__class__
+        scheduler.__class__ = StepByStep
+        self.addCleanup(setattr, scheduler, "__class__", original_class)
+        release, holder = self.hold_scheduler_lock()
+
+        def forced_panic():
+            self.assertIsNone(scheduler.begin_recovery(timeout=0))
+            # Stands in for the helper call, which ends after the newer Panic.
+            resume.wait(10)
+            scheduler.end_forced_recovery()
+
+        worker = threading.Thread(target=forced_panic, daemon=True)
+        forcing.append(worker)
+        worker.start()
+        self.assertTrue(stopped.wait(5), "the forced Panic never wrote its counts")
+        release.set()
+        holder.join(5)
+        # A newer Panic takes the free lock and completes while the first one is stopped.
+        ticket = scheduler.begin_recovery()
+        scheduler.finish_recovery(ticket, lambda overlap_failed=False: (None, True))
+        admitted = scheduler.can_apply(scheduler.apply_generation)
+        resume.set()
+        worker.join(5)
+        self.assertFalse(admitted, "a Start was admitted while a forced Panic was unfinished")
+        self.assertFalse(scheduler.can_apply(scheduler.apply_generation))
+        ticket = scheduler.begin_recovery()
+        scheduler.finish_recovery(ticket, lambda overlap_failed=False: (None, True))
+        self.assertTrue(scheduler.can_apply(scheduler.apply_generation))
+
     def test_the_scheduler_wait_fits_the_panic_database_allowance(self):
         worst = (access_module.PANIC_SCHEDULER_WAIT_SECONDS
                  + access_module.PANIC_SCHEDULER_STEP_FLOOR_SECONDS
