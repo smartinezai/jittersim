@@ -106,6 +106,7 @@
         <p id="status-devices-more" class="status-more" hidden></p>
       </details>
       <p id="status-lists" class="status-line" hidden></p>
+      <p id="status-address-follow" class="status-line" hidden><a id="status-address-follow-link" href="#devices"></a></p>
     </section>
     <button id="controls-toggle" class="controls-toggle" type="button" aria-expanded="false"
       aria-controls="sidebar-controls">Controls</button>
@@ -250,6 +251,26 @@
     </div>
     <p id="general-profile-status">Check the admin token to view the profile for everyone.</p>
     <p id="general-profile-note" class="form-note">The speed limit is shared only by affected devices. Protected devices bypass it completely. Stopping this profile resumes saved device rules. Panic turns all profiles off.</p>
+  </section>
+  <section class="card" id="address-follow-card" aria-labelledby="address-follow-title" tabindex="-1">
+    <h2 id="address-follow-title">Address changes</h2>
+    <p class="form-note">Phones and laptops can change their private Wi-Fi address. The Pi then sees a new device and its saved settings stop applying. This finds saved devices that came back with a new address.</p>
+    <div class="fields">
+      <label>Follow private address changes
+        <select id="address-follow-mode" aria-describedby="address-follow-mode-note" disabled>
+          <option value="ask">Ask before moving</option>
+          <option value="automatic">Automatic for strong evidence</option>
+          <option value="off">Off</option>
+        </select>
+      </label>
+    </div>
+    <button id="address-follow-save" type="button" disabled>Save setting</button>
+    <p id="address-follow-mode-note" class="form-note">Ask moves nothing until you choose Yes. Automatic moves only a device's profile and name, and only on strong evidence. Protection and dashboard access never move automatically. Every move can be undone for 7 days. Off keeps no device names.</p>
+    <div id="address-follow-list" class="connected-list">Check the admin token to look for address changes.</div>
+    <details id="address-follow-history-box">
+      <summary>Address change history</summary>
+      <div id="address-follow-history"><p class="form-note">No moves yet.</p></div>
+    </details>
   </section>
   <section class="card connected-card">
     <div class="section-heading">

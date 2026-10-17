@@ -53,6 +53,7 @@ PI_BROWSER_MODULES=(
   trust_access
   address_move
   address_move_privacy
+  address_follow
   general_profile
   device_apply_start
   saved_profiles

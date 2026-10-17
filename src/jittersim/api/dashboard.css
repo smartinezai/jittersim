@@ -302,6 +302,16 @@
       border-radius: 0.6rem;
       background: var(--bg-inset);
     }
+    .address-follow-row {
+      padding: 0.75rem;
+      border: 1px solid var(--bd-subtle);
+      border-radius: 0.6rem;
+      background: var(--bg-inset);
+      overflow-wrap: anywhere;
+    }
+    .address-follow-question { margin: 0; color: var(--tx-strong); font-weight: 700; }
+    .address-follow-evidence, .address-follow-history { margin: 0.4rem 0; padding-left: 1.2rem; }
+    .address-follow-history li { margin: 0.3rem 0; overflow-wrap: anywhere; }
     .connected-dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0.2rem #70d7a922; }
     .connected-address { margin: 0; color: var(--tx-strong); font-weight: 700; }
     .connected-meta { margin: 0.1rem 0 0; color: var(--tx-muted); font-size: 0.8rem; }

@@ -14,6 +14,7 @@ test. It is for experiments, not a replacement for your home router.
 - Schedule changes, run a timer or gradually switch between settings.
 - Control device, website and service access, with data and time limits.
 - See connected devices, traffic measurements and the effect of a test.
+- Follow a saved device to its new private Wi-Fi address, with Ask, Automatic and Undo.
 - Choose whether active profiles resume after a router outage.
 
 ## Screenshots
