@@ -87,17 +87,6 @@ def _validate_decimal_number(value: Number, field_name: str, minimum: int,
     return value
 
 
-def _normalize_string_list(values: Tuple[str, ...], field_name: str) -> Tuple[str, ...]:
-    if not isinstance(values, (list, tuple)):
-        raise ValidationError(f"{field_name} must be a list")
-    normalized = tuple(dict.fromkeys(value.strip() for value in values if isinstance(value, str) and value.strip()))
-    if len(normalized) > 256:
-        raise ValidationError(f"{field_name} must contain no more than 256 items")
-    if len(normalized) != len(values):
-        raise ValidationError(f"{field_name} must contain non-empty strings")
-    return normalized
-
-
 def normalize_domain(value: str) -> str:
     """Return one safe lowercase DNS name without its optional trailing dot."""
 

@@ -13,6 +13,7 @@ Run one by hand against a local fixture, for example:
 """
 
 import json
+import sys
 
 import pytest
 
@@ -39,13 +40,42 @@ def assert_client_error(dashboard, route, body, raw=None):
     assert "error" in json.loads(data)
 
 
-def test_an_integer_literal_over_4300_digits_is_a_bad_request_on_every_route(dashboard):
+def routes_that_read_too_long_a_number(dashboard):
     body = b'{"version": ' + b"9" * 4301 + b"}"
     wrong = []
     for route in POST_ROUTES:
         status, data = post_status(dashboard, route, None, raw=body)
         if status != 400 or json.loads(data).get("error") != "a number in the request body has too many digits":
             wrong.append((route, status))
+    return wrong
+
+
+def test_an_integer_literal_over_4300_digits_is_a_bad_request_on_every_route(dashboard):
+    wrong = routes_that_read_too_long_a_number(dashboard)
+    assert not wrong, f"{len(wrong)} of {len(POST_ROUTES)} routes: {wrong[:5]}"
+
+
+@pytest.fixture
+def interpreter_without_a_digit_limit():
+    """CPython has refused long integer literals itself only since 3.9.14, 3.10.7 and 3.11.
+
+    Apple's Python 3.9.6 has no limit, so there the server read the literal (a quadratic parse)
+    and 88 of 88 routes answered something other than 400. Switch the limit off to stand in for it.
+    """
+
+    if not hasattr(sys, "set_int_max_str_digits"):
+        yield  # the interpreter under test really has no limit
+        return
+    saved = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)
+    try:
+        yield
+    finally:
+        sys.set_int_max_str_digits(saved)
+
+
+def test_the_digit_limit_is_the_servers_own_and_not_the_interpreters(dashboard, interpreter_without_a_digit_limit):
+    wrong = routes_that_read_too_long_a_number(dashboard)
     assert not wrong, f"{len(wrong)} of {len(POST_ROUTES)} routes: {wrong[:5]}"
 
 

@@ -6,6 +6,10 @@ Wants=network-pre.target
 
 [Service]
 Type=oneshot
+# Clear a table left by an earlier run. `add table` first: it is a no-op when the
+# table exists, so `delete table` always finds one and never logs a harmless
+# "No such file or directory" error on the first start after a boot.
+ExecStartPre=-/usr/sbin/nft add table inet jittersim_control
 ExecStartPre=-/usr/sbin/nft delete table inet jittersim_control
 ExecStart=/usr/sbin/nft -f /etc/jittersim/jittersim-control-firewall.nft
 ExecStop=/usr/sbin/nft delete table inet jittersim_control

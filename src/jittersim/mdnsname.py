@@ -74,6 +74,10 @@ class AvahiCollision(AvahiError):
     """Another device already uses the name."""
 
 
+class AvahiNotPermitted(AvahiError):
+    """Avahi answers but refuses records from other programs."""
+
+
 class ConfigureError(Exception):
     """The Avahi settings could not be changed."""
 
@@ -106,11 +110,18 @@ def _bounded_step(function):
 # What this feature needs from avahi-daemon.conf. Avahi cannot limit its own
 # publishing to one network, so it publishes nothing by itself. The publisher
 # adds the records, each bound to its own interface.
+#
+# disable-user-service-publishing must stay "no". It is not about the *.service
+# files (those are renamed instead). It makes Avahi answer EntryGroupNew with
+# NotPermitted for every D-Bus client, and the publisher is one. With "yes" the
+# name was never announced (found on the Pi on 2026-10-16). The cost of "no" is
+# that another program on the Pi could publish through Avahi too. The Pi runs
+# none, and Avahi's own records and services stay switched off below.
 _REQUIRED = (
     ("server", "use-ipv4", "yes"),
     ("server", "enable-dbus", "yes"),
     ("publish", "disable-publishing", "no"),
-    ("publish", "disable-user-service-publishing", "yes"),
+    ("publish", "disable-user-service-publishing", "no"),
     ("publish", "publish-workstation", "no"),
     ("publish", "publish-addresses", "no"),
     ("publish", "publish-hinfo", "no"),
@@ -361,6 +372,10 @@ class DbusAvahi:
         try:
             path = self._server_call("EntryGroupNew")
         except self._dbus.DBusException as error:
+            if "NotPermitted" in (error.get_dbus_name() or ""):
+                raise AvahiNotPermitted(
+                    "Avahi refuses records from other programs "
+                    "(disable-user-service-publishing=yes)") from error
             raise AvahiError("Avahi refused a new record group") from error
         return _DbusGroup(self._dbus, self._bus, path)
 
@@ -471,7 +486,8 @@ class Publisher:
             status = self._status(addresses, now, None)
         except AvahiError as error:
             self._forget()
-            status = self._status(addresses, now, str(error))
+            status = self._status(addresses, now, str(error),
+                                  refused=isinstance(error, AvahiNotPermitted))
         self._write(status, now)
         return status
 
@@ -559,7 +575,7 @@ class Publisher:
     # -- the report --------------------------------------------------------
 
     def _status(self, addresses: Dict[str, Optional[str]], now: float,
-                problem: Optional[str]) -> dict:
+                problem: Optional[str], refused: bool = False) -> dict:
         links, extra = [], []
         for kind, interface in self._links:
             record = self._records.get((interface, self.name))
@@ -576,7 +592,16 @@ class Publisher:
         states = [link["state"] for link in links]
         networks = [LINK_NAMES[link["link"]] for link in links if link["state"] == "published"]
         missing = [LINK_NAMES[link["link"]] for link in links if link["state"] != "published"]
-        if problem is not None:
+        if refused:
+            status.update(
+                state="unavailable",
+                message="Avahi is set to refuse records from other programs, so %s is not "
+                        "announced. The dashboard still opens by its IP address." % self.name,
+                fix="Install the current JitterSim release again, or set "
+                    "disable-user-service-publishing=no in the [publish] section of "
+                    "/etc/avahi/avahi-daemon.conf and run: sudo systemctl restart "
+                    "avahi-daemon.service jittersim-mdns.service")
+        elif problem is not None:
             status.update(
                 state="unavailable",
                 message="Avahi is not answering (%s), so %s is not announced. "
@@ -761,13 +786,6 @@ def _extra_names(name: str, trust_env: Path = TRUST_ENV) -> Tuple[str, ...]:
 
 
 def _publish_command(arguments: argparse.Namespace) -> int:
-    runtime = _environment(arguments.runtime_env)
-    uplink = runtime.get("JITTERSIM_UPLINK", "eth0")
-    test_interface = runtime.get("JITTERSIM_TEST_INTERFACE", "wlan0")
-    name = read_local_name(arguments.trust_env)
-    publisher = Publisher(
-        name=name, uplink=uplink, test_interface=test_interface,
-        extra_names=_extra_names(name, arguments.trust_env), status_path=arguments.status)
     flags = {"stop": False, "wake": False}
 
     def on_stop(*_ignored) -> None:
@@ -776,9 +794,23 @@ def _publish_command(arguments: argparse.Namespace) -> int:
     def on_wake(*_ignored) -> None:
         flags["wake"] = True
 
+    # The handlers come first, before any slow or failing work. The network hook
+    # sends SIGHUP as soon as the unit is active, which at boot can be while the
+    # setup below is still running (loading the certificate code and running
+    # openssl take seconds on a Pi). Until a handler exists SIGHUP ends the
+    # process, and systemd counts that as a clean exit. A wake-up or stop that
+    # arrives early is only remembered here. The loop answers it when it starts.
     signal.signal(signal.SIGTERM, on_stop)
     signal.signal(signal.SIGINT, on_stop)
     signal.signal(signal.SIGHUP, on_wake)
+
+    runtime = _environment(arguments.runtime_env)
+    uplink = runtime.get("JITTERSIM_UPLINK", "eth0")
+    test_interface = runtime.get("JITTERSIM_TEST_INTERFACE", "wlan0")
+    name = read_local_name(arguments.trust_env)
+    publisher = Publisher(
+        name=name, uplink=uplink, test_interface=test_interface,
+        extra_names=_extra_names(name, arguments.trust_env), status_path=arguments.status)
 
     def woken() -> bool:
         wake, flags["wake"] = flags["wake"], False

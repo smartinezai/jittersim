@@ -68,13 +68,17 @@ def test_a_client_without_a_name_is_announced_by_its_host_name_or_address():
 def test_a_result_shows_in_the_toast_and_nowhere_a_screen_reader_would_read_it_again():
     # The message line stays for scripts but is hidden and silent.
     line = re.search(r'<p id="message"[^>]*>', DASHBOARD_HTML).group(0)
-    assert "hidden" in line and 'aria-hidden="true"' in line and 'aria-live="off"' in line
-    assert "role=" not in line
+    assert "hidden" in line and 'aria-hidden="true"' in line
+    assert "role=" not in line and "aria-live" not in line
     status = re.search(r'<p id="token-check-status"[^>]*>', DASHBOARD_HTML).group(0)
-    assert 'aria-live="off"' in status and "role=" not in status
+    assert "role=" not in status and "aria-live" not in status
     toast = re.search(r'<div id="toast"[^>]*>', DASHBOARD_HTML).group(0)
     assert 'role=' not in toast
-    assert 'id="action-announcer" class="action-announcer" role="status"' in DASHBOARD_HTML
+    # Two persistent regions say every result: status for most and alert for errors. Neither
+    # changes its aria-live, and nothing else in the page carries an aria-live attribute.
+    assert 'id="action-announcer" class="action-announcer" role="status" aria-atomic="true"' in DASHBOARD_HTML
+    assert 'id="action-alert" class="action-announcer" role="alert" aria-atomic="true"' in DASHBOARD_HTML
+    assert "aria-live" not in re.sub(r"<script>.*?</script>", "", DASHBOARD_HTML, flags=re.DOTALL)
     # Every message, with or without a kind, reaches the toast.
     body = re.search(r"function showMessage\(message, kind\) \{.*?\n    \}", DASHBOARD_HTML, re.DOTALL).group(0)
     assert 'showToast(message, kind || "info");' in body
