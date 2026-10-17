@@ -481,6 +481,34 @@ class ChangeTests(CheckBase):
         self.assertEqual((result["status"], result["summary"]["verdict"]), ("changed", "changed"))
         self.assertIn("changed during the check", ended["ended_reason"])
 
+    def test_a_harmless_change_of_a_shared_rule_does_not_mark_a_good_check(self) -> None:
+        def tweak(index):
+            if index == 50:
+                general = self.scheduler.plan.general_profile
+                self.scheduler.plan = replace(
+                    self.scheduler.plan,
+                    general_profile=replace(general, outage_active=True, allowed_addresses=()))
+            if index == 60:
+                # The source's label and step only word a message: a ticking label is no change.
+                state = self.scheduler.states["lab"]
+                self.scheduler.states["lab"] = replace(
+                    state, source=replace(state.source, label="3 min left", step="2"))
+
+        self.on_send = tweak
+        _, run = self.start()
+        result = self.finish(run["id"])["result"]
+        self.assertEqual((result["status"], result["summary"]["verdict"]), ("complete", "matches"))
+
+    def test_a_new_source_for_the_device_marks_the_check_changed(self) -> None:
+        def new_timer(index):
+            if index == 50:
+                self.scheduler.set_source("lab", "timer", "Slow")
+
+        self.on_send = new_timer
+        _, run = self.start()
+        result = self.finish(run["id"])["result"]
+        self.assertEqual((result["status"], result["summary"]["verdict"]), ("changed", "changed"))
+
     def test_a_missing_final_address_is_not_taken_as_unchanged(self) -> None:
         def lose_address(index):
             if index == 99:

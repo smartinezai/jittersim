@@ -109,7 +109,7 @@ it (O3).
   profile and gets one during the burst is not a baseline): (a) once per second during the burst
   and once more at the end, from the scheduler's applied plan **in memory** (no helper call): the
   saved device whose queue the plan marks this address into, the impairment of that download
-  queue, its source (kind, profile, label), the shared rules and the service-rule state, so a
+  queue, its source (kind, identity, profile: the label and step only word a message), whether shared profiles exist and the service-rule state, so a
   progression, timer, new apply or reset is seen; (b) after the burst, from the helper, for a
   device with its own profile: the queue identity (generation, interface, handle, kind,
   impairment); for every run: whether the device is still associated and **whether it still has

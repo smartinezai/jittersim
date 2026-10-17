@@ -380,10 +380,10 @@ def _signature(speed, plan, states, source, ipv4):
     """What decides the shaping of one address, from the applied plan in memory.
 
     It names the saved device whose queue the plan marks this address into (none for a device
-    nothing shapes), the impairment and source of that queue, the shared rules and the service
-    rules. Two readings that differ mean the profile changed in between (a schedule, a timer, a
-    new apply or a reset), also for a device that started without a profile. None when there is
-    no readable plan. A change that went away again between two readings is not seen: the check
+    nothing shapes), the impairment and source (kind, identity, profile) of that queue, whether
+    shared profiles exist and the service rules. Two readings that differ mean the profile
+    changed in between (a schedule, a timer, a new apply or a reset), also for a device that
+    started without a profile. None when there is no readable plan. A change that went away again between two readings is not seen: the check
     promises to catch changes it observes, not every transient.
     """
 
@@ -396,13 +396,16 @@ def _signature(speed, plan, states, source, ipv4):
     state = states.get(owner) if owner is not None else None
     source_key = None
     if state is not None:
-        source_key = (state.source.kind, state.source.profile, state.source.label)
+        # The identity tells two sources apart. The label and the step only word the message.
+        source_key = (state.source.kind, state.source.identity, state.source.profile)
     return (
         owner,
         None if spec is None else tuple(sorted(asdict(spec.impairment).items(), key=str)),
         source_key,
-        getattr(plan, "general_profile", None),
-        getattr(plan, "everyone_else", None),
+        # Only whether a shared profile exists: its resolved website addresses and its outage
+        # flag change without any effect on the Pi's own probes, and must not mark a good check.
+        getattr(plan, "general_profile", None) is not None,
+        getattr(plan, "everyone_else", None) is not None,
         speed._service_rules_apply(owner, source, plan, states),
     )
 
