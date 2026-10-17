@@ -249,6 +249,15 @@ class StartTests(CheckBase):
         self.assertFalse(result["summary"]["shaped"])
         self.assertEqual(result["profile"]["profile_name"], "No profile")
 
+    def test_a_queue_reading_without_a_download_side_is_refused_to_retry(self) -> None:
+        read = self.helper.queue_stats
+        self.helper.queue_stats = lambda: [
+            entry for entry in read() if entry["direction"] != "download"]
+        status, body = self.start()
+        self.assertEqual(status, 503)
+        self.assertIn("download queue", body["error"])
+        self.assertEqual(self.manager.runs, {})
+
     def test_a_device_without_an_address_or_a_sender_is_refused_with_a_reason(self) -> None:
         self.helper.addresses[PHONE] = None
         status, body = self.start()

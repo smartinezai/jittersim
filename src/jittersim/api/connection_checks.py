@@ -157,10 +157,15 @@ class ConnectionCheckManager:
         identity: Optional[Dict[str, Any]] = None
         if target.source == "device" and not protected:
             entry = target.entries.get("download")
-            if entry is not None:
-                impairment = dict(entry.get("impairment") or {})
-                identity = _identity(entry)
-                burst = _download_burst(target.plan, target.queue_id)
+            if entry is None:
+                # Every device queue has a download side. A reading without one is a bad read,
+                # and a check without it would call a shaped device a baseline.
+                raise SpeedTestRequestError(
+                    "The Pi could not read this device's download queue just now. Try again in "
+                    "a moment.", 503)
+            impairment = dict(entry.get("impairment") or {})
+            identity = _identity(entry)
+            burst = _download_burst(target.plan, target.queue_id)
         notes = list(target.notes)
         if target.source == "device" and not protected:
             if target.service_rules is True:
@@ -383,8 +388,9 @@ def _signature(speed, plan, states, source, ipv4):
     nothing shapes), the impairment and source (kind, identity, profile) of that queue, whether
     shared profiles exist and the service rules. Two readings that differ mean the profile
     changed in between (a schedule, a timer, a new apply or a reset), also for a device that
-    started without a profile. None when there is no readable plan. A change that went away again between two readings is not seen: the check
-    promises to catch changes it observes, not every transient.
+    started without a profile. None when there is no readable plan. A change that went away
+    again between two readings is not seen: the check promises to catch changes it observes, not
+    every transient.
     """
 
     if plan is None or states is None:
