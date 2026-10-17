@@ -33,6 +33,28 @@ class DeploymentFirewallTests(unittest.TestCase):
                         "169.254.0.0/16", "100.64.0.0/10"):
             self.assertIn(network, private)
 
+    def test_nothing_with_a_test_wifi_address_or_for_another_lan_host_leaves_the_uplink(self) -> None:
+        # The behaviour is checked by capture in tests/kernel/test_router_wire_guard.py.
+        firewall = (
+            REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-control-firewall.nft"
+        ).read_text()
+        postrouting = firewall[firewall.index("chain postrouting"):]
+        self.assertIn("type filter hook postrouting priority 300;", postrouting)
+        self.assertIn('oifname "@UPLINK_INTERFACE@" ip saddr 192.168.50.0/24 counter drop',
+                      postrouting)
+        forward = firewall[firewall.index("chain forward"):firewall.index("chain postrouting")]
+        self.assertIn('iifname "@UPLINK_INTERFACE@" oifname "@UPLINK_INTERFACE@" counter drop',
+                      forward)
+
+    def test_the_firewall_unit_sets_arp_and_redirects_and_wraps_networkmanager(self) -> None:
+        unit = (
+            REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-control-firewall.service"
+        ).read_text()
+        for setting in ("conf/all/arp_ignore", "conf/all/arp_announce", "conf/*/send_redirects"):
+            self.assertIn(setting, unit)
+        before = [line for line in unit.splitlines() if line.startswith("Before=")]
+        self.assertIn("NetworkManager.service", before[0].split("=", 1)[1].split())
+
     def test_pi_service_uses_tls_and_installer_protects_the_private_key(self) -> None:
         service = (
             REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-dashboard.service"

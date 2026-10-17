@@ -49,5 +49,21 @@ table inet jittersim_control {
             fc00::/7,
             fe80::/10
         } counter drop comment "deny test Wi-Fi access to private IPv6 upstream networks"
+        # The Pi is a gateway for its test Wi-Fi only, never a router for the
+        # household LAN. A packet that came in on the uplink for another host on
+        # the uplink goes no further.
+        iifname "@UPLINK_INTERFACE@" oifname "@UPLINK_INTERFACE@" counter drop comment "never route the household LAN"
+    }
+
+    chain postrouting {
+        type filter hook postrouting priority 300; policy accept;
+
+        # Every packet toward the router must carry the Pi's own address. NAT
+        # (priority 100) has run by now, so a test Wi-Fi address here means NAT
+        # was skipped: connection tracking did not follow the packet (a TCP reset
+        # or FIN for a connection it no longer tracks, for example after a
+        # reboot) or NetworkManager's NAT table was gone for a moment while the
+        # Wi-Fi restarted. This table stays loaded when no profile runs.
+        oifname "@UPLINK_INTERFACE@" ip saddr 192.168.50.0/24 counter drop comment "never send a test Wi-Fi address to the router"
     }
 }

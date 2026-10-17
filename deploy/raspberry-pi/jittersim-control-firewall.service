@@ -1,11 +1,20 @@
 [Unit]
 Description=JitterSim management-interface firewall
 After=network-pre.target
-Before=jittersim-dashboard.service
+# Loaded before NetworkManager starts any connection and removed only after it
+# stopped them, so the test Wi-Fi never forwards without these rules at boot or
+# at shutdown.
+Before=NetworkManager.service jittersim-dashboard.service
 Wants=network-pre.target
 
 [Service]
 Type=oneshot
+# The Pi answers ARP on an interface only for that interface's own address and
+# uses the uplink address in its ARP requests there: it never claims its test
+# Wi-Fi address 192.168.50.1 on the household LAN (a router that also uses
+# 192.168.50.1 would lose every device's gateway). It never sends ICMP
+# redirects. See docs/router-safety-audit-round2-2026-10-17.md.
+ExecStartPre=-/bin/sh -c 'echo 1 > /proc/sys/net/ipv4/conf/all/arp_ignore && echo 2 > /proc/sys/net/ipv4/conf/all/arp_announce && for setting in /proc/sys/net/ipv4/conf/*/send_redirects; do echo 0 > "$$setting"; done'
 # Clear a table left by an earlier run. `add table` first: it is a no-op when the
 # table exists, so `delete table` always finds one and never logs a harmless
 # "No such file or directory" error on the first start after a boot.
