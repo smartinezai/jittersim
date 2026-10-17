@@ -38,6 +38,7 @@ VETO_LIMIT = 1024
 SIGHTING_WRITE_SECONDS = 25
 AUTOMATIC_PER_DAY = 3
 AUTOMATIC_GAP_SECONDS = 10 * 60
+PRUNE_SECONDS = 60 * 60
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS address_follow_settings (
@@ -153,6 +154,10 @@ class AddressFollowStore:
         """
 
         known = self.sightings()
+        vetoes = {
+            (row["old_mac"], row["new_mac"]): row["seen_at"]
+            for row in self._read("SELECT old_mac, new_mac, seen_at FROM address_follow_vetoes")
+        }
         present_saved = [row for row in rows if row["mac_address"] in saved]
         present_new = [
             row["mac_address"] for row in rows
@@ -160,6 +165,9 @@ class AddressFollowStore:
         ]
         try:
             with self.repository.transaction():
+                # Off may have cleared everything since the caller read the mode.
+                if self.mode() == "off":
+                    return
                 for row in present_saved:
                     mac = row["mac_address"]
                     name = row["hostname"]
@@ -180,6 +188,9 @@ class AddressFollowStore:
                     )
                 for row in present_saved:
                     for new_mac in present_new:
+                        seen = vetoes.get((row["mac_address"], new_mac))
+                        if seen is not None and 0 <= now - seen < SIGHTING_WRITE_SECONDS:
+                            continue
                         self.db.execute(
                             "INSERT INTO address_follow_vetoes (old_mac, new_mac, seen_at) "
                             "VALUES (?, ?, ?) ON CONFLICT(old_mac, new_mac) DO UPDATE SET "
@@ -198,6 +209,31 @@ class AddressFollowStore:
                 )
         except sqlite3.Error as error:
             raise StorageError("could not save address sightings") from error
+
+    def prune(self, *, now: int) -> None:
+        """Delete expired observations and history even when nothing else happens.
+
+        Runs at most once an hour per repository, whether or not the station list
+        can be read.
+        """
+
+        if 0 <= now - getattr(self.repository, "_address_follow_pruned", -PRUNE_SECONDS) < (
+            PRUNE_SECONDS
+        ):
+            return
+        try:
+            with self.repository.transaction():
+                self.db.execute("DELETE FROM address_sightings WHERE last_seen < ?",
+                                (int(now) - SIGHTING_RETENTION_SECONDS,))
+                self.db.execute("DELETE FROM address_follow_vetoes WHERE seen_at < ?",
+                                (int(now) - SIGHTING_RETENTION_SECONDS,))
+                self.db.execute("DELETE FROM address_follow_dismissals WHERE until <= ?",
+                                (int(now),))
+                self.db.execute("DELETE FROM address_follow_history WHERE happened_at < ?",
+                                (int(now) - HISTORY_RETENTION_SECONDS,))
+        except sqlite3.Error as error:
+            raise StorageError("could not remove expired address follow data") from error
+        self.repository._address_follow_pruned = now
 
     def vetoed(self) -> Set[Tuple[str, str]]:
         return {
@@ -390,6 +426,7 @@ def current_suggestions(repository, snapshot, *, now: int):
     """
 
     store = AddressFollowStore(repository)
+    store.prune(now=now)
     mode = store.mode()
     if (
         mode == "off"
@@ -446,7 +483,6 @@ def move_profile_and_label(
     mode: str,
     now: int,
     protection_move_id: str = "",
-    allowed: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """Point the saved device and its name at the new address in one transaction.
 
@@ -455,8 +491,8 @@ def move_profile_and_label(
     and a MAC another saved device uses. The scheduler's address check then
     moves the device to its new IPv4 address with the existing grouped rules,
     which handle swaps and keep traffic progressions in step.
-    `allowed` is asked again just before the commit, so a Panic that started
-    meanwhile stops an automatic move.
+    It nests inside a caller's transaction, such as the existing protection
+    move, so both commit or fail together.
     """
 
     old, new = suggestion.old, suggestion.new
@@ -507,8 +543,6 @@ def move_profile_and_label(
             now=now,
             device_ids=[(old.device_id,) if old.device_id else ()],
         )
-        if allowed is not None and not allowed():
-            raise FollowConflict("The network was stopped. Nothing was moved.")
     return {"id": entry_id, "moved_profile": device_after is not None,
             "moved_label": label_after is not None,
             "moved_protection": bool(protection_move_id)}
@@ -532,6 +566,18 @@ def check_undo(repository, store, entry: dict, *, now: int) -> None:
             after["ipv4_address"] = current["ipv4_address"]
         if current != after:
             raise FollowConflict("The saved device changed since the move. Nothing was undone.")
+        others = [item for item in repository.list_devices() if item.id != entry["device_id"]]
+        if any(item.mac_address == entry["old_mac"] for item in others):
+            raise FollowConflict(
+                "Another saved device uses the old address now. Nothing was undone."
+            )
+        before_ipv4 = (entry["device_before"] or {}).get("ipv4_address")
+        if before_ipv4 and before_ipv4 != current["ipv4_address"] and any(
+            str(item.ipv4_address) == before_ipv4 for item in others
+        ):
+            raise FollowConflict(
+                "Another saved device uses the old IP address now. Nothing was undone."
+            )
     label = entry["label_after"]
     if label is not None:
         labels = repository.list_connected_device_labels()
@@ -551,6 +597,15 @@ def undo_profile_and_label(repository, store, entry: dict, *, now: int) -> None:
                 repository.save_device(restored, expected=device)
             except DeviceConflictError as error:
                 raise FollowConflict(str(error)) from error
+            # The IP follow may have moved the device to the new address's IPv4 address.
+            # Its rules follow the IPv4 address, so it goes back too, or the rejected
+            # device would keep this profile.
+            current_ipv4 = str(restored.ipv4_address)
+            before_ipv4 = (entry["device_before"] or {}).get("ipv4_address")
+            if before_ipv4 and before_ipv4 != current_ipv4 and not (
+                repository.move_device_addresses({entry["device_id"]: (current_ipv4, before_ipv4)})
+            ):
+                raise FollowConflict("The saved device changed during Undo. Nothing was undone.")
         label = entry["label_after"]
         if label is not None:
             repository.save_connected_device_label(
@@ -569,10 +624,13 @@ def undo_profile_and_label(repository, store, entry: dict, *, now: int) -> None:
 
 
 def follow_automatically(repository, snapshot, *, now: int,
-                         allowed: Optional[Callable[[], bool]] = None) -> list:
+                         fence: Optional[Callable] = None) -> list:
     """The scheduler's step: move strong, unique, stable matches when the owner chose Automatic.
 
-    Returns the moves it made. Everything else waits for the owner.
+    `fence(publish)` runs `publish` under the scheduler's Panic fence and returns
+    (still allowed, result), so a Panic either comes before the commit and stops it
+    or waits until it is done. Returns the moves it made. Everything else waits for
+    the owner.
     """
 
     mode, suggestions = current_suggestions(repository, snapshot, now=now)
@@ -583,9 +641,16 @@ def follow_automatically(repository, snapshot, *, now: int,
     for suggestion in suggestions:
         if not automatic_allowed(store, suggestion, now=now):
             continue
+        def publish(suggestion=suggestion):
+            return move_profile_and_label(repository, store, suggestion, mode="automatic", now=now)
+
         try:
-            done.append(move_profile_and_label(repository, store, suggestion,
-                                               mode="automatic", now=now, allowed=allowed))
+            if fence is None:
+                result = publish()
+            else:
+                _, result = fence(publish)
         except (FollowConflict, StorageError):
             continue
+        if result is not None:
+            done.append(result)
     return done

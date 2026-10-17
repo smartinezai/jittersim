@@ -1010,7 +1010,8 @@ class RuntimeScheduler:
         try:
             follow_automatically(
                 repository, snapshot, now=int(now),
-                allowed=lambda: self.can_apply(generation) and not self._paused,
+                fence=lambda publish: self.publish_if_current(
+                    generation, lambda: None if self._paused else publish()),
             )
         except (StorageError, sqlite3.Error):
             LOGGER.warning("could not check for changed private addresses", exc_info=True)

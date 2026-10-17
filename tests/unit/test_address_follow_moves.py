@@ -3,6 +3,7 @@
 import json
 import time
 import unittest
+from unittest.mock import patch
 
 from jittersim.api.server import ControlServer, WRITE_PATHS
 from jittersim.config.address_follow import (
@@ -114,6 +115,27 @@ class StoreAndMoveTests(unittest.TestCase):
         self.assertEqual(self.suggestions(station(), station(mac=OLD, hostname="dads-iphone")), [])
         # Dad leaves and the other device reconnects. The veto still holds.
         self.assertEqual(self.suggestions(station(seconds=5), now=NOW + 60), [])
+
+    def test_off_set_during_a_check_stops_its_writes(self):
+        self.store.set_mode("off")
+        self.store.observe([{"mac_address": OLD, "hostname": "dads-iphone", "ipv4_address": None,
+                             "connected_seconds": 1, "ipv4_verified": False}],
+                           saved={OLD}, now=NOW)
+        self.assertEqual(self.store.sightings(), {})
+
+    def test_expired_data_goes_even_without_a_station_list(self):
+        later = NOW + 31 * 24 * 60 * 60
+        current_suggestions(self.repository, None, now=later)
+        self.assertEqual(self.store.sightings(), {})
+
+    def test_undo_puts_the_ipv4_address_back_so_the_rejected_device_is_not_shaped(self):
+        [item] = self.suggestions(station())
+        move_profile_and_label(self.repository, self.store, item, mode="ask", now=NOW)
+        self.assertTrue(self.repository.move_device_addresses(
+            {"dad": ("192.168.50.20", "192.168.50.23")}))
+        undo_profile_and_label(self.repository, self.store, self.store.history()[0], now=NOW)
+        device = self.repository.get_device("dad")
+        self.assertEqual((device.mac_address, str(device.ipv4_address)), (OLD, "192.168.50.20"))
 
     def test_the_profile_and_name_move_and_undo(self):
         [item] = self.suggestions(station())
@@ -234,7 +256,8 @@ class StoreAndMoveTests(unittest.TestCase):
         self.assertEqual(follow_automatically(self.repository, stations, now=NOW), [])
         self.store.set_mode("automatic")
         self.assertEqual(
-            follow_automatically(self.repository, stations, now=NOW, allowed=lambda: False), [])
+            follow_automatically(self.repository, stations, now=NOW,
+                                 fence=lambda publish: (False, None)), [])
         self.assertEqual(self.repository.get_device("dad").mac_address, OLD)
         self.assertEqual(self.store.history(), [])
         [done] = follow_automatically(self.repository, stations, now=NOW)
@@ -345,25 +368,42 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(self.repository.get_device("dad").mac_address, OLD)
         self.assertIsNone(self.repository.get_address_move(OLD))
 
-    def test_a_failed_profile_move_puts_protection_back(self):
+    def test_a_failed_profile_move_leaves_protection_where_it_was(self):
         self.repository.save_unaffected_device(UnaffectedDevice(OLD, "Dad's phone", 1))
-        original = self.server.move_device_address
 
-        def move_then_edit(*args, **kwargs):
-            result = original(*args, **kwargs)
-            # Someone else's edit lands between the two steps.
-            self.repository.save_device(Device("dad", "Dad", "192.168.50.20", "slow",
-                                               "aa:bb:cc:00:00:07"))
-            return result
+        def refuse(*args, **kwargs):
+            raise FollowConflict("The saved device changed. Nothing was moved.")
 
-        self.server.move_device_address = move_then_edit
-        status, result = self.write("/api/address-follow/accept",
-                                    {"old_mac": OLD, "new_mac": NEW, "move_protection": True})
+        with patch("jittersim.api.address_follow.move_profile_and_label", refuse):
+            status, result = self.write("/api/address-follow/accept",
+                                        {"old_mac": OLD, "new_mac": NEW, "move_protection": True})
         self.assertEqual(status, 409, result)
-        self.assertIn("Protection was put back", result["error"])
+        # One transaction: protection, the move record and the profile all stay as they were.
         self.assertEqual({item.mac_address for item in self.repository.list_unaffected_devices()},
                          {OLD})
+        self.assertIsNone(self.repository.get_address_move(OLD))
+        self.assertEqual(self.repository.get_device("dad").mac_address, OLD)
         self.assertEqual(self.read()["history"], [])
+
+    def test_undo_of_a_protected_move_is_refused_before_anything_changes(self):
+        self.repository.save_unaffected_device(UnaffectedDevice(OLD, "Dad's phone", 1))
+        self.write("/api/address-follow/accept",
+                   {"old_mac": OLD, "new_mac": NEW, "move_protection": True})
+        # Another saved device takes the old address meanwhile.
+        self.repository.save_device(Device("other", "Other", "192.168.50.40", "slow", OLD))
+        [entry] = self.read()["history"]
+        status, result = self.write("/api/address-follow/undo", {"id": entry["id"]})
+        self.assertEqual(status, 409, result)
+        self.assertEqual({item.mac_address for item in self.repository.list_unaffected_devices()},
+                         {NEW})
+        self.assertEqual(self.repository.get_device("dad").mac_address, NEW)
+
+    def test_every_undoable_move_stays_visible(self):
+        with self.repository.transaction():
+            for index in range(30):
+                self.store.add_history({"mode": "ask", "name": f"x{index}", "old_mac": OLD,
+                                        "new_mac": NEW, "evidence": []}, now=NOW - index)
+        self.assertEqual(len(self.read()["history"]), 30)
 
     def test_dashboard_access_and_the_mac_list_are_named_as_manual(self):
         self.helper.dashboard_access = lambda *args, **kwargs: {

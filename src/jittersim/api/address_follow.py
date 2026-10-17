@@ -123,7 +123,10 @@ def _history_payload(store, *, now):
             "undone_at": entry["undone_at"],
             "can_undo": entry["undone_at"] is None and now - entry["happened_at"] <= UNDO_SECONDS,
         }
-        for entry in store.history(limit=HISTORY_SHOWN)
+        for index, entry in enumerate(store.history())
+        # Every move that can still be undone stays visible, plus the newest others.
+        if index < HISTORY_SHOWN or (
+            entry["undone_at"] is None and now - entry["happened_at"] <= UNDO_SECONDS)
     ]
 
 
@@ -190,33 +193,33 @@ def _accept(server, store, payload, *, now):
                      "Confirm that to continue.",
             "saved": False,
         }, 409)
-    # The write route holds the scheduler's exclusive lock for this whole request, so no
-    # other write runs between the protection move and the profile move below.
-    status, _, body = server.move_device_address(old_mac, new_mac, access_moved=False)
+    # The profile, the name and the history entry commit inside the existing protection
+    # move's own transaction, before it validates the plan. Everything is saved together
+    # or nothing is, and the plan is checked in its final state.
+    moved = {}
+
+    def also(record):
+        moved.update(move_profile_and_label(repository, store, item, mode="ask", now=now,
+                                            protection_move_id=record.move_id))
+
+    status, _, body = server.move_device_address(old_mac, new_mac, access_moved=False, also=also)
     result = json.loads(body)
     if result.get("saved") is not True:
         return _response({"error": result.get("error") or "Protection could not be moved.",
                           "saved": False}, status)
-    warning = result.get("error") if status != 200 else None
-    record = repository.get_address_move(old_mac)
-    move_id = record.move_id if record is not None and record.new_mac == new_mac else ""
-    try:
-        done = move_profile_and_label(repository, store, item, mode="ask", now=now,
-                                      protection_move_id=move_id)
-    except (FollowConflict, StorageError) as error:
-        # Put protection back so nothing is left half moved.
-        status, _, body = server.undo_device_address_move(old_mac, "")
-        reversed_ok = json.loads(body).get("saved") is True
-        return _response({
-            "error": str(error) + (" Protection was put back." if reversed_ok else
-                                   " Protection moved and could not be put back. Undo it under "
-                                   "Dashboard access."),
-            "saved": not reversed_ok,
-        }, 409)
-    response = {"saved": True, "moved": done}
-    if warning:
-        response["warning"] = warning
-    return _response(response)
+    return _response(_with_live_outcome({"saved": True, "moved": moved}, status, result))
+
+
+def _with_live_outcome(response, status, result):
+    """Keep what the existing move said about the network and dashboard access."""
+
+    notes = [str(result[key]) for key in ("error", "warning") if result.get(key)]
+    if status != 200 or notes:
+        response["warning"] = " ".join(notes) or "The network update is not confirmed."
+    for key in ("live_applied", "dashboard_access"):
+        if key in result:
+            response[key] = result[key]
+    return response
 
 
 def _undo(server, store, payload, *, now):
@@ -230,7 +233,7 @@ def _undo(server, store, payload, *, now):
         check_undo(repository, store, entry, now=now)
     except FollowConflict as error:
         return _response({"error": str(error), "saved": False}, 409)
-    protection_undone = False
+    status, result = 200, {}
     if entry["protection_move_id"]:
         record = repository.get_address_move(entry["old_mac"])
         if (record is None or record.move_id != entry["protection_move_id"]
@@ -238,22 +241,23 @@ def _undo(server, store, payload, *, now):
             return _response({
                 "error": "Protection changed since this move. Nothing was undone.", "saved": False,
             }, 409)
-        status, _, body = server.undo_device_address_move(entry["old_mac"], "")
+        # The profile and the name go back inside the existing protection Undo's transaction.
+        status, _, body = server.undo_device_address_move(
+            entry["old_mac"], "",
+            also=lambda _record: undo_profile_and_label(repository, store, entry, now=now),
+        )
         result = json.loads(body)
         if result.get("saved") is not True:
-            return _response({"error": result.get("error") or "Protection could not be undone.",
+            return _response({"error": result.get("error") or "This move could not be undone.",
                               "saved": False}, status)
-        protection_undone = True
-    try:
-        undo_profile_and_label(repository, store, entry, now=now)
-    except (FollowConflict, StorageError) as error:
-        message = str(error)
-        if protection_undone:
-            message += " Protection is back at the old address."
-        return _response({"error": message, "saved": protection_undone}, 409)
+    else:
+        try:
+            undo_profile_and_label(repository, store, entry, now=now)
+        except FollowConflict as error:
+            return _response({"error": str(error), "saved": False}, 409)
     # The owner said this was wrong, so the same pair is not suggested again.
     store.dismiss(entry["old_mac"], entry["new_mac"], until=now + DISMISS_SECONDS["never"], now=now)
-    return _response({"saved": True, "undone": entry["id"]})
+    return _response(_with_live_outcome({"saved": True, "undone": entry["id"]}, status, result))
 
 
 def write_address_follow(server, path, payload):

@@ -31,7 +31,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
 from pathlib import Path
-from typing import Any, Collection, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Collection, Dict, List, Optional, Sequence, Set, Tuple
 
 from jittersim.diagnostic_privacy import SafeServerErrors, configure_logging
 from jittersim.diagnostic_records import recorded
@@ -4593,8 +4593,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         access_moved: bool,
         name: str = "",
         prepared: Optional[AddressMove] = None,
+        also: Optional[Callable[[AddressMove], None]] = None,
     ):
-        """Commit protection and history together, then report the separate live outcome."""
+        """Commit protection and history together, then report the separate live outcome.
+
+        `also(record)` runs inside the same transaction before the plan is validated, so
+        a caller's related saved change commits or fails together with this move.
+        """
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
             try:
@@ -4662,6 +4667,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                             phase="saved",
                         )
                     )
+                    if also is not None:
+                        also(record)
                     if move_protection:
                         self._validate_saved_plan()
             except (KeyError, TypeError, ValueError, StorageError) as error:
@@ -4710,8 +4717,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 "Protection changed or its ownership cannot be proved. Nothing was overwritten."
             )
 
-    def undo_device_address_move(self, old_mac: str, peer: str):
-        """Undo only owned entries, retaining evidence until both stores agree."""
+    def undo_device_address_move(
+        self, old_mac: str, peer: str, *, also: Optional[Callable[[AddressMove], None]] = None
+    ):
+        """Undo only owned entries, retaining evidence until both stores agree.
+
+        `also(record)` runs inside the final transaction before the plan is validated.
+        """
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
             record = None
@@ -4800,6 +4812,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                                 record.old_mac, record.previous_protection_owner
                             )
                     self.repository.delete_address_move(record.old_mac)
+                    if also is not None:
+                        also(record)
                     if record.moved_protection:
                         self._validate_saved_plan()
             except (KeyError, TypeError, ValueError, StorageError) as error:

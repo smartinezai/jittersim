@@ -241,13 +241,17 @@ How a move runs:
   `save_device(expected=...)`, in one transaction with the name, the history
   entry and the activity log line. The existing IP follow then moves the IPv4
   address with its grouped rules (swaps, traffic progression baselines).
-- Yes on a protected device runs the existing `move_device_address` first, then
-  the profile move. Both happen under the scheduler's exclusive lock that every
-  dashboard write holds, so no other write lands between them. When the profile
-  move fails, the existing Undo puts protection back.
-- An automatic move asks the scheduler's Panic fence (`can_apply` with the tick's
-  generation, and not paused) again just before its commit, so a Panic that
-  starts while the station list is read stops it.
+- Yes on a protected device runs the existing `move_device_address` with a hook
+  (`also`) that makes the profile move, the name move and the history entry
+  inside its own transaction, before it validates the plan. Everything commits
+  together or nothing does, and the 15-rule limit is checked on the final state.
+  Undo works the same way through `undo_device_address_move`.
+- Undo also puts the IPv4 address back (with the existing grouped
+  `move_device_addresses`), because rules follow the IPv4 address and the
+  rejected device would otherwise keep the profile.
+- An automatic move commits inside the scheduler's `publish_if_current` with the
+  tick's generation, so a Panic either comes first and stops it or waits the few
+  milliseconds until the commit is done.
 
 ## API
 
@@ -314,3 +318,13 @@ One independent review of this plan found ten points. All were taken:
    moves and is reported as their error.
 10. No host name in the history. Observation also runs while the dashboard page
     is open, so Ask works while the network is stopped.
+
+## Diff review (Sol, 2026-10-17)
+
+The full-diff review found eight points. All were fixed in one round: Undo
+restores the IPv4 address (S1), protection and profile commit in one
+transaction in both directions (S1, and the rule-limit point), the automatic
+commit runs under the Panic fence, the live warnings of the protection move are
+passed on, Off is checked again inside the observation transaction, expired data
+is pruned hourly even without a station list, and every undoable entry stays in
+the history list.

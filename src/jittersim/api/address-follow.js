@@ -222,8 +222,9 @@ async function undoAddressFollow(entry, button) {
       entry.old_mac + " if nothing changed since the move.",
       {title: "Undo this move?", confirmLabel: "Undo move"})) return;
   try {
-    await request("/api/address-follow/undo", "POST", {id: entry.id});
-    await afterAddressFollowChange("Move undone. " + entry.name + " uses its old address again.");
+    const result = await request("/api/address-follow/undo", "POST", {id: entry.id});
+    await afterAddressFollowChange("Move undone. " + entry.name + " uses its old address again." +
+      (result.warning ? " " + result.warning : ""));
   } catch (error) {
     showMessage(error.message, "error");
     addressFollowLoadedAt = 0;
