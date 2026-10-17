@@ -91,7 +91,8 @@ function updatesView() {
   return {installed: pi.installed, available: staged ? staged.version : null, tag: staged ? staged.tag : null,
     phase: pi.phase, message: "ok", rollback_available: pi.rollback, installable: Boolean(staged),
     signed_by: staged ? "desk-mac" : null, reason: null, token_set: pi.tokenSet,
-    source: staged ? "github" : null};
+    source: staged ? "github" : null, notes: staged ? staged.notes ?? null : null,
+    recovery_problem: pi.recoveryProblem ?? null};
 }
 function jobView(state) {
   return {job: "0123456789abcdef", state, requested_at: 1, checked_at: state === "done" ? pi.checkedAt : null,
@@ -268,4 +269,67 @@ def test_a_failed_install_is_reported_not_called_updated():
   await waitFor(() => /not confirmed|failed/i.test(element("update-progress").textContent));
   assert.doesNotMatch(element("update-progress").textContent, /Updated to/);
   assert.equal(element("release-check").disabled, false);
+""")
+
+
+@NODE
+def test_install_button_names_the_release_and_notes_and_recovery_follow_the_status():
+    run(r"""
+  await loadReleaseStatus({force: true});
+  assert.equal(element("release-install").textContent, "Install update", "nothing staged");
+  assert.equal(element("update-notes-box").hidden, true);
+  assert.equal(element("update-recovery").textContent, "Made automatically before the next install.");
+
+  pi.staged = {version: "1.1.0", tag: "v1.1.0", notes: "  ## v1.1.0\n\n* Faster checks\n"};
+  await loadReleaseStatus({force: true});
+  assert.equal(element("release-install").textContent, "Install v1.1.0");
+  assert.equal(element("update-notes-box").hidden, false);
+  assert.equal(element("update-notes").textContent, "## v1.1.0\n\n* Faster checks");
+
+  pi.staged.notes = "x".repeat(20000);
+  await loadReleaseStatus({force: true});
+  assert.equal(element("update-notes").textContent.length, 16384, "the page shows at most 16 KB of notes");
+
+  pi.staged.notes = 42;
+  await loadReleaseStatus({force: true});
+  assert.equal(element("update-notes-box").hidden, true, "notes that are not text stay hidden");
+
+  pi.staged = {version: "1.0.0", tag: "v1.0.0", notes: "Already installed"};
+  await loadReleaseStatus({force: true});
+  assert.equal(element("release-install").textContent, "Install update", "the installed release is not offered");
+  assert.equal(element("update-notes-box").hidden, true, "notes belong to a release that can be installed");
+
+  pi.staged = null;
+  pi.rollback = true;
+  await loadReleaseStatus({force: true});
+  assert.match(element("update-recovery").textContent, /^Kept\. Restore previous installation is available/);
+  pi.rollback = false;
+  pi.recoveryProblem = "cannot read the recovery folder";
+  await loadReleaseStatus({force: true});
+  assert.match(element("update-recovery").textContent, /^Could not be checked/);
+  assert.doesNotMatch(element("update-recovery").textContent, /Made automatically/);
+
+  releaseState = {phase: "unavailable", message: "Release controls require the Pi network helper."};
+  renderUpdates();
+  assert.equal(element("update-recovery").textContent, "Unknown", "an answer without recovery facts says Unknown");
+  releaseState = null;
+  renderUpdates();
+  assert.equal(element("update-recovery").textContent, "Unknown");
+""")
+
+
+@NODE
+def test_signing_out_clears_the_release_name_notes_and_recovery_facts():
+    run(r"""
+  pi.staged = {version: "1.1.0", tag: "v1.1.0", notes: "* Faster checks"};
+  pi.rollback = true;
+  await loadReleaseStatus({force: true});
+  assert.equal(element("release-install").textContent, "Install v1.1.0");
+  assert.equal(element("update-notes-box").hidden, false);
+  clearUpdatePrivateState();
+  assert.equal(element("release-install").textContent, "Install update");
+  assert.equal(element("release-install").disabled, true);
+  assert.equal(element("update-notes-box").hidden, true);
+  assert.equal(element("update-notes").textContent, "");
+  assert.equal(element("update-recovery").textContent, "Unknown");
 """)

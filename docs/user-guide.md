@@ -50,13 +50,18 @@ is unchanged.
 
 ### Update the Pi
 
-<img src="../docs/screenshots/staged-update-check.png" alt="A verified release staged on the Pi is ready to install" width="100%" />
+<img src="../docs/screenshots/staged-update-check.png" alt="The Updates and recovery page showing a staged release, an install button labeled with its name and automatic backup status" width="100%" />
 
 Open **Updates** and choose **Check for updates**. When a read-only GitHub
 token is saved on the Pi, the Pi downloads the newest release, checks its
-signature and stages it. Choose **Install update** to install it. The previous
-installation and its settings are backed up first, and when the Pi's health
-check fails after installing the Pi tries to restore that backup by itself. The sidebar
+signature and stages it. The page then names the release and who signed it,
+and **Recovery copy** says whether a copy of the previous installation is kept.
+When the Pi reports release notes for the staged release, a **Release notes**
+section shows them. Choose the install button, which names the staged release
+(for example **Install v1.1.0**). It reads **Install update** and stays off
+while nothing can be installed. The confirmation names the signer. The previous
+installation and its settings are backed up first. If the Pi's health check
+fails after installation, it tries to restore that backup by itself. The sidebar
 shows **Update available** while a release is staged. Checking every day and
 installing automatically are both off until you turn them on.
 
