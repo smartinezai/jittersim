@@ -729,22 +729,31 @@ has three choices:
   join right after the old address left). A protected device is never moved
   automatically. At most one automatic move per device in 10 minutes and three
   a day. Nothing moves automatically while the network is stopped.
-- **Off**: looks for nothing and deletes the stored device names.
+- **Off**: looks for nothing and deletes the stored device names. Your No and
+  Not this device answers and the pairs seen together stay, so turning it on
+  again does not bring back a suggestion you already refused.
 
 The Pi compares the DHCP device name, a confirmed IP address, the time the old
 address was last seen and the saved name. It suggests a move only when exactly
-one saved device fits one new address. Two addresses that were online at the
-same time are never matched. A saved dashboard access grant never moves from
+one saved device fits one new address. Two addresses that the Pi saw online at
+the same time are not matched for 30 days. The Pi only sees this while it
+looks (the scheduler runs or the dashboard is open), so it is a safeguard, not a
+guarantee. A saved dashboard access grant never moves from
 this card: open the dashboard on that device and use the move under Dashboard
 access. Every move is listed under **Address change history** with **Undo** for
 7 days, and in the activity log. Data limits, groups, website rules and
 schedules belong to the saved device, so they follow it.
 
-Privacy: the Pi keeps the last DHCP device name, IP address and time seen only
-for addresses of saved devices, for at most 30 days after they were last seen,
-and pairs of addresses seen together (addresses only) for 30 days. The history
-keeps the addresses and which rules matched, never the device name the phone
-sent, for 90 days. None of this is in the settings export, import or version
+Privacy, what is stored where:
+
+- Sightings: the last DHCP device name, IP address and time seen, only for
+  addresses of saved devices, for at most 30 days after they were last seen.
+  Off deletes them.
+- Pairs seen together and your dismissals: addresses only, 30 and 90 days.
+- Address change history: the addresses, the saved name and which rules
+  matched, never the device name the phone sent, for 90 days.
+- Activity log and test session reports: one line per move with the saved name
+  only, no address and no device name from the phone. None of this is in the settings export, import or version
 history. The database backup is a copy of the whole database and includes it.
 Keeping a fixed address on the device (Private Wi-Fi address set to Fixed, or
 Use device MAC on Android) avoids the problem altogether.

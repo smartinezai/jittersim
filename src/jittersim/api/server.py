@@ -51,6 +51,7 @@ from jittersim.api.trust import TRUST_DOWNLOADS, dashboard_name_report, easy_add
 from jittersim.localname import read_local_name
 from jittersim.api.address_follow import (
     ADDRESS_FOLLOW_WRITES,
+    linked_address_follow_undo,
     read_address_follow,
     write_address_follow,
 )
@@ -4739,6 +4740,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     raise ValueError(
                         "Legacy move ownership cannot be proved. Use management recovery."
                     )
+                if also is None:
+                    # A move from the Address changes card also moved the profile and the
+                    # name. Every Undo route puts them back in the same transaction.
+                    also = linked_address_follow_undo(self.repository, record.move_id)
+                if also is not None and hasattr(also, "check"):
+                    also.check()
                 if any(
                     move.old_mac == record.new_mac for move in self.repository.list_address_moves()
                 ):

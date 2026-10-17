@@ -39,6 +39,7 @@ SIGHTING_WRITE_SECONDS = 25
 AUTOMATIC_PER_DAY = 3
 AUTOMATIC_GAP_SECONDS = 10 * 60
 PRUNE_SECONDS = 60 * 60
+_last_prune: Optional[int] = None
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS address_follow_settings (
@@ -98,6 +99,17 @@ class AddressFollowStore:
         self.repository = repository
         self.db = repository._connection
         if not getattr(repository, "_address_follow_schema", False):
+            # The scheduler opens a new repository every tick. Look before writing so a
+            # database that has the tables gets no write transaction for them.
+            with repository._lock:
+                present = self.db.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN "
+                    "('address_follow_settings', 'address_sightings', 'address_follow_history', "
+                    "'address_follow_dismissals', 'address_follow_vetoes')"
+                ).fetchone()[0] == 5
+            if present:
+                repository._address_follow_schema = True
+        if not getattr(repository, "_address_follow_schema", False):
             try:
                 with repository.transaction():
                     for statement in SCHEMA.split(";"):
@@ -129,10 +141,10 @@ class AddressFollowStore:
                     (mode,),
                 )
                 if mode == "off":
-                    # Off keeps no host names and no observations.
-                    for table in ("address_sightings", "address_follow_dismissals",
-                                  "address_follow_vetoes"):
-                        self.db.execute(f"DELETE FROM {table}")
+                    # Off keeps no host names. The owner's answers (dismissals) and the
+                    # pairs seen together (vetoes, addresses only) stay, so turning it on
+                    # again cannot suggest a pair that was already ruled out.
+                    self.db.execute("DELETE FROM address_sightings")
         except sqlite3.Error as error:
             raise StorageError("could not save the address follow setting") from error
 
@@ -213,13 +225,12 @@ class AddressFollowStore:
     def prune(self, *, now: int) -> None:
         """Delete expired observations and history even when nothing else happens.
 
-        Runs at most once an hour per repository, whether or not the station list
-        can be read.
+        Runs at most once an hour in this process (the scheduler opens a new
+        repository every tick), whether or not the station list can be read.
         """
 
-        if 0 <= now - getattr(self.repository, "_address_follow_pruned", -PRUNE_SECONDS) < (
-            PRUNE_SECONDS
-        ):
+        global _last_prune
+        if _last_prune is not None and 0 <= now - _last_prune < PRUNE_SECONDS:
             return
         try:
             with self.repository.transaction():
@@ -233,7 +244,7 @@ class AddressFollowStore:
                                 (int(now) - HISTORY_RETENTION_SECONDS,))
         except sqlite3.Error as error:
             raise StorageError("could not remove expired address follow data") from error
-        self.repository._address_follow_pruned = now
+        _last_prune = now
 
     def vetoed(self) -> Set[Tuple[str, str]]:
         return {
@@ -337,6 +348,18 @@ class AddressFollowStore:
              entry["device_id"]),
         )
         return bool(rows)
+
+    def entry_for_protection_move(self, move_id: str) -> Optional[dict]:
+        """The open history entry that the existing protection move `move_id` belongs to."""
+
+        if not move_id:
+            return None
+        rows = self._read(
+            f"SELECT {', '.join(HISTORY_COLUMNS)} FROM address_follow_history "
+            "WHERE protection_move_id = ? AND undone_at IS NULL ORDER BY id DESC LIMIT 1",
+            (move_id,),
+        )
+        return self._entry(rows[0]) if rows else None
 
     def mark_undone(self, entry_id: int, *, now: int) -> bool:
         cursor = self.db.execute(
@@ -516,12 +539,13 @@ def move_profile_and_label(
         label_after = None
         if old.mac_address in labels and new.mac_address not in labels:
             label = labels[old.mac_address]
+            # Delete first so the saved-label limit cannot refuse the move.
+            repository.delete_connected_device_label(mac_address=old.mac_address)
             repository.save_connected_device_label(
                 mac_address=new.mac_address,
                 display_name=label["display_name"],
                 device_type=label["device_type"],
             )
-            repository.delete_connected_device_label(mac_address=old.mac_address)
             label_after = dict(label)
         if not (device_after or label_after or protection_move_id):
             raise FollowConflict("There is nothing to move for that device.")
@@ -538,7 +562,9 @@ def move_profile_and_label(
         )
         how = "automatically" if mode == "automatic" else "after the owner said yes"
         repository.record_activities(
-            [("address", f"{old.name} uses a new private address {new.mac_address}. "
+            # No address here: activity lines are copied into test session reports.
+            # The address change history keeps the addresses.
+            [("address", f"{old.name} uses a new private Wi-Fi address. "
                          f"Its {what} moved {how}.")],
             now=now,
             device_ids=[(old.device_id,) if old.device_id else ()],
@@ -608,16 +634,16 @@ def undo_profile_and_label(repository, store, entry: dict, *, now: int) -> None:
                 raise FollowConflict("The saved device changed during Undo. Nothing was undone.")
         label = entry["label_after"]
         if label is not None:
+            repository.delete_connected_device_label(mac_address=entry["new_mac"])
             repository.save_connected_device_label(
                 mac_address=entry["old_mac"],
                 display_name=label["display_name"],
                 device_type=label["device_type"],
             )
-            repository.delete_connected_device_label(mac_address=entry["new_mac"])
         if not store.mark_undone(entry["id"], now=now):
             raise FollowConflict("This move was already undone.")
         repository.record_activities(
-            [("address", f"Undid the move of {entry['name']} to {entry['new_mac']}.")],
+            [("address", f"Undid the address move of {entry['name']}.")],
             now=now,
             device_ids=[(entry["device_id"],) if entry["device_id"] else ()],
         )

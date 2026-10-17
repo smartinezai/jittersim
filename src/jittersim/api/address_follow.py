@@ -243,8 +243,7 @@ def _undo(server, store, payload, *, now):
             }, 409)
         # The profile and the name go back inside the existing protection Undo's transaction.
         status, _, body = server.undo_device_address_move(
-            entry["old_mac"], "",
-            also=lambda _record: undo_profile_and_label(repository, store, entry, now=now),
+            entry["old_mac"], "", also=_LinkedUndo(repository, store, entry),
         )
         result = json.loads(body)
         if result.get("saved") is not True:
@@ -255,9 +254,43 @@ def _undo(server, store, payload, *, now):
             undo_profile_and_label(repository, store, entry, now=now)
         except FollowConflict as error:
             return _response({"error": str(error), "saved": False}, 409)
-    # The owner said this was wrong, so the same pair is not suggested again.
-    store.dismiss(entry["old_mac"], entry["new_mac"], until=now + DISMISS_SECONDS["never"], now=now)
+        # The owner said this was wrong, so the same pair is not suggested again.
+        try:
+            store.dismiss(entry["old_mac"], entry["new_mac"],
+                          until=now + DISMISS_SECONDS["never"], now=now)
+        except StorageError:
+            result = {**result, "warning": "The move was undone, but this pair may be "
+                                           "suggested again."}
     return _response(_with_live_outcome({"saved": True, "undone": entry["id"]}, status, result))
+
+
+class _LinkedUndo:
+    """Put a card move's profile and name back inside the existing protection Undo."""
+
+    def __init__(self, repository, store, entry):
+        self.repository, self.store, self.entry = repository, store, entry
+        self.now = int(time.time())
+
+    def check(self):
+        # Before the protection Undo changes anything, so a refusal leaves no half state.
+        check_undo(self.repository, self.store, self.entry, now=self.now)
+
+    def __call__(self, _record):
+        undo_profile_and_label(self.repository, self.store, self.entry, now=self.now)
+        try:
+            # The owner said this was wrong, so the same pair is not suggested again.
+            self.store.dismiss(self.entry["old_mac"], self.entry["new_mac"],
+                               until=self.now + DISMISS_SECONDS["never"], now=self.now)
+        except StorageError:
+            pass
+
+
+def linked_address_follow_undo(repository, move_id):
+    """The hook for the Undo under Dashboard access, or None when no card move is linked."""
+
+    store = AddressFollowStore(repository)
+    entry = store.entry_for_protection_move(move_id)
+    return None if entry is None else _LinkedUndo(repository, store, entry)
 
 
 def write_address_follow(server, path, payload):

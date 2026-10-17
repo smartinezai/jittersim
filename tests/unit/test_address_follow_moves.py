@@ -1,6 +1,7 @@
 """Following a saved device to its new private address: storage, moves, routes and scheduler."""
 
 import json
+import re
 import time
 import unittest
 from unittest.mock import patch
@@ -83,6 +84,43 @@ class StoreAndMoveTests(unittest.TestCase):
         seed(self.repository)
         self.store.observe([], saved=set(), now=NOW)
         self.assertEqual(self.store.sightings(), {})
+
+    def test_off_keeps_dismissals_and_vetoes(self):
+        self.store.dismiss(OLD, NEW, until=NOW + 90 * 86400, now=NOW)
+        self.store.observe([{"mac_address": OLD, "hostname": "", "ipv4_address": None,
+                             "connected_seconds": 1, "ipv4_verified": False},
+                            {"mac_address": "06:00:00:00:00:42", "hostname": "",
+                             "ipv4_address": None, "connected_seconds": 1,
+                             "ipv4_verified": False}], saved={OLD}, now=NOW - 200)
+        self.store.set_mode("off")
+        self.store.set_mode("automatic")
+        self.assertIn((OLD, NEW), self.store.dismissed(now=NOW))
+        self.assertIn((OLD, "06:00:00:00:00:42"), self.store.vetoed())
+        # Automatic does not move onto the refused pair.
+        seed(self.repository)
+        self.assertEqual(follow_automatically(
+            self.repository, snapshot(station(ipv4="192.168.50.20")), now=NOW), [])
+        self.assertEqual(self.repository.get_device("dad").mac_address, OLD)
+
+    def test_activity_lines_name_no_address(self):
+        [item] = self.suggestions(station())
+        move_profile_and_label(self.repository, self.store, item, mode="ask", now=NOW)
+        undo_profile_and_label(self.repository, self.store, self.store.history()[0], now=NOW)
+        messages = [event["message"] for event in self.repository.list_activity()]
+        self.assertEqual(len(messages), 2)
+        for message in messages:
+            self.assertIsNone(re.search(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}", message), message)
+            self.assertNotIn("dads-iphone", message.lower())
+
+    def test_a_full_label_list_does_not_stop_a_move(self):
+        for index in range(255):
+            self.repository.save_connected_device_label(
+                mac_address=f"aa:00:00:00:{index // 256:02x}:{index % 256:02x}",
+                display_name=f"Device {index}", device_type="phone")
+        [item] = self.suggestions(station())
+        move_profile_and_label(self.repository, self.store, item, mode="ask", now=NOW)
+        undo_profile_and_label(self.repository, self.store, self.store.history()[0], now=NOW)
+        self.assertIn(OLD, self.repository.list_connected_device_labels())
 
     def test_off_clears_host_names_and_suggests_nothing(self):
         self.store.set_mode("off")
@@ -398,6 +436,37 @@ class RouteTests(unittest.TestCase):
                          {NEW})
         self.assertEqual(self.repository.get_device("dad").mac_address, NEW)
 
+    def test_undo_under_dashboard_access_also_puts_the_profile_and_name_back(self):
+        self.repository.save_unaffected_device(UnaffectedDevice(OLD, "Dad's phone", 1))
+        status, result = self.write("/api/address-follow/accept",
+                                    {"old_mac": OLD, "new_mac": NEW, "move_protection": True})
+        self.assertEqual(status, 200, result)
+        # The other route: the existing Undo under Dashboard access.
+        status, _, body = self.server.undo_device_address_move(OLD, "")
+        self.assertEqual(status, 200, body)
+        self.assertEqual({item.mac_address for item in self.repository.list_unaffected_devices()},
+                         {OLD})
+        self.assertEqual(self.repository.get_device("dad").mac_address, OLD)
+        self.assertEqual(set(self.repository.list_connected_device_labels()), {OLD})
+        [entry] = self.read()["history"]
+        self.assertIsNotNone(entry["undone_at"])
+        self.assertFalse(entry["can_undo"])
+        self.assertIsNone(self.repository.get_address_move(OLD))
+
+    def test_undo_under_dashboard_access_refuses_before_anything_changes(self):
+        self.repository.save_unaffected_device(UnaffectedDevice(OLD, "Dad's phone", 1))
+        self.write("/api/address-follow/accept",
+                   {"old_mac": OLD, "new_mac": NEW, "move_protection": True})
+        device = self.repository.get_device("dad")
+        self.repository.save_device(Device("dad", "Renamed", "192.168.50.20", "slow", NEW),
+                                    expected=device)
+        status, _, body = self.server.undo_device_address_move(OLD, "")
+        self.assertEqual(status, 409, body)
+        self.assertEqual({item.mac_address for item in self.repository.list_unaffected_devices()},
+                         {NEW})
+        # Nothing is left half undone: the move record is still saved, not in recovery.
+        self.assertEqual(self.repository.get_address_move(OLD).phase, "saved")
+
     def test_every_undoable_move_stays_visible(self):
         with self.repository.transaction():
             for index in range(30):
@@ -458,6 +527,13 @@ class SchedulerTests(unittest.TestCase):
 
     def test_ask_mode_moves_nothing_in_the_scheduler(self):
         self.store.set_mode("ask")
+        self.helper.clients = [station(ipv4="192.168.50.20")]
+        self.scheduler.tick(repository=self.repository, now=NOW)
+        self.assertEqual(self.repository.get_device("dad").mac_address, OLD)
+
+    def test_after_reset_the_scheduler_moves_nothing(self):
+        self.repository.update_runtime_state(observed_state="reset", last_action="reset",
+                                             last_result="success", last_error=None)
         self.helper.clients = [station(ipv4="192.168.50.20")]
         self.scheduler.tick(repository=self.repository, now=NOW)
         self.assertEqual(self.repository.get_device("dad").mac_address, OLD)

@@ -240,7 +240,8 @@ element("address-follow-save").addEventListener("click", async () => {
   if (mode === "automatic" && (!addressFollowData || addressFollowData.mode !== "automatic")) {
     if (!await confirmFromButton(button, "Automatic moves a saved device's profile and name to its new " +
         "address when the evidence is strong. Protection and dashboard access never move automatically. " +
-        "Every move shows in the history with Undo.",
+        "Any device can send a copied device name, so a wrong match can move a profile onto " +
+        "another device. Every move shows in the history with Undo.",
         {title: "Turn on automatic moves?", confirmLabel: "Turn on"})) return;
   }
   setButtonBusy(button, true);

@@ -328,3 +328,35 @@ commit runs under the Panic fence, the live warnings of the protection move are
 passed on, Off is checked again inside the observation transaction, expired data
 is pruned hourly even without a station list, and every undoable entry stays in
 the history list.
+
+## Independent Opus review (Claude, 2026-10-17)
+
+A read-only Claude Opus review of head `43e2b826` found three S2 points, all
+fixed:
+
+- B1: Off deleted the 90-day dismissals and the vetoes. Off now deletes only the
+  sightings (host names).
+- B2: the existing Undo under Dashboard access reversed only protection and left
+  the profile and the name on the new address. Every Undo route now finds the
+  linked history entry by its protection move ID, checks it before anything
+  changes and puts profile and name back in the same transaction.
+- B3: activity and test session lines named the new MAC address. They now name
+  only the saved device.
+
+Smaller points taken: label moves delete before they save (the 256-label limit
+cannot refuse inside a protection Undo), the schema is created only when missing
+and expired data is pruned at most once an hour per process (the scheduler opens
+a new repository every tick), a failed dismissal after Undo is a warning and not
+an error, and the Automatic confirm text says that a copied device name can move
+a profile onto another device.
+
+Correction to D11: pruning of old sightings, vetoes, dismissals and history runs
+once an hour whenever the check runs, including while Off, not only when a move
+is made.
+
+Left as documented risks:
+
+- A station that stays in the list for a while after it left could veto a real
+  return. This needs real hardware to measure.
+- The existing `address_moves` table refuses a new move once it holds 64 rows. A protection move from the card then fails with that error and nothing
+  is moved.

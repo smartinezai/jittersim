@@ -311,3 +311,33 @@ def test_a_copy_of_a_suggested_device_removes_its_suggestion(world):
                                 "device_id": "copy"})
         again = suggest(identities + [copy], arrivals)
         assert all(other.new.mac_address != item.new.mac_address for other in again)
+
+
+@settings(max_examples=300, deadline=None)
+@given(worlds(), st.data())
+def test_dismissals_and_vetoes_never_turn_a_tie_into_a_guess(world, data):
+    identities, arrivals = world
+    pairs = [(identity.mac_address, arrival.mac_address)
+             for identity in identities for arrival in arrivals]
+    dismissed = set(data.draw(st.lists(st.sampled_from(pairs), max_size=4)))
+    vetoed = set(data.draw(st.lists(st.sampled_from(pairs), max_size=4)))
+    items = suggest(identities, arrivals, dismissed=dismissed, vetoed=vetoed)
+    for item in items:
+        pair = (item.old.mac_address, item.new.mac_address)
+        assert pair not in dismissed and pair not in vetoed
+        # Among the pairs that are not vetoed, this one is the only match both ways.
+        over_for_new = [
+            identity for identity in identities
+            if (identity.mac_address, item.new.mac_address) not in vetoed
+            and qualifies(score(identity, item.new, now=NOW), protected=identity.protected)
+        ]
+        over_for_old = [
+            new for new in arrivals
+            if (item.old.mac_address, new.mac_address) not in vetoed
+            and qualifies(score(item.old, new, now=NOW), protected=item.old.protected)
+        ]
+        assert over_for_new == [item.old] and over_for_old == [item.new]
+    # A dismissal only removes suggestions, it never adds one.
+    plain = {(item.old.mac_address, item.new.mac_address)
+             for item in suggest(identities, arrivals, vetoed=vetoed)}
+    assert {(item.old.mac_address, item.new.mac_address) for item in items} <= plain
