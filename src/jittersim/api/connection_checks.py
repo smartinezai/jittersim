@@ -73,6 +73,12 @@ NO_ADDRESS_MESSAGE = "This device has no address yet, so the Pi cannot send it p
 class ConnectionCheckRun(SpeedTestRun):
     kind = "check"
 
+    def __init__(self, **fields):
+        # The base class starts a run without an identity: set it after.
+        identity = fields.pop("identity", None)
+        super().__init__(**fields)
+        self.identity = identity
+
     def payload(self, now: float) -> Dict[str, Any]:
         """The run as the page sees it. `now` is on the monotonic clock, like the deadline."""
 
