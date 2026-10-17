@@ -224,7 +224,7 @@
     const SLOW_REQUEST_PATHS = /^\/api\/(apply|reset|normal-access|general-profile|router|wifi|release|import)/;
 
     function requestTimeoutMs(path, method) {
-      if (path === "/api/speed-tests/start" && method === "POST") {
+      if ((path === "/api/speed-tests/start" || path === "/api/connection-checks/start") && method === "POST") {
         return SPEED_TEST_START_TIMEOUT_MS;
       }
       const slow = SLOW_REQUEST_PATHS.test(path) && (method !== "GET" || /^\/api\/(router|wifi)/.test(path));

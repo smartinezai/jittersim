@@ -19,13 +19,15 @@ def assemble_dashboard() -> str:
             raise ValueError(f"Dashboard template must contain {marker} exactly once")
     for marker, filename in _INLINE_ASSETS:
         page = page.replace(marker, (_ASSET_DIRECTORY / filename).read_text(encoding="utf-8"))
-    for filename in ("workflows.css", "access.css", "speed-test.css", "phone.css", "refresh.css"):
+    for filename in ("workflows.css", "access.css", "speed-test.css", "connection-check.css",
+                     "phone.css", "refresh.css"):
         page = page.replace(
             "</style>",
             (_ASSET_DIRECTORY / filename).read_text(encoding="utf-8") + "</style>",
             1,
         )
-    for filename in ("workflows.js", "access.js", "reconnect.js", "trust.js", "speed-test.js"):
+    for filename in ("workflows.js", "access.js", "reconnect.js", "trust.js", "speed-test.js",
+                     "connection-check.js"):
         page = page.replace(
             "    startDashboard();",
             (_ASSET_DIRECTORY / filename).read_text(encoding="utf-8")
