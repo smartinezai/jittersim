@@ -409,6 +409,26 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
         self.assertEqual(scheduler.running_plan()[0].configuration_version, version)
         self.assertEqual(self.apply_to(PHONE, "low")[0], 200)
 
+    def test_a_device_that_moved_address_in_a_tick_keeps_the_device_apply_open(self) -> None:
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        moved = {**AIR, "ipv4_address": "192.168.50.190"}
+        clients = self.helper.connected_devices()
+        moved_clients = [{**clients[0], **moved}, clients[1]]
+        scheduler._last_address_check_at = 0.0
+        before = self.version()
+
+        with patch.object(self.helper, "connected_devices", return_value=moved_clients):
+            self.assertTrue(scheduler.tick(repository=self.repository))
+            # The move is a saved change, and the plan of the same tick includes it.
+            self.assertEqual(str(self.repository.get_device(AIR_ID).ipv4_address), "192.168.50.190")
+            self.assertEqual(self.version(), before + 1)
+            self.assertEqual(scheduler.running_plan()[0].configuration_version, self.version())
+            status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 200, result)
+        self.assertEqual(self.exceptions(), {AIR_ID, PHONE_ID})
+
     def test_a_save_by_another_process_during_the_apply_is_never_installed(self) -> None:
         for moment in ("before saving", "while building"):
             with self.subTest(moment=moment):

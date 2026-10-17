@@ -949,8 +949,7 @@ DEVICE_CLEANUP_ERROR = "device-only cleanup failed"
 # while what runs is older than what is saved.
 _SAVED_SETTINGS_WAIT = (
     "Saved settings are still waiting to be applied, so Everyone does not run what is "
-    "saved. Nothing was saved. Try again in a moment, or choose Start to apply the saved "
-    "settings first."
+    "saved. Nothing was saved. Choose Start to apply them first, then apply this profile."
 )
 _RESET_SAVED_ONLY = {
     "live_applied": False,

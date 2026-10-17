@@ -650,15 +650,21 @@ class RuntimeScheduler:
         with self._lock:
             return self._halt_count
 
-    def _keep_applied_version(self, configuration_version: int) -> None:
+    def _keep_applied_version(self, configuration_version: int,
+                              moved_from: Optional[int] = None) -> None:
         """Keep the saved version of the running plan only while nothing was saved since.
 
         A scheduled apply changes timed and random effects only: it leaves access rule and
         ad-blocking edits pending. So it never makes newer saved settings count as running.
-        Only a full apply from the dashboard does.
+        Only a full apply from the dashboard does. The one exception is `moved_from`: the
+        version right before this tick moved saved devices to their new addresses, which the
+        plan of this tick includes.
         """
 
-        if self._applied_version != configuration_version:
+        if self._applied_version is not None and self._applied_version in (
+                configuration_version, moved_from):
+            self._applied_version = configuration_version
+        else:
             self._applied_version = None
 
     def running_plan(self):
@@ -871,7 +877,14 @@ class RuntimeScheduler:
                         repository=active_repository, now=current_time, scope_ended=scope_ended,
                     )
                     return False
-            self._follow_device_addresses(repository=active_repository, now=current_time)
+            # Moving a saved device to its new DHCP address is a saved change too. When it
+            # was the only one, the plan of this tick, built after it, covers both versions.
+            moved_from = None
+            if self._follow_device_addresses(repository=active_repository, now=current_time):
+                moved = active_repository.get_runtime_state().configuration_version
+                if moved == configuration_version + 1:
+                    moved_from = configuration_version
+                configuration_version = moved
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
             if current_time - self._last_analytics_cleanup_at >= 24 * 60 * 60:
@@ -921,7 +934,7 @@ class RuntimeScheduler:
                 # The network already runs this plan, for example one the
                 # dashboard applied after a saved change.
                 def publish_unchanged():
-                    self._keep_applied_version(configuration_version)
+                    self._keep_applied_version(configuration_version, moved_from)
                     self._log_plan_recovery(self._clear_plan_failure())
                     self._record_activity(repository=active_repository, states=states, now=current_time)
                     self._save_patterns(active_repository, current_time)
@@ -947,7 +960,7 @@ class RuntimeScheduler:
                     active_repository.rebase_quota_counters(now=int(current_time))
                     self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
                 self._current_payload = payload
-                self._keep_applied_version(configuration_version)
+                self._keep_applied_version(configuration_version, moved_from)
                 self._log_plan_recovery(self._clear_plan_failure())
                 if not active_repository.record_schedule_result(success=True):
                     self.pause()
@@ -1041,26 +1054,27 @@ class RuntimeScheduler:
                 "attempt" if failed_tries == 1 else "attempts",
             )
 
-    def _follow_device_addresses(self, *, repository: ConfigRepository, now: float) -> None:
+    def _follow_device_addresses(self, *, repository: ConfigRepository, now: float) -> bool:
         """Move saved devices to the addresses their MAC addresses use now.
 
         DHCP can hand a device a new address, and a saved device is matched by
-        its address, so its profile would silently stop applying.
+        its address, so its profile would silently stop applying. Says whether a
+        move was saved.
         """
 
         if now - self._last_address_check_at < self.address_check_seconds:
-            return
+            return False
         self._last_address_check_at = now
         read_clients = getattr(self._helper_client, "connected_device_snapshot", None)
         if read_clients is None:
-            return
+            return False
         try:
             snapshot = read_clients()
         except HelperClientError:
             LOGGER.warning("could not check which addresses saved devices use", exc_info=True)
-            return
+            return False
         if not snapshot.get("association_status_available"):
-            return
+            return False
         # Only a reachable neighbour entry confirms an address. Otherwise the
         # helper falls back to a DHCP lease or an old neighbour entry, which
         # can be stale and would move a device back and forth.
@@ -1103,10 +1117,10 @@ class RuntimeScheduler:
         }
         self._blocked_moves = {**unconfirmed, **blocked}
         if not moves:
-            return
+            return False
         if not repository.move_device_addresses(moves):
             LOGGER.warning("saved devices changed during the address check; checking again later")
-            return
+            return False
         for device_id, (old_address, new_address) in moves.items():
             LOGGER.info("device %s moved from %s to %s", device_id, old_address, new_address)
             self._record(
@@ -1118,6 +1132,7 @@ class RuntimeScheduler:
                 now,
                 device_ids=[(device_id,)],
             )
+        return True
 
     def _record_activity(
         self, *, repository: ConfigRepository, states: Dict[str, TargetState], now: float

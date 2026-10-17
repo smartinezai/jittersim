@@ -143,7 +143,7 @@ Behaviour:
 | --- | --- |
 | Everyone running | The device leaves Everyone. Other saved devices stay under Everyone. |
 | Everyone saved but not running: never started, or its last apply failed, so no plan with Everyone runs | Refused before saving (409). Start would run Everyone for every device, which this Apply must not do. Choose Start, Reset network first or stop Everyone. |
-| Everyone runs, but not what is saved: the plan that runs was built from an older saved version. For example a failed Apply to all or Stop for everyone, an edit of a profile that did not reach the network yet, or settings written by another process | Refused before saving (409): this Apply builds the whole plan from the saved settings, so it would install them for other devices too. Try again in a moment (a dashboard save applies itself), or choose Start first. |
+| Everyone runs, but not what is saved: the plan that runs was built from an older saved version. For example a failed Apply to all or Stop for everyone, an edit of a profile that did not reach the network yet, or settings written by another process | Refused before saving (409): this Apply builds the whole plan from the saved settings, so it would install them for other devices too. A dashboard save applies itself, so this mostly follows a CLI save without `--apply` or a failed action. Choose Start first. |
 | Panic or outage stop latched, or the Pi does not say | Refused before saving (409), as after a Reset. |
 | Device protected | Refused before saving, as before. |
 | More than 15 classes with Everyone, the exceptions, their service limits and the service lists | Refused before saving (409) and the earlier exceptions stay. Service limits count even when the plan is checked without DNS. |
