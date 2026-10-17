@@ -1997,13 +1997,6 @@ def stage_release(path, *, signature=None, root=UPDATE_ROOT, code=CODE_ROOT,
     return record
 
 
-def _remove_quietly(path):
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
-
-
 def stage_upload(upload_id=None, *, spool=UPLOAD_SPOOL, lock=None, root=UPDATE_ROOT,
                  code=CODE_ROOT, config=CONFIG_ROOT):
     """Stage the release the dashboard received over HTTPS.
