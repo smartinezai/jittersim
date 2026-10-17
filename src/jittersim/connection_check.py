@@ -37,6 +37,9 @@ UNKNOWN_GRACE_SECONDS = 3.0
 # 99 percent: a number is called less or more only when the expected range lies outside it.
 Z_MATCH = 1.96
 Z_CLEAR = 2.576
+# Netem flips one bit of a probe frame. The device drops the frame unless the bit is in the source
+# MAC address (6 of 98 bytes), so at least 90 percent of the corrupted probes show up as lost.
+CORRUPT_DROP_FLOOR = 0.9
 # A healthy Wi-Fi link loses, duplicates or reorders about 0 to 2 percent of pings by itself.
 WIFI_SHARE_ALLOWANCE = 0.02
 # The Wi-Fi hop adds a few milliseconds. The slack is the larger of this and a share of the delay.
@@ -148,7 +151,10 @@ def wilson_interval(events: float, total: float, z: float) -> Tuple[float, float
     denominator = 1 + z2 / total
     centre = (share + z2 / (2 * total)) / denominator
     margin = z * math.sqrt(share * (1 - share) / total + z2 / (4 * total * total)) / denominator
-    return max(0.0, centre - margin), min(1.0, centre + margin)
+    # The ends are exact: no event gives a lower end of 0 and every event an upper end of 1.
+    low = 0.0 if share <= 0 else max(0.0, centre - margin)
+    high = 1.0 if share >= 1 else min(1.0, centre + margin)
+    return low, high
 
 
 def burst_inflation(loss_share: float, burst_packets: Optional[int]) -> float:
@@ -179,7 +185,8 @@ def percentile(values: Sequence[float], share: float) -> Optional[float]:
 
 
 def _overlaps(low_a: float, high_a: float, low_b: float, high_b: float) -> bool:
-    return low_a <= high_b and low_b <= high_a
+    # A tiny tolerance keeps rounding in the last digit from separating two ranges that touch.
+    return low_a <= high_b + 1e-9 and low_b <= high_a + 1e-9
 
 
 def share_status(
@@ -200,9 +207,9 @@ def share_status(
     interval = (low95, high95)
     if total <= 0:
         return "not-judged", None, interval
-    if high99 < low:
+    if high99 < low - 1e-9:
         return "less", None, interval
-    if low99 > high:
+    if low99 > high + 1e-9:
         return "more", None, interval
     if _overlaps(low95, high95, low, high):
         # A set value that the observed interval cannot tell from a healthy link is not proof.
@@ -245,10 +252,12 @@ def expected_loss_range(loss: float, duplicate: float, corrupt: float) -> Tuple[
 
     Netem decides duplication first. A duplicated packet that is also lost still leaves one copy,
     so a probe is unanswered with probability L * (1 - Pd), not L. Corruption makes the device
-    drop a damaged packet, which can add up to C. The high end also allows a healthy Wi-Fi link.
+    drop a damaged packet: at least 90 percent of it and at most all of it is added. The high end
+    also allows a healthy Wi-Fi link.
     """
 
-    low = loss * (1 - duplicate)
+    lost = loss * (1 - duplicate)
+    low = 1 - (1 - lost) * (1 - CORRUPT_DROP_FLOOR * corrupt)
     high = 1 - (1 - loss) * (1 - corrupt)
     return low, min(1.0, high + WIFI_SHARE_ALLOWANCE)
 
@@ -749,10 +758,16 @@ def build_summary(
                          f"A burst of probes is about {PROBE_DEMAND_KBIT:.0f} kbit/s, far below "
                          "the cap. Use Test speed to check the cap."))
     statuses = [row["status"] for row in rows if row["id"] in JUDGED_IDS]
+    # The numbers the profile really sets. Only these can show that the profile is in effect: a
+    # number that is not set matching "nothing" says only that the link is healthy.
+    set_ids = {name for name, value in (
+        ("loss", burst.loss or burst.corrupt), ("delay", burst.delay), ("jitter", burst.jitter),
+        ("duplicate", burst.duplicate), ("reorder", burst.reorder)) if value}
+    confirmed = [row["status"] for row in rows if row["id"] in set_ids]
     verdict = _overall(
-        statuses, received=stats["received"], sent=stats["sent"], source=source, shaped=shaped,
-        protected=protected, withheld=withheld, probe_status=probe_status,
-        loss_status=loss_row["status"])
+        statuses, confirmed, received=stats["received"], sent=stats["sent"], source=source,
+        shaped=shaped, protected=protected, withheld=withheld, probe_status=probe_status,
+        loss_status=loss_row["status"], only_cap=bool(burst.bandwidth) and not set_ids)
     notes = list(notes) + burst.notes
     if verdict == "no-answer":
         notes.insert(0, NO_ANSWER_NOTE)
@@ -762,6 +777,9 @@ def build_summary(
         notes.insert(0, BASELINE_NOTE)
     elif verdict in ("changed", "unverified", "out-of-range"):
         notes.insert(0, reason or "")
+    if verdict == "inconclusive" and burst.bandwidth and not set_ids:
+        notes.append("This profile sets only a speed cap, which a burst of probes cannot "
+                     "measure. Use Test speed to check it.")
     if shaped:
         notes.append(UPLOAD_NOTE)
         if burst.loss and burst_packets is None:
@@ -812,9 +830,9 @@ def _unique(values: Iterable[str]) -> List[str]:
     return seen
 
 
-def _overall(statuses: Sequence[str], *, received: int, sent: int, source: str, shaped: bool,
-             protected: bool, withheld: Optional[str], probe_status: str, loss_status: str
-             ) -> str:
+def _overall(statuses: Sequence[str], confirmed: Sequence[str], *, received: int, sent: int,
+             source: str, shaped: bool, protected: bool, withheld: Optional[str],
+             probe_status: str, loss_status: str, only_cap: bool) -> str:
     if withheld in ("changed", "unverified"):
         return withheld
     if probe_status == "unavailable":
@@ -838,10 +856,14 @@ def _overall(statuses: Sequence[str], *, received: int, sent: int, source: str, 
         return "less"
     if "borderline" in statuses:
         return "borderline"
-    # A delay or jitter above the set value still shows that the profile is in effect.
-    if "matches" in statuses or "extra" in statuses:
-        return "matches"
-    return "inconclusive"
+    if only_cap:
+        return "inconclusive"
+    if confirmed:
+        # A delay or jitter above the set value still shows that the profile is in effect.
+        return "matches" if any(status in ("matches", "extra") for status in confirmed
+                                ) else "inconclusive"
+    # The profile sets nothing: the link looks as healthy as that.
+    return "matches" if "matches" in statuses else "inconclusive"
 
 
 # Saved results: the table of the export.
