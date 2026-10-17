@@ -1010,6 +1010,13 @@ PANIC_APPROVED_SOURCES = ({
     "src/jittersim/panic_guard.py": "041cf171875d7b85d1c0664c2acff262542a3ac3c2b2e8fe51f80d2d59d6d639",
     "src/jittersim/networking/helper.py": "a765dc97cce4015e0d1189cf92373395e5ca88c9be19b2e25c000e0975c7314b",
     "src/jittersim/networking/access.py": "41a0f6f96cf2a20616d7ac613dd95acf2cd31085a13018ce14667dea2e11e1f3",
+}, {
+    # See docs/review-results-carry-forward-2026-10-16.md. The carry-forward fixes: Panic saves its
+    # stop records through a bounded saver so a stalled write cannot hold the network lock, status
+    # reads are read-only, and the helper client passes the burst-loss length through.
+    "src/jittersim/panic_guard.py": "041cf171875d7b85d1c0664c2acff262542a3ac3c2b2e8fe51f80d2d59d6d639",
+    "src/jittersim/networking/helper.py": "a955a1517abd11013f37712b27750e1515614d4555b76170e8679ebbb6fe9f80",
+    "src/jittersim/networking/access.py": "41a0f6f96cf2a20616d7ac613dd95acf2cd31085a13018ce14667dea2e11e1f3",
 },)
 
 
