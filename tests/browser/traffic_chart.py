@@ -243,6 +243,12 @@ def check_chart(browser, base, width, dpr, general_active, touch=False):
                 page.locator(".traffic-chart-wrap").screenshot(
                     path="test-results/traffic-chart-wide-selected.png"
                 )
+            # An open question owns Escape. It answers no and leaves the highlight where it is.
+            page.evaluate("() => { window.question = confirmWorkflow('Add this name to the profile?'); }")
+            expect(page.get_by_role("dialog")).to_have_count(1)
+            page.keyboard.press("Escape")
+            expect(page.get_by_role("dialog")).to_have_count(0)
+            expect(selected).to_have_attribute("aria-pressed", "true")
             page.keyboard.press("Escape")
             expect(selected).to_have_attribute("aria-pressed", "false")
 
