@@ -11,6 +11,11 @@ next release takes them over.
 - Add a device speed test that records traffic through the applied profile, saves
   results and compares them with numbers entered from a speed test run on the
   device.
+- Add a **Check connection** button next to **Test speed**. The Pi sends a short
+  burst of ping probes to the device and shows packet loss, round trip, jitter,
+  duplicates and reordering. It compares them with the download side of the
+  profile the Pi applied and says whether they match, are less than set or are
+  more than set. Results are saved per device and can be exported.
 - The Pi Wi-Fi follows the router. After a **Copy router Wi-Fi to Pi** that
   worked, the Pi records the router's Wi-Fi name and security (no password).
   Every boot renames a saved Wi-Fi with another name, such as
