@@ -10,7 +10,7 @@ an editable install:
 ```sh
 python -m pip install '.[dev]' 'playwright==1.63.0'
 python -m playwright install chromium
-python -m pytest tests/unit/test_gui_capture.py tests/unit/test_gui_axe_report.py tests/unit/test_gui_container.py
+python -m pytest tests/unit/test_gui_capture.py tests/unit/test_gui_axe_report.py
 python -m tests.browser.gui_baseline
 python -m tests.browser.a11y_axe
 ```
@@ -87,64 +87,3 @@ its PR. The JSON keeps one number per line, so a merge conflict only touches the
 numbers in dispute: keep either side and run `--update` again. Other numbers
 that move with the page, such as request counts, axe findings and screenshots,
 stay in the retained run artifacts because they vary per run.
-
-## Clean Linux container check
-
-Wait for the release coordinator's Docker lock. Keep other containers running.
-Use the existing browser Dockerfile with its Python 3.13 Debian Bookworm base,
-Playwright 1.63.0 and installed dashboard wheel. Resolve the base image's
-published digest before the check and pass the complete reference:
-
-```sh
-python -m tests.browser.gui_container \
-  --base-image 'python:3.13-slim-bookworm@sha256:REPLACE_WITH_VERIFIED_DIGEST'
-```
-
-The command requires a clean source checkout. It gives its image, container
-and output directory unique names. Build time is bounded at 15 minutes and
-the two-runner container at 25 minutes. Cleanup applies only to the named
-container and image tag created by this invocation. It does not prune shared
-images or stop another container. Keep the resulting report's base digest,
-built image ID and source commit with the verification evidence.
-The build context contains only required tracked files from the recorded
-commit. Ignored local files and later checkout edits cannot enter it.
-
-The browser image has no Git checkout. The command passes the inspected host
-commit and explicit dirty flag through `JITTERSIM_GUI_SOURCE_COMMIT` and
-`JITTERSIM_GUI_SOURCE_DIRTY`. Manifests label this identity as `supplied`.
-Malformed or incomplete metadata fails. Normal checkout and CI runs use Git
-directly. Actual installed source and served page hashes are recorded in
-either mode. This distinction prevents missing Git data from being reported
-as a verified clean checkout.
-
-## Cached Linux browser fallback
-
-If the registry cannot supply a fresh base image, use a compatible browser
-image that the release coordinator has inspected locally. Pass its complete
-immutable digest rather than a mutable tag:
-
-```sh
-python -m tests.browser.gui_container \
-  --cached-browser-image 'jittersim-browser-tests@sha256:REPLACE_WITH_VERIFIED_DIGEST'
-```
-
-This path requires Linux, Python 3.13, Playwright 1.63.0 and its cached
-Chromium. It builds a portable dashboard wheel from the clean tracked source
-on the host. Wheel building is limited to two minutes. The disposable
-container installs that wheel with package downloads disabled and verifies
-every app source and asset hash. Tracked tests and the wheel are copied into an
-isolated directory then given read-only file permissions. This avoids relying
-on Docker sharing host temporary paths. The old app and test checkout in the
-image cannot supply the inspected imports. Docker pulls are disabled.
-
-The report labels this check `cached-runtime` and records the image ID, wheel
-hash, installed file hashes and runtime versions. The cached image remains
-unchanged. Cleanup removes only this invocation's container. This verifies
-the current wheel on the cached Linux browser environment. It does not verify
-fresh Docker dependency resolution or replace a clean image build or actual
-green CI on the final combined source.
-Container creation is limited to 30 seconds and each input or artifact copy to
-60 seconds. Failed browser runs attempt to preserve their partial reports
-before the owned container is removed.
-Returned artifacts are limited to 201 MB and 5,000 archive entries. Unsafe
-paths, links and unexpected top-level files fail before they can be written.
