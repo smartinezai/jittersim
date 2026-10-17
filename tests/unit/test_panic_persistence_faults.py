@@ -15,6 +15,7 @@ Each failure is injected in one of three phases of one `normal-access` call:
 
 import json
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -30,8 +31,10 @@ from jittersim.api.server import ControlServer
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.access import AccessPlan
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.networking import adblocking as adblocking_module
 from jittersim.networking import helper as helper_module
 from jittersim.networking.access import AccessManager
+from jittersim.networking.adblocking import AdRouting, AdStore
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.executor import FakeExecutor
 from jittersim.networking.helper import HelperClient, HelperClientError, HelperService
@@ -583,6 +586,72 @@ def test_an_error_of_a_late_stop_save_never_confirms_panic(monkeypatch):
         assert answer.get("ok") is not True
         assert service._panic_recovery_failed is True
         assert_effects_stopped(rig)
+
+
+class StalledFileSync:
+    """Behaves like `os` except that, while armed, a file sync waits for `release`."""
+
+    def __init__(self):
+        self.armed = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def fsync(self, descriptor):
+        if self.armed and not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            self.entered.set()
+            self.release.wait(FaultPlan.STALL_LIMIT_SECONDS)
+        return os.fsync(descriptor)
+
+
+def test_a_stalled_ad_blocking_stop_save_does_not_hold_the_network_release(monkeypatch):
+    # Sol review of PR 138, finding 2: Panic pauses ad blocking before any rule is
+    # removed, and that pause saves its stop intent with a plain fsync. This uses the
+    # real ad-blocking store. A stall there must not keep the rules in place.
+    monkeypatch.setattr(helper_module, "AD_PAUSE_PANIC_WAIT_SECONDS", 0.5)
+    with fault_rig(monkeypatch, "guard", "write") as rig:
+        ads = rig.directory / "ads"
+        ads.mkdir()
+        store = AdStore(
+            AdRouting("wlan0", FakeExecutor()), path=ads / "policy.json",
+            lock_path=ads / "lock", active_path=ads / "active.json",
+            status_path=ads / "status.json", intent_path=ads / "intent.json",
+            panic_guard=rig.guard,
+        )
+        rig.service._ad_blocking_store = store
+        stall = StalledFileSync()
+        monkeypatch.setattr(adblocking_module, "os", stall)
+        seen = {}
+
+        def release_later():
+            # Look while the save still stalls, then let storage answer again.
+            if stall.entered.wait(10):
+                time.sleep(2.0)
+                seen["stopped_during_stall"] = (rig.service._active_plan is None
+                                                and not rig.manager.applied.options.enabled)
+            stall.release.set()
+
+        releaser = threading.Thread(target=release_later, daemon=True)
+        stall.armed = True
+        releaser.start()
+        try:
+            answer = rig.service.handle_payload({"action": "normal-access"})
+        finally:
+            stall.armed = False
+            releaser.join(15)
+        assert seen.get("stopped_during_stall") is True, "the rules waited for the stalled save"
+        # The ad-blocking stop was not saved in time, so Panic is not confirmed.
+        assert answer["ok"] is False
+        assert rig.service._panic_recovery_failed is True
+        assert_effects_stopped(rig)
+        for thread in threading.enumerate():
+            if thread.name == "ad-blocking-pause":
+                thread.join(10)
+        # Once storage answers, a retry confirms the stop.
+        assert rig.service.handle_payload({"action": "normal-access"})["ok"] is True
+        assert store.read()["running"] is False
 
 
 # Restart rule: the guard and gateway.json are combined so that a stop in either
