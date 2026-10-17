@@ -8,6 +8,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.confirm_dialogs import answer_confirm, cancel_with_escape
+
 
 def run():
     environment = {**os.environ, "JITTERSIM_BROWSER_TEST_WIFI_PEER": "1",
@@ -81,8 +83,13 @@ def run():
                     expect(page.locator("#address-move-replaced")).to_contain_text("Old Mac")
 
                     # Undo returns the old entry and signs this device out again.
-                    page.once("dialog", lambda dialog: dialog.accept())
-                    page.locator("#address-move-replaced button").click()
+                    undo = page.locator("#address-move-replaced button")
+                    undo.click()
+                    cancel_with_escape(page, undo, verb="Reverse move", title="Reverse this move?",
+                                       text="Reverse the move for Old Mac?")
+                    expect(page.locator("#private-dashboard")).to_be_visible()
+                    undo.click()
+                    answer_confirm(page, "Reverse move", title="Reverse this move?")
                     expect(page.locator("#private-dashboard")).to_be_hidden()
                     expect(prompt).to_be_visible()
                     assert not errors, errors

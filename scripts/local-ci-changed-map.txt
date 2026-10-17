@@ -34,6 +34,7 @@ tests/browser/GUI_BASELINE.md             none
 tests/browser/vendor/*                    none
 
 # Shared test helpers: the modules that import them.
+tests/browser/confirm_dialogs.py          journeys address_move group_devices router_copy wifi_recovery wifi_restart_reconnect dashboard_access protected_dashboard_access
 tests/browser/diagnostics_keyboard.py     dashboard_navigation
 tests/browser/draft_navigation.py         dashboard_navigation
 tests/browser/forms_support.py            schedules_timers limits_quotas

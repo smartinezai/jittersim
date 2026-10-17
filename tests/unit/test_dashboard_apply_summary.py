@@ -725,9 +725,9 @@ def test_the_page_starts_with_the_start_wording_and_a_line_for_the_summary():
     )
 
 
-def test_the_summary_line_is_a_polite_live_region_and_starts_hidden():
+def test_the_summary_line_is_a_status_region_and_starts_hidden():
     tag = re.search(r'<p id="apply-summary"[^>]*>', sidebar_html()).group(0)
-    assert 'aria-live="polite"' in tag
+    assert 'role="status"' in tag and "aria-live" not in tag
     assert " hidden" in tag
 
 

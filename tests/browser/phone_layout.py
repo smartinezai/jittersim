@@ -340,10 +340,10 @@ def check_router_switch(page, what):
     writes = []
     page.on("request", lambda request: writes.append(request)
             if request.url.endswith("/api/router/wifi") else None)
-    page.once("dialog", lambda dialog: dialog.dismiss())
     switch.click(force=True)
     page.wait_for_timeout(300)
     assert not writes, writes
+    expect(page.get_by_role("dialog")).to_have_count(0)
 
 
 def check_active_profile(page, base, what):

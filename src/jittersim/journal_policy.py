@@ -12,7 +12,15 @@ import tempfile
 import time
 from pathlib import Path
 
-NAME = "20-jittersim-outage.conf"
+# Drop-ins from every directory are merged by file name and the last one wins. The
+# name must therefore sort after Raspberry Pi OS's own 40-rpi-volatile-storage.conf,
+# or that file's Storage=volatile would silently win.
+NAME = "90-jittersim-persistent.conf"
+# The name used before 2026-10-16. It sorted before the Raspberry Pi OS default.
+LEGACY_NAMES = ("20-jittersim-outage.conf",)
+# Defaults a distribution ships in its own directory (the first root). They are not an
+# administrator's decision: the file name and its one setting must match exactly.
+DISTRIBUTION_DEFAULTS = {"40-rpi-volatile-storage.conf": {"Storage": "volatile"}}
 TARGET_NAME = "outage-journal.conf"
 STATE_NAME = "outage-journal-owner.json"
 HEADER = "# JitterSim outage journal defaults. Administrator settings take precedence.\n"
@@ -131,8 +139,22 @@ def _owned_link(link, target):
     return stat.S_ISLNK(info.st_mode) and info.st_uid == os.geteuid() and os.readlink(link) == str(target)
 
 
+def _distribution_default(path, parsed, roots):
+    """True for a known distribution file in the distribution's own directory.
+
+    Only the first root counts. The same name anywhere else is an administrator's
+    file, and a changed file or an unknown name is never accepted.
+    """
+    return (path.parent == roots[0] / "journald.conf.d"
+            and DISTRIBUTION_DEFAULTS.get(path.name) == parsed)
+
+
 def inspect_policy(roots=CONFIG_ROOTS, target=CONFIG / TARGET_NAME):
-    """Reject ambiguous policy instead of overriding an administrator's choice."""
+    """Reject ambiguous policy instead of overriding an administrator's choice.
+
+    The first root is the distribution's own. Its known defaults (see
+    DISTRIBUTION_DEFAULTS) do not count as an administrator's choice.
+    """
     # Preserve explicit choices even when a newer systemd reads a vendor main file.
     files = [root / "journald.conf" for root in roots
              if (root / "journald.conf").exists() or (root / "journald.conf").is_symlink()]
@@ -159,7 +181,7 @@ def inspect_policy(roots=CONFIG_ROOTS, target=CONFIG / TARGET_NAME):
                 if path.name == NAME:
                     raise PolicyError("administrator-mask")
                 continue
-            if path.name == NAME and _owned_link(path, target):
+            if path.name in (NAME,) + LEGACY_NAMES and _owned_link(path, target):
                 continue
             raise PolicyError("unsafe-configuration")
         if path.name == NAME:
@@ -168,7 +190,8 @@ def inspect_policy(roots=CONFIG_ROOTS, target=CONFIG / TARGET_NAME):
         size += len(raw)
         if size > MAX_CONFIG:
             raise PolicyError("configuration-limit")
-        if _parse(raw):
+        parsed = _parse(raw)
+        if parsed and not _distribution_default(path, parsed, roots):
             # Even a known explicit value remains the administrator's decision.
             raise PolicyError("administrator-policy")
     return True
@@ -201,6 +224,11 @@ def _activate(deadline):
             raise PolicyError("activation-unavailable")
 
 
+def _legacy_links(vendor, target):
+    """Links an earlier release made under its old name. Only our own are returned."""
+    return [vendor / name for name in LEGACY_NAMES if _owned_link(vendor / name, target)]
+
+
 def install(config=CONFIG, roots=CONFIG_ROOTS, vendor=VENDOR_ROOT, disk=Path("/var/log"), activate=_activate):
     target, link = config / TARGET_NAME, vendor / NAME
     deadline = time.monotonic() + 8
@@ -226,7 +254,9 @@ def install(config=CONFIG, roots=CONFIG_ROOTS, vendor=VENDOR_ROOT, disk=Path("/v
     _directory(vendor)
     previous = json.loads(_read(config / STATE_NAME, 1024)) if (config / STATE_NAME).exists() else None
     prior_persistent = previous["previous_persistent"] if previous else (disk / "journal").is_dir()
-    changed = not target.exists() or _read(target, 4096) != raw or not _owned_link(link, target)
+    legacy = _legacy_links(vendor, target)
+    changed = (not target.exists() or _read(target, 4096) != raw or not _owned_link(link, target)
+               or bool(legacy))
     if not changed and not previous["activation_pending"]:
         return "unchanged"
     # An interruption with mismatched files is refused rather than guessed.
@@ -236,6 +266,8 @@ def install(config=CONFIG, roots=CONFIG_ROOTS, vendor=VENDOR_ROOT, disk=Path("/v
     _atomic(target, raw)
     if not _owned_link(link, target):
         os.symlink(str(target), link)
+    for old in legacy:
+        old.unlink()
     activate(deadline)
     state["activation_pending"] = False
     _atomic(config / STATE_NAME, json.dumps(state).encode())
@@ -254,18 +286,20 @@ def _unfinished_removal(config):
 def remove(config=CONFIG, vendor=VENDOR_ROOT, activate=_activate, roots=CONFIG_ROOTS):
     target, link = config / TARGET_NAME, vendor / NAME
     receipt = config / STATE_NAME
+    legacy = _legacy_links(vendor, target)
     if not _owned_link(link, target):
         if link.exists() or link.is_symlink():
             raise PolicyError("administrator-policy")
-        if not _unfinished_removal(config):
-            return "unchanged"
-        # An earlier removal unlinked the setting but journald was not restarted,
-        # so it may still run with the project limits. Finish that restart now.
-        inspect_policy(roots=roots, target=target)
-        activate(time.monotonic() + 8)
-        for path in (target, receipt):
-            path.unlink()
-        return "removed"
+        if not legacy:
+            if not _unfinished_removal(config):
+                return "unchanged"
+            # An earlier removal unlinked the setting but journald was not restarted,
+            # so it may still run with the project limits. Finish that restart now.
+            inspect_policy(roots=roots, target=target)
+            activate(time.monotonic() + 8)
+            for path in (target, receipt):
+                path.unlink()
+            return "removed"
     if not _matches_state(config):
         raise PolicyError("administrator-policy")
     state = json.loads(_read(receipt, 1024))
@@ -275,7 +309,8 @@ def remove(config=CONFIG, vendor=VENDOR_ROOT, activate=_activate, roots=CONFIG_R
         # without the link, so a failed restart is recognised and retried.
         state["activation_pending"] = True
         _atomic(receipt, json.dumps(state).encode())
-        link.unlink()
+        for old in ([link] if _owned_link(link, target) else []) + legacy:
+            old.unlink()
         activate(time.monotonic() + 8)
         for path in (target, receipt):
             path.unlink()
@@ -283,11 +318,15 @@ def remove(config=CONFIG, vendor=VENDOR_ROOT, activate=_activate, roots=CONFIG_R
     # Keeping old disk evidence leaves the shared directory present. Without this
     # small compatibility setting Storage=auto would keep new logging persistent.
     raw = (HEADER + "[Journal]\nStorage=volatile\nRuntimeMaxUse=8M\nRuntimeMaxFileSize=1M\n").encode()
-    if _read(target, 4096) == raw and not state["activation_pending"]:
+    if _read(target, 4096) == raw and not state["activation_pending"] and not legacy:
         return "unchanged"
     state.update(sha256=hashlib.sha256(raw).hexdigest(), activation_pending=True)
     _atomic(config / STATE_NAME, json.dumps(state).encode())
     _atomic(target, raw)
+    if not _owned_link(link, target):
+        os.symlink(str(target), link)
+    for old in legacy:
+        old.unlink()
     activate(time.monotonic() + 8)
     state["activation_pending"] = False
     _atomic(config / STATE_NAME, json.dumps(state).encode())

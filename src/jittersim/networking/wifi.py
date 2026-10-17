@@ -9,7 +9,8 @@ from .wifi_security import PREFIX, SECURITY_PROPERTIES, saved_security, security
 DEFAULT_WIFI_NAME = "TestNet"
 AP_CONNECTION = "jittersim-ap"
 RECOVERY_CONNECTION = "jittersim-ap-recovery"
-WPA3_SETTINGS = security_settings("WPA3")
+# The fallback name. Only the name changes: password and security stay.
+RECOVERY_WIFI_NAME = "JitterSim-Recovery"
 SSID_PROPERTY = "802-11-wireless.ssid"
 PROFILE_PROPERTIES = ("connection.type", "connection.interface-name", SSID_PROPERTY,
                       *SECURITY_PROPERTIES)
@@ -224,16 +225,40 @@ class WifiController:
         return self.commands_run
 
     def reset_name(self) -> Dict[str, str]:
+        return self.rename(DEFAULT_WIFI_NAME)
+
+    def identity(self) -> Dict[str, str]:
+        """Name and security of the saved Pi Wi-Fi. Never reads the password."""
+        try:
+            settings = self._settings()
+            return {"ssid": settings[SSID_PROPERTY], "security": saved_security(settings)}
+        except (CommandExecutionError, ValueError):
+            raise WifiError("Could not inspect the Pi Wi-Fi connection. No Wi-Fi change was made.") from None
+
+    def rename_saved(self, name: str) -> None:
+        """Change only the saved name with one NetworkManager write. The radio is not touched.
+
+        For boot, before jittersim-ap.service starts the Wi-Fi.
+        """
+        if not 1 <= len(name.encode("utf-8")) <= 32 or any(ord(char) < 32 for char in name):
+            raise WifiError("The Wi-Fi name is invalid.")
+        self._settings()
+        self._run(("connection", "modify", "id", AP_CONNECTION, SSID_PROPERTY, name))
+        if self._settings()[SSID_PROPERTY] != name:
+            raise WifiError("The saved Pi Wi-Fi name did not change.")
+
+    def rename(self, name: str) -> Dict[str, str]:
+        """Change only the name of the running Wi-Fi with radio checks and rollback."""
         try:
             self.recover_pending()
             previous = self._settings()
             saved_security(previous)
         except (CommandExecutionError, WifiError, ValueError):
             raise WifiError("Could not inspect the Pi Wi-Fi connection. No Wi-Fi change was made.") from None
-        expected = {**previous, SSID_PROPERTY: DEFAULT_WIFI_NAME}
+        expected = {**previous, SSID_PROPERTY: name}
         try:
             mode = self._verify_radio(previous)
-            self._modify({SSID_PROPERTY: DEFAULT_WIFI_NAME})
+            self._modify({SSID_PROPERTY: name})
             self._activate()
             self._verify(expected, security=mode)
         except (CommandExecutionError, WifiError, ValueError):
@@ -246,4 +271,4 @@ class WifiController:
                                 reason="wifi-restore-failed") from None
             raise WifiError("Wi-Fi name reset failed. The previous Wi-Fi settings were restored.",
                             reason="wifi-restored") from None
-        return {"ssid": DEFAULT_WIFI_NAME, "security": mode}
+        return {"ssid": name, "security": mode}

@@ -100,7 +100,7 @@ function textNode(tag, text, className) { return {tag: tag, text: text, classNam
 function actionButton(label) { return {tag: 'button', text: label}; }
 const cards = {children: [], replaceChildren() { this.children = []; },
   append(...nodes) { this.children.push(...nodes); }};
-const document = {createElement: () => ({children: [], append(...nodes) { this.children.push(...nodes); }})};
+const document = {createElement: () => ({children: [], dataset: {}, append(...nodes) { this.children.push(...nodes); }})};
 function element(id) { return id === 'device-cards' ? cards : null; }
 const deviceConditions = {devices: {}};
 function appliedProfileCell(name) { return [name, 'Saved profile']; }

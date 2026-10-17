@@ -39,7 +39,7 @@ downloads Chromium once into Playwright's cache.
 | `scripts/local-ci.sh lint` | `ruff check --select E9,F63,F7,F82,F811 src tests`, then the advisory checks below | Lint |
 | `scripts/local-ci.sh unit` | `python -m pytest` on the whole suite, on one Python | Python 3.9, 3.11, 3.13 |
 | `scripts/local-ci.sh browser` | `tests.browser.journeys` and the 28 modules of the Pi browser job | Browser journeys, Pi browser journeys |
-| `scripts/local-ci.sh gui` | the three GUI pytest files, `gui_baseline` and `a11y_axe` | GUI baseline |
+| `scripts/local-ci.sh gui` | the two GUI pytest files, `gui_baseline` and `a11y_axe` | GUI baseline |
 | `scripts/local-ci.sh homepage` | `npm ci`, the homepage fixture test, `homepage_bounce_reference`, two Node journeys | Homepage reference |
 | `scripts/local-ci.sh kernel` | `tests/kernel/run-in-docker.sh` (Docker, privileged) | Linux datapath |
 | `scripts/local-ci.sh release-checks` | `prepare-locked-wheels.py`, then the Docker build and 13 Docker runs of the Pi Linux checks | Python matrix (locked packages), Pi Linux release checks |
@@ -172,6 +172,11 @@ tests also skip because the container is not privileged. Read the skip counts
 in the summary.
 
 The browser, GUI and homepage commands run on the venv Python only.
+
+The Python 3.9 environment has no Playwright, because Playwright 1.61 and newer need Python 3.10.
+That matches the hosted Python 3.9 job, which installs `.[dev]` only, so the tests that need a
+browser skip there. `browser`, `gui` and `homepage` stop on Python 3.9 with a message that says so.
+Leave `--python` unset to run them on the newest Python.
 
 ## The Docker VM
 

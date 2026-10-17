@@ -196,13 +196,14 @@ def test_old_save_completion_keeps_newer_ap_name_password_and_draft():
     let listener,finish,release,wifiChangePending=false,pendingFormSubmitButton=null,adminTokenRevision=1;
     const fields={"access-point-form":{addEventListener:(kind,fn)=>listener=fn},
       "access-point-ssid":{value:"Original"},"access-point-password":{value:"old-secret"}};
-    const element=id=>fields[id];const window={confirm:()=>true};
+    const element=id=>fields[id];const confirmWorkflow=async()=>true;
     const formDrafts=new Map([["access-point-form",{sequence:1}]]);
     const clearDraft=id=>formDrafts.delete(id);const showMessage=()=>{};
     runWifiChange=async(path,body,callback)=>{finish=callback;return new Promise(resolve=>release=resolve);};
     ''' + SCRIPT[start:end] + '''
     const pending=listener({preventDefault(){}});
     fields["access-point-ssid"].value="New name";fields["access-point-password"].value="new-secret";
+    while(!finish) await Promise.resolve();
     formDrafts.set("access-point-form",{sequence:2});
     finish({state:"succeeded",message:"old done"});release({operation:{state:"succeeded"}});await pending;
     console.log(JSON.stringify({name:fields["access-point-ssid"].value,

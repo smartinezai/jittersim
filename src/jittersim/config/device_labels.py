@@ -13,15 +13,6 @@ CONNECTED_DEVICE_TYPES = (
     "other",
 )
 MAX_SAVED_CONNECTED_DEVICE_LABELS = 256
-CONNECTED_DEVICE_TYPE_NAMES = {
-    "unknown": "Unknown",
-    "phone": "Phone",
-    "tablet": "Tablet",
-    "laptop": "Laptop",
-    "desktop": "Desktop",
-    "tv_console": "TV or console",
-    "other": "Other",
-}
 _MAC_ADDRESS_PATTERN = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 _CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 

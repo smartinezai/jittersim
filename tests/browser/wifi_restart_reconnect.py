@@ -10,6 +10,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.confirm_dialogs import answer_confirm
+
 TOKEN_KEY = "jittersim.remembered.admin-token"
 RAW_BROWSER_TEXT = re.compile(r"Load failed|Failed to fetch|NetworkError")
 
@@ -54,14 +56,10 @@ def check_reset_name(page):
     page.locator("#access-point-ssid").fill("Typed name")
     seen = drop_connection(page, "**/api/wifi-operation?id=*", 2)
 
-    def confirm(dialog):
-        # Said plainly before anything is sent.
-        assert "Wi-Fi will restart" in dialog.message
-        assert "Wi-Fi menu" in dialog.message
-        dialog.accept()
-
-    page.once("dialog", confirm)
     button.click()
+    # Said plainly before anything is sent.
+    answer_confirm(page, "Restore name", title="Restore the default Wi-Fi name?",
+                   text=["Wi-Fi will restart", "Wi-Fi menu"])
     banner = page.locator("#wifi-change-banner")
     expect(banner).to_contain_text("Reconnecting to the Pi", timeout=10000)
     assert_no_raw_error(page)
@@ -82,8 +80,8 @@ def check_access_point_form(page):
     page.locator("#access-point-ssid").fill("Journey net")
     page.locator("#access-point-password").fill("journey-password-1")
     seen = drop_connection(page, "**/api/wifi-operation?id=*", 3)
-    page.once("dialog", lambda dialog: dialog.accept())
     page.get_by_role("button", name="Use these values on the Pi").click()
+    answer_confirm(page, "Change Pi Wi-Fi", title="Change the Pi Wi-Fi?", text="Wi-Fi will restart")
     banner = page.locator("#wifi-change-banner")
     expect(banner).to_contain_text("Reconnecting to the Pi", timeout=10000)
     assert_no_raw_error(page)
@@ -120,14 +118,10 @@ def check_router_copy(page):
     page.locator("#close-credentials").click()
     seen = drop_connection(page, "**/api/router/operation", 2)
 
-    def confirm(dialog):
-        assert "Browser home using WPA2" in dialog.message
-        assert "Wi-Fi will restart" in dialog.message
-        dialog.accept()
-
-    page.once("dialog", confirm)
     expect(page.locator("#sync-router-ap")).to_be_enabled(timeout=15000)
     page.locator("#sync-router-ap").click()
+    answer_confirm(page, "Copy Wi-Fi", title="Copy the router Wi-Fi to the Pi?",
+                   text=["Browser home using WPA2", "Wi-Fi will restart"])
     banner = page.locator("#wifi-change-banner")
     expect(banner).to_contain_text("Reconnecting to the Pi", timeout=15000)
     assert_no_raw_error(page)
@@ -167,8 +161,8 @@ def check_lost_acceptance_is_confirmed_without_another_write(page):
         route.abort("connectionfailed")
         completed.append(True)
     page.route("**/api/access-point/reset-name", lose_reply)
-    page.once("dialog", lambda dialog: dialog.accept())
     page.locator("#reset-wifi-name").click()
+    answer_confirm(page, "Restore name")
     expect(page.locator("#wifi-change-banner")).to_contain_text("Wi-Fi change finished", timeout=15000)
     deadline = time.monotonic() + 5
     while not completed and time.monotonic() < deadline:
@@ -191,8 +185,8 @@ def check_late_result_keeps_new_edits_and_page(page):
     writes = []
     page.route("**/api/wifi-operation?id=*", lambda route: held.append(route))
     page.on("request", lambda request: writes.append(request) if request.url.endswith("/api/access-point") else None)
-    page.once("dialog", lambda dialog: dialog.accept())
     page.get_by_role("button", name="Use these values on the Pi").click()
+    answer_confirm(page, "Change Pi Wi-Fi")
     expect(page.locator("#wifi-change-banner")).to_be_visible()
     page.wait_for_timeout(1000)
     assert held
