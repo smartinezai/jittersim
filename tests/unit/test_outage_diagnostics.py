@@ -348,7 +348,10 @@ export._actions = forbidden
 export._journal = forbidden
 raise SystemExit(main(['diagnostics', 'export']))
 """
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=5, check=False)
+    # -W ignore: on a Python built with LibreSSL, importing urllib3 prints a warning of its own, and
+    # this test is about what the command says, not about what the libraries say on import.
+    result = subprocess.run([sys.executable, "-W", "ignore", "-c", script], capture_output=True, timeout=5,
+                            check=False)
     assert result.returncode == 1
     assert result.stdout == b""
     assert result.stderr == b"Diagnostic export requires Linux. Run this command on the Pi.\n"

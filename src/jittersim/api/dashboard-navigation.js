@@ -250,7 +250,8 @@
       setStatusOpen(statusStrip.getAttribute("aria-expanded") !== "true");
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || event.defaultPrevented || !controlsOpen()) return;
+      // An open question owns Escape: it answers no and leaves the Controls sheet as it is.
+      if (event.key !== "Escape" || event.defaultPrevented || !controlsOpen() || document.querySelector("dialog[open]")) return;
       event.preventDefault();
       const inside = controlsSheet.contains(document.activeElement) ||
         document.activeElement === controlsToggle;

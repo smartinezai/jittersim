@@ -213,6 +213,49 @@
       return true;
     }
 
+    // A list drawn again takes the control a person stands on with it. Rows carry data-key and a
+    // control keeps its name, so the same control of the same row gets focus back. Focus that went
+    // elsewhere is not moved, and a row that never comes back ends the search after 1.5 s.
+    const ROW_CONTROLS = "button, a[href], input[type='checkbox'], summary";
+
+    function controlName(node) {
+      return node.getAttribute("aria-label") || node.textContent.trim() || node.id || node.tagName;
+    }
+
+    function sameControls(row, name) {
+      return Array.from(row.querySelectorAll(ROW_CONTROLS)).filter((node) => controlName(node) === name);
+    }
+
+    function keepFocusWhenListsAreDrawn() {
+      let standing = null;
+      document.addEventListener("focusin", ({ target }) => {
+        const row = target.closest && target.closest("[data-key]");
+        const scope = row && row.parentElement.closest("[id]");
+        const name = scope && target.matches(ROW_CONTROLS) && controlName(target);
+        standing = name ? { scope: scope.id, key: row.dataset.key, name, control: target,
+          index: sameControls(row, name).indexOf(target), until: 0 } : null;
+      });
+      // Chromium reports a removed control's focus as leaving. One still in the page afterwards left on purpose.
+      document.addEventListener("focusout", ({ target }) => window.queueMicrotask(() => {
+        if (standing && target === standing.control && target.isConnected) standing = null;
+      }));
+      new MutationObserver(() => {
+        if (!standing || standing.control.isConnected) return;
+        standing.until = standing.until || performance.now() + 1500;
+        if (document.activeElement !== document.body || performance.now() > standing.until) {
+          standing = null;
+          return;
+        }
+        const scope = document.getElementById(standing.scope);
+        const row = scope && Array.from(scope.querySelectorAll("[data-key]")).find((item) => item.dataset.key === standing.key);
+        const same = row ? sameControls(row, standing.name) : [];
+        const target = same[Math.min(standing.index, same.length - 1)];
+        if (target && !target.disabled) target.focus({ preventScroll: true });
+      }).observe(document.body, { childList: true, subtree: true });
+    }
+
+    keepFocusWhenListsAreDrawn();
+
     const PI_NOT_ANSWERING = "Pi not answering, retrying";
 
     const REQUEST_TIMEOUT_MS = 15000;
@@ -329,7 +372,9 @@
           if (data.access_choice_required === true && path === "/api/unaffected-devices/delete" &&
               body && body.dashboard_access === undefined && tokenRevision === adminTokenRevision) {
             // Removing protection would also lock this device out. Never do that silently.
-            const choice = chooseProtectedAccess();
+            // The question can stay open for a while, so the request's own time limit ends first.
+            clearTimeout(timeout);
+            const choice = await chooseProtectedAccess();
             if (choice) return request(path, method, {...body, dashboard_access: choice}, options);
           }
           const error = new Error(applyHint);
@@ -559,12 +604,15 @@
           undo.type = "button";
           undo.textContent = move.recovery_required ? "Finish reversing move" : "Undo";
           undo.addEventListener("click", async () => {
-            if (!window.confirm("Reverse the move for " + move.name + "? Access or protection that came " +
-                "from this move will return to " + move.old_mac + " if it has not changed since then.")) return;
+            if (!await confirmFromButton(undo, "Reverse the move for " + move.name + "? Access or protection that came " +
+                "from this move will return to " + move.old_mac + " if it has not changed since then.",
+                {title: "Reverse this move?", confirmLabel: "Reverse move"})) return;
             const change = beginAddressChange();
-            if (!change) return;
+            if (!change) {
+              setButtonBusy(undo, false);
+              return;
+            }
             const {revision, generation} = change;
-            setButtonBusy(undo, true);
             try {
               await request("/api/dashboard-access/move-undo", "POST", {from_mac: move.old_mac});
               if (!addressResponseCurrent(revision, generation)) return;
@@ -624,11 +672,13 @@
       }
     });
 
-    function chooseProtectedAccess() {
-      if (window.confirm("This is the device you are using. It opens the dashboard only because it is protected. " +
-          "Keep dashboard access for it as a separate saved grant? Choose Cancel to decide about removing it.")) return "keep";
-      if (window.confirm("Stop protecting this device and remove its dashboard access? It then needs " +
-          "Allow this device or the management network to sign in again.")) return "remove";
+    async function chooseProtectedAccess() {
+      if (await confirmWorkflow("This is the device you are using. It opens the dashboard only because it is protected. " +
+          "Keep dashboard access for it as a separate saved grant? Choose Cancel to decide about removing it.",
+          {title: "Keep dashboard access?", confirmLabel: "Keep access"})) return "keep";
+      if (await confirmWorkflow("Stop protecting this device and remove its dashboard access? It then needs " +
+          "Allow this device or the management network to sign in again.",
+          {title: "Stop protecting this device?", confirmLabel: "Stop protecting", danger: true})) return "remove";
       return null;
     }
 
@@ -714,12 +764,13 @@
           remove.type = "button";
           remove.textContent = device.protected ? "Remove saved grant" : "Remove";
           remove.addEventListener("click", async () => {
-            if (!window.confirm(device.protected
+            if (!await confirmFromButton(remove, device.protected
                 ? "Remove the saved grant for " + (device.name || device.mac_address) +
                   "? It stays allowed while it is protected."
                 : "Remove dashboard access for " + (device.name || device.mac_address) +
-                  "? Removing this device returns it to sign-in.")) return;
-            setButtonBusy(remove, true);
+                  "? Removing this device returns it to sign-in.",
+                {title: device.protected ? "Remove the saved grant?" : "Remove dashboard access?",
+                  confirmLabel: device.protected ? "Remove saved grant" : "Remove access", danger: true})) return;
             try {
               await request("/api/dashboard-access/remove", "POST", {mac_address: device.mac_address});
               await checkAdminToken();
@@ -862,8 +913,6 @@
       ["open-admin-credentials", "open-router-credentials", "open-router-credentials-inline"].forEach((id) => {
         element(id).setAttribute("aria-expanded", "true");
       });
-      element("credential-router-status").setAttribute("aria-live", "polite");
-      element("router-action-message").setAttribute("aria-live", "off");
       const field = element(kind === "router" ? "router-admin-password" : "admin-token");
       field.focus({preventScroll: true});
       // A short window shows the Check button below the field too when both fit.
@@ -884,8 +933,6 @@
       ["open-admin-credentials", "open-router-credentials", "open-router-credentials-inline"].forEach((id) => {
         element(id).setAttribute("aria-expanded", "false");
       });
-      element("credential-router-status").setAttribute("aria-live", "off");
-      element("router-action-message").setAttribute("aria-live", "polite");
       if (credentialOpener && credentialOpener.isConnected) credentialOpener.focus({preventScroll: true});
     }
 
@@ -906,7 +953,8 @@
     element("close-credentials").addEventListener("click", closeCredentials);
 
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && !element("credentials-panel").hidden) {
+      // An open question owns Escape: it answers no and leaves this panel as it is.
+      if (event.key === "Escape" && !element("credentials-panel").hidden && !document.querySelector("dialog[open]")) {
         event.preventDefault();
         closeCredentials();
       }
@@ -1046,7 +1094,9 @@
             ? "Remembered until " + rememberedUntil(saved.expires, savedHours(saved) > 24) + "."
             : "Will be remembered for " + REMEMBER_CHOICES[rememberHours(kind)] + " once accepted.";
         }
-        element(config.note).textContent = note;
+        const noteLine = element(config.note);
+        // A status line speaks whenever it is written, so it is only written when its words change.
+        if (noteLine.textContent !== note) noteLine.textContent = note;
       }
     }
 
@@ -1907,6 +1957,17 @@
       else button.removeAttribute("aria-busy");
     }
 
+    // Ask before a button's action with the one in-page dialog. The button stays busy while the
+    // question is open, so a second click cannot open another one. Cancel and Escape make it
+    // usable again and focus returns to it. After a yes the caller owns the busy state.
+    async function confirmFromButton(button, message, options) {
+      setButtonBusy(button, true);
+      let confirmed = false;
+      try { confirmed = await confirmWorkflow(message, {...options, returnFocus: button}); }
+      finally { if (!confirmed) setButtonBusy(button, false); }
+      return confirmed;
+    }
+
     let toastTimer = null;
     let toastDismissDelay = 0;
     let toastReturnFocus = null;
@@ -1926,6 +1987,16 @@
       }, toastDismissDelay);
     }
 
+    // Say a result once. Errors go to the alert region and everything else to the status region.
+    // Both are always in the page and neither changes its aria-live, so a screen reader that
+    // already watches them hears each write. Polled lists never come through here.
+    function announce(message, assertive) {
+      const speaking = element(assertive ? "action-alert" : "action-announcer");
+      const quiet = element(assertive ? "action-announcer" : "action-alert");
+      if (quiet.textContent) quiet.textContent = "";
+      speaking.textContent = message;
+    }
+
     function showToast(message, kind) {
       const toast = element("toast");
       const icon = element("toast-icon");
@@ -1933,9 +2004,7 @@
       if (!toast.contains(document.activeElement)) toastReturnFocus = document.activeElement;
       element("toast-message").textContent = message;
       toast.className = "toast " + (kind || "working");
-      const announcer = element("action-announcer");
-      announcer.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
-      announcer.textContent = message;
+      announce(message, kind === "error");
       icon.textContent = kind === "success" ? "✓" : kind === "error" ? "!" : "";
       toast.hidden = false;
       toastDismissDelay = kind === "working" || kind === "error" ? 0 : 6000;
@@ -2902,6 +2971,7 @@
       devices.forEach((device) => {
         const row = document.createElement("div");
         row.className = "connected-row";
+        row.dataset.key = device.mac_address;
         row.dataset.macAddress = device.mac_address;
         const draft = connectedDrafts.get(device.mac_address) || {};
         const dot = document.createElement("span");
@@ -3309,6 +3379,7 @@
         data.devices.forEach((device) => {
           const row = document.createElement("div");
           row.className = "connected-row saved-device-label-row";
+          row.dataset.key = device.mac_address;
           const name = document.createElement("div");
           const title = document.createElement("p");
           title.className = "connected-address";
@@ -3422,9 +3493,12 @@
 
     function updateGroupFormControls() {
       const count = groupSelectedMembers.size;
-      element("group-member-count").textContent = count + " of 15 selected";
+      // These two speak (role="status"), so they are only written when their words change.
+      const memberCount = element("group-member-count");
+      if (memberCount.textContent !== count + " of 15 selected") memberCount.textContent = count + " of 15 selected";
       const problem = groupFormProblem();
-      element("group-validation").textContent = problem || groupSaveError;
+      const validation = element("group-validation");
+      if (validation.textContent !== (problem || groupSaveError)) validation.textContent = problem || groupSaveError;
       element("group-save").disabled = groupSubmitting || Boolean(problem);
       element("group-cancel-edit").disabled = groupSubmitting;
       element("group-profile-help").textContent = element("group-profile").value
@@ -4017,6 +4091,7 @@
         const buildRow = (observation, blockSyncs, afterBlockChange, inGroup) => {
           const item = document.createElement("li");
           item.className = "observation-domain";
+          item.dataset.key = device.ipv4_address + "|" + observation.domain;
           const domain = document.createElement("div");
           domain.className = "observation-domain-name";
           const parts = domainRowParts(observation);
@@ -4120,6 +4195,7 @@
         const buildGroup = (group) => {
           const item = document.createElement("li");
           item.className = "observation-group-item";
+          item.dataset.key = observationGroupOpenKey(device.ipv4_address, group.key);
           const wrapper = document.createElement("div");
           wrapper.className = "observation-group";
           const openKey = observationGroupOpenKey(device.ipv4_address, group.key);
@@ -4425,6 +4501,7 @@
     function createQuotaRow({ quota, service }) {
       const row = document.createElement("div");
       row.className = "quota-row" + (quota.reached ? " reached" : "");
+      row.dataset.key = service === "group" ? quota.group_id : service ? quota.id : quota.device_id;
       const heading = document.createElement("div");
       heading.className = "quota-row-heading";
       const title = document.createElement("strong");
@@ -4512,6 +4589,7 @@
       groups.forEach((group) => {
         const row = document.createElement("div");
         row.className = "quota-row";
+        row.dataset.key = group.id;
         const heading = document.createElement("div");
         heading.className = "quota-row-heading";
         const title = document.createElement("strong");
@@ -4648,6 +4726,7 @@
       lists.forEach((serviceList) => {
         const row = document.createElement("div");
         row.className = "quota-row";
+        row.dataset.key = serviceList.id;
         const heading = document.createElement("div");
         heading.className = "quota-heading";
         const title = document.createElement("strong");
@@ -4713,6 +4792,7 @@
       assignments.forEach((assignment) => {
         const row = document.createElement("div");
         row.className = "quota-row";
+        row.dataset.key = assignment.id;
         const heading = document.createElement("div");
         heading.className = "quota-heading";
         const title = document.createElement("strong");
@@ -4854,9 +4934,13 @@
         showMessage("Wait for the group save to finish before deleting a group.", "working");
         return;
       }
-      if (!window.confirm("Delete " + group.name + "? Members keep their saved profiles. The group's shared data limit, schedules and running scenarios are deleted.")) return;
-      setButtonBusy(button, true);
+      if (!await confirmFromButton(button, "Delete " + group.name + "? Members keep their saved profiles. The group's shared data limit, schedules and running scenarios are deleted.",
+          {title: "Delete this group?", confirmLabel: "Delete group", danger: true})) return;
       try {
+        if (groupSubmitting) {
+          showMessage("Wait for the group save to finish before deleting a group.", "working");
+          return;
+        }
         await request("/api/groups/delete", "POST", { id: group.id });
         if (editingGroupId === group.id) stopEditing("group");
         refreshAfterSuccess("Device group deleted. Saved device profiles remain.");
@@ -4966,6 +5050,7 @@
     function createTimeQuotaRow(quota) {
       const row = document.createElement("div");
       row.className = "quota-row" + (quota.reached ? " reached" : "");
+      row.dataset.key = quota.id;
       const heading = document.createElement("div");
       heading.className = "quota-row-heading";
       const title = document.createElement("strong");
@@ -5293,6 +5378,7 @@
       schedules.forEach((schedule) => {
         const row = document.createElement("div");
         row.className = "schedule-row";
+        row.dataset.key = schedule.id;
         const text = document.createElement("div");
         const name = document.createElement("span");
         name.textContent =
@@ -5351,6 +5437,7 @@
       timers.forEach((timer) => {
         const row = document.createElement("div");
         row.className = "timer-row";
+        row.dataset.key = timer.id;
         const details = document.createElement("div");
         details.className = "timer-details";
         const title = document.createElement("strong");
@@ -5405,6 +5492,7 @@
       progressions.forEach((progression) => {
         const row = document.createElement("div");
         row.className = "progression-row";
+        row.dataset.key = progression.id;
         const heading = document.createElement("div");
         heading.className = "progression-row-heading";
         const title = document.createElement("strong");
@@ -6341,6 +6429,7 @@
       container.replaceChildren(...profiles.map((profile) => {
         const row = document.createElement("div");
         row.className = "saved-profile-row";
+        row.dataset.key = profile.id;
         row.dataset.profileId = profile.id;
         const text = document.createElement("div");
         const heading = document.createElement("p");
@@ -7213,13 +7302,17 @@
         showMessage(text);
       };
       if (wifiChangePending) return cancelChange("Another Pi Wi-Fi change is still running.");
-      if (!window.confirm(WIFI_RESTART_NOTICE)) return cancelChange("Pi Wi-Fi change cancelled.");
+      // Held while the question is open so a second save or a name reset cannot start beside it.
       wifiChangePending = true;
       const submittedSsid = element("access-point-ssid").value;
       const submittedPassword = element("access-point-password").value;
       const submittedDraft = formDrafts.get("access-point-form");
-      const tokenRevision = adminTokenRevision;
+      let tokenRevision = adminTokenRevision;
       try {
+        if (!await confirmWorkflow(WIFI_RESTART_NOTICE, {title: "Change the Pi Wi-Fi?", confirmLabel: "Change Pi Wi-Fi"})) {
+          return cancelChange("Pi Wi-Fi change cancelled.");
+        }
+        tokenRevision = adminTokenRevision;
         // The Pi confirms first and restarts its Wi-Fi afterwards. The result is read once it is back.
         const outcome = await runWifiChange("/api/access-point", {
           ssid: submittedSsid,
@@ -7244,11 +7337,17 @@
 
     element("reset-wifi-name").addEventListener("click", async (event) => {
       if (wifiResetPending || wifiChangePending || !helperConfigured) return;
-      if (!window.confirm("Restore the default Wi-Fi name? The password and security type stay the same. " + WIFI_RESTART_NOTICE)) return;
       const button = event.currentTarget;
       const status = element("wifi-reset-status");
+      // Held while the question is open so a second click or a Wi-Fi save cannot start beside it.
       wifiResetPending = true;
-      setButtonBusy(button, true);
+      if (!await confirmFromButton(button, "Restore the default Wi-Fi name? The password and security type stay the same. " + WIFI_RESTART_NOTICE,
+          {title: "Restore the default Wi-Fi name?", confirmLabel: "Restore name"}) || !helperConfigured) {
+        wifiResetPending = false;
+        setButtonBusy(button, false);
+        button.disabled = !helperConfigured;
+        return;
+      }
       status.textContent = "Restoring the Pi Wi-Fi name...";
       const submittedDraft = formDrafts.get("access-point-form");
       const submittedSsid = element("access-point-ssid").value;
@@ -7443,7 +7542,11 @@
           if (!stillCurrent()) return;
           status.textContent = "Router Wi-Fi uses " + preview.security + " on " + preview.band + ".";
           const warning = preview.legacy ? " Older WPA is weak security. Copy it only for compatibility testing." : "";
-          if (!window.confirm("Copy " + preview.ssid + " using " + preview.security + " (" + preview.band + ")?" + warning + " The Pi will use the router's Wi-Fi password. " + (typeof WIFI_RESTART_NOTICE === "string" ? WIFI_RESTART_NOTICE : "") + " Keep a separate management connection.")) {
+          const copyConfirmed = await confirmWorkflow("Copy " + preview.ssid + " using " + preview.security + " (" + preview.band + ")?" + warning + " The Pi will use the router's Wi-Fi password. " + (typeof WIFI_RESTART_NOTICE === "string" ? WIFI_RESTART_NOTICE : "") + " Keep a separate management connection.",
+            {title: "Copy the router Wi-Fi to the Pi?", confirmLabel: "Copy Wi-Fi", returnFocus: button});
+          // The page keeps running while the question is open, so the credentials may have changed.
+          if (!stillCurrent()) return;
+          if (!copyConfirmed) {
             status.textContent = "Wi-Fi security checked. Copy cancelled.";
             showMessage(status.textContent, "success");
             return;
@@ -7572,14 +7675,8 @@
       routerAction("/api/router/sync-ap", {}, "Checking the router Wi-Fi security...", event.currentTarget);
     });
 
-    element("router-wifi-toggle").addEventListener("click", (event) => {
-      renderRouterWifi();
-      if (typeof routerWifiEnabled !== "boolean" || event.currentTarget.disabled) return;
-      const enabled = !routerWifiEnabled;
-      if (!enabled && !window.confirm("Turn off router Wi-Fi, including guest Wi-Fi? Keep the Pi connected by Ethernet. A Mac that is using the router's Wi-Fi loses its connection and needs to join the Pi's test Wi-Fi network.")) return;
-      routerAction("/api/router/wifi", {enabled, confirm_disable: !enabled},
-        enabled ? "Turning on router Wi-Fi..." : "Turning off router Wi-Fi...", event.currentTarget);
-    });
+    // The router Wi-Fi switch is read only (renderRouterWifi keeps it disabled and the Pi refuses
+    // router Wi-Fi writes), so it has no click handler and nothing to confirm.
 
     document.addEventListener("visibilitychange", () => {
       renderRouterWifi();
@@ -7768,9 +7865,10 @@
       const head = document.createElement("thead");
       head.appendChild(headRow);
       const body = document.createElement("tbody");
-      rows.forEach(({ cells, actions, rowClass }) => {
+      rows.forEach(({ cells, actions, rowClass, key }) => {
         const row = document.createElement("tr");
         if (rowClass) row.className = rowClass;
+        if (key) row.dataset.key = key;
         cells.forEach((value) => row.appendChild(tableCell(value)));
         const actionCell = document.createElement("td");
         const actionGroup = document.createElement("div");
@@ -7894,6 +7992,7 @@
             describeImpairment(profile.download),
             describeExtras(profile)
           ],
+          key: profile.id,
           actions: [
             ["Edit", () => fillProfileForm(profile)],
             ["Duplicate", () => duplicateProfile(profile)],
@@ -7949,7 +8048,8 @@
           ),
           conditionCell(condition)
         ],
-        actions: []
+        actions: [],
+        key: "everyone-else"
       };
     }
 
@@ -8006,6 +8106,7 @@
     function renderDeviceTable() {
       const rows = devices.map((device) => ({
         rowClass: deviceRowClass(device),
+        key: device.id,
         cells: [
           [deviceDisplayName(device), device.id],
           [device.ipv4_address, device.mac_address || "No MAC address"],
@@ -8213,17 +8314,19 @@
       }
     }
 
-    function deleteProfile(profile, button) {
-      if (!window.confirm("Delete the profile " + profile.name + "?")) return;
-      deleteItem("/api/profiles/delete", { id: profile.id }, "Profile deleted.", button);
+    async function deleteProfile(profile, button) {
+      if (!await confirmFromButton(button, "Delete the profile " + profile.name + "?",
+          {title: "Delete this profile?", confirmLabel: "Delete profile", danger: true})) return;
+      await deleteItem("/api/profiles/delete", { id: profile.id }, "Profile deleted.", button);
     }
 
-    function deleteDevice(device, button) {
+    async function deleteDevice(device, button) {
       const question = "Delete " + deviceTitle(device) + "? Its schedules, timers, progressions, " +
         "limits and browser service profiles are deleted too, and so is a group it is the " +
         "only member of.";
-      if (!window.confirm(question)) return;
-      deleteItem("/api/devices/delete", { id: device.id }, "Device deleted.", button);
+      if (!await confirmFromButton(button, question,
+          {title: "Delete this device?", confirmLabel: "Delete device", danger: true})) return;
+      await deleteItem("/api/devices/delete", { id: device.id }, "Device deleted.", button);
     }
 
     function formatMinute(minute) {
@@ -9023,6 +9126,7 @@
         const text = scenarioRunText(run);
         const row = document.createElement("div");
         row.className = "timer-row";
+        row.dataset.key = run.id;
         const details = document.createElement("div");
         details.className = "timer-details";
         const title = document.createElement("strong");
@@ -9050,6 +9154,7 @@
       savedScenarios.forEach((scenario) => {
         const row = document.createElement("div");
         row.className = "schedule-row";
+        row.dataset.key = scenario.id;
         const text = document.createElement("div");
         const name = document.createElement("span");
         name.textContent = scenario.name;
@@ -9212,8 +9317,8 @@
     }
 
     async function clearActivity(button) {
-      if (!window.confirm("Clear every event, including those hidden by filters? This can't be undone.")) return;
-      setButtonBusy(button, true);
+      if (!await confirmFromButton(button, "Clear every event, including those hidden by filters? This can't be undone.",
+          {title: "Clear the activity log?", confirmLabel: "Clear all events", danger: true})) return;
       try {
         await request("/api/activity/clear", "POST", {});
         element("activity-markdown").hidden = true;
@@ -9664,22 +9769,28 @@
       if (!file) return;
       const question = "Replace every profile, device, group, schedule, access rule and limit " +
         "with the settings in " + file.name + "?";
-      if (!window.confirm(question)) return;
-      showMessage("Importing settings...", "working");
-      let settings;
+      const importButton = element("import-settings-button");
+      if (!await confirmFromButton(importButton, question,
+          {title: "Replace all settings?", confirmLabel: "Replace settings", danger: true})) return;
       try {
-        settings = JSON.parse(await file.text());
-      } catch (error) {
-        showMessage(file.name + " is not a JSON settings export.", "error");
-        return;
-      }
-      try {
-        const result = await request("/api/import", "POST", settings);
-        refreshAfterSuccess(
-          result.live_applied ? "Settings imported and applied." : "Settings imported."
-        );
-      } catch (error) {
-        showMessage(error.message, "error");
+        showMessage("Importing settings...", "working");
+        let settings;
+        try {
+          settings = JSON.parse(await file.text());
+        } catch (error) {
+          showMessage(file.name + " is not a JSON settings export.", "error");
+          return;
+        }
+        try {
+          const result = await request("/api/import", "POST", settings);
+          refreshAfterSuccess(
+            result.live_applied ? "Settings imported and applied." : "Settings imported."
+          );
+        } catch (error) {
+          showMessage(error.message, "error");
+        }
+      } finally {
+        setButtonBusy(importButton, false);
       }
     });
 

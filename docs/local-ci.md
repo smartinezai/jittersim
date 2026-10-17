@@ -173,6 +173,11 @@ in the summary.
 
 The browser, GUI and homepage commands run on the venv Python only.
 
+The Python 3.9 environment has no Playwright, because Playwright 1.61 and newer need Python 3.10.
+That matches the hosted Python 3.9 job, which installs `.[dev]` only, so the tests that need a
+browser skip there. `browser`, `gui` and `homepage` stop on Python 3.9 with a message that says so.
+Leave `--python` unset to run them on the newest Python.
+
 ## The Docker VM
 
 Docker Desktop here runs one VM with 1 CPU and about 2 GB of memory. Unrelated MAIA

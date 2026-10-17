@@ -9,6 +9,8 @@ from pathlib import Path
 
 from playwright.sync_api import Error as PlaywrightError, expect, sync_playwright
 
+from tests.browser.confirm_dialogs import answer_confirm, cancel_with_escape
+
 PROTECTED_MAC = "02:00:00:00:00:01"
 
 
@@ -71,8 +73,13 @@ def run():
                 page.locator("#allow-dashboard-device").click()
                 expect(status).to_contain_text("a saved grant and from protection")
                 expect(listing).to_contain_text("saved grant and protection")
-                page.once("dialog", lambda dialog: dialog.accept())
-                listing.get_by_role("button", name="Remove saved grant").click()
+                remove = listing.get_by_role("button", name="Remove saved grant")
+                remove.click()
+                cancel_with_escape(page, remove, verb="Remove saved grant", title="Remove the saved grant?",
+                                   text="It stays allowed while it is protected.")
+                expect(listing).to_contain_text("saved grant and protection")
+                remove.click()
+                answer_confirm(page, "Remove saved grant", title="Remove the saved grant?")
                 expect(status).to_contain_text("comes from protecting this device")
                 expect(page.locator("#private-dashboard")).to_be_visible()
                 # A failed sync is visible with a retry, never shown as working access.
@@ -99,17 +106,11 @@ def run():
                 expect(listing.get_by_role("alert")).to_have_count(0)
                 page.screenshot(path="test-results/protected-dashboard-access.png")
                 # Removing this device's protection asks first and can keep access.
-                dialogs = []
-
-                def keep(dialog):
-                    dialogs.append(dialog.message)
-                    dialog.accept()
-
-                page.on("dialog", keep)
-                page.evaluate("""() => request("/api/unaffected-devices/delete", "POST",
-                                                {mac_address: "%s"})""" % PROTECTED_MAC)
-                page.remove_listener("dialog", keep)
-                assert dialogs and "only because it is protected" in dialogs[0], dialogs
+                page.evaluate("""() => { window.stopping = request("/api/unaffected-devices/delete", "POST",
+                                                {mac_address: "%s"}); }""" % PROTECTED_MAC)
+                answer_confirm(page, "Keep access", title="Keep dashboard access?",
+                               text="only because it is protected")
+                page.evaluate("() => window.stopping")
                 page.evaluate("() => checkAdminToken()")
                 expect(status).to_contain_text("comes from a saved grant")
                 expect(page.locator("#private-dashboard")).to_be_visible()
