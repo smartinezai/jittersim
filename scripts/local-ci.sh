@@ -66,6 +66,7 @@ PI_BROWSER_MODULES=(
   group_devices
   impact_check
   speed_test_window
+  connection_check
   sidebar_status
   apply_clarity
   router_copy

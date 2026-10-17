@@ -52,3 +52,7 @@ src/jittersim/api/trust.py                trust_access
 src/jittersim/localca.py                  trust_access
 src/jittersim/networking/adblocking.py    ad_blocking
 src/jittersim/config/adblocking.py        ad_blocking
+src/jittersim/api/connection-check.js     connection_check
+src/jittersim/api/connection-check.css    connection_check
+src/jittersim/api/connection_checks.py    connection_check
+src/jittersim/connection_check.py         connection_check
