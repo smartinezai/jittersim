@@ -5395,7 +5395,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     put_back_version.append(restored_version)
             except StorageError:
                 LOGGER.exception("could not put back the device assignment after a failed start")
-                self.repository.restore_everyone_exceptions(previous_exceptions)
+                # The device keeps the saved choice that failed, so it goes back to Everyone
+                # instead of running that choice beside it.
+                self.repository.restore_everyone_exceptions(previous_exceptions - {device.id})
             return True
 
         accepted, restored = self._publish_apply(control_intent[0], restore)

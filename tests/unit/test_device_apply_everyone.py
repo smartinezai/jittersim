@@ -659,6 +659,28 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         state = self.repository.get_runtime_state()
         self.assertEqual((state.observed_state, state.last_action), ("reset", "reset"))
 
+    def test_a_failed_restore_sends_the_device_back_to_everyone(self) -> None:
+        from jittersim.config.storage import StorageError
+
+        self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        patcher, _ = self.fail_first_apply()
+        real_save = self.repository.save_device
+
+        def save_device(device, **arguments):
+            if arguments.get("expected") is not None and device.profile_id == "slow-test":
+                raise StorageError("simulated storage failure")
+            return real_save(device, **arguments)
+
+        with patcher, patch.object(self.repository, "save_device", side_effect=save_device), \
+                self.assertLogs("jittersim.api.server", "ERROR"):
+            status, _ = self.apply_to(profile_id="low")
+
+        self.assertEqual(status, 502)
+        # The saved choice that failed stays saved, so the device must not run it.
+        self.assertEqual(self.repository.get_device(AIR_ID).profile_id, "low")
+        self.assertEqual(self.exceptions(), frozenset())
+
     def test_if_putting_it_back_fails_too_the_record_still_says_what_ran(self) -> None:
         self.use_scheduler()
         self.assertEqual(self.apply_to()[0], 200)
