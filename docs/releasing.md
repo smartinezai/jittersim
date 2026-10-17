@@ -37,7 +37,10 @@ It does this and stops only where you must act:
 
 1. Checks the version is newer than the last tag, reserves it, sets it in the
    two version files and adds GitHub's generated notes (the merged PRs since
-   the last tag) to `CHANGELOG.md` in a release commit.
+   the last tag) to `CHANGELOG.md` in a release commit. Notes longer than
+   15000 bytes stop the run before anything is kept: approval accepts 16000
+   characters and the Pi shows 16 KB. For a first release, whose generated list
+   is the whole history, give a short text with `--notes-file FILE`.
 2. Runs the checks on that commit (lint, the full Python tests, the browser
    journeys and `scripts/local-ci.sh` when it exists) and signs a local
    verification record with your key. A failing check stops here, before
@@ -56,14 +59,46 @@ It does this and stops only where you must act:
 7. Opens a small PR that records the published release and moves main to the
    next patch number.
 
-A passphrase on the key is asked once by `ssh-add` in your terminal. Nothing
-else ever asks for it. Packages and evidence stay in `~/jittersim-releases/X.Y.Z`.
+A passphrase on the key is asked by `ssh-add` in your terminal and kept by
+ssh-agent for one hour. The checks can take longer, so the script makes sure of
+the key again before each step that signs (the local record, the package and
+the approval) and asks again there when the hour is over. Nothing else ever
+asks for it. Packages and evidence stay in `~/jittersim-releases/X.Y.Z`.
+
+The last of the checks runs `scripts/local-ci.sh all`, which includes Docker
+and the network and takes long. Choose another scope with
+`JITTERSIM_RELEASE_LOCAL_CI`, for example `JITTERSIM_RELEASE_LOCAL_CI=release-checks`
+or `JITTERSIM_RELEASE_LOCAL_CI="--no-install lint"`, or turn that check off with
+`none`. The release policy requires only the lint, the Python tests and the
+browser journeys, and those always run. The checks use the virtual environment's
+python with its `bin` folder first on `PATH`, like `local-ci.sh`.
 
 Try it without touching GitHub or the Pi:
 
 ```sh
 JITTERSIM_RELEASE_PYTHON="$PWD/.venv/bin/python" scripts/release.sh --dry-run 0.3.0
 ```
+
+## Before the first release: a Pi that runs a development build
+
+The installed update manager decides which packages it may install. A Pi built
+before the current Panic protection review cannot install the current `main`
+or a release made from it through the dashboard, `jittersim remote update` or
+`sudo jittersim update install`: the update refuses it before it changes
+anything (`The selected package cannot preserve Panic protection`). Install a
+development build of `main` once with the root installer, then update normally:
+
+```sh
+deploy/raspberry-pi/deploy-from-mac.sh --ref origin/main --use-installer
+```
+
+Do this **before** `scripts/release.sh` starts and deploy nothing else to the
+Pi until the release is installed. The Pi refuses any package whose release
+order is not newer than the highest one it ever installed and any version
+number lower than the installed one. A development build made after the
+release was reserved has a newer order than the release, and one made after the
+release record moved `main` to the next patch number has a higher version
+number. Either way the Pi would refuse the release.
 
 ## Install a release
 

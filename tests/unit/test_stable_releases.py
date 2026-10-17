@@ -243,8 +243,19 @@ class Publisher(CI):
             return self.rows
         if "/git/ref/tags/" in path:
             return {"object": {"type": "commit", "sha": self.tag_commit}}
-        if "/releases/tags/" in path or path.endswith("releases/latest"):
-            return self.rows[0]
+        if "/releases/tags/" in path:
+            # GitHub documents this lookup as "a published release". A draft is a 404 here, so the
+            # tool must find a draft it just created in the list of releases instead.
+            tag = path.rsplit("/", 1)[1]
+            found = [row for row in self.rows if row["tag_name"] == tag and not row["draft"]]
+            if not found:
+                raise self.release.ReleaseError("A release command failed. No stable release was approved.")
+            return found[0]
+        if path.endswith("releases/latest"):
+            found = [row for row in self.rows if not row["draft"] and not row["prerelease"]]
+            if not found:
+                raise self.release.ReleaseError("A release command failed. No stable release was approved.")
+            return found[0]
         return super().api(path)
 
     def call(self, *args):
