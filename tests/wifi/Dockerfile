@@ -5,7 +5,9 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system jittersim
 WORKDIR /app
-COPY pyproject.toml README.md CHANGELOG.md ./
+COPY pyproject.toml ./
+# The docs link test follows relative links to the other top-level pages (ROADMAP.md, DESIGN.md ...).
+COPY *.md ./
 COPY src ./src
 COPY deploy ./deploy
 COPY tests ./tests
