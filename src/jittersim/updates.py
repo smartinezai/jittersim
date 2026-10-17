@@ -3725,7 +3725,7 @@ def remove_upload_intake(config, run, query, timeout=10, *, root=UPDATE_ROOT, li
         for item in filters if isinstance(filters, list) else ():
             options = item.get("options") if isinstance(item, dict) else None
             actions = options.get("actions") if isinstance(options, dict) else None
-            if (item.get("kind") == "matchall" and isinstance(actions, list)
+            if (isinstance(item, dict) and item.get("kind") == "matchall" and isinstance(actions, list)
                     and any(isinstance(action, dict) and action.get("kind") == "connmark"
                             for action in actions)):
                 return True
@@ -3792,9 +3792,13 @@ def remove_upload_intake(config, run, query, timeout=10, *, root=UPDATE_ROOT, li
         problems.append(UpdateError("the upload intake could not be removed before recovery"))
     if problems:
         raise problems[0]
-    if record.exists() or record.is_symlink():
-        record.unlink()
-        _fsync_folder(root)
+    try:
+        if record.exists() or record.is_symlink():
+            record.unlink()
+            _fsync_folder(root)
+    except OSError as error:
+        # The intake is gone. A record left behind only makes the next attempt check again.
+        raise UpdateError(f"the upload intake record could not be removed: {error}") from error
 
 
 def upload_intake_warning(error):
@@ -3853,10 +3857,20 @@ def quiesce_manual_install(source, *, root=UPDATE_ROOT, descriptor=9, units=UNIT
         if not writers_stopped(names, query, budget):
             raise UpdateError("the installer settings writers did not stop")
         budget.check()
-        remove_upload_intake(config, lambda command, timeout: run(command, budget.limit(timeout)),
-                             lambda command, timeout: query(command, budget.limit(timeout)),
-                             root=root)
-        budget.check()
+        try:
+            remove_upload_intake(config, lambda command, timeout: run(command, budget.limit(timeout)),
+                                 lambda command, timeout: query(command, budget.limit(timeout)),
+                                 root=root)
+            budget.check()
+        except (CommandNotStopped, OperationOwnershipUnknown):
+            # A command may still run: never start the services over it.
+            raise
+        except UpdateError:
+            # Nothing is installed yet and install.sh stops on this error. Start the
+            # unchanged installation again so its helper and Panic run.
+            if names:
+                run(["systemctl", "start", *reversed(names)], 60)
+            raise
         # Never publish the earlier preview. The real producer rereads latest
         # intent after stop so a concurrent Panic cannot be lost in migration.
         _panic_candidate(source)

@@ -603,6 +603,35 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse(state["ifb"])
         self.assertTrue(state["ingress"])
 
+    def test_an_unexpected_filter_answer_is_an_ordinary_cleanup_problem(self):
+        # A filter list with an item that is not an object must never skip the restore.
+        state, run, query = self.intake_system()
+
+        def odd_query(command, timeout):
+            if command[:4] == ["tc", "-j", "filter", "show"]:
+                return json.dumps(["matchall"])
+            return query(command, timeout)
+
+        with patch.object(updates, "_link_present", state["link_present"]):
+            problem = updates.remove_upload_intake_before_restore(
+                self.config, run, odd_query, lambda *args: None, root=self.root)
+        # Nothing proves the qdisc is ours, so it stays and the restore goes on.
+        self.assertIsNone(problem)
+        self.assertTrue(state["ingress"])
+
+    def test_a_failed_record_removal_is_an_ordinary_cleanup_problem(self):
+        state, run, query = self.intake_system(fail="ingress")
+        with self.assertRaises(UpdateError):
+            updates.remove_upload_intake(self.config, run, query, root=self.root,
+                                         link_present=state["link_present"])
+        retry_state, retry_run, retry_query = self.intake_system(proof=False, ifb=False)
+        with patch.object(updates, "_link_present", retry_state["link_present"]), \
+                patch.object(updates, "_fsync_folder", side_effect=OSError("disk stalled")):
+            problem = updates.remove_upload_intake_before_restore(
+                self.config, retry_run, retry_query, lambda *args: None, root=self.root)
+        self.assertIsInstance(problem, UpdateError)
+        self.assertFalse(retry_state["ingress"])
+
     def test_a_pi_without_the_intake_needs_no_command(self):
         commands = []
         updates.remove_upload_intake(

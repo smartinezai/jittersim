@@ -492,3 +492,60 @@ def test_installer_child_refuses_without_its_outer_group_lease(root, tmp_path):
             updates.quiesce_manual_install(tmp_path, root=root, descriptor=descriptor)
     finally:
         os.close(descriptor)
+
+
+def _installer_with_failing_cleanup(root, tmp_path, monkeypatch, failure):
+    units = tmp_path / "units"
+    units.mkdir()
+    for name in updates.WRITERS:
+        (units / name).touch()
+    calls = []
+
+    class Guard:
+        owner_uid = os.geteuid()
+
+        def read(self):
+            return {"current": True}
+
+        def provision_upgrade(self, path):
+            calls.append(["provision"])
+
+    module = types.SimpleNamespace(PanicGuard=Guard, PANIC_LEGACY_PATH=tmp_path / "legacy.json")
+    monkeypatch.setattr(updates, "_panic_candidate", lambda *args: module)
+    monkeypatch.setenv("JITTERSIM_INSTALLER_NONCE", "a" * 32)
+    updates.atomic_json(root / "installer-pending.json", {
+        "format": 2, "state": "running", "owner": os.getpid(), "group": os.getpgrp(),
+        "boot": updates._current_boot(), "nonce": "a" * 32})
+
+    def cleanup(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(updates, "remove_upload_intake", cleanup)
+    descriptor = os.open(root / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        with pytest.raises(type(failure)):
+            updates.quiesce_manual_install(
+                tmp_path, root=root, descriptor=descriptor, units=units,
+                run=lambda command, timeout: calls.append(command),
+                query=lambda command, timeout: "ActiveState=inactive\nMainPID=0\nControlPID=0\nTasksCurrent=0\n",
+                config=tmp_path / "no-config")
+    finally:
+        os.close(descriptor)
+    return calls
+
+
+def test_installer_restarts_the_unchanged_installation_when_intake_cleanup_fails(root, tmp_path, monkeypatch):
+    calls = _installer_with_failing_cleanup(
+        root, tmp_path, monkeypatch, updates.UpdateError("tc failed"))
+    # install.sh runs under set -eu and stops here: the helper and its Panic must run again.
+    assert calls == [["systemctl", "stop", *updates.WRITERS],
+                     ["systemctl", "start", *reversed(updates.WRITERS)]]
+
+
+@pytest.mark.parametrize("failure", [
+    updates.CommandNotStopped("tc", Pending()),
+    updates.OperationOwnershipUnknown("tc"),
+])
+def test_installer_never_restarts_over_a_cleanup_command_that_may_still_run(root, tmp_path, monkeypatch, failure):
+    calls = _installer_with_failing_cleanup(root, tmp_path, monkeypatch, failure)
+    assert calls == [["systemctl", "stop", *updates.WRITERS]]
