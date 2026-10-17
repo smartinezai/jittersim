@@ -186,6 +186,7 @@ are grouped by theme.
 | Plan | Date |
 | --- | --- |
 | [Connected device details](implementation-plan-connected-device-details-2026-09.md) | 2026-09 |
+| [Check connection (probe burst against the applied profile)](implementation-plan-connection-check-2026-10-17.md) | 2026-10-17 |
 | [Clear dashboard action feedback](implementation-plan-dashboard-feedback-2026-09.md) | 2026-09 |
 | [Dashboard follow-ups: stable device identity and visible network state](implementation-plan-dashboard-followups-2026-09.md) | 2026-09 |
 | [Clear private results and repair phone controls](implementation-plan-dashboard-private-and-phone-repairs-2026-10-03.md) | 2026-10-03 |
