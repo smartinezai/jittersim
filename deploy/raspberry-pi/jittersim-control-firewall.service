@@ -1,9 +1,8 @@
 [Unit]
 Description=JitterSim management-interface firewall
 After=network-pre.target
-# Loaded before NetworkManager starts any connection and removed only after it
-# stopped them, so the test Wi-Fi never forwards without these rules at boot or
-# at shutdown.
+# Loaded before NetworkManager starts any connection, so the test Wi-Fi never
+# forwards without these rules at boot.
 Before=NetworkManager.service jittersim-dashboard.service
 Wants=network-pre.target
 
@@ -15,13 +14,10 @@ Type=oneshot
 # 192.168.50.1 would lose every device's gateway). It never sends ICMP
 # redirects. See docs/router-safety-audit-round2-2026-10-17.md.
 ExecStartPre=-/bin/sh -c 'echo 1 > /proc/sys/net/ipv4/conf/all/arp_ignore && echo 2 > /proc/sys/net/ipv4/conf/all/arp_announce && for setting in /proc/sys/net/ipv4/conf/*/send_redirects; do echo 0 > "$$setting"; done'
-# Clear a table left by an earlier run. `add table` first: it is a no-op when the
-# table exists, so `delete table` always finds one and never logs a harmless
-# "No such file or directory" error on the first start after a boot.
-ExecStartPre=-/usr/sbin/nft add table inet jittersim_control
-ExecStartPre=-/usr/sbin/nft delete table inet jittersim_control
+# The rules file replaces any older table in one transaction. There is no
+# ExecStop: a restart during an install or update must never remove the rules
+# while the test Wi-Fi keeps running, and the table goes with the next boot.
 ExecStart=/usr/sbin/nft -f /etc/jittersim/jittersim-control-firewall.nft
-ExecStop=/usr/sbin/nft delete table inet jittersim_control
 RemainAfterExit=yes
 
 [Install]

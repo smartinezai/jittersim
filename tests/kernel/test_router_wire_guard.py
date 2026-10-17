@@ -19,7 +19,8 @@ never get from the Pi:
 - mDNS, SSDP, LLMNR or NetBIOS (the lab runs no Avahi, so any such frame was
   reflected from the test Wi-Fi), or any other IPv4 broadcast that is not the
   Pi's own DHCP client
-- byte-identical copies of a forwarded frame within one second
+- a copy of a numbered upload datagram or echo request within one second, or
+  numbered upload datagrams out of order
 - more than BURST_LIMIT broadcast or multicast frames, or more than ARP_LIMIT
   ARP frames, in any one second, and more upstream DNS questions than the
   clients asked distinct names (the Pi's resolver must not amplify)
@@ -133,6 +134,8 @@ TRAFFIC = r"""
 import random, socket, struct, sys, time
 source, target, resolver, label = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 repeated, distinct = int(sys.argv[5]), int(sys.argv[6])
+# "quick": only fresh flows and untracked segments, for the moment a table is missing.
+quick = sys.argv[7] == "quick"
 
 def checksum(data):
     if len(data) % 2:
@@ -142,51 +145,54 @@ def checksum(data):
         total = (total & 0xFFFF) + (total >> 16)
     return ~total & 0xFFFF
 
+# Numbered UDP from a fresh socket (a new flow), checked for order at the router.
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
     udp.bind((source, 0))
-    for number in range(150):
+    for number in range(40 if quick else 150):
         udp.sendto(b"JSW" + struct.pack("!I", number) + bytes(40), (target, 9999))
         time.sleep(0.004)
-# At most four seconds of TCP, however slow the profile makes it.
-deadline = time.monotonic() + 4
+# At most four seconds of TCP (one second in quick mode), however slow the profile.
+deadline = time.monotonic() + (1 if quick else 4)
 try:
-    with socket.create_connection((target, 5001), timeout=3, source_address=(source, 0)) as tcp:
+    with socket.create_connection((target, 5001), timeout=1 if quick else 3,
+                                  source_address=(source, 0)) as tcp:
         tcp.settimeout(1)
         for _ in range(48):
             if time.monotonic() > deadline:
                 break
             tcp.sendall(bytes(1024))
 except OSError:
-    pass
+    pass  # Blocking and lossy profiles may refuse or drop the connection.
 
 def question(name, identifier):
     labels = b"".join(bytes([len(part)]) + part.encode() for part in name.split("."))
     return struct.pack("!HHHHHH", identifier, 0x0100, 1, 0, 0, 0) + labels + b"\0\0\1\0\1"
 
-with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as dns:
-    dns.bind((source, 0))
-    dns.settimeout(0.1)
-    names = ["cached.example.org"] * repeated + [
-        "%s-%d.example.org" % (label, number) for number in range(distinct)]
-    for identifier, name in enumerate(names, 1):
-        dns.sendto(question(name, identifier), (resolver, 53))
-        try:
-            dns.recv(512)
-        except OSError:
-            pass
+if not quick:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as dns:
+        dns.bind((source, 0))
+        dns.settimeout(0.1)
+        names = ["cached-%s.example.org" % label.split("-")[-1]] * repeated + [
+            "%s-%d.example.org" % (label, number) for number in range(distinct)]
+        for identifier, name in enumerate(names, 1):
+            dns.sendto(question(name, identifier), (resolver, 53))
+            try:
+                dns.recv(512)
+            except OSError:
+                pass
 
-with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as chatter:
-    chatter.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    # A TTL above one, so only the Pi's lack of a multicast router stops it.
-    chatter.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 8)
-    chatter.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(source))
-    chatter.bind((source, 0))
-    for _ in range(3):
-        for address, port in (("224.0.0.251", 5353), ("239.255.255.250", 1900),
-                              ("224.0.0.252", 5355), ("192.168.50.255", 137),
-                              ("192.168.50.255", 138), ("255.255.255.255", 9),
-                              ("239.1.2.3", 5000)):
-            chatter.sendto(b"jittersim-chatter", (address, port))
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as chatter:
+        chatter.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        # A TTL above one, so only the Pi's lack of a multicast router stops it.
+        chatter.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 8)
+        chatter.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(source))
+        chatter.bind((source, 0))
+        for _ in range(3):
+            for address, port in (("224.0.0.251", 5353), ("239.255.255.250", 1900),
+                                  ("224.0.0.252", 5355), ("192.168.50.255", 137),
+                                  ("192.168.50.255", 138), ("255.255.255.255", 9),
+                                  ("239.1.2.3", 5000)):
+                chatter.sendto(b"jittersim-chatter", (address, port))
 
 raw = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
 raw.bind((source, 0))
@@ -200,11 +206,13 @@ for flags in (0x04, 0x11, 0x12, 0x14):
         raw.sendto(header, (target, 0))
 raw.close()
 
-try:
-    with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as six:
-        six.sendto(b"jittersim-ipv6", ("2001:db8::1", 9999))
-except OSError:
-    pass
+if not quick:
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as six:
+            six.sendto(b"jittersim-ipv6", ("2001:db8::1", 9999))
+    except OSError:
+        pass  # No route is fine: nothing may leave anyway.
+print("complete", flush=True)
 """
 
 # A TCP sink on the router's internet address for every client connection.
@@ -215,6 +223,7 @@ server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind((sys.argv[1], 5001))
 server.listen(8)
 server.settimeout(1)
+print("ready", flush=True)
 def drain(connection):
     connection.settimeout(5)
     try:
@@ -302,6 +311,10 @@ frames = [
     + udp4(router_ip, "192.168.0.255", 137, 137, netbios),
     b"\x01\x00\x5e\x00\x00\xfb" + mac(router_mac) + b"\x08\x00"
     + udp4(router_ip, "224.0.0.251", 5353, 5353, mdns),
+    # A ping of the Pi's uplink address: its own replies must still leave.
+    mac(pi_mac) + mac(router_mac) + b"\x08\x00"
+    + ipv4(router_ip, pi_ip, 1, (lambda body: body[:2] + struct.pack("!H", checksum(body))
+                                 + body[4:])(struct.pack("!BBHHH", 8, 0, 0, 0x4A53, 1) + bytes(16))),
     # For a host on the router LAN, sent to the Pi's MAC: only a router forwards it.
     mac(pi_mac) + mac(router_mac) + b"\x08\x00"
     + udp4(router_ip, internet, 40000, 9999, b"jittersim-hairpin"),
@@ -312,6 +325,7 @@ for _ in range(2):
     for frame in frames:
         sender.send(frame)
     time.sleep(0.3)
+print("complete", flush=True)
 """
 
 
@@ -343,7 +357,7 @@ def audit_frames(frames, *, pi_mac, router_mac, pi_ip, pi_ipv6=(), test_wifi=TES
     problems = Counter()
     stats = Counter()
     burst_times, arp_times = [], []
-    seen = {}
+    seen, last_number = {}, {}
     for moment, frame in frames:
         stats["frames"] += 1
         if len(frame) < 14:
@@ -443,10 +457,25 @@ def audit_frames(frames, *, pi_mac, router_mac, pi_ip, pi_ipv6=(), test_wifi=TES
                 continue
         if protocol == 17 and ports[1] == 53:
             stats["dns questions"] += 1
-        if protocol in (6, 17, 1) and not (protocol == 17 and 53 in ports):
+        if protocol == 17 and ports[1] == 9999 and body[8:11] == b"JSW" and len(body) >= 15:
+            stats["udp to the sink"] += 1
+            (number,) = struct.unpack("!I", body[11:15])
+            if number <= last_number.get(ports[0], -1):
+                problems["numbered uploads reached the router out of order"] += 1
+            last_number[ports[0]] = number
+        if protocol == 6 and ports[1] == 5001:
+            stats["tcp to the sink"] += 1
+        if protocol == 1 and body[:1] in (b"\x00", b"\x08"):
+            stats["icmp echo " + ("replies" if body[:1] == b"\x00" else "requests")] += 1
+        # Numbered datagrams and echo requests are unique when the client sends
+        # them, so a second one can only be a copy made on the way. Other frames
+        # may repeat legitimately (a client's duplicate ACK can be byte-identical).
+        unique = (protocol == 17 and ports[1] == 9999 and body[8:11] == b"JSW") or (
+            protocol == 1 and body[:1] == b"\x08")
+        if unique:
             previous = seen.get(frame)
             if previous is not None and moment - previous < 1.0:
-                problems["byte-identical copy of a forwarded frame"] += 1
+                problems["copy of a numbered upload reached the router"] += 1
             seen[frame] = moment
         stats["ipv4"] += 1
     for name, times, limit in (("broadcast or multicast", burst_times, BURST_LIMIT),
@@ -537,6 +566,9 @@ def profile(identifier, impairment):
 class RouterWireGuardTests(unittest.TestCase):
     """Run every scenario against the same lab and fail on any bad frame toward the router."""
 
+    # Part of every DNS name, so the Pi's cache never hides a scenario's questions.
+    run_number = 0
+
     @classmethod
     def setUpClass(cls) -> None:
         create_lab()
@@ -572,7 +604,11 @@ class RouterWireGuardTests(unittest.TestCase):
         localname.install_config(config, shared)
         argv = nm_dnsmasq_argv(cls.directory) + [f"--server={ROUTER_ADDRESS}"]
         cls.spawn(PI, argv)
-        cls.spawn(ROUTER, [sys.executable, "-c", SINK, INTERNET])
+        sink = subprocess.Popen(["ip", "netns", "exec", ROUTER, sys.executable, "-c", SINK, INTERNET],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        cls.processes.append(sink)
+        if sink.stdout.readline().strip() != "ready":
+            raise RuntimeError("the router's TCP sink did not start")
         # IPv6 the way a client may have it from elsewhere, aimed at the Pi.
         pi_wifi_link_local = cls.ipv6_addresses("wlan0")[0]
         _in(CLIENT, "ip", "-6", "addr", "add", "2001:db8:50::10/64", "dev", "c0", "nodad")
@@ -618,38 +654,60 @@ class RouterWireGuardTests(unittest.TestCase):
 
     # One run: capture on the router port while the clients and the LAN probes send.
 
+    def traffic(self, namespace, *, quick=False):
+        address = {CLIENT: CLIENT_ADDRESS, OTHER_CLIENT: OTHER_ADDRESS}[namespace]
+        return subprocess.Popen(
+            ["ip", "netns", "exec", namespace, sys.executable, "-c", TRAFFIC, address, INTERNET,
+             "192.168.50.1", f"{namespace.rsplit('-', 1)[-1]}-{self.run_number}",
+             str(REPEATED_QUERIES), str(DISTINCT_NAMES), "quick" if quick else "full"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def finish(self, process, deadline):
+        """Wait for a generator. A crash or a missing completion line fails the test."""
+        try:
+            output, errors = process.communicate(timeout=max(1.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            self.fail("a traffic generator did not finish")
+        self.assertEqual(process.returncode, 0, errors)
+        self.assertIn("complete", output, errors)
+
+    def quick_traffic(self, *clients):
+        """Fresh flows and untracked segments from each client, finished before returning."""
+        deadline = time.monotonic() + 20
+        for process in [self.traffic(namespace, quick=True) for namespace in clients]:
+            self.finish(process, deadline)
+
     def capture(self, *, during=None, clients=(CLIENT,)):
+        type(self).run_number += 1
         capture = subprocess.Popen(
             ["ip", "netns", "exec", ROUTER, sys.executable, "-c", CAPTURE, "up0",
              str(CAPTURE_SECONDS)], stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(capture.stdout.readline().strip(), "ready")
-            sources = {CLIENT: CLIENT_ADDRESS, OTHER_CLIENT: OTHER_ADDRESS}
-            started = time.monotonic()
-            senders = []
-            for namespace in clients:
-                senders.append(subprocess.Popen(
-                    ["ip", "netns", "exec", namespace, sys.executable, "-c", TRAFFIC,
-                     sources[namespace], INTERNET, "192.168.50.1", namespace.rsplit("-", 1)[-1],
-                     str(REPEATED_QUERIES), str(DISTINCT_NAMES)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-                senders.append(subprocess.Popen(
-                    ["ip", "netns", "exec", namespace, "ping", "-n", "-q", "-c", "150", "-i",
-                     "0.005", "-W", "1", "-I", sources[namespace], INTERNET],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-            senders.append(subprocess.Popen(
+            deadline = time.monotonic() + 40
+            generators = [self.traffic(namespace) for namespace in clients]
+            pings = [subprocess.Popen(
+                ["ip", "netns", "exec", namespace, "ping", "-n", "-q", "-c", "150", "-i",
+                 "0.005", "-W", "1", "-I", {CLIENT: CLIENT_ADDRESS,
+                                            OTHER_CLIENT: OTHER_ADDRESS}[namespace], INTERNET],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for namespace in clients]
+            generators.append(subprocess.Popen(
                 ["ip", "netns", "exec", ROUTER, sys.executable, "-c", PROBES, "up0",
                  self.router_mac, self.pi_mac, ROUTER_ADDRESS, PI_UPLINK, PROBE_MAC, INTERNET],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
             if during is not None:
                 time.sleep(1.0)
                 during()
-            for sender in senders:
+            for generator in generators:
+                self.finish(generator, deadline)
+            for ping in pings:
                 try:
-                    sender.wait(timeout=max(1.0, started + 40 - time.monotonic()))
+                    ping.wait(timeout=max(1.0, deadline - time.monotonic()))
                 except subprocess.TimeoutExpired:
-                    sender.kill()
-                    sender.wait()
+                    ping.kill()
+                    ping.wait()
             output, _ = capture.communicate(timeout=60)
         finally:
             if capture.poll() is None:
@@ -658,20 +716,33 @@ class RouterWireGuardTests(unittest.TestCase):
         frames = [(moment, bytes.fromhex(data)) for moment, data in json.loads(output)]
         return audit_frames(frames, pi_mac=self.pi_mac, router_mac=self.router_mac,
                             pi_ip=PI_UPLINK, pi_ipv6=self.pi_ipv6,
-                            clients_distinct_names=1 + len(clients) * DISTINCT_NAMES)
+                            clients_distinct_names=len(clients) * (1 + DISTINCT_NAMES))
+
+    def invariant_drops(self):
+        """Packets the management firewall stopped from leaving with a test Wi-Fi address."""
+        listing = json.loads(_in(PI, "nft", "-j", "list", "chain", "inet", "jittersim_control",
+                                 "postrouting").stdout)
+        return sum(expression["counter"]["packets"] for item in listing["nftables"]
+                   if "rule" in item for expression in item["rule"]["expr"]
+                   if "counter" in expression)
 
     def assert_clean(self, *, plan=None, service_addresses=None, during=None,
-                     clients=(CLIENT,), forwarded=True):
+                     clients=(CLIENT,), forwarded=True, expect=("udp", "icmp", "tcp")):
         if plan is not None:
             self.applier.apply(plan=plan, service_addresses=service_addresses)
         problems, stats = self.capture(during=during, clients=clients)
         self.assertEqual(dict(problems), {}, f"bad frames toward the router ({dict(stats)})")
         # The capture saw the Pi answering ARP for its own uplink address and, unless
-        # the scenario blocks it, the clients' traffic: an empty problem list is
-        # never an empty capture.
+        # the scenario blocks it, each kind of client traffic: an empty problem
+        # list is never an empty capture.
         self.assertGreater(stats["arp replies for the uplink address"], 0, dict(stats))
+        self.assertGreater(stats["icmp echo replies"], 0, "the Pi's own ping reply never left")
+        self.assertGreater(stats["dns questions"], 0, "the Pi's resolver never asked the router")
         if forwarded:
-            self.assertGreater(stats["ipv4"], 100, dict(stats))
+            for kind, key in (("udp", "udp to the sink"), ("tcp", "tcp to the sink"),
+                              ("icmp", "icmp echo requests")):
+                if kind in expect:
+                    self.assertGreater(stats[key], 0, f"no {kind} reached the router: {dict(stats)}")
         self.assertEqual(_in(PI, "cat", "/proc/sys/net/ipv6/conf/all/forwarding").stdout.strip(),
                          "0", "IPv6 forwarding was switched on")
         return stats
@@ -680,22 +751,29 @@ class RouterWireGuardTests(unittest.TestCase):
 
     def test_no_profile_running(self) -> None:
         # Profiles stopped, after Reset and after Panic: no JitterSim tables at all.
-        stats = self.assert_clean(clients=(CLIENT, OTHER_CLIENT))
-        self.assertGreater(stats["dns questions"], 0, "the Pi's resolver never asked the router")
+        before = self.invariant_drops()
+        self.assert_clean(clients=(CLIENT, OTHER_CLIENT))
+        # Without a JitterSim plan only the management firewall stops the
+        # untracked TCP segments. They reached it, so the check was real.
+        self.assertGreater(self.invariant_drops(), before)
 
     def test_every_impairment_type_on_a_device(self) -> None:
         for name, impairment in IMPAIRMENT_TYPES.items():
             with self.subTest(impairment=name):
                 plan = compile_plan(devices=[Device("a", "a", CLIENT_ADDRESS, "p")],
                                     profiles={"p": profile("p", impairment)})
-                self.assert_clean(plan=plan, forwarded=name != "blackhole")
+                lossy = impairment.loss_percent or impairment.corrupt_percent
+                self.assert_clean(plan=plan, forwarded=name != "blackhole",
+                                  expect=("udp", "icmp") if lossy else ("udp", "icmp", "tcp"))
 
     def test_every_impairment_type_for_everyone(self) -> None:
         for name in ("duplication", "reordering", "corruption", "every setting"):
             with self.subTest(impairment=name):
                 plan = compile_plan(devices=[], profiles={"p": profile("p", IMPAIRMENT_TYPES[name])},
                                     general_profile=GeneralProfileRule("p"))
-                self.assert_clean(plan=plan, clients=(CLIENT, OTHER_CLIENT))
+                lossy = IMPAIRMENT_TYPES[name].corrupt_percent
+                self.assert_clean(plan=plan, clients=(CLIENT, OTHER_CLIENT),
+                                  expect=("udp", "icmp") if lossy else ("udp", "icmp", "tcp"))
 
     def test_an_outage_for_everyone(self) -> None:
         plan = compile_plan(devices=[], profiles={"p": profile("p", HARSH)},
@@ -747,43 +825,64 @@ class RouterWireGuardTests(unittest.TestCase):
             with self.subTest(rule=name):
                 self.assert_clean(plan=plan, service_addresses={"internet": [internet]},
                                   clients=(CLIENT, OTHER_CLIENT),
-                                  forwarded=name not in ("blocked website", "website allowlist"))
+                                  forwarded=name not in ("blocked website", "website allowlist"),
+                                  expect=("udp", "icmp") if name == "service list"
+                                  else ("udp", "icmp", "tcp"))
 
     def test_panic_and_reset_while_traffic_runs(self) -> None:
         # Panic and Reset remove every JitterSim table and queue at once. Open
-        # connections and queued packets must not leave in a bad state.
+        # connections, queued packets and the flows that start right after must
+        # not leave in a bad state.
         plan = compile_plan(devices=[], profiles={"p": profile("p", HARSH)},
                             general_profile=GeneralProfileRule("p"))
-        self.assert_clean(plan=plan, during=self.applier.reset, clients=(CLIENT, OTHER_CLIENT))
+
+        def reset():
+            self.applier.reset()
+            self.quick_traffic(CLIENT, OTHER_CLIENT)
+
+        before = self.invariant_drops()
+        self.assert_clean(plan=plan, during=reset, clients=(CLIENT, OTHER_CLIENT),
+                          expect=("udp", "icmp"))
+        self.assertGreater(self.invariant_drops(), before)
 
     def test_a_wifi_restart_while_traffic_runs(self) -> None:
         # Recovery, the router-name rename at boot and a router Wi-Fi copy all
         # restart the access point (nmcli connection up). NetworkManager removes
         # its NAT table while the radio may still pass frames for a moment, then
-        # adds it back.
+        # adds it back. Fresh flows start inside that moment.
         plan = compile_plan(devices=[Device("a", "a", CLIENT_ADDRESS, "p")],
                             profiles={"p": profile("p", HARSH)})
 
         def restart():
             _in(PI, "nft", "delete", "table", "ip", "nm-shared-wlan0")
-            time.sleep(1.5)
-            _in(PI, "ip", "link", "set", "wlan0", "down")
-            time.sleep(0.5)
-            _in(PI, "ip", "link", "set", "wlan0", "up")
-            _in(PI, "ip", "addr", "replace", "192.168.50.1/24", "dev", "wlan0")
-            _in(PI, "nft", "-f", "-", stdin=NM_SHARED_TABLE)
+            try:
+                self.quick_traffic(CLIENT, OTHER_CLIENT)
+                _in(PI, "ip", "link", "set", "wlan0", "down")
+                time.sleep(0.5)
+                _in(PI, "ip", "link", "set", "wlan0", "up")
+                _in(PI, "ip", "addr", "replace", "192.168.50.1/24", "dev", "wlan0")
+            finally:
+                _in(PI, "nft", "-f", "-", stdin=NM_SHARED_TABLE)
 
-        self.addCleanup(lambda: _in(PI, "nft", "-f", "-", stdin=NM_SHARED_TABLE, check=False))
-        self.assert_clean(plan=plan, during=restart, clients=(CLIENT, OTHER_CLIENT))
+        before = self.invariant_drops()
+        self.assert_clean(plan=plan, during=restart, clients=(CLIENT, OTHER_CLIENT),
+                          expect=("udp", "icmp"))
+        # The fresh flows without NAT reached the management firewall and stopped there.
+        self.assertGreater(self.invariant_drops(), before)
 
-    def test_a_management_firewall_restart_while_traffic_runs(self) -> None:
-        # An install or update restarts jittersim-control-firewall.service: its
-        # table goes and comes back.
-        def restart():
-            _in(PI, "nft", "delete", "table", "inet", "jittersim_control")
-            self.load_management_firewall()
+    def test_a_management_firewall_reload_while_traffic_runs(self) -> None:
+        # An install or update restarts jittersim-control-firewall.service, which
+        # loads the rules file again. The file replaces the table in one
+        # transaction, so the rules are never missing.
+        def reload():
+            fresh = [self.traffic(namespace, quick=True) for namespace in (CLIENT, OTHER_CLIENT)]
+            for _ in range(5):
+                self.load_management_firewall()
+            deadline = time.monotonic() + 20
+            for process in fresh:
+                self.finish(process, deadline)
 
-        self.assert_clean(during=restart, clients=(CLIENT, OTHER_CLIENT))
+        self.assert_clean(during=reload, clients=(CLIENT, OTHER_CLIENT))
 
 
 @unittest.skipUnless(ENABLED, "needs root on Linux, dnsmasq and JITTERSIM_KERNEL_TESTS=1")
@@ -815,8 +914,12 @@ class SameSubnetRouterTests(unittest.TestCase):
         _in(PI, "nft", "-f", "-", stdin=control_firewall_text())
         _in(ROUTER, "ip", "addr", "flush", "dev", "up0")
         _in(ROUTER, "ip", "addr", "add", f"{self.ROUTER_ON_SAME_SUBNET}/24", "dev", "up0")
+        # NetworkManager's route metrics: wired 100, Wi-Fi 600, so the Pi reaches
+        # the shared network through Ethernet.
         _in(PI, "ip", "addr", "flush", "dev", "eth0")
-        _in(PI, "ip", "addr", "add", f"{self.PI_ON_SAME_SUBNET}/24", "dev", "eth0")
+        _in(PI, "ip", "addr", "add", f"{self.PI_ON_SAME_SUBNET}/24", "dev", "eth0", "metric", "100")
+        _in(PI, "ip", "addr", "flush", "dev", "wlan0")
+        _in(PI, "ip", "addr", "add", "192.168.50.1/24", "dev", "wlan0", "metric", "600")
         shared = self.directory / "dnsmasq-shared.d"
         config = self.directory / "jittersim-config"
         config.mkdir()
@@ -849,6 +952,8 @@ class SameSubnetRouterTests(unittest.TestCase):
             uplink_network=IPv4Network("192.168.50.0/24"))
         self.assertEqual(dict(problems), {}, dict(stats))
         self.assertGreater(stats["arp replies for the uplink address"], 0, dict(stats))
+        # The Pi's own traffic still leaves through Ethernet.
+        self.assertGreater(stats["icmp echo replies"], 0, dict(stats))
 
 
 def _ipv6_of(namespace, interface):
@@ -912,10 +1017,17 @@ class GuardSelfTests(unittest.TestCase):
         problems, _ = audit_frames(burst, pi_mac=self.PI_MAC, router_mac=self.ROUTER_MAC,
                                    pi_ip=PI_UPLINK)
         self.assertTrue(any("in one second" in problem for problem in problems), problems)
-        copies = [(0.0, self.frame(self.ipv4(PI_UPLINK, INTERNET, 17, udp)))] * 2
+        numbered = struct.pack("!HHHH", 40000, 9999, 23, 0) + b"JSW" + struct.pack("!I", 7) + bytes(8)
+        copies = [(0.0, self.frame(self.ipv4(PI_UPLINK, INTERNET, 17, numbered)))] * 2
         problems, _ = audit_frames(copies, pi_mac=self.PI_MAC, router_mac=self.ROUTER_MAC,
                                    pi_ip=PI_UPLINK)
-        self.assertIn("byte-identical copy of a forwarded frame", problems)
+        self.assertIn("copy of a numbered upload reached the router", problems)
+        swapped = [(0.0, self.frame(self.ipv4(PI_UPLINK, INTERNET, 17, struct.pack(
+            "!HHHH", 40000, 9999, 23, 0) + b"JSW" + struct.pack("!I", number) + bytes(8))))
+            for number in (2, 1)]
+        problems, _ = audit_frames(swapped, pi_mac=self.PI_MAC, router_mac=self.ROUTER_MAC,
+                                   pi_ip=PI_UPLINK)
+        self.assertIn("numbered uploads reached the router out of order", problems)
 
 
 if __name__ == "__main__":

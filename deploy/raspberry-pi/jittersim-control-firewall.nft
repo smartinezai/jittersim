@@ -1,3 +1,9 @@
+# Loading this file replaces the whole table in one transaction (`add table`
+# is a no-op when it exists, then `delete table` and the new table). A reload
+# during an install or update therefore never leaves the test Wi-Fi without
+# these rules, and a file that fails to load keeps the old rules.
+add table inet jittersim_control
+delete table inet jittersim_control
 table inet jittersim_control {
     chain input {
         type filter hook input priority filter; policy accept;
@@ -63,7 +69,9 @@ table inet jittersim_control {
         # was skipped: connection tracking did not follow the packet (a TCP reset
         # or FIN for a connection it no longer tracks, for example after a
         # reboot) or NetworkManager's NAT table was gone for a moment while the
-        # Wi-Fi restarted. This table stays loaded when no profile runs.
-        oifname "@UPLINK_INTERFACE@" ip saddr 192.168.50.0/24 counter drop comment "never send a test Wi-Fi address to the router"
+        # Wi-Fi restarted. This table stays loaded when no profile runs. The
+        # Pi's own addresses are left alone, so its Ethernet traffic keeps
+        # working on a router LAN that uses 192.168.50.0/24 too.
+        oifname "@UPLINK_INTERFACE@" ip saddr 192.168.50.0/24 fib saddr type != local counter drop comment "never send a test Wi-Fi address to the router"
     }
 }

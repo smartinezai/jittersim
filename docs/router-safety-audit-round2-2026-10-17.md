@@ -45,10 +45,11 @@ contacted. Earlier records: `outage-dossier-2026-10-04-2026-10-09.md`,
 
 | File | Change | Why |
 | --- | --- | --- |
-| `deploy/raspberry-pi/jittersim-control-firewall.nft` | New `postrouting` chain (priority 300, after NAT): `oifname uplink ip saddr 192.168.50.0/24 drop` | One invariant for every cause: nothing leaves toward the router with a test Wi-Fi source |
+| `deploy/raspberry-pi/jittersim-control-firewall.nft` | New `postrouting` chain (priority 300, after NAT): `oifname uplink ip saddr 192.168.50.0/24 fib saddr type != local drop` | One invariant for every cause: nothing leaves toward the router with a test Wi-Fi client source. The Pi's own addresses pass, so its Ethernet traffic keeps working on a router LAN that also uses 192.168.50.0/24 |
+| same | The file starts with `add table` and `delete table`, so loading it replaces the table in one transaction | An install or update reload never leaves a moment without the rules, and a file that fails to load keeps the old ones |
 | same | `forward`: `iifname uplink oifname uplink drop` | The Pi is a gateway for its Wi-Fi only, never a router for the LAN |
 | `deploy/raspberry-pi/jittersim-control-firewall.service` | `ExecStartPre` sets `net.ipv4.conf.all.arp_ignore=1`, `arp_announce=2` and `send_redirects=0` on every interface | No ARP answer for the Wi-Fi address on the LAN, the uplink address in ARP requests, no ICMP redirects (sent before the forward hook, so nft alone cannot stop them) |
-| same | `Before=NetworkManager.service` | The rules load before any connection starts and are removed only after NetworkManager stopped the Wi-Fi at shutdown |
+| same | `Before=NetworkManager.service`; no separate `nft delete` steps and no `ExecStop` | The rules load before any connection starts. A restart (install, update) no longer deletes the table first, and shutdown never removes it while the Wi-Fi still runs |
 | `tests/kernel/test_router_wire_guard.py` | The router-side capture test (below) | Closes the gaps with tests, not prose |
 | `tests/unit/test_deployment.py` | Static checks of the new rules and unit lines | Fast guard in the unit suite |
 
@@ -87,9 +88,18 @@ redirect; an IGMP query; mDNS, SSDP, LLMNR or NetBIOS (the lab runs no Avahi,
 so any such frame is reflected); any other IPv4 broadcast or multicast; a
 byte-identical copy of a forwarded frame within 1 s; more than 10 broadcast or
 multicast frames or 10 ARP frames in any second; more DNS questions to the
-router than distinct names asked (amplification). Positive controls: the Pi's
-ARP reply for its uplink address must be seen, forwarded traffic must arrive
-(except in blocking scenarios), and IPv6 forwarding must stay off.
+router than distinct names asked (amplification); a copy of a numbered upload
+datagram or echo request, or numbered datagrams out of order. Positive
+controls: every traffic generator and the LAN probes must finish (a crash fails
+the test), the Pi's ARP reply for its uplink address and its own ping reply must
+be seen, UDP, ICMP and (where the profile does not drop it) TCP must reach the
+router, the router must get at least one DNS question, and IPv6 forwarding must
+stay off. In the scenarios without a JitterSim plan, Panic and Reset, and the
+Wi-Fi restart, the drop counter of the new postrouting rule must rise: that
+proves the untracked segments or the fresh flows without NAT were really sent
+in the moment that matters. The transition scenarios send fresh flows inside
+the gap (NetworkManager's NAT table removed, after a reset, during five
+firewall reloads), not only around it.
 
 | Scenario | Before this PR | After |
 | --- | --- | --- |
@@ -102,13 +112,16 @@ ARP reply for its uplink address must be seen, forwarded traffic must arrive
 | Blocked website, website allowlist, service list, service quota, disconnected device | same | clean |
 | Panic or Reset while traffic runs (tables and queues removed mid-flow) | not measured separately (same causes) | clean |
 | Wi-Fi restart while traffic runs (NAT table gone 1.5 s, link down and up) | leak of new flows (cause 1) | clean |
-| Management firewall restart while traffic runs (install, update) | 16 un-NATed frames, as without profiles | clean |
+| Management firewall reload while traffic runs (install, update), five reloads | 16 un-NATed frames (the old unit deleted the table first) | clean, the file replaces the table atomically |
 | Router LAN on 192.168.50.0/24, router on .1 | **Pi answers ARP for 192.168.50.1** | clean |
 | DHCP on eth0, also in the same-subnet case and with `dhcp-authoritative` | silent (no DHCPOFFER or DHCPNAK) | silent |
 
 Lab runs on 17 October (colima, kernel image built from this branch): before
-the fix 22 failures in 13 tests; after the fix 13 tests in 503 s, all pass. The
-same-subnet "before" run removed the unit's kernel settings only.
+the fix 22 failures in 13 tests; after the fix all 13 tests pass. The
+same-subnet "before" run removed the unit's kernel settings only. One later run
+caught a byte-identical client frame under download duplication for everyone
+(a client's own duplicate ACK, not a Pi copy); the copy check now looks only at
+frames the client sends once (numbered datagrams, echo requests).
 
 What the lab cannot emulate: real Wi-Fi association and roaming between two
 radios, NetworkManager itself (its effects are reproduced from its source),
@@ -128,7 +141,7 @@ everyone else, service rules, quotas), **S** profiles stopped, Reset or Panic,
 | 1 | Damaged frames (netem corruption on eth0) | ok | ok | ok | ok | ok | `renderer.py:93-104` `upstream_safe_impairment`; wire guard all P scenarios; `test_upstream_safety.py` | safe | Rollback to a release before PR 125 (carry-forward doc: reboot after rollback) |
 | 2 | Duplicated or reordered uploads | ok | ok | ok | ok | ok | `renderer.py:104`, `test_upstream_safety.py` order and copy checks, guard copy check | safe | none |
 | 3 | Non-Pi source MAC | ok | ok | ok | ok | ok | no bridge anywhere; guard source MAC check | safe | none |
-| 4 | Test Wi-Fi source IP without NAT | ok | **was leaking** | **was leaking** | **gap at shutdown** | ok | guard "no profile", "Wi-Fi restart"; fix: control firewall `postrouting` | fixed | A rollback to an older release removes the rule until it is reinstalled |
+| 4 | Test Wi-Fi source IP without NAT | ok | **was leaking** | **was leaking** | **gap at reload and shutdown** | ok | guard "no profile", "Wi-Fi restart"; fix: control firewall `postrouting` | fixed | A rollback to an older release removes the rule until it is reinstalled. A flow that started without NAT during a Wi-Fi restart stays dropped until it is idle (seconds to minutes), the client then opens a new one |
 | 5 | Pi forwards for other LAN hosts, ICMP redirects | was open | was open | was open | was open | was open | guard hairpin probe; fix: uplink-to-uplink drop, `send_redirects=0` | fixed | none |
 | 6 | ARP: sender address not the uplink address | was open | was open | was open | was open | was open | guard ARP probe for 192.168.50.1; same-subnet test; fix: `arp_ignore=1`, `arp_announce=2` | fixed | Settings live until reboot after a rollback to an older release, then return to the default |
 | 7 | Gratuitous ARP on eth0 | ok | ok | ok | ok | ok | NetworkManager announces only on the interface it configures (wlan0 for the AP); guard saw none | safe | none |
@@ -166,9 +179,8 @@ everyone else, service rules, quotas), **S** profiles stopped, Reset or Panic,
    address in `192.168.50.0/24` (`jittersim-ap.service` `ExecStartPre`). The
    wire is already clean in that case (test above), so this only protects the
    Pi's own routing.
-5. Low: make the management firewall reload atomic (`add table` and
-   `delete table` inside the rules file) so an update restart has no gap of a
-   few milliseconds. The restart test passes today because the gap is short.
+5. Done here as well: the management firewall reload is atomic and the unit
+   no longer removes the table on stop (found by the review).
 6. Carried over, unchanged: the rollback cleanup of the upload intake
    (`carry-forward-panic-batch-2026-10-10.md`).
 
@@ -201,6 +213,20 @@ is installed. Nothing here changes the Pi or contacts the router's web page.
    shows whether the router name comes from two BSSIDs.
 6. Router side, only with the owner's agreement and only reading: the router
    event log export and uptime before and after a trial, as in the dossier.
+
+## Reviews
+
+One full-diff review by Sol (GPT-6.1) ran on `87f7466` before the coordinator
+stopped all OpenAI use; none ran after. It found five issues, all fixed in the
+fix round: the postrouting drop also hit the Pi's own traffic on a same-subnet
+router LAN (now `fib saddr type != local`, and the same-subnet test requires
+the Pi's ping reply); the unit still deleted the table before loading it
+(atomic file, no `ExecStop`); the transition tests could finish their traffic
+before the transition (fresh flows now run inside the gap and the drop counter
+must rise); a crashed generator could pass silently (generators must finish
+with a completion line); the capture did not check order (numbered datagrams
+are now checked). The author's own read-only Claude pass of the final diff is
+in the pull request. A second independent Claude review is still open.
 
 ## Gate
 
