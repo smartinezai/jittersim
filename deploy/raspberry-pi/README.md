@@ -1026,7 +1026,8 @@ paths, links, 5000 or more files and excessive compressed or expanded size.
 write the staged files. The dashboard can select only that staged release and
 cannot submit a URL, path or shell command.
 
-On the Updates page press **Check for updates** then **Install update**. The operation
+On the Updates page press **Check for updates** then the install button, which
+names the staged release (**Install update** while nothing can be installed). The operation
 runs the release steps of `install.sh`. It first runs the release's network
 preflight and kernel egress-hook check. If either fails nothing changes. It
 then stops the dashboard, helper and browser proxy. It backs up the
@@ -1176,7 +1177,7 @@ install code as root. The admin token and the SSH login are not.
   release comes back only with the local rollback (`sudo jittersim update
   rollback` or **Restore previous installation**), which restores the recovery
   copy and never stages an archive.
-- Install update (dashboard, `jittersim update install`) checks again
+- Install (the dashboard's install button, `jittersim update install`) checks again
   that the staged release was signed by a key that is still trusted and is
   still newer. A release staged without a signature cannot be installed.
 
