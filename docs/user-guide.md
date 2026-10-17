@@ -671,9 +671,11 @@ current override.
 **Apply profile** starts the profile for that client at once. While JitterSim
 runs, the saved settings are applied again with it. After **Reset network**
 only that client starts and everything else stays paused. While a profile for
-Everyone is active, or before its first start, **Apply profile** is refused and
-nothing is saved. Stop it with **Stop for everyone**, choose **Reset network**,
-or save the choice under **Saved devices** for later. An **Apply profile**
+Everyone runs, that client leaves Everyone and runs its own profile. While
+Everyone is saved but not running, or a saved change has not reached the network
+yet, **Apply profile** is refused and nothing is saved. Choose **Start**, wait a
+moment, choose **Reset network**, or save the choice under **Saved devices** for
+later. An **Apply profile**
 request during Reset or Panic is refused too. If a device-only start fails,
 JitterSim resets the Pi and retries that reset when needed.
 

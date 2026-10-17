@@ -12,7 +12,7 @@ next release takes them over.
   starts it for that device. The device leaves Everyone and runs its own profile,
   and Everyone keeps running for every other device. Before, the dashboard refused
   with "Everyone uses ... right now". It is refused while Everyone is saved but not
-  the profile that runs. A failed start changes nothing. Start, Apply to all, Stop
+  running, or while what runs is older than the saved settings. A failed start changes nothing. Start, Apply to all, Stop
   for everyone, Reset network and Panic end it for every device. The change adds a
   table to the settings database and needs the Pi helper restarted with the update.
 - The Pi Wi-Fi follows the router. After a **Copy router Wi-Fi to Pi** that

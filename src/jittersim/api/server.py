@@ -138,7 +138,7 @@ from jittersim.engine.eligibility import (
 )
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, GENERAL_QUEUE_ID, NetworkPlan
 from jittersim.engine.progression import progression_factor
-from jittersim.engine.runtime import PreparedRuntimePlan, RuntimeScheduler
+from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.scenarios import active_scenario_runs
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
@@ -5204,26 +5204,22 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 stopped = last_action == "reset"
                 general = self.repository.get_general_profile()
                 beside_everyone = False
-                if general is None and not stopped and self.scheduler is not None:
-                    applied = self.scheduler.applied_plan()
-                    if applied is not None and applied.general_profile is not None:
-                        # A Stop for everyone that was saved but failed. Applying the saved
-                        # settings now would finish it and start every paused device setting.
-                        raise ValueError(
-                            "Everyone still runs because Stop for everyone did not finish. "
-                            "Nothing was saved. Choose Start to finish it, then apply this "
-                            "profile."
-                        )
+                # What runs now, with the saved version it was built from. This Apply builds
+                # the whole plan again from the saved settings, so while Everyone runs it may
+                # only go ahead when the saved settings are exactly what runs: then every
+                # other device keeps what it has. One version check covers every way the two
+                # can differ, such as a failed Start, Apply to all or Stop, or an edit that
+                # did not reach the network yet.
+                running = self.scheduler.running_plan() if self.scheduler is not None else None
+                everyone_runs, saved_runs = self._everyone_and_saved_run(running)
+                if everyone_runs and not saved_runs and not stopped:
+                    raise ValueError(
+                        "Saved settings are still waiting to be applied, so Everyone does not "
+                        "run what is saved. Nothing was saved. Try again in a moment, or "
+                        "choose Start to apply the saved settings first."
+                    )
                 if general is not None and not stopped:
-                    if (last_action is not None
-                            and self.repository.get_runtime_state().observed_state == "unknown"):
-                        # A saved change that nothing applied yet, for example one written by
-                        # another process. This Apply would install it for other devices too.
-                        raise ValueError(
-                            "Saved settings are still waiting to be applied. Nothing was saved. "
-                            "Try again in a moment."
-                        )
-                    if not self._everyone_runs():
+                    if not everyone_runs:
                         # An Everyone that does not run, for example after a failed Start,
                         # would start for every device as a side effect of this Apply.
                         raise ValueError(
@@ -5231,7 +5227,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                             "Nothing was saved. Choose Start to run it, Reset network first to "
                             "start only this device, or stop Everyone."
                         )
-                    # Everyone runs. This device leaves it for its own profile.
+                    # Everyone runs what is saved. This device leaves it for its own profile.
                     beside_everyone = True
                 if stopped or beside_everyone:
                     stop_state = self._stop_state()
@@ -5246,14 +5242,10 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 previous_scope = self.repository.get_device_start_scope() or frozenset()
                 previous_exceptions = self.repository.get_everyone_exceptions()
                 # What runs now, for the case that this start fails at the helper.
-                ran_before = None
-                if beside_everyone and self.scheduler is not None:
-                    applied, sources = self.scheduler.applied_snapshot()
-                    if applied is not None:
-                        ran_before = (
-                            applied, sources, self.scheduler.roll_snapshot(),
-                            self.repository.get_runtime_state().observed_state,
-                        )
+                ran_before = running if beside_everyone else None
+                # The saved version before and after this save, so a put-back can tell
+                # whether the saved settings are again exactly what ran.
+                versions = []
                 if self.scheduler:
                     self.scheduler.sample_before_control_change(repository=self.repository)
                 # Refuse a Panic or a changed helper intent before saving, on both paths.
@@ -5267,6 +5259,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
                 def save():
                     with self.repository.transaction():
+                        versions.append(self.repository.get_runtime_state().configuration_version)
                         self.repository.save_device(
                             device, expected=existing, create_only=existing is None
                         )
@@ -5284,6 +5277,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                             # The classes and the plan with Everyone and this device must
                             # fit before anything is saved.
                             self._validate_saved_plan()
+                        versions.append(self.repository.get_runtime_state().configuration_version)
 
                 # Panic cannot land between the last check and the commit.
                 accepted, _ = self._publish_apply(control_intent[0], save)
@@ -5301,35 +5295,28 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             if beside_everyone:
                 return self._start_beside_everyone(
                     fields, snapshot, device, general, control_intent, previous_exceptions,
-                    ran_before, existing)
+                    ran_before, existing, versions)
             if not stopped:
                 return self._saved_control_response(fields, snapshot)
             return self._start_device_only(fields, snapshot, device, control_intent, previous_scope)
 
-    def _everyone_runs(self) -> bool:
-        """Whether the helper really runs the saved Everyone profile right now.
+    def _everyone_and_saved_run(self, running) -> Tuple[bool, bool]:
+        """Whether Everyone runs, and whether what runs is what is saved.
 
-        A saved Everyone that never started, or whose apply failed, does not run. A device
-        Apply must not start it for every other device as a side effect.
+        `running` is the scheduler's running plan. The saved settings run only when that
+        plan was built from the saved configuration version of now and the last apply
+        succeeded. Without a scheduler only the recorded state can tell.
         """
 
-        if self.repository.get_general_profile() is None:
-            return False
-        if self.repository.get_runtime_state().observed_state != "applied":
-            return False
+        state = self.repository.get_runtime_state()
+        applied = state.observed_state == "applied"
         if self.scheduler is None:
-            return True
-        # The profile that runs must be the one saved. After a failed Apply to all the old
-        # one still runs, and this Apply must not switch every other device to the new one.
-        applied = self.scheduler.applied_plan()
-        saved = self.repository.get_general_profile()
-        return (
-            applied is not None
-            and applied.general_profile is not None
-            and applied.general_profile.profile_id == saved.id
-            # An edit of the saved profile that never reached the network is not running.
-            and self.scheduler.applied_general_profile() == saved
-        )
+            return applied and self.repository.get_general_profile() is not None, applied
+        if running is None:
+            return False, False
+        prepared, _ = running
+        return (prepared.plan.general_profile is not None,
+                applied and prepared.configuration_version == state.configuration_version)
 
     def _stop_state(self) -> str:
         """Whether a Panic, outage or state error keeps profiles stopped: latched, clear or unknown."""
@@ -5345,7 +5332,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         return "latched" if latched else "clear"
 
     def _start_beside_everyone(self, fields, snapshot, device, general, control_intent,
-                               previous_exceptions, ran_before=None, existing=None):
+                               previous_exceptions, ran_before=None, existing=None,
+                               versions=()):
         """Apply Everyone for all and this device's own profile. Everyone is not cleared."""
 
         status, content_type, body = self._apply_configuration_locked(
@@ -5369,12 +5357,21 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         # then agree, so a later Apply or retry never installs this failed choice. The check
         # and the restore are one step under the Panic fence: a Panic that ended the
         # exceptions is never undone.
+        put_back_version = []
+
         def restore():
             failed = self.repository.get_runtime_state()
             if failed.last_action not in ("apply", "schedule"):
                 return False
             try:
                 with self.repository.transaction():
+                    # Saved and running agree again after the restore only when nothing
+                    # else was saved since the plan that ran was built.
+                    clean = (
+                        ran_before is not None and len(versions) == 2
+                        and versions[0] == ran_before[0].configuration_version
+                        and failed.configuration_version == versions[1]
+                    )
                     if existing is None:
                         self.repository.delete_device(device.id)
                     else:
@@ -5386,6 +5383,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         last_result=failed.last_result, last_error=failed.last_error,
                         keep_everyone_exceptions=bool(previous_exceptions),
                     )
+                if clean:
+                    put_back_version.append(
+                        self.repository.get_runtime_state().configuration_version)
             except StorageError:
                 LOGGER.exception("could not put back the device assignment after a failed start")
                 self.repository.restore_everyone_exceptions(previous_exceptions)
@@ -5395,10 +5395,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         note = ""
         if status == HTTPStatus.BAD_GATEWAY and accepted and restored and ran_before is not None:
             # A failed apply may have removed the rules that ran. Put back the plan that ran,
-            # not the saved settings: the device's new profile may be what failed.
+            # not the saved settings: the device's new profile may be what failed. After a
+            # clean restore the saved settings build that plan again, so it counts as theirs.
+            prepared, rolls = ran_before
+            prepared = replace(prepared, configuration_version=(
+                put_back_version[0] if put_back_version else None))
             put_back, _, _ = self._apply_configuration_locked(
                 connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
-                keep_exceptions=True, restore_plan=ran_before,
+                keep_exceptions=True, restore_plan=(prepared, rolls),
             )
             note = (
                 " What ran before was put back."
@@ -5737,8 +5741,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
     ) -> Tuple[int, str, bytes]:
         """Apply the whole saved plan, or with `device_scope` only a device-only start.
 
-        `restore_plan` is a plan and its source descriptions that ran before: a failed
-        apply puts exactly that back, not what the saved settings say now.
+        `restore_plan` is the scheduler's running plan from before, with its saved version
+        and randomization state: a failed apply puts exactly that back, not what the saved
+        settings say now.
 
         A device-only start is read here, under the shared lock, so a Reset that ran
         while this call waited leaves nothing to start. Start and Apply to everyone cover
@@ -5797,21 +5802,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         ran_before = None
         if (scope is None and not keep_exceptions and restore_plan is None
                 and self.scheduler is not None and self.repository.everyone_exception_rows()):
-            applied, sources = self.scheduler.applied_snapshot()
-            if applied is not None:
-                ran_before = (
-                    applied, sources, self.scheduler.roll_snapshot(),
-                    self.repository.get_runtime_state().observed_state,
-                )
+            ran_before = self.scheduler.running_plan()
         try:
             if restore_plan is not None:
-                # The randomization state of the plan that ran comes back with it.
-                if self.scheduler is not None:
-                    self.scheduler.restore_rolls(restore_plan[2])
-                prepared = (
-                    PreparedRuntimePlan(plan=restore_plan[0], states=dict(restore_plan[1] or {}))
-                    if self.scheduler is not None else None
-                )
+                # The plan that ran comes back with its randomization state.
+                prepared, rolls = restore_plan
+                self.scheduler.restore_rolls(rolls)
             else:
                 prepared = (
                     self.scheduler.prepare_plan(
@@ -5821,9 +5817,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     if self.scheduler is not None else None
                 )
             plan = (
-                restore_plan[0]
-                if restore_plan is not None
-                else prepared.plan
+                prepared.plan
                 if prepared is not None
                 else compile_stored_plan(
                     repository=self.repository,
@@ -5913,10 +5907,11 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         def publish():
             if result.get("counters_preserved") is not True:
                 self.repository.rebase_quota_counters(now=int(time.time()))
-            # A plan put back after a failure leaves unapplied saved settings unapplied: the
-            # state keeps saying so instead of claiming that the saved settings run.
+            # A plan put back after a failure counts as applied only when the saved settings
+            # of now built it. Otherwise unapplied saved settings stay unapplied.
             observed = (
-                "unknown" if restore_plan is not None and restore_plan[3] == "unknown"
+                "unknown" if restore_plan is not None and prepared.configuration_version
+                != self.repository.get_runtime_state().configuration_version
                 else "applied"
             )
             state = self.repository.update_runtime_state(

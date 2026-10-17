@@ -142,13 +142,25 @@ Behaviour:
 | State when Apply is pressed on one device | Result |
 | --- | --- |
 | Everyone running | The device leaves Everyone. Other saved devices stay under Everyone. |
-| Everyone saved but not running: never started, a failed apply, or the applied plan has no Everyone, or a different Everyone profile, or a profile whose saved definition was edited without reaching the network | Refused before saving (409). Start would run Everyone for every device, which this Apply must not do. Choose Start, Reset network first or stop Everyone. |
-| Saved settings that nothing applied yet (state unknown after a network ran), for example written by another process | Refused before saving (409): this Apply would install them for other devices too. Try again in a moment. |
-| A Stop for everyone that was saved but failed, so Everyone still runs | Refused before saving (409): applying the saved settings would finish the Stop and start every paused device setting. Choose Start first. |
+| Everyone saved but not running: never started, or its last apply failed, so no plan with Everyone runs | Refused before saving (409). Start would run Everyone for every device, which this Apply must not do. Choose Start, Reset network first or stop Everyone. |
+| Everyone runs, but not what is saved: the plan that runs was built from an older saved version. For example a failed Apply to all or Stop for everyone, an edit of a profile that did not reach the network yet, or settings written by another process | Refused before saving (409): this Apply builds the whole plan from the saved settings, so it would install them for other devices too. Try again in a moment (the scheduler applies saved changes), or choose Start first. |
 | Panic or outage stop latched, or the Pi does not say | Refused before saving (409), as after a Reset. |
 | Device protected | Refused before saving, as before. |
 | More than 15 classes with Everyone, the exceptions, their service limits and the service lists | Refused before saving (409) and the earlier exceptions stay. Service limits count even when the plan is checked without DNS. |
 | The helper fails to apply | Nothing changes: the device keeps the assignment it had, or none, and is not an exception, and the earlier exceptions stay. Saved and running settings agree, so a later Apply or retry never installs the failed choice. The dashboard applies the plan that ran at once, not the saved settings, because a failed apply can remove the rules and the new profile may be what failed. The scheduler keeps trying if that fails too and later plans the saved settings as for any saved change. A Panic that lands meanwhile wins: the exceptions are put back only through the Panic fence. |
+
+Why one rule covers the divergence cases: the scheduler keeps the saved configuration
+version that the running plan was built from (every saved change raises the version,
+and every accepted plan records the version read before it was built). A device Apply
+beside Everyone goes ahead only while that version equals the saved version of now and
+the last apply succeeded. Then the saved settings build the plan that runs, so the only
+change the Apply makes is the device's own profile. Earlier drafts compared single
+fields (profile id, profile contents, state unknown, a failed Stop), and each review
+found one more field. A put-back after a failed device Apply carries the saved version
+of after the restore, so a retry is allowed again only when nothing else was saved in
+between. What the version does not cover is the same for every apply: the time of day
+(schedules, timers), website lookups and the connected devices are read when the plan
+is built.
 
 How long the device stays beside Everyone:
 
@@ -167,8 +179,8 @@ How long the device stays beside Everyone:
   failed Start, Apply to all or Stop for everyone keeps them and applies the plan
   that ran again with its randomization state, outage deadlines and sessions, so
   the record, the retry, the next tick and the running policy agree. The state
-  keeps saying unknown when saved settings were waiting to be applied before the
-  failure, so the put-back never claims that they run.
+  says applied only when the saved settings of now built the plan that was put back,
+  so the put-back never claims that unapplied saved settings run.
   The usage of the devices is sampled before the counters restart.
 - Traffic progressions sample and advance only for the devices that run beside
   Everyone. The others stay paused.

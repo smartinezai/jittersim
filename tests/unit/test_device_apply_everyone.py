@@ -53,6 +53,9 @@ class EveryoneRunningFixture(DeviceApplyFixture):
         self.assertEqual(decoded.queues, plan.queues)
         return plan
 
+    def version(self):
+        return self.repository.get_runtime_state().configuration_version
+
     def exceptions(self):
         return self.repository.get_everyone_exceptions()
 
@@ -326,7 +329,8 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
 
         scheduler = self.use_scheduler()
         self.assertEqual(self.apply_to()[0], 200)
-        scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan))
+        scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan),
+                           configuration_version=self.version())
         real = self.helper.apply
         calls = []
 
@@ -353,11 +357,12 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
         self.assertIsNone(self.repository.get_device(PHONE_ID))
         self.assertEqual(len(self.helper.plans), applied_before)
         self.assertEqual(self.helper.applied_plan.general_profile.profile_id, "low")
-        # Once that state is cleared the saved Everyone still is not the one that runs.
+        # A state that claims success does not help: the plan that runs is older than the
+        # saved settings.
         self.mark_applied()
         status, result = self.apply_to(PHONE, "low")
         self.assertEqual(status, 409)
-        self.assertIn("Everyone is saved as Slow test", result["error"])
+        self.assertIn("waiting to be applied", result["error"])
         self.assertEqual(len(self.helper.plans), applied_before)
 
     def test_a_device_apply_waits_for_saved_settings_that_nothing_applied(self) -> None:
@@ -376,10 +381,28 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
         self.assertEqual(len(self.helper.plans), applied_before)
         self.assertEqual(self.delays(self.helper.applied_plan, AIR_ID), {3_000})
 
+    def test_once_the_scheduler_applied_the_saved_change_a_device_apply_runs(self) -> None:
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        self.repository.save_profile(Profile(
+            id="slow-test", name="Slow test", upload=Impairment(delay_ms=2_000)))
+        self.assertEqual(self.apply_to(PHONE, "low")[0], 409)
+
+        # The next tick builds the plan from the saved settings, so they are what runs.
+        self.assertTrue(scheduler.tick(repository=self.repository))
+        self.assertEqual(scheduler.running_plan()[0].configuration_version, self.version())
+        status, _ = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 200)
+        plan = self.last_plan()
+        self.assertEqual(self.delays(plan, AIR_ID), {2_000})
+        self.assertEqual(self.delays(plan, PHONE_ID), {50})
+
     def test_a_device_apply_never_installs_an_edit_of_everyones_profile(self) -> None:
         scheduler = self.use_scheduler()
         self.assertEqual(self.apply_to()[0], 200)
-        scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan))
+        scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan),
+                           configuration_version=self.version())
         # The saved Everyone profile was edited but the edit never reached the network.
         self.repository.save_profile(Profile(
             id="low", name="daily climb manual", upload=Impairment(loss_percent=100)))
@@ -389,7 +412,7 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
         status, result = self.apply_to(PHONE, "low")
 
         self.assertEqual(status, 409)
-        self.assertIn("not running", result["error"])
+        self.assertIn("waiting to be applied", result["error"])
         self.assertIsNone(self.repository.get_device(PHONE_ID))
         self.assertEqual(len(self.helper.plans), applied_before)
         self.assertEqual(self.delays(self.helper.applied_plan, GENERAL_QUEUE_ID), {50})
@@ -399,7 +422,8 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
 
         scheduler = self.use_scheduler()
         self.assertEqual(self.apply_to()[0], 200)
-        scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan))
+        scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan),
+                           configuration_version=self.version())
         real = self.helper.apply
         calls = []
 
@@ -421,7 +445,7 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
         status, result = self.apply_to(PHONE, "low")
 
         self.assertEqual(status, 409)
-        self.assertIn("Stop for everyone did not finish", result["error"])
+        self.assertIn("waiting to be applied", result["error"])
         self.assertIsNone(self.repository.get_device(PHONE_ID))
         self.assertEqual(len(self.helper.plans), applied_before)
         self.assertEqual(self.helper.applied_plan.general_profile.profile_id, "low")
@@ -479,11 +503,11 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
     def test_putting_back_never_installs_the_profile_that_failed(self) -> None:
         # The Air already runs beside Everyone. Applying a profile that blocks everything
         # fails at the helper. What goes back is the plan that ran, not the saved choice.
-        self.use_scheduler()
         self.repository.save_profile(Profile(
             id="blocked", name="Blocked", upload=Impairment(loss_percent=100),
             download=Impairment(loss_percent=100)))
         self.mark_applied()
+        self.use_scheduler()
         self.assertEqual(self.apply_to()[0], 200)
         ran_before = self.helper.applied_plan
         patcher, calls = self.fail_first_apply()
@@ -726,7 +750,8 @@ class WholeScopeActionTests(EveryoneRunningFixture):
                         raise HelperClientError("simulated helper failure")
                     return real(**arguments)
 
-                scheduler.activate(applied_payload=plan_to_payload(ran))
+                scheduler.activate(applied_payload=plan_to_payload(ran),
+                                   configuration_version=self.version())
                 with patch.object(self.helper, "apply", side_effect=apply), \
                         self.assertLogs("jittersim.api.server", "ERROR"):
                     status, result = self.write(path, payload)
@@ -750,7 +775,8 @@ class WholeScopeActionTests(EveryoneRunningFixture):
                 self.assertEqual(self.write("/api/general-profile", {"profile_id": "low"})[0], 200)
                 scheduler = self.use_scheduler()
                 self.assertEqual(self.apply_to()[0], 200)
-                scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan))
+                scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan),
+                                   configuration_version=self.version())
                 before = {key: roll for key, roll in scheduler._rolls.items()}
                 self.assertIn(AIR_ID, before)
                 real = self.helper.apply

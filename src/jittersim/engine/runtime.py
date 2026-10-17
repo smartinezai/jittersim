@@ -154,6 +154,8 @@ class PreparedRuntimePlan:
     states: Dict[str, TargetState]
     # Website names whose lookup missed the deadline, so the plan leaves them out.
     unresolved_names: Tuple[str, ...] = ()
+    # The saved configuration version read before the plan was built. None when unknown.
+    configuration_version: Optional[int] = None
 
 
 @dataclass
@@ -216,6 +218,9 @@ class RuntimeScheduler:
         self._pending_events: List[dict] = []
         self._last_pattern_cleanup_at = 0.0
         self._current_payload = None
+        # The saved configuration version the applied plan was built from. It counts only
+        # while `_current_payload` is set.
+        self._applied_version: Optional[int] = None
         self._paused = True
         # Counts Panic requests so an apply that was running meanwhile can tell.
         self._halt_count = 0
@@ -342,13 +347,15 @@ class RuntimeScheduler:
         if unresolved:
             raise WorkersStillRunning("Scheduler workers did not stop. Their state remains owned.")
 
-    def activate(self, *, applied_payload: object, counters_preserved: bool = False) -> None:
+    def activate(self, *, applied_payload: object, counters_preserved: bool = False,
+                 configuration_version: Optional[int] = None) -> None:
         """Resume scheduled work after a successful manual apply."""
 
         with self._lock:
             if not self.can_apply(self.apply_generation):
                 return
             self._current_payload = applied_payload
+            self._applied_version = configuration_version
             self._paused = False
             # A replacement restarts the counters. Keep totals and count on from zero.
             if not counters_preserved:
@@ -372,7 +379,9 @@ class RuntimeScheduler:
         with self._apply_lock:
             self._record_activity(repository=repository, states=prepared.states, now=time.time())
             self._save_patterns(repository, time.time())
-            self.activate(applied_payload=plan_to_payload(prepared.plan), counters_preserved=counters_preserved)
+            self.activate(applied_payload=plan_to_payload(prepared.plan),
+                          counters_preserved=counters_preserved,
+                          configuration_version=prepared.configuration_version)
 
     def build_plan(
         self,
@@ -424,12 +433,16 @@ class RuntimeScheduler:
 
         current_time = time.time() if now is None else now
         with self._apply_lock:
+            # Read before building: a write that lands meanwhile makes the version look older
+            # than the plan, never newer.
+            version = repository.get_runtime_state().configuration_version
             plan, states = self._build_plan(
                 repository=repository, now=current_time, connected_snapshot=connected_snapshot,
                 device_scope=device_scope, everyone_exceptions=everyone_exceptions,
             )
             return PreparedRuntimePlan(
-                plan=plan, states=states, unresolved_names=self._unresolved_names
+                plan=plan, states=states, unresolved_names=self._unresolved_names,
+                configuration_version=version,
             )
 
     @contextmanager
@@ -637,18 +650,24 @@ class RuntimeScheduler:
         with self._lock:
             return self._halt_count
 
-    def applied_general_profile(self):
-        """Return the saved profile the applied Everyone plan was built from, if any."""
+    def running_plan(self):
+        """Return the plan that runs and a copy of its randomization state, or None.
 
-        with self._lock:
-            roll = self._rolls.get("@general")
-            return None if roll is None else roll.source_profiles
+        The plan carries its source descriptions and the saved configuration version it
+        was built from, so a caller can tell whether the saved settings are what runs and
+        can apply exactly this plan again.
+        """
 
-    def roll_snapshot(self):
-        """Copy the randomization state that belongs to the plan that runs."""
-
-        with self._apply_lock:
-            return {key: replace(roll) for key, roll in self._rolls.items()}
+        with self._apply_lock, self._lock:
+            version = self._applied_version
+            plan, states = self.applied_snapshot()
+            if plan is None:
+                return None
+            return (
+                PreparedRuntimePlan(plan=plan, states=dict(states or {}),
+                                    configuration_version=version),
+                {key: replace(roll) for key, roll in self._rolls.items()},
+            )
 
     def restore_rolls(self, snapshot) -> None:
         """Put back the randomization state of a plan that is applied again."""
@@ -891,6 +910,8 @@ class RuntimeScheduler:
                 # The network already runs this plan, for example one the
                 # dashboard applied after a saved change.
                 def publish_unchanged():
+                    # The saved settings of this version build exactly the plan that runs.
+                    self._applied_version = configuration_version
                     self._log_plan_recovery(self._clear_plan_failure())
                     self._record_activity(repository=active_repository, states=states, now=current_time)
                     self._save_patterns(active_repository, current_time)
@@ -916,6 +937,7 @@ class RuntimeScheduler:
                     active_repository.rebase_quota_counters(now=int(current_time))
                     self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
                 self._current_payload = payload
+                self._applied_version = configuration_version
                 self._log_plan_recovery(self._clear_plan_failure())
                 if not active_repository.record_schedule_result(success=True):
                     self.pause()
