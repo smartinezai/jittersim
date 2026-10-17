@@ -25,7 +25,6 @@ from jittersim.connection_check import DEFAULT_PROBES, PROBE_INTERVAL_SECONDS
 from jittersim.engine.plan import (
     GENERAL_QUEUE_ID,
     Direction,
-    QueueSpec,
     ServiceAssignmentRule,
 )
 from jittersim.networking.helper import HelperClientError
