@@ -253,10 +253,15 @@ How it works:
   service uses the system Python and the `python3-dbus` package that the
   installer adds.
 - Avahi's own publishing is switched off (`publish-addresses=no`,
-  `publish-workstation=no`, `publish-hinfo=no`, `publish-domain=no`,
-  `disable-user-service-publishing=yes`, no reflector, and the SSH, SFTP and
-  other `*.service` files in `/etc/avahi/services` are renamed to
-  `*.jittersim-disabled`) because Avahi cannot limit these to one network.
+  `publish-workstation=no`, `publish-hinfo=no`, `publish-domain=no`, no
+  reflector, and the SSH, SFTP and other `*.service` files in
+  `/etc/avahi/services` are renamed to `*.jittersim-disabled`) because Avahi
+  cannot limit these to one network. `disable-user-service-publishing` stays
+  `no`: with `yes` Avahi refuses every record from every D-Bus client, the name
+  service included, and the name is never announced. Releases before 16 October
+  2026 wrote `yes`. Installing or updating corrects it and restarts Avahi. The
+  name service reports "Avahi is set to refuse records from other programs"
+  until then.
   The Pi's host name is not changed. Fresh settings announce no host or product
   aliases. Existing `.local` aliases required by the retained certificate stay
   reachable on Ethernet only. Nothing but the one neutral name is announced on
@@ -1490,9 +1495,18 @@ changes are preserved. The policy utility also supports older-release rollback.
 
 Setup stops and prints one fixed reason word when it cannot be sure it is safe.
 `administrator-policy` means a journald file already sets storage or limits.
-Distribution defaults count too. Raspberry Pi OS may ship a volatile storage
-default. In that case set the limits yourself or ask for a decision. Nothing
-is overwritten. `unsafe-directory` or `unsafe-configuration` means an owner or
+Nothing is overwritten. One distribution default is not counted: Raspberry Pi OS
+ships `/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf` with
+exactly `Storage=volatile`. The project's file is named
+`90-jittersim-persistent.conf` so it sorts after that one (journald merges
+drop-ins by file name and the last value wins), and logs then survive a reboot
+(at most 64 MB on the card, 7 days). Earlier releases used the name
+`20-jittersim-outage.conf`, which lost to the Raspberry Pi OS file. The next
+setup or removal moves its link to the new name. A changed copy of the Raspberry
+Pi OS file, any other file in `/usr/lib`, and any file in `/etc` or `/run` that
+sets storage or limits (the same file name under `/etc` included) still counts
+as an administrator's choice. Then set the limits yourself or ask for a decision.
+`unsafe-directory` or `unsafe-configuration` means an owner or
 permission check failed. `low-space` means the card is too full. An interrupted
 setup leaves `/etc/jittersim-outage-journal` behind and later runs refuse to
 guess. Delete that folder and the link under

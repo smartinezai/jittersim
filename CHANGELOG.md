@@ -30,3 +30,14 @@ next release takes them over.
   v1.1.0**), shows whether a recovery copy is kept, shows the release notes when
   the Pi reports them, and the install confirmation names the signer and the
   automatic restore.
+- The dashboard asks before deleting a profile, device or group, clearing the
+  activity log, importing settings, changing the Pi Wi-Fi, restoring its name,
+  reversing an address move, copying the router Wi-Fi, removing dashboard
+  access or stopping protection of the device in use in its own dialog instead
+  of the browser's. The dialog names the action on its button, Escape
+  cancels it and focus returns to the control that opened it.
+- A screen reader hears each result once. The dashboard has one status region
+  and one alert region for results and errors, and lists that refresh every few
+  seconds (devices, saved profiles, groups, schedules, timers, limits,
+  observations and the router connection) no longer announce themselves. A
+  refresh keeps keyboard focus on the button you were on.

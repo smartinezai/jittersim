@@ -11,7 +11,6 @@ AP_CONNECTION = "jittersim-ap"
 RECOVERY_CONNECTION = "jittersim-ap-recovery"
 # The fallback name. Only the name changes: password and security stay.
 RECOVERY_WIFI_NAME = "JitterSim-Recovery"
-WPA3_SETTINGS = security_settings("WPA3")
 SSID_PROPERTY = "802-11-wireless.ssid"
 PROFILE_PROPERTIES = ("connection.type", "connection.interface-name", SSID_PROPERTY,
                       *SECURITY_PROPERTIES)

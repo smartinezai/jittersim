@@ -8,7 +8,14 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
-from tests.browser.phone import close_controls, is_phone, open_controls, open_status, sidebar_control
+from tests.browser.live_regions import speakers
+from tests.browser.phone import (
+    close_controls,
+    is_phone,
+    open_controls,
+    open_status,
+    sidebar_control,
+)
 
 MAC_ADDRESS = "02:00:00:00:00:01"
 CLIENT_NAME = "Fixture laptop"
@@ -64,13 +71,8 @@ def check_one_message(page, width, height):
     # The message line keeps the text for scripts but shows nothing and says nothing.
     expect(page.locator("#message")).to_be_hidden()
     assert page.locator("#message").get_attribute("aria-hidden") == "true"
-    announcing = page.evaluate(
-        """() => [...document.querySelectorAll(
-          '[role="status"], [role="alert"], [aria-live="polite"], [aria-live="assertive"]')]
-          .filter((node) => !node.closest('[hidden]') && node.getAttribute('aria-hidden') !== 'true'
-                  && node.textContent.includes('Token accepted')).map((node) => node.id)"""
-    )
-    assert announcing == ["action-announcer"], announcing
+    said = speakers(page, "Token accepted")
+    assert said == ["action-announcer"], said
     box = toast.bounding_box()
     assert box["width"] <= 22 * 16 + 1, box
     assert box["x"] >= 0 and box["y"] >= 0 and box["x"] + box["width"] <= width, box
@@ -78,6 +80,20 @@ def check_one_message(page, width, height):
         assert height - (box["y"] + box["height"]) <= 17, box
     expect(toast.get_by_role("button", name="Dismiss message")).to_be_visible()
     expect(toast).to_be_hidden(timeout=9000)
+
+    # An error goes to the alert region and nowhere else. The two regions never change their kind.
+    page.evaluate("showToast('Alert region check', 'error')")
+    said = speakers(page, "Alert region check")
+    assert said == ["action-alert"], said
+    page.evaluate("showToast('Status region check', 'success')")
+    assert speakers(page, "Status region check") == ["action-announcer"]
+    assert speakers(page, "Alert region check") == [], "the alert text stays after a status"
+    kinds = page.evaluate(
+        "['action-announcer', 'action-alert'].map((id) => [id,"
+        " document.getElementById(id).getAttribute('role'),"
+        " document.getElementById(id).hasAttribute('aria-live')])"
+    )
+    assert kinds == [["action-announcer", "status", False], ["action-alert", "alert", False]], kinds
 
     # A result must not hide the control currently being used by keyboard.
     page.evaluate("showToast('Keyboard notification check', 'success')")
@@ -122,7 +138,7 @@ def check_one_message(page, width, height):
         hidden_dismiss = page.locator('#toast-dismiss')
         hidden_dismiss.evaluate("node => node.focus()")
         assert not hidden_dismiss.evaluate("node => node === document.activeElement")
-        expect(page.locator('#action-announcer')).to_have_text('Persistent recovery message')
+        expect(page.locator('#action-alert')).to_have_text('Persistent recovery message')
         close_controls(page)
         expect(toast).to_be_visible()
         expect(toast).to_contain_text('Persistent recovery message')
@@ -145,6 +161,18 @@ def check_one_message(page, width, height):
         page.screenshot(path=f"test-results/sidebar-long-recovery-{width}.png")
         dismiss.click()
         expect(toast).to_be_hidden()
+
+
+def check_said_once(page, what):
+    """The result of an action is written to one live region and heard once, not in every
+    status line that also happens to show it."""
+
+    message = page.locator("#toast-message").text_content().strip()
+    assert message, what
+    found = speakers(page, message)
+    assert found == ["action-announcer"], (what, message, found)
+    # Nothing else that speaks changed at the same time to say it again.
+    assert speakers(page, message.split(".")[0]) == ["action-announcer"], (what, message)
 
 
 def check_width(browser, width, height):
@@ -212,6 +240,7 @@ def check_width(browser, width, height):
         expect(page.locator("#status-general")).to_have_text(
             f"Everyone: {PROFILE_NAME} · active"
         )
+        check_said_once(page, "Apply")
         expect(devices_line(page)).to_have_text("1 device affected")
         page.locator("#status-devices-summary").click()
         expect(page.locator("#status-devices-list li")).to_have_count(1)
@@ -284,15 +313,17 @@ def check_width(browser, width, height):
             f"Everyone: {PROFILE_NAME} · paused"
         )
         expect(page.locator("#status-lists")).to_be_hidden()
-        post("/api/apply", {})
+        sidebar_control(page, "#apply-button").click()
         expect(devices_line(page)).to_have_text("No connected device is affected", timeout=9000)
         expect(page.locator("#status-general")).to_have_text(
             f"Everyone: {PROFILE_NAME} · active"
         )
+        check_said_once(page, "Start")
 
         # turning every profile off
         page.locator("#panic-button").click()
         expect(devices_line(page)).to_have_text("Profiles off")
+        check_said_once(page, "Panic")
         expect(page.locator("#status-general")).to_have_text(
             f"Everyone: {PROFILE_NAME} · paused"
         )

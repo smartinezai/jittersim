@@ -367,6 +367,7 @@ function renderDeviceCards() {
     const state = Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id) ? deviceConditions.devices[device.id] : null;
     const card = document.createElement('article');
     card.className = 'device-card';
+    card.dataset.key = device.id;
     const profile = deviceProfileCell(device);
     // The name is the title and the address is small text under it.
     card.append(textNode('h3', deviceDisplayName(device)), textNode('p', device.ipv4_address, 'form-note'),
@@ -378,7 +379,7 @@ function renderDeviceCards() {
   });
   const others = everyoneElseRow();
   if (others) {
-    const card = document.createElement('article'); card.className='device-card';
+    const card = document.createElement('article'); card.className='device-card'; card.dataset.key='everyone-else';
     card.append(textNode('h3', 'Everyone else'), textNode('p', others.cells[2].join(' · ')),
       actionButton('Edit everyone else', () => element('everyone-else-profile').focus()));
     container.append(card);
@@ -630,20 +631,56 @@ function installRecords() {
 installRecords();
 
 
-async function confirmWorkflow(message) {
+// One accessible question for every destructive or restarting action. The one-argument form keeps
+// the generic Continue button. Options: confirmLabel (the verb on the button), danger (red button
+// for deletes), title (a heading that names the action), returnFocus (the control to focus again
+// when it is not the one that has focus now). Escape and Cancel answer false, and focus goes back
+// to the control that opened the question.
+let workflowConfirmSerial = 0;
+async function confirmWorkflow(message, options) {
+  const settings = options || {};
+  const opener = settings.returnFocus || document.activeElement;
+  const serial = ++workflowConfirmSerial;
   const dialog = document.createElement('dialog');
-  const text = textNode('p', message); text.id = 'workflow-confirm-text';
-  dialog.setAttribute('aria-labelledby', text.id);
+  dialog.className = 'workflow-confirm';
+  const text = textNode('p', message); text.id = 'workflow-confirm-text-' + serial;
+  if (settings.title) {
+    const title = textNode('h2', settings.title); title.id = 'workflow-confirm-title-' + serial;
+    dialog.setAttribute('aria-labelledby', title.id);
+    dialog.setAttribute('aria-describedby', text.id);
+    dialog.append(title);
+  } else dialog.setAttribute('aria-labelledby', text.id);
   dialog.append(text);
   const answer = await new Promise(resolve => {
-    const cancel = actionButton('Cancel', () => { dialog.close(); resolve(false); });
-    const proceed = actionButton('Continue', () => { dialog.close(); resolve(true); });
+    const choice = (label, value, className) => {
+      const button = textNode('button', label, className); button.type = 'button';
+      button.addEventListener('click', () => dialog.close(value));
+      return button;
+    };
+    const cancel = choice('Cancel', 'cancel');
+    const proceed = choice(settings.confirmLabel || 'Continue', 'confirm', settings.danger ? 'danger' : '');
     dialog.append(cancel, proceed);
-    dialog.addEventListener('cancel', () => resolve(false), {once:true});
+    // Escape closes the dialog without a return value, which counts as Cancel.
+    dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm'), {once:true});
     document.body.append(dialog); dialog.showModal(); cancel.focus();
   });
   dialog.remove();
+  restoreWorkflowFocus(opener);
   return answer;
+}
+function restoreWorkflowFocus(opener) {
+  if (!opener || opener === document.body || !opener.isConnected) return;
+  if (!opener.disabled) { opener.focus({preventScroll:true}); return; }
+  // The opener is busy while its own action runs (see actionButton). Give it focus when it is
+  // enabled again, unless the person has already moved on.
+  const watcher = new MutationObserver(() => {
+    if (opener.disabled) return;
+    watcher.disconnect();
+    const active = document.activeElement;
+    if (!active || active === document.body) opener.focus({preventScroll:true});
+  });
+  watcher.observe(opener, {attributes:true, attributeFilter:['disabled']});
+  window.setTimeout(() => watcher.disconnect(), 120000);
 }
 
 let releaseState = null;
@@ -777,7 +814,8 @@ function renderUpdates(failedRead) {
   element('update-retry-status').hidden = !retryReason;
   const progress = updateProgressText(failedRead);
   element('update-progress').hidden = !progress;
-  element('update-progress').textContent = progress;
+  // The progress line speaks (role="status"), so it is only written when its words change.
+  if (element('update-progress').textContent !== progress) element('update-progress').textContent = progress;
   element('sidebar-update-link').hidden = !ready;
   element('sidebar-update-link').textContent = ready ? 'Update available: ' + releaseLabel(state) : '';
   element('update-available-badge').hidden = !ready;
@@ -1237,20 +1275,20 @@ function installReleaseControls() {
       <div><dt>Recovery copy</dt><dd id="update-recovery">Unknown</dd></div>
     </dl>
     <details id="update-notes-box" hidden><summary>Release notes</summary><pre id="update-notes" class="update-notes" tabindex="0" role="region" aria-label="Release notes text"></pre></details>
-    <p id="release-status" role="status" aria-live="polite">Check for an approved release on this Pi.</p>
-    <p id="online-check-status" class="form-note" role="status" aria-live="polite">Loading the online check…</p>
+    <p id="release-status">Check for an approved release on this Pi.</p>
+    <p id="online-check-status" class="form-note">Loading the online check…</p>
     <p id="github-access-hint" class="form-note" hidden></p>
     <div id="release-actions"></div>
     <p id="update-retry-status" class="form-note" hidden></p>
-    <p id="update-progress" class="update-progress" role="status" aria-live="polite" hidden></p>
+    <p id="update-progress" class="update-progress" role="status" hidden></p>
     <h3 class="online-heading">Settings</h3>
     <label class="update-auto-check"><input id="online-daily-check" type="checkbox" disabled><span>Check automatically every day</span></label>
     <label class="update-auto-check"><input id="online-install-automatically" type="checkbox" disabled><span>Install automatically</span></label>
     <p class="form-note">Install automatically installs a new signed release without anyone pressing Install. It uses the same checks and the same recovery copy as a manual install. Both settings are off until you turn them on.</p>
-    <p id="online-setting-status" class="form-note" role="status" aria-live="polite"></p>
+    <p id="online-setting-status" class="form-note" role="status"></p>
     <details><summary>The GitHub token</summary><p>The repository is private, so the Pi needs a read-only token for this one repository. Create it on GitHub (Settings, Developer settings, Fine-grained tokens, only this repository, Contents read-only, with an expiry date). Then run <code id="update-token-command">the setup command shown after sign-in</code> on the Pi, paste the token and press Ctrl-D. This page never asks for the token and never shows it.</p></details>
     <label class="update-auto-check"><input id="check-staged-updates-on-open" type="checkbox" disabled><span>Look for a release staged on this Pi when the dashboard opens</span></label>
-    <p id="update-preference-status" class="form-note update-preference-status" role="status" aria-live="polite">Loading the saved preference…</p>
+    <p id="update-preference-status" class="form-note update-preference-status">Loading the saved preference…</p>
     <details><summary>How releases reach this private Pi</summary><p>The owner builds and signs a release on the Mac and deploy-from-mac.sh stages it over SSH. The Pi can also fetch the newest signed release from GitHub itself. The Pi stages only a release signed by a key it trusts and newer than the one it runs. The admin token cannot stage a release: it can only install the one already staged. See Signed releases in the deployment guide.</p></details>`);
   wireReleaseControls();
 }

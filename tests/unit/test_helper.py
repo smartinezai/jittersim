@@ -24,7 +24,7 @@ from jittersim.engine.plan import (
     ServiceQuotaRule,
 )
 from jittersim.networking.applier import NetworkApplier
-from jittersim.networking.browser_proxy import load_active_plan
+from jittersim.networking.browser_proxy import _read_active_plan
 from jittersim.networking.commands import CommandResult
 from jittersim.networking.executor import CommandExecutionError, FakeExecutor
 from tests.helper_support import OldHelperService, OlderHelperService, captures, serving
@@ -306,7 +306,7 @@ class HelperServiceTests(unittest.TestCase):
                 {"action": "apply", "plan": plan_to_payload(make_plan())}
             )
             self.assertTrue(response["ok"])
-            self.assertEqual(load_active_plan(plan_path), make_plan())
+            self.assertEqual(_read_active_plan(plan_path)[0], make_plan())
             self.assertTrue(service.handle_payload({"action": "reset"})["ok"])
             self.assertFalse(plan_path.exists())
 
