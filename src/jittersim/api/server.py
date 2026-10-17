@@ -951,6 +951,7 @@ _SAVED_SETTINGS_WAIT = (
     "Saved settings are still waiting to be applied, so Everyone does not run what is "
     "saved. Nothing was saved. Choose Start to apply them first, then apply this profile."
 )
+_RESET_KEPT = "A reset was recorded meanwhile, so what ran before was not put back."
 _RESET_SAVED_ONLY = {
     "live_applied": False,
     "message": "saved; the network is reset, so choose Start to use it",
@@ -5413,6 +5414,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             note = (
                 " What ran before was put back."
                 if put_back == HTTPStatus.OK else
+                " " + _RESET_KEPT if put_back == HTTPStatus.CONFLICT else
                 " What ran before could not be put back, so the dashboard keeps trying."
             )
         response["error"] = (
@@ -5850,12 +5852,24 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             # yet, so this plan must not install them for other devices.
             return HTTPStatus.CONFLICT, "application/json", _json_bytes({
                 "error": _SAVED_SETTINGS_WAIT})
-        accepted, _ = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
-            observed_state="applying", last_action=runtime_action, last_result=None, last_error=None,
-            **keep,
-        ))
+        def mark_applying():
+            with self.repository.transaction():
+                if (restore_plan is not None
+                        and self.repository.get_runtime_state().last_action == "reset"):
+                    # A reset, for example `jittersim reset`, landed after the failure. A
+                    # put-back must never undo it.
+                    return False
+                self.repository.update_runtime_state(
+                    observed_state="applying", last_action=runtime_action, last_result=None,
+                    last_error=None, **keep,
+                )
+            return True
+
+        accepted, applying = self._publish_apply(halts_at_start, mark_applying)
         if not accepted:
             return self._apply_refused(halts_at_start)
+        if not applying:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": _RESET_KEPT})
         if self.scheduler is not None and sample_usage:
             # Applying recreates the helper counters, so record their traffic first.
             self.scheduler.sample_usage(repository=self.repository)
@@ -5901,6 +5915,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 failure += (
                     " What ran before was put back."
                     if put_back == HTTPStatus.OK else
+                    " " + _RESET_KEPT if put_back == HTTPStatus.CONFLICT else
                     " What ran before could not be put back, so the dashboard keeps trying."
                 )
                 state = self.repository.get_runtime_state()

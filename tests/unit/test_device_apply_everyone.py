@@ -638,6 +638,27 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         self.assertEqual(self.delays(plan, PHONE_ID), {50})
         self.assertEqual(self.exceptions(), {AIR_ID, PHONE_ID})
 
+    def test_a_reset_recorded_before_the_put_back_is_never_undone(self) -> None:
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        patcher, calls = self.fail_first_apply()
+
+        def cli_reset(_rolls):
+            # `jittersim reset` from another process, after the failure was recorded.
+            self.repository.update_runtime_state(
+                observed_state="reset", last_action="reset", last_result="success",
+                last_error=None)
+
+        with patcher, patch.object(scheduler, "restore_rolls", side_effect=cli_reset), \
+                self.assertLogs("jittersim.api.server", "ERROR"):
+            status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("A reset was recorded meanwhile", result["error"])
+        state = self.repository.get_runtime_state()
+        self.assertEqual((state.observed_state, state.last_action), ("reset", "reset"))
+
     def test_if_putting_it_back_fails_too_the_record_still_says_what_ran(self) -> None:
         self.use_scheduler()
         self.assertEqual(self.apply_to()[0], 200)
