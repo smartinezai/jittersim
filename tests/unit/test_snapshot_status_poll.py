@@ -8,9 +8,9 @@ loop beside it, the QA dashboard answered 502 to 2447 of 7796 reads of the clien
 15417 without that poll.
 
 READ_ONLY_ACTIONS lives in src/jittersim/networking/helper.py, one of the three files the updater
-only accepts as an approved bundle. The fix is two names in that set and goes in with the next
-Panic batch. Until then the browser fixture's PatientHelperClient asks again (see
-tests/unit/test_browser_fixture.py) and this module keeps the cause as an executable record.
+only accepts as an approved bundle. The two status reads are in that set now (carry-forward Panic
+batch), so these tests are ordinary regression tests. The browser fixture's scan retry
+(PatientHelperClient.connected_device_snapshot) that covered this cause is gone.
 """
 
 import threading
@@ -65,14 +65,6 @@ def new_client():
     return HelperClient(socket_path=Path("/tmp/not-used.sock"))
 
 
-STILL_FAILS = (
-    "update-online-status and update-online-settings are missing from READ_ONLY_ACTIONS in "
-    "networking/helper.py (Panic-gated, hash-pinned). Add both there, add a bundle to "
-    "PANIC_APPROVED_SOURCES, then remove this marker and PatientHelperClient.connected_device_snapshot."
-)
-
-
-@pytest.mark.xfail(strict=True, reason=STILL_FAILS)
 @pytest.mark.parametrize("poll", [
     pytest.param(lambda client: client.online_status(), id="online-status"),
     pytest.param(lambda client: client.online_settings(), id="online-settings-read"),
