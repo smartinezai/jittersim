@@ -226,6 +226,53 @@ QUESTION_CASES = (
 )
 
 
+def check_random_website_choices_say_the_last_answer_once(page):
+    """Two choices are made before the first answer arrives and the answers come in the other
+    order. The line under the table is no live region, so only the choice that is still the latest
+    says its answer, once, and the older one says nothing (it must not read the loading note)."""
+
+    page.locator('[data-page-link="traffic"]').click()
+    advance(page, 3)
+    held = []
+    page.route("**/api/random-website-analytics*", lambda route: held.append(route))
+    page.evaluate("""() => {
+      window.said = [];
+      for (const id of ['action-announcer', 'action-alert']) {
+        const region = document.getElementById(id);
+        new MutationObserver(() => { if (region.textContent) window.said.push(region.textContent); })
+          .observe(region, {childList: true, characterData: true, subtree: true});
+      }
+    }""")
+    days = page.locator("#random-website-days")
+    # The card starts closed.
+    closed = days.locator("xpath=ancestor::section[1]").locator("h2 .card-toggle[aria-expanded='false']")
+    if closed.count():
+        closed.first.click()
+    expect(days).to_be_visible()
+    for choice in ("7", "30"):
+        days.select_option(choice)
+        for _ in range(100):
+            if len(held) == int(choice == "30") + 1:
+                break
+            page.wait_for_timeout(50)
+    assert len(held) == 2, "both choices should be waiting for an answer"
+
+    def answer(count):
+        return {"rows": [{"device_id": "alice", "display_name": "Test phone", "domain": f"site{n}.example",
+                          "kept_count": 1, "removed_count": 1, "days_with_events": 1} for n in range(count)],
+                "oldest_available_day_utc": None, "truncated": False}
+
+    held[1].fulfill(json=answer(1))
+    expect(page.locator("#random-website-status")).to_contain_text("1 device and website totals")
+    held[0].fulfill(json=answer(2))
+    page.wait_for_timeout(400)
+    said = [text for text in page.evaluate("window.said") if "randomized website" in text or "totals" in text]
+    assert said and set(said) == {said[0]}, said
+    assert said[0].startswith("1 device and website totals"), said
+    assert len(said) == 1, said
+    page.unroute("**/api/random-website-analytics*")
+
+
 def check_a_question_returns_focus_after_its_list_is_drawn_again(page, cases=QUESTION_CASES):
     """A person takes a while to read a question, and the page polls meanwhile, so the list may be
     drawn again under the open question. Cancel and Escape must still give focus to the control of
@@ -318,6 +365,7 @@ def run():
                 advance(page, 6)
                 check_pollers_are_quiet(page, base)
                 check_a_full_refresh_is_quiet(page)
+                check_random_website_choices_say_the_last_answer_once(page)
                 check_a_question_returns_focus_after_its_list_is_drawn_again(page)
                 check_long_idle_is_quiet(page)
                 check_focus_survives_refresh(page)

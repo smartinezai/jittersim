@@ -32,8 +32,8 @@ def markdown_files():
     return [path for path in found if not any(path.relative_to(ROOT).as_posix().startswith(part) for part in SKIPPED)]
 
 
-def prose_lines(text):
-    """The lines outside code fences, with inline code removed."""
+def prose_lines(text, keep_code=False):
+    """The lines outside code fences. Inline code is removed unless a heading needs its words."""
 
     fenced = False
     for number, line in enumerate(text.splitlines(), 1):
@@ -41,7 +41,7 @@ def prose_lines(text):
             fenced = not fenced
             continue
         if not fenced:
-            yield number, re.sub(r"`[^`]*`", "", line)
+            yield number, line if keep_code else re.sub(r"`[^`]*`", "", line)
 
 
 def github_slug(heading):
@@ -56,7 +56,7 @@ _anchors = {}
 def anchors_of(path):
     if path not in _anchors:
         seen, found = {}, set()
-        for _number, line in prose_lines(path.read_text(encoding="utf-8")):
+        for _number, line in prose_lines(path.read_text(encoding="utf-8"), keep_code=True):
             match = HEADING.match(line)
             if match:
                 slug = github_slug(match.group(1))
@@ -99,10 +99,12 @@ def test_the_checker_sees_the_pages_and_their_links():
 
 
 def test_the_checker_finds_a_missing_file_and_a_missing_heading(tmp_path):
-    (tmp_path / "other.md").write_text("# Real heading\n\n## Same\n\n## Same\n", encoding="utf-8")
+    (tmp_path / "other.md").write_text(
+        "# Real heading\n\n## Same\n\n## Same\n\n### 8. Spike: let `dnsmasq --nftset` learn\n", encoding="utf-8")
     page = tmp_path / "page.md"
     page.write_text(
         "[ok](other.md#real-heading) [twin](other.md#same-1) [web](https://example.invalid/x#y)\n"
+        "[code](other.md#8-spike-let-dnsmasq---nftset-learn)\n"
         "[gone](missing.md) [bad](other.md#nothing) [self](#nope)\n"
         "`[code](missing.md)`\n\n```\n[fenced](missing.md)\n```\n",
         encoding="utf-8",

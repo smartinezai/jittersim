@@ -7697,7 +7697,11 @@
     // The line under the table is no live region, as every save reads it again. A choice made here
     // asks for the answer, so the answer is said once.
     async function askRandomWebsiteChoices() {
-      await loadRandomWebsiteAnalytics();
+      const asking = loadRandomWebsiteAnalytics();
+      const version = randomWebsiteAnalyticsRequestVersion;
+      await asking;
+      // A later choice says its own answer, and the line may be showing its loading note.
+      if (version !== randomWebsiteAnalyticsRequestVersion) return;
       const status = element("random-website-status");
       announce(status.textContent, status.classList.contains("error"));
     }
