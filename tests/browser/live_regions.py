@@ -13,6 +13,7 @@ import selectors
 import subprocess
 import sys
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import expect, sync_playwright
 
 TOKEN = "browser-test"
@@ -218,6 +219,67 @@ def check_focus_survives_refresh(page, cases=FOCUS_CASES, rounds=2):
             assert after == before, (listing, before, after)
 
 
+# Rows with a control that opens a question. (page, list, control inside the list)
+QUESTION_CASES = (
+    ("devices", "#device-table", "button:text-is('Delete')"),
+    ("access", "#access-device-list", "button:has-text('Block ')"),
+)
+
+
+def check_a_question_returns_focus_after_its_list_is_drawn_again(page, cases=QUESTION_CASES):
+    """A person takes a while to read a question, and the page polls meanwhile, so the list may be
+    drawn again under the open question. Cancel and Escape must still give focus to the control of
+    that row, which is a new element by then."""
+
+    for name, listing, control in cases:
+        page.locator(f'[data-page-link="{name}"]').click()
+        advance(page, 6)
+        button = page.locator(listing).locator(control).first
+        expect(button).to_be_visible()
+        label = (button.get_attribute("aria-label") or button.inner_text()).strip()
+        button.focus()
+        page.evaluate("() => { window.firstOpener = document.activeElement; }")
+        button.click()
+        expect(page.get_by_role("dialog")).to_have_count(1)
+        for _ in range(4):
+            advance(page, 6)
+            if page.evaluate("!window.firstOpener.isConnected"):
+                break
+        assert page.evaluate("!window.firstOpener.isConnected"), (
+            listing, "the list was not drawn again, so this check proves nothing")
+        expect(page.get_by_role("dialog")).to_have_count(1)
+        page.keyboard.press("Escape")
+        expect(page.get_by_role("dialog")).to_have_count(0)
+        # The question is answered a moment before it is taken out of the page and focus moves.
+        try:
+            page.wait_for_function(
+                "(listing) => document.querySelector(listing).contains(document.activeElement)",
+                arg=listing, timeout=3000)
+        except PlaywrightTimeout:
+            pass
+        after = page.evaluate(WHO_HAS_FOCUS, listing)
+        assert after and after[1] == label, (listing, label, after)
+
+
+def check_a_full_refresh_is_quiet(page):
+    """A save, a delete or Apply makes the page read everything again. That read is not an answer
+    to anything the person asked, so no line of the page may speak because of it. The result of the
+    action itself goes through the one announcer and is checked by the journeys of each action."""
+
+    noisy = {}
+    for name in PAGES:
+        page.locator(f'[data-page-link="{name}"]').click()
+        advance(page, 3)
+        page.evaluate(WATCH)
+        page.evaluate("refresh()")
+        advance(page, 3)
+        writes = page.evaluate("window.liveWrites")
+        if writes:
+            noisy[name] = sorted(set(writes))
+    page.evaluate("window.liveWatch.disconnect()")
+    assert not noisy, json.dumps(noisy, indent=2)
+
+
 def check_long_idle_is_quiet(page, seconds=130):
     """Two minutes with nothing touched. Timers that run every minute write nothing new either,
     for example the note under Remember, which says the same thing each time it is checked."""
@@ -255,6 +317,8 @@ def run():
                 seed(page, base)
                 advance(page, 6)
                 check_pollers_are_quiet(page, base)
+                check_a_full_refresh_is_quiet(page)
+                check_a_question_returns_focus_after_its_list_is_drawn_again(page)
                 check_long_idle_is_quiet(page)
                 check_focus_survives_refresh(page)
                 # On a phone the saved devices are cards, and the sidebar is a bar.

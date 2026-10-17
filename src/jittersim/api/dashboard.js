@@ -226,14 +226,27 @@
       return Array.from(row.querySelectorAll(ROW_CONTROLS)).filter((node) => controlName(node) === name);
     }
 
+    // Where a control sits in a list that is drawn again: the list, the key of its row and which of
+    // the row's controls with that name it is. The same place in the new drawing is the same control.
+    function rowAnchor(node) {
+      const row = node && node.closest && node.closest("[data-key]");
+      const scope = row && row.parentElement.closest("[id]");
+      const name = scope && node.matches(ROW_CONTROLS) && controlName(node);
+      return name ? { scope: scope.id, key: row.dataset.key, name, index: sameControls(row, name).indexOf(node) } : null;
+    }
+
+    function controlAtAnchor(anchor) {
+      const scope = document.getElementById(anchor.scope);
+      const row = scope && Array.from(scope.querySelectorAll("[data-key]")).find((item) => item.dataset.key === anchor.key);
+      const same = row ? sameControls(row, anchor.name) : [];
+      return same[Math.min(anchor.index, same.length - 1)] || null;
+    }
+
     function keepFocusWhenListsAreDrawn() {
       let standing = null;
       document.addEventListener("focusin", ({ target }) => {
-        const row = target.closest && target.closest("[data-key]");
-        const scope = row && row.parentElement.closest("[id]");
-        const name = scope && target.matches(ROW_CONTROLS) && controlName(target);
-        standing = name ? { scope: scope.id, key: row.dataset.key, name, control: target,
-          index: sameControls(row, name).indexOf(target), until: 0 } : null;
+        const anchor = rowAnchor(target);
+        standing = anchor ? { ...anchor, control: target, until: 0 } : null;
       });
       // Chromium reports a removed control's focus as leaving. One still in the page afterwards left on purpose.
       document.addEventListener("focusout", ({ target }) => window.queueMicrotask(() => {
@@ -246,10 +259,7 @@
           standing = null;
           return;
         }
-        const scope = document.getElementById(standing.scope);
-        const row = scope && Array.from(scope.querySelectorAll("[data-key]")).find((item) => item.dataset.key === standing.key);
-        const same = row ? sameControls(row, standing.name) : [];
-        const target = same[Math.min(standing.index, same.length - 1)];
+        const target = controlAtAnchor(standing);
         if (target && !target.disabled) target.focus({ preventScroll: true });
       }).observe(document.body, { childList: true, subtree: true });
     }
@@ -1583,7 +1593,8 @@
         });
       });
       document.addEventListener("keydown", (event) => {
-        if (event.key !== "Escape" || element("page-traffic").hidden) return;
+        // An open question owns Escape: it answers no and leaves the highlight as it is.
+        if (event.key !== "Escape" || element("page-traffic").hidden || document.querySelector("dialog[open]")) return;
         trafficInspection = { pointer: null, legend: null, pinned: null };
         requestTrafficChartDraw();
       });
@@ -2942,15 +2953,16 @@
         tv_console: "TV or console",
         other: "Other"
       };
+      // A status line: the same words written again are read out again.
       if (!data.available) {
-        count.textContent = "Unavailable";
+        setTextIfChanged(count, "Unavailable");
         const empty = document.createElement("p");
         empty.className = "device-empty";
         empty.textContent = data.message || "Connected-client information is unavailable.";
         container.appendChild(empty);
       } else {
         const connectionLabel = data.association_status_available ? " connected" : " visible";
-        count.textContent = devices.length + connectionLabel;
+        setTextIfChanged(count, devices.length + connectionLabel);
         if (!data.association_status_available) {
           const warning = document.createElement("p");
           warning.className = "device-empty";
@@ -3351,9 +3363,9 @@
         const ads = data.ad_blocking;
         const service = ads.service;
         if (!adBlockingBusy) {
-          element("ad-blocking-status").textContent = service.paused
+          setTextIfChanged(element("ad-blocking-status"), service.paused
             ? "Ad blocking is paused. Choose Start to resume."
-            : service.message || (service.ready ? "Ad blocking is active." : "Ad blocking is off.");
+            : service.message || (service.ready ? "Ad blocking is active." : "Ad blocking is off."));
         }
         if (document.activeElement !== element("ad-blocking-allowances")) {
           element("ad-blocking-allowances").value = ads.allowed_domains.join("\n");
@@ -7682,11 +7694,15 @@
       renderRouterWifi();
     });
 
-    element("random-website-device").addEventListener("change", loadRandomWebsiteAnalytics);
-
-    element("random-website-days").addEventListener("change", loadRandomWebsiteAnalytics);
-
-    element("random-website-refresh").addEventListener("click", loadRandomWebsiteAnalytics);
+    // The line under the table is no live region, as every save reads it again. A choice made here
+    // asks for the answer, so the answer is said once.
+    async function askRandomWebsiteChoices() {
+      await loadRandomWebsiteAnalytics();
+      const status = element("random-website-status");
+      announce(status.textContent, status.classList.contains("error"));
+    }
+    ["random-website-device", "random-website-days"].forEach((id) => element(id).addEventListener("change", askRandomWebsiteChoices));
+    element("random-website-refresh").addEventListener("click", askRandomWebsiteChoices);
 
     // Each look is planned when the last one is over, so a slow Pi is never asked twice at
     // once. A hidden tab plans nothing and looks again as soon as it is shown.
@@ -9070,9 +9086,9 @@
     function updateScenarioDuration() {
       const steps = scenarioStepsFromForm();
       const total = steps.reduce((seconds, step) => seconds + step.duration_seconds, 0);
-      element("scenario-duration").textContent = steps.length + (steps.length === 1 ? " step · " : " steps · ") +
+      setTextIfChanged(element("scenario-duration"), steps.length + (steps.length === 1 ? " step · " : " steps · ") +
         (Number.isFinite(total) ? formatDuration(total) : "Check step durations") +
-        (element("scenario-loop").checked ? " per repeat" : " total");
+        (element("scenario-loop").checked ? " per repeat" : " total"));
     }
 
     function renderScenarioSteps(steps) {

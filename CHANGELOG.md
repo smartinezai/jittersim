@@ -37,3 +37,9 @@ next release takes them over.
   seconds (devices, saved profiles, groups, schedules, timers, limits,
   observations and the router connection) no longer announce themselves. A
   refresh keeps keyboard focus on the button you were on.
+- A save, an Apply or a delete no longer makes the dashboard read out its
+  loading notes and device count again. The ad blocking line speaks only when
+  its words change, and the random website line speaks only when you ask for it.
+  Cancelling a question gives focus back to the button that asked, also when the
+  list holding it was drawn again while the question was open. Escape in a
+  question no longer clears a highlighted line of the traffic chart.
