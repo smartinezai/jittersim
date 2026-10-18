@@ -17,7 +17,8 @@ from tests.browser import gui_stats
 # The only addresses outside the Pi that the page may name. The first two are plain links the
 # person clicks, never requests the page makes by itself (the page's policy blocks those at
 # runtime). The third is the SVG XML namespace identifier that every inline SVG data URI in the
-# stylesheet needs to render (the navigation icons). It names a namespace, nothing is fetched.
+# stylesheet needs to render (the navigation icons), and the speed test QR code uses it too. It
+# names a namespace, nothing is fetched.
 ALLOWED_OFF_ORIGIN_URLS = {"http://192.168.0.1", "https://duckduckgo.com/?q=", "http://www.w3.org/2000/svg"}
 
 
