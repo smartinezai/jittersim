@@ -371,36 +371,51 @@ def _render_nft_script(
     if plan.general_profile is not None:
         general = plan.general_profile
         upload_match = f'iifname "{test_interface}" oifname "{topology.uplink_interface}" '
+        # Devices that run their own profile beside Everyone are matched by address
+        # and left out of every shared rule below, so Everyone's marks, counters and
+        # queues never see them. Their own rules come with the device rules.
+        exceptions = [mark_rule.ipv4_address for mark_rule in plan.mark_rules]
+        skip_upload = f"ip saddr != {_render_set(exceptions)} " if exceptions else ""
+        skip_download = f"ip daddr != {_render_set(exceptions)} " if exceptions else ""
         if general.allowed_addresses is not None:
             match = (
                 f"ip daddr != {_render_set(general.allowed_addresses)} "
                 if general.allowed_addresses else "meta nfproto ipv4 "
             )
             lines.append(
-                f'add rule inet {PROJECT_TABLE} forward {upload_match}{guard}{match}'
+                f'add rule inet {PROJECT_TABLE} forward {upload_match}{skip_upload}{guard}{match}'
                 'drop comment "general profile website allowlist"'
             )
         lines.append(
             f'add rule inet {PROJECT_TABLE} forward oifname "{test_interface}" '
-            f'meta mark set {GENERAL_DOWNLOAD_MARK} comment "identify forwarded test downloads"'
+            f'{skip_download}meta mark set {GENERAL_DOWNLOAD_MARK} '
+            'comment "identify forwarded test downloads"'
         )
+        if exceptions:
+            # An address match is IPv4 only. IPv6 downloads are identified as before.
+            lines.append(
+                f'add rule inet {PROJECT_TABLE} forward oifname "{test_interface}" '
+                f'meta nfproto ipv6 meta mark set {GENERAL_DOWNLOAD_MARK} '
+                'comment "identify forwarded IPv6 test downloads"'
+            )
         download_match = f"meta mark {{ 1, {GENERAL_DOWNLOAD_MARK} }} "
         if general.outage_active:
             lines.extend((
-                f'add rule inet {PROJECT_TABLE} forward {upload_match}{guard}'
+                f'add rule inet {PROJECT_TABLE} forward {upload_match}{skip_upload}{guard}'
                 'drop comment "general profile outage"',
                 f'add rule netdev {DOWNLOAD_TABLE} download {download_match}'
                 'drop comment "general profile outage"',
             ))
-            if guard:
-                # The guard only looks at IPv4 destinations, so IPv6 needs its own drop.
+            if guard or exceptions:
+                # The guard and the address skip only look at IPv4 addresses, so IPv6
+                # needs its own drop. A device's IPv6 address is not known to the plan.
                 lines.append(
                     f'add rule inet {PROJECT_TABLE} forward {upload_match}meta nfproto ipv6 '
                     'drop comment "general profile outage over IPv6"'
                 )
         lines.extend((
             f'add rule inet {PROJECT_TABLE} forward {upload_match}meta nfproto ipv4 '
-            f'meta mark set 1 counter comment "usage-device {GENERAL_QUEUE_ID} upload"',
+            f'{skip_upload}meta mark set 1 counter comment "usage-device {GENERAL_QUEUE_ID} upload"',
             f'add rule netdev {DOWNLOAD_TABLE} download {download_match}ether type ip '
             f'meta mark set 1 counter comment "usage-device {GENERAL_QUEUE_ID} download"',
             f'add rule inet {PROJECT_TABLE} output oifname "{topology.uplink_interface}" '
@@ -523,9 +538,20 @@ def _render_nft_script(
             f'add rule inet {PROJECT_TABLE} forward oifname "{test_interface}" '
             f"ip saddr @{set_name} meta mark set {download_mark} counter "
             f'comment "service-list {list_rule.list_id} download"',
-            f"add rule netdev {DOWNLOAD_TABLE} download meta mark {download_mark} "
-            f"meta mark set {list_rule.mark}{general_download_count}",
         ))
+        if plan.general_profile is not None and plan.mark_rules:
+            # A listed download of a device beside Everyone is not Everyone's traffic.
+            # It is rewritten first and without Everyone's counter. The device's own
+            # download counter counts it by address.
+            exceptions = _render_set([mark_rule.ipv4_address for mark_rule in plan.mark_rules])
+            lines.append(
+                f"add rule netdev {DOWNLOAD_TABLE} download ip daddr {exceptions} "
+                f"meta mark {download_mark} meta mark set {list_rule.mark}"
+            )
+        lines.append(
+            f"add rule netdev {DOWNLOAD_TABLE} download meta mark {download_mark} "
+            f"meta mark set {list_rule.mark}{general_download_count}"
+        )
     return "\n".join(lines) + "\n"
 
 
