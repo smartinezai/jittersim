@@ -92,6 +92,31 @@ def test_stop_closes_the_connection(tmp_path, counted):
         counted[-1]._connection.execute("SELECT 1")
 
 
+
+def test_stop_does_not_wait_for_a_manual_apply_without_bound(tmp_path, counted):
+    import threading
+    import time
+
+    scheduler = _scheduler(tmp_path)
+    scheduler.tick(now=1000)
+    held, release = threading.Event(), threading.Event()
+
+    def apply_in_progress():
+        with scheduler.exclusive():
+            held.set()
+            release.wait(10)
+
+    worker = threading.Thread(target=apply_in_progress)
+    worker.start()
+    try:
+        assert held.wait(5)
+        started = time.monotonic()
+        scheduler.stop(timeout=0.3)
+        assert time.monotonic() - started < 2
+    finally:
+        release.set()
+        worker.join(5)
+
 @pytest.fixture
 def quotas(tmp_path):
     repository = ConfigRepository(tmp_path / "quota.db")

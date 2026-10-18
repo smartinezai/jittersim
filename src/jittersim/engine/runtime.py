@@ -354,7 +354,7 @@ class RuntimeScheduler:
             self._router_canary.stop(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
         if unresolved:
             raise WorkersStillRunning("Scheduler workers did not stop. Their state remains owned.")
-        self._close_tick_repository()
+        self._close_tick_repository(timeout=max(0.0, deadline - time.monotonic()))
 
     def activate(self, *, applied_payload: object, counters_preserved: bool = False) -> None:
         """Resume scheduled work after a successful manual apply."""
@@ -1046,9 +1046,15 @@ class RuntimeScheduler:
             self._tick_repository = None
             repository.close()
 
-    def _close_tick_repository(self) -> None:
-        with self._apply_lock:
+    def _close_tick_repository(self, timeout: float) -> None:
+        # A manual apply in another thread may still tick with this connection. Stop must
+        # not wait for it without bound: then the connection stays open until the process ends.
+        if not self._apply_lock.acquire(timeout=max(0.0, timeout)):
+            return
+        try:
             repository, self._tick_repository = self._tick_repository, None
+        finally:
+            self._apply_lock.release()
         if repository is not None:
             repository.close()
 
