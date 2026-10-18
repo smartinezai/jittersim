@@ -1,12 +1,12 @@
 """Regression tests for the security audit of 2026-10-18 (docs/security-audit-2026-10-18.md)."""
 
+import http.client
 import socket
 import tempfile
 import threading
 import time
 import unittest
 from email.message import Message
-from ipaddress import IPv4Address
 from pathlib import Path
 from unittest.mock import patch
 
@@ -124,7 +124,8 @@ class ProxyRequestDeadlineTests(unittest.TestCase):
         server_side, client_side = socket.socketpair()
         self.addCleanup(server_side.close)
         self.addCleanup(client_side.close)
-        client_side.sendall(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\nhello")
+        client_side.sendall(
+            b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\nhello")
         host, first = browser_proxy._read_connect_request(server_side)
         self.assertEqual((host, first), ("example.com", b"hello"))
 
@@ -143,15 +144,14 @@ class CrossOriginHeaderTests(unittest.TestCase):
         thread.start()
         self.addCleanup(thread.join, 5)
         self.addCleanup(server.shutdown)
-        import http.client
-
+        port = server.server_address[1]
         for path, token in (("/", None), ("/api/health", None), ("/api/state", None),
                             ("/api/state", "admin-token")):
-            connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
             headers = {"Authorization": "Bearer " + token} if token else {}
             connection.request("GET", path, headers=headers)
             response = connection.getresponse()
             response.read()
             connection.close()
-            self.assertEqual(response.getheader("Cross-Origin-Opener-Policy"), "same-origin", path)
-            self.assertEqual(response.getheader("Cross-Origin-Resource-Policy"), "same-origin", path)
+            for name in ("Cross-Origin-Opener-Policy", "Cross-Origin-Resource-Policy"):
+                self.assertEqual(response.getheader(name), "same-origin", path)

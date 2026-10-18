@@ -603,7 +603,8 @@ class ForwardedAnswerTests(unittest.TestCase):
 
     def test_frames_that_are_not_ipv4_have_no_source(self) -> None:
         self.assertIsNone(dns_watch.frame_source(b""))
-        self.assertIsNone(dns_watch.frame_source(b"\x00" * 12 + b"\x86\xdd" + b"\x60" + b"\x00" * 40))
+        ipv6 = b"\x00" * 12 + b"\x86\xdd" + b"\x60" + b"\x00" * 40
+        self.assertIsNone(dns_watch.frame_source(ipv6))
         self.assertEqual(dns_watch.frame_source(frame_for(b"x" * 12, source="198.51.100.7")),
                          IPv4Address("198.51.100.7"))
 
@@ -634,9 +635,13 @@ class RedirectFileTests(unittest.TestCase):
 
         state = dns_watch._RedirectFile(self.path)
         self.assertFalse(state())
-        self.write(json.dumps(AccessPlan(options=AccessOptions(enabled=True, dns_failure_percent=5)).payload()))
+        def policy(enabled):
+            options = AccessOptions(enabled=enabled, dns_failure_percent=5)
+            return json.dumps(AccessPlan(options=options).payload())
+
+        self.write(policy(True))
         self.assertTrue(state())
-        self.write(json.dumps(AccessPlan(options=AccessOptions(enabled=False, dns_failure_percent=5)).payload()))
+        self.write(policy(False))
         self.assertFalse(state())
 
     def test_garbage_means_not_redirected(self) -> None:

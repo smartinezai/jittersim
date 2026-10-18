@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from jittersim.diagnostic_privacy import configure_logging
+from jittersim.localname import GATEWAY_ADDRESS
 
 from .access import read_access
 from .helper import HelperClient, HelperClientError
@@ -53,7 +54,7 @@ FLUSH_SECONDS = 0.25
 PLAN_CHECK_SECONDS = 1.0
 LOG_ERROR_EVERY_SECONDS = 60.0
 # The Pi's own address on the test Wi-Fi. Its resolver answers from here.
-RESOLVER_ADDRESS = IPv4Address("192.168.50.1")
+RESOLVER_ADDRESS = IPv4Address(GATEWAY_ADDRESS)
 _PRIVATE_NETWORKS = (
     IPv4Network("10.0.0.0/8"),
     IPv4Network("172.16.0.0/12"),
