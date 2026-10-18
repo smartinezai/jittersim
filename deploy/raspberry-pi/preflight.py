@@ -108,10 +108,10 @@ def check_firewall(*, uplink: str, test_interface: str, template: Path = FIREWAL
                    nft: Optional[str] = None) -> bool:
     """Ask this kernel whether it can load the release's management firewall.
 
-    `nft --check` sends the rules as a test transaction and changes nothing. It
-    fails when the kernel lacks a module the rules need (such as nft_fib_inet),
-    so an install or update stops before it stops a service or replaces the
-    running rules. Returns False when nft is not installed yet (a first install
+    `nft --check` sends the rules as a test transaction and changes no rules (it
+    may load the kernel modules the rules need). It fails when the kernel lacks
+    a module the rules need (such as nft_fib_inet), so an install or update stops
+    before it stops a service or replaces the running rules. Returns False when nft is not installed yet (a first install
     adds nftables later and checks again with --firewall-only).
     """
     for interface in (uplink, test_interface):
@@ -130,8 +130,9 @@ def check_firewall(*, uplink: str, test_interface: str, template: Path = FIREWAL
     if result.returncode != 0:
         raise PreflightError(
             "this kernel cannot load the management firewall rules (nft --check failed). "
-            "Nothing was changed. Check that the nft_fib_inet and nft_fib_ipv4 kernel "
-            "modules are available")
+            "No existing service was stopped and no existing file or rule was replaced "
+            "(an install in progress may already have added packages). Check that the "
+            "nft_fib_inet and nft_fib_ipv4 kernel modules are available")
     return True
 
 

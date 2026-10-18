@@ -90,13 +90,16 @@ if dpkg-query -W -f='${Status}' hostapd 2>/dev/null | grep -q 'install ok instal
 fi
 apt-get update
 apt-get install -y dnsmasq-base iputils-ping iw wpasupplicant nftables openssl python3-venv tcpdump unbound dnsutils hostapd conntrack
-# The kernel must be able to load the management firewall before anything is
-# replaced or restarted. nft --check changes nothing.
-python3 "$SOURCE_DIR/deploy/raspberry-pi/preflight.py" --firewall-only \
-    --uplink "$JITTERSIM_UPLINK" --test-interface "$JITTERSIM_TEST_INTERFACE"
-# New package defaults must not take over existing DNS or Wi-Fi services.
+# New package defaults must not take over existing DNS or Wi-Fi services. This
+# comes before the firewall check below: the check can stop the script, and the
+# packages just installed must not be left running when it does.
 if [ "$existing_unbound" = no ]; then systemctl disable --now unbound.service; fi
 if [ "$existing_hostapd" = no ]; then systemctl disable --now hostapd.service; fi
+# The kernel must be able to load the management firewall before anything is
+# replaced or restarted. nft --check changes no rules (it may load the needed
+# kernel modules).
+python3 "$SOURCE_DIR/deploy/raspberry-pi/preflight.py" --firewall-only \
+    --uplink "$JITTERSIM_UPLINK" --test-interface "$JITTERSIM_TEST_INTERFACE"
 
 # Verify the actual kernel hook before replacing live profile rules.
 python3 "$SOURCE_DIR/deploy/raspberry-pi/check-egress-hook.py" "$JITTERSIM_TEST_INTERFACE"
