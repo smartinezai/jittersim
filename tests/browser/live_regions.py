@@ -16,7 +16,7 @@ import sys
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import expect, sync_playwright
 
-from tests.browser.route_support import keep_interception_on, release_route, watched
+from tests.browser.route_support import keep_interception_on
 
 TOKEN = "browser-test"
 HEADERS = {"Authorization": "Bearer " + TOKEN}
@@ -336,8 +336,7 @@ def check_the_loading_note_is_never_announced(page):
         closed.first.click()
     expect(days).to_be_visible()
     held = []
-    handler = watched(lambda route: held.append(route))
-    page.route("**/api/devices", handler)
+    page.route("**/api/devices", lambda route: held.append(route))
     page.evaluate("""() => {
       window.said = [];
       for (const id of ['action-announcer', 'action-alert']) {
@@ -359,7 +358,7 @@ def check_the_loading_note_is_never_announced(page):
     for route in held:
         route.continue_()
     page.wait_for_timeout(400)
-    release_route(page, "**/api/devices", handler)
+    page.unroute("**/api/devices")
     expect(status).to_have_text("Loading randomized website choices...")
     said = page.evaluate("window.said")
     assert not [text for text in said if text.startswith("Loading")], said

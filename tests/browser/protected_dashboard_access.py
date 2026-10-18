@@ -10,7 +10,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.confirm_dialogs import answer_confirm, cancel_with_escape
-from tests.browser.route_support import keep_interception_on, release_route, watched
+from tests.browser.route_support import keep_interception_on
 
 PROTECTED_MAC = "02:00:00:00:00:01"
 
@@ -30,10 +30,13 @@ def idle(page):
 
 def hold_first_diagnostics(page):
     """Hold the first read of the diagnostics, which every token check makes. Return the held
-    routes and the handler to give back to release_route."""
+    routes and the handler to remove."""
 
     held = []
-    handler = watched(lambda route: held.append(route) if not held else route.continue_())
+
+    def handler(route):
+        held.append(route) if not held else route.continue_()
+
     page.route("**/api/diagnostics", handler)
     return held, handler
 
@@ -61,7 +64,7 @@ def check_a_refresh_during_the_token_check_is_not_a_failed_token(page):
     page.evaluate("() => { window.refreshing = refresh(); }")
     held[0].continue_()
     page.evaluate("() => Promise.all([window.checking, window.refreshing])")
-    release_route(page, "**/api/diagnostics", handler)
+    page.unroute("**/api/diagnostics", handler)
     expect(page.locator("#token-check-status")).to_have_text("Token accepted. Diagnostics loaded.")
     expect(page.locator("#private-dashboard")).to_be_visible()
 
@@ -84,7 +87,7 @@ def check_a_second_token_check_waits_for_the_first(page):
     assert len(reads) == before, "the second check started while the first was still running"
     held[0].continue_()
     page.evaluate("() => Promise.all([window.first, window.second])")
-    release_route(page, "**/api/diagnostics", handler)
+    page.unroute("**/api/diagnostics", handler)
     assert len(reads) == before + 1, "the second check must run once, after the first"
     expect(page.locator("#token-check-status")).to_have_text("Token accepted. Diagnostics loaded.")
     expect(page.locator("#private-dashboard")).to_be_visible()
@@ -164,16 +167,14 @@ def run():
                         "not_eligible": [], "error": "Helper unreachable."}
                     route.fulfill(response=response, body=json.dumps(data))
                 # Every list read reports the failure until the route is removed, so a page
-                # refresh cannot replace the alert before it is checked. A list refresh that is
-                # still in flight when the route is removed finishes first (release_route).
-                failed = watched(failed)
+                # refresh cannot replace the alert before it is checked.
                 page.route("**/api/dashboard-access", failed)
                 page.evaluate("() => loadDashboardAccessList()")
                 expect(listing.get_by_role("alert")).to_contain_text("not confirmed")
                 expect(listing.get_by_role("alert")).to_contain_text("may still open the dashboard")
                 listing.get_by_role("button", name="Retry protected access").click()
                 expect(page.locator("#toast-message")).to_contain_text("confirmed")
-                release_route(page, "**/api/dashboard-access", failed)
+                page.unroute("**/api/dashboard-access", failed)
                 page.evaluate("() => loadDashboardAccessList()")
                 expect(listing.get_by_role("alert")).to_have_count(0)
                 page.screenshot(path="test-results/protected-dashboard-access.png")

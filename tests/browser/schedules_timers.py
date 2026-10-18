@@ -27,7 +27,6 @@ from tests.browser.forms_support import (
     run_journey,
     unlock,
 )
-from tests.browser.route_support import release_route
 
 ALL_DAYS = [0, 1, 2, 3, 4, 5, 6]
 DEFAULT_DAYS = ["true", "true", "true", "true", "true", "false", "false"]
@@ -241,7 +240,7 @@ def check_schedule_form(page, base, width):
     expect(page.locator("#draft-links")).to_contain_text("Review Scheduled profile")
     expect(submit).to_be_enabled()
     assert "fine-id" not in saved_schedules(page, base)
-    release_route(page, "**/api/schedules", handler)
+    page.unroute("**/api/schedules", handler)
     save_schedule(page)
     expect(schedule_row(page, "fine-id")).to_contain_text("Sat · 08:00–09:30")
     expect(page.locator("#schedule-form .form-error")).to_have_count(0)
@@ -398,7 +397,7 @@ def check_timer_form(page, base, width):
     expect(page.locator("#draft-links")).to_contain_text("Review Profile timer")
     expect(submit).to_be_enabled()
     assert get(page, base, "/api/timers")["timers"] == []
-    release_route(page, "**/api/timers", handler)
+    page.unroute("**/api/timers", handler)
 
     # The keyboard: focus the duration, type and press Enter.
     page.locator("#timer-duration").focus()
@@ -577,7 +576,7 @@ def check_progression_form(page, base, width):
     submit.click()
     expect(page.locator("#progression-form .form-error")).to_have_text("Save unavailable")
     expect(page.locator("#progression-domains")).to_have_value("example.com")
-    release_route(page, "**/api/progressions", handler)
+    page.unroute("**/api/progressions", handler)
 
     # The keyboard: Tab goes from the menu to the duration and Enter there saves the form.
     mode.select_option("time")

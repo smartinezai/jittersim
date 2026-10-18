@@ -27,7 +27,6 @@ from tests.browser.forms_support import (
     run_journey,
     unlock,
 )
-from tests.browser.route_support import release_route, watched
 
 GIGABYTE = 1073741824
 MEGABYTE = 1048576
@@ -227,7 +226,7 @@ def check_data_limit(page, base, width):
     save(page, button)
     expect(page.locator("#data-limit-form .form-error")).to_have_text("Save unavailable")
     expect(page.locator("#data-limit-amount")).to_have_value("4")
-    release_route(page, "**/api/data-limits", handler)
+    page.unroute("**/api/data-limits", handler)
 
     # The keyboard: Space turns the check box off, Enter in the amount saves the form.
     page.locator("#data-limit-enabled").focus()
@@ -347,7 +346,7 @@ def check_group_data_limit(page, base, width):
     )
     expect(page.locator("#group-data-limit-amount")).to_have_value("2")
     expect(page.locator("#draft-links")).to_contain_text("Review Shared group data limit")
-    release_route(page, "**/api/group-data-limits", handler)
+    page.unroute("**/api/group-data-limits", handler)
     page.locator("#group-data-limit-amount").focus()
     with page.expect_request(posted("/api/group-data-limits")):
         page.keyboard.press("Enter")
@@ -402,7 +401,6 @@ def hide_observed(page, domain):
             device["domains"] = [item for item in device.get("domains", []) if item["domain"] != domain]
         route.fulfill(response=response, json=body)
 
-    handler = watched(handler)
     page.route("**/api/observations", handler)
     return handler
 
@@ -448,7 +446,7 @@ def check_saved_names_survive(page, base, prefix, list_id, button, path, change)
     page.locator(field).fill(value + "0")
     discard_all_drafts(page)
     expect(option).to_have_count(0)
-    release_route(page, "**/api/observations", handler)
+    page.unroute("**/api/observations", handler)
     page.evaluate("refresh()")
     clear_toast(page)
 
@@ -582,7 +580,7 @@ def check_service_quota(page, base, width):
     expect(page.locator("#service-quota-id")).to_have_value("alice-icloud")
     expect(page.locator("#service-quota-weight")).to_have_value("1")
     expect(page.locator("#draft-links")).to_contain_text("Review Service data limit")
-    release_route(page, "**/api/service-quotas", handler)
+    page.unroute("**/api/service-quotas", handler)
 
     # The keyboard: Enter in the name saves, then Reset usage and Delete from the row.
     page.locator("#service-quota-name").focus()
@@ -738,7 +736,7 @@ def check_time_quota(page, base, width):
     save(page, button)
     expect(page.locator("#time-quota-form .form-error")).to_have_text("Save unavailable")
     expect(page.locator("#time-quota-amount")).to_have_value("3")
-    release_route(page, "**/api/time-quotas", handler)
+    page.unroute("**/api/time-quotas", handler)
 
     # The keyboard: Enter in the name saves, then Start, Reset usage and Delete from the row.
     page.locator("#time-quota-name").focus()
