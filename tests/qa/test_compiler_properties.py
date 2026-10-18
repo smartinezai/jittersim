@@ -16,6 +16,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from jittersim.config.models import Device, Impairment, Profile
+from jittersim.engine.codec import plan_from_payload, plan_to_payload
 from jittersim.engine.compiler import MAX_DEVICES_PER_PLAN, compile_plan
 from jittersim.engine.plan import WebsiteFilter
 from jittersim.networking.applier import NetworkApplier
@@ -106,6 +107,15 @@ def test_the_same_input_gives_the_same_plan_in_any_order(scenario):
     assert render_command_plan(plan=first, topology=TOPOLOGY) == render_command_plan(
         plan=second, topology=TOPOLOGY
     )
+
+
+@PROFILE
+@given(scenarios())
+def test_compiled_plans_round_trip_through_the_wire_codec(scenario):
+    devices, profiles = scenario
+    plan = compiled(devices, profiles)
+
+    assert plan_from_payload(plan_to_payload(plan)) == plan
 
 
 @PROFILE
