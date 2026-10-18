@@ -347,6 +347,7 @@ def _status(arguments: argparse.Namespace) -> int:
             "running": running,
             "lastAction": state.get("last_action"),
             "deviceOnly": state.get("device_only"),
+            "everyoneExceptions": state.get("everyone_exceptions"),
             "generalState": general,
             "profiles": profiles,
             "clients": clients,
@@ -361,6 +362,7 @@ def _status(arguments: argparse.Namespace) -> int:
         {
             "lastAction": state.get("last_action"),
             "deviceOnly": state.get("device_only"),
+            "everyoneExceptions": state.get("everyone_exceptions"),
             "helperConfigured": health.get("helper_configured") is not False,
         },
     )
