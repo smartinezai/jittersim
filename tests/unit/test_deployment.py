@@ -58,6 +58,24 @@ class DeploymentFirewallTests(unittest.TestCase):
         before = [line for line in unit.splitlines() if line.startswith("Before=")]
         self.assertIn("NetworkManager.service", before[0].split("=", 1)[1].split())
 
+    def test_a_stuck_nft_cannot_hold_networkmanager_for_minutes(self) -> None:
+        # The unit is ordered Before=NetworkManager. A timed-out nft gets SIGTERM and then waits
+        # TimeoutStopSec (90 s by default) before SIGKILL, once more if it cannot be killed yet.
+        pi = REPOSITORY_ROOT / "deploy" / "raspberry-pi"
+        unit = (pi / "jittersim-control-firewall.service").read_text()
+        start = [line.split("=", 1)[1] for line in unit.splitlines()
+                 if line.startswith("TimeoutStartSec=")]
+        stop = [line.split("=", 1)[1] for line in unit.splitlines()
+                if line.startswith("TimeoutStopSec=")]
+        self.assertEqual(start, ["30"])
+        self.assertEqual(len(stop), 1)
+        self.assertTrue(stop[0].isdigit() and 0 < int(stop[0]) <= 10, stop)
+        # The documented failure mode: only SSH stays reachable because these units need it.
+        for name in ("jittersim-dashboard", "jittersim-browser-proxy", "jittersim-service-watch"):
+            service = (pi / f"{name}.service").read_text()
+            requires = [line for line in service.splitlines() if line.startswith("Requires=")]
+            self.assertIn("jittersim-control-firewall.service", requires[0].split("=", 1)[1].split())
+
     def test_pi_service_uses_tls_and_installer_protects_the_private_key(self) -> None:
         service = (
             REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-dashboard.service"

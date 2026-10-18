@@ -235,9 +235,15 @@ installer prints the authority's fingerprint. It also links the `jittersim` comm
 (Avahi) on Ethernet, where it answers with the current Ethernet address, and on
 the test Wi-Fi, where it answers `192.168.50.1`. A Mac on the home router's
 Wi-Fi and the same Mac on the Pi's test Wi-Fi therefore use the same address
-and the same remembered sign-in. The Pi's Ethernet address and `192.168.50.1`
+and the same remembered sign-in. On the test Wi-Fi the Pi's Ethernet address and `192.168.50.1`
 remain as a fallback, and `https://pi.home.arpa:8080` still works on the test
 Wi-Fi for bookmarks made with the earlier name.
+
+From the household network, reach the dashboard only through the Ethernet
+address or the `.local` name. `192.168.50.1` is the test Wi-Fi address: replies
+to a household host that connected to it through `eth0` (for example through a
+static route) leave without NAT and with source `192.168.50.1`, and the
+management firewall drops them. That is not a supported access path.
 
 Changing the dashboard name requires completed certificate adoption. If the
 command reports an old self-signed identity or an unfinished adoption, complete
