@@ -266,14 +266,18 @@ class AccessPointStartTests(unittest.TestCase):
         self.assertIn("/usr/bin/nmcli --wait 10 connection up jittersim-ap && return 0", command)
         self.assertIn("did not start after 10 tries", command)
         self.assertTrue(command.rstrip("'").endswith("exit 1"))
-        # Two rounds of ten tries (router copy, then the previous Wi-Fi) fit the limit.
-        self.assertIn("TimeoutStartSec=360", self.unit)
+        # Two rounds of ten tries (router copy, then the previous Wi-Fi), the boot look and
+        # both lock waits fit the limit (about 385 s worst case).
+        self.assertIn("TimeoutStartSec=420", self.unit)
 
     def test_boot_returns_to_the_router_copy_and_never_blocks_the_start(self):
         follow = "/opt/jittersim/.venv/bin/python -I -m jittersim.networking.wifi_follow"
         # A failing step is ignored ("-"), so the Wi-Fi always starts with some profile.
+        # After it, the read-only uplink check (only its exit status 3 fails the unit).
         self.assertEqual(self.directives(self.unit, "ExecStartPre")[1:], [
-            ["-" + follow.split()[0], *follow.split()[1:], "boot"]])
+            ["-" + follow.split()[0], *follow.split()[1:], "boot"],
+            ["/bin/sh", "-c", "'%s" % follow.split()[0], *follow.split()[1:], "uplink-check;",
+             "[", '"$$?"', "-ne", "3", "]'"]])
         self.assertEqual(self.directives(self.unit, "ExecStartPost"), [
             ["-" + follow.split()[0], *follow.split()[1:], "boot-done"]])
         self.assertIn("EnvironmentFile=-/etc/jittersim/runtime.env", self.unit)

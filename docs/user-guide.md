@@ -361,6 +361,42 @@ Copying the router's Wi-Fi name can make the debugging computer join the Pi.
 Use saved dashboard access below to keep control while testing. SSH still
 requires the router network or a local Pi terminal.
 
+#### The Pi Wi-Fi name after a reboot
+
+After a copy that worked the Pi returns to the router's Wi-Fi name at every
+boot, for example from `JitterSim-Recovery`. Before that it reads the Wi-Fi
+names on the air once: first the list the Pi already has, then at most one
+fresh scan. That scan is active (the Pi asks nearby Wi-Fis to answer, as a
+phone does), but it never signs in to or changes the router, and the boot
+waits for it about 20 seconds at most.
+
+- When the router's own Wi-Fi already sends the router name, the Pi keeps
+  `JitterSim-Recovery` for this boot, or takes it when it had the router name.
+  Two Wi-Fis with one name on two subnets make phones and laptops switch
+  between them, which looks like "connected but no internet". Household
+  devices then use the router Wi-Fi, also the ones that were on the Pi under
+  the router name, and test devices join `JitterSim-Recovery` with the same
+  password. A neighbour, a guest network or a mesh repeater with exactly the
+  router name has the same effect.
+- When the look finds nothing, cannot run or the radio is busy, the boot does
+  what it did before and uses the router name. A problem with the look never
+  keeps the test Wi-Fi off. At a cold boot the Pi first waits a few seconds for
+  its Wi-Fi radio to be ready, so the look can run.
+- To use the router name again, switch the router Wi-Fi off and reboot the Pi,
+  or run `sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow router`
+  to use it now anyway.
+
+`sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow status`
+shows what the last boot saw and why it chose the name (`boot_decision` and
+`boot_scan`, for example `router-on-air` and `seen`). The dashboard does not
+show this yet.
+
+The test Wi-Fi also does not start when the Pi's Ethernet address is inside
+`192.168.50.0/24`, the Pi Wi-Fi's own subnet, because the Pi could not route
+both. `systemctl status jittersim-ap` and the `uplink` line of `status` say so.
+Change the router's LAN to another subnet, for example `192.168.0.0/24`, and
+reboot the Pi. The check runs only when the Wi-Fi starts.
+
 ### Dashboard access from Pi Wi-Fi
 
 On the Pi Wi-Fi open `https://netlab.local:8080`, the same address that works
