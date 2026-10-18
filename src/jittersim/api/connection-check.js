@@ -4,7 +4,7 @@
 // the speed test window's small helpers (speedTestNode, speedTestWhen) and its styles.
 const connCheckState = {
   dialog: null, device: null, meta: null, run: null, results: [], shown: null,
-  pollTimer: null, serial: 0, deleting: null, focusAction: null
+  pollTimer: null, serial: 0
 };
 const connCheckLockClosingDialogs = new WeakSet();
 
@@ -157,7 +157,6 @@ function connCheckClearPrivateState() {
   connCheckState.run = null;
   connCheckState.results = [];
   connCheckState.shown = null;
-  connCheckState.deleting = null;
 }
 
 privateDataLockHooks.push(connCheckClearPrivateState);
@@ -169,7 +168,6 @@ async function connCheckOpen(device) {
   connCheckState.device = device;
   connCheckState.run = null;
   connCheckState.shown = null;
-  connCheckState.deleting = null;
   element('conn-check-title').textContent = 'Check connection: ' + (device.display_name || device.ipv4_address || device.mac_address);
   element('conn-check-announce').textContent = '';
   element('conn-check-error').textContent = '';
@@ -413,41 +411,14 @@ function connCheckRenderHistory(results) {
     show.setAttribute('aria-label', 'Show check from ' + when);
     show.dataset.action = 'show';
     group.append(show);
-    if (connCheckState.deleting === result.id) {
-      const sure = connCheckButton('Delete for good', null, () => connCheckDelete(result));
-      sure.setAttribute('aria-label', 'Really delete check from ' + when);
-      sure.dataset.action = 'confirm';
-      const keep = connCheckButton('Keep', null, async () => {
-        connCheckState.deleting = null;
-        connCheckState.focusAction = [result.id, 'delete'];
-        connCheckRenderHistory(connCheckState.results);
-        connCheckSay('Check kept.');
-      });
-      keep.dataset.action = 'keep';
-      group.append(sure, keep);
-    } else {
-      const remove = connCheckButton('Delete', null, async () => {
-        connCheckState.deleting = result.id;
-        connCheckState.focusAction = [result.id, 'keep'];
-        connCheckRenderHistory(connCheckState.results);
-        connCheckSay('Choose Delete for good to remove this check, or Keep.');
-      });
-      remove.setAttribute('aria-label', 'Delete check from ' + when);
-      remove.dataset.action = 'delete';
-      group.append(remove);
-    }
+    const remove = connCheckButton('Delete', null, () => connCheckDelete(result));
+    remove.setAttribute('aria-label', 'Delete check from ' + when);
+    group.append(remove);
     actions.append(group);
     row.append(actions);
     return row;
   });
   box.append(connCheckTable(['When', 'Label', 'Profile', 'Verdict', 'Loss and round trip', ''], rows));
-  if (connCheckState.focusAction) {
-    // The button that was pressed is gone after the redraw: put focus on its safe neighbour.
-    const [id, action] = connCheckState.focusAction;
-    connCheckState.focusAction = null;
-    const target = box.querySelector('tr[data-result-id="' + id + '"] [data-action="' + action + '"]');
-    if (target) target.focus({preventScroll: true});
-  }
 }
 
 function connCheckShowSaved(result) {
@@ -457,10 +428,15 @@ function connCheckShowSaved(result) {
 }
 
 async function connCheckDelete(result) {
+  // The question is the page's own dialog (confirmWorkflow), like every other delete. The serial
+  // is read first so that a lock or another device opened during the question drops the answer.
   const serial = connCheckState.serial;
+  const confirmed = await confirmWorkflow(
+    'Delete the connection check from ' + speedTestWhen(result.started_at) + '? This cannot be undone.',
+    {title: 'Delete connection check', confirmLabel: 'Delete check', danger: true});
+  if (!confirmed || serial !== connCheckState.serial) return;
   await request('/api/connection-checks/delete', 'POST', {result_id: result.id});
   if (serial !== connCheckState.serial) return;
-  connCheckState.deleting = null;
   if (connCheckState.shown === result.id) {
     connCheckState.shown = null;
     element('conn-check-result').hidden = true;

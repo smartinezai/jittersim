@@ -949,8 +949,9 @@ What the check cannot do:
   (speed tests and checks together), one per device. A dashboard restart drops a
   running check.
 
-**Export CSV** and **Export JSON** download the device's checks without any token or
-password. The Pi keeps the newest 50 checks per device and 500 in total. They are part
+**Delete** on a saved check asks in the page first (**Delete check** or **Cancel**) and
+cannot be undone. **Export CSV** and **Export JSON** download the device's checks without
+any token or password. The Pi keeps the newest 50 checks per device and 500 in total. They are part
 of the configuration backup.
 
 The design and the open decisions are in

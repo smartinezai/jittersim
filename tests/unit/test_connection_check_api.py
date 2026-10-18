@@ -33,8 +33,9 @@ from tests.unit import test_device_speed_test as speed
 
 PHONE = speed.PHONE
 OTHER = speed.OTHER
-IMPAIRMENT = {"delay_ms": 100, "jitter_ms": 0, "loss_percent": 10, "bandwidth_kbit": None,
-              "reorder_percent": 0, "duplicate_percent": 0, "corrupt_percent": 0}
+IMPAIRMENT = {"delay_ms": 100, "jitter_ms": 0, "loss_percent": 10, "loss_burst_packets": 0,
+              "bandwidth_kbit": None, "reorder_percent": 0, "duplicate_percent": 0,
+              "corrupt_percent": 0}
 
 
 class CheckHelper(speed.CountingHelper):
@@ -111,7 +112,6 @@ class CheckBase(speed.ManagerBase):
     def setUp(self) -> None:
         super().setUp()
         self.impairment = dict(IMPAIRMENT)
-        self.burst = 0
         self.script = typical
         self.on_send = None
         self.probers = []
@@ -136,10 +136,8 @@ class CheckBase(speed.ManagerBase):
     def set_impairment(self, **changes):
         """Change what the helper reports and what the scheduler's plan says, together."""
 
-        # The helper's client cleaner drops the burst length: only the plan knows it.
-        self.burst = changes.pop("loss_burst_packets", self.burst)
         self.impairment.update(changes)
-        planned = Impairment(loss_burst_packets=self.burst, **self.impairment)
+        planned = Impairment(**self.impairment)
         queues = tuple(
             replace(queue, impairment=planned)
             if queue.device_id == "lab" and queue.direction == Direction.DOWNLOAD else queue
@@ -330,13 +328,22 @@ class ResultTests(CheckBase):
         summary = self.finish(run["id"])["result"]["summary"]
         self.assertEqual(summary["verdict"], "less")
 
-    def test_the_burst_length_comes_from_the_plan(self) -> None:
+    def test_the_burst_length_comes_from_the_queue_the_helper_reports(self) -> None:
         self.set_impairment(loss_burst_packets=4)
         _, run = self.start()
         summary = self.finish(run["id"])["result"]["summary"]
         self.assertEqual(summary["burst_packets"], 4)
         # The same ten lost probes of a hundred are inside a much wider range with bursts.
         self.assertEqual(summary["verdict"], "matches")
+
+    def test_a_start_is_refused_when_the_queue_has_another_burst_length_than_the_plan(self) -> None:
+        self.set_impairment(loss_burst_packets=8)
+        # The helper already runs a newer apply: only its reading has the other burst length.
+        self.impairment["loss_burst_packets"] = 4
+        status, body = self.start()
+        self.assertEqual(status, 503)
+        self.assertIn("applying a change", body["error"])
+        self.assertEqual(self.manager.runs, {})
 
     def test_a_late_second_answer_is_waited_for_when_duplication_is_set(self) -> None:
         self.set_impairment(duplicate_percent=10, loss_percent=0, delay_ms=0)

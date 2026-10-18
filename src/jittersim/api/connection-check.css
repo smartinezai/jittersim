@@ -1,7 +1,7 @@
 /* Connection check window (connection-check.js). It reuses the speed test window's styles. */
 .conn-check-error:empty { display: none; }
 .conn-check-error { color: #f3c77b; font-weight: 600; }
-.conn-check-verdict { font-size: 1.05rem; margin: .5rem 0; }
+.conn-check-verdict { font-size: 1.05rem; margin: 0.6rem 0; }
 .conn-check-verdict-matches strong { color: #9fe0c0; }
 .conn-check-verdict-less strong, .conn-check-verdict-more strong, .conn-check-verdict-differs strong, .conn-check-verdict-borderline strong { color: #f3c77b; }
 .conn-check-result { margin-top: .8rem; }

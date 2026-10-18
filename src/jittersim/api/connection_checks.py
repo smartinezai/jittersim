@@ -153,7 +153,6 @@ class ConnectionCheckManager:
         if target.ipv4 is None:
             raise SpeedTestRequestError(NO_ADDRESS_MESSAGE, 409)
         impairment: Optional[Dict[str, Any]] = None
-        burst: Optional[int] = None
         identity: Optional[Dict[str, Any]] = None
         if target.source == "device" and not protected:
             entry = target.entries.get("download")
@@ -165,7 +164,6 @@ class ConnectionCheckManager:
                     "a moment.", 503)
             impairment = dict(entry.get("impairment") or {})
             identity = _identity(entry)
-            burst = _download_burst(target.plan, target.queue_id)
         notes = list(target.notes)
         if target.source == "device" and not protected:
             if target.service_rules is True:
@@ -211,7 +209,7 @@ class ConnectionCheckManager:
             service_rules=target.service_rules,
             protected=protected,
             impairment=impairment,
-            burst_packets=burst,
+            burst_packets=(impairment or {}).get("loss_burst_packets"),
             identity=identity,
             profile=speed._profile_snapshot(
                 target.owner, target.queue_id, "none" if protected else target.source,
@@ -414,15 +412,6 @@ def _signature(speed, plan, states, source, ipv4):
         getattr(plan, "everyone_else", None) is not None,
         speed._service_rules_apply(owner, source, plan, states),
     )
-
-
-def _download_burst(plan, queue_id) -> Optional[int]:
-    """The burst length of the download queue in the applied plan. The helper's client drops it."""
-
-    for queue in getattr(plan, "queues", ()):
-        if queue.device_id == queue_id and queue.direction.value == "download":
-            return queue.impairment.loss_burst_packets
-    return None
 
 
 def connection_check_manager(server) -> ConnectionCheckManager:

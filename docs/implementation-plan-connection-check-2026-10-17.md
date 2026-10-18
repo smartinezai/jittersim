@@ -6,7 +6,7 @@ The owner asked for "a feature where you can click a button from the jittersim d
 some packages to a device and check the loss and so on to make sure it's actually working."
 
 This change adds a **Check connection** button to each connected device, next to **Test speed**
-(PR 121, which this change is stacked on). The Pi sends a bounded burst of small ping packets to
+(PR 121, which is merged). The Pi sends a bounded burst of small ping packets to
 the device (100 probes at 10 per second by default, 20 to 300 allowed) and shows what came back:
 
 * packet loss, with a 95 percent range,
@@ -152,10 +152,10 @@ left the Wi-Fi or got a profile during the burst.
 
 ### Per-number rules
 
-All rules use the **download impairment of the applied queue** (`set` values). Values come from the
-scheduler's applied plan when it is readable (it also carries the burst length, which the helper's
-client cleaner drops, see PR 121 review round 4) and otherwise from the helper's queue counters.
-Loss uses the exact binomial model below.
+All rules use the **download impairment of the applied queue** (`set` values), as the helper
+reports it in its queue counters, including the burst length of the loss. The start check of the
+speed test manager has already compared those numbers with the scheduler's applied plan, and the
+check is refused when they differ. Loss uses the exact binomial model below.
 
 | Number | What is measured | What the profile is expected to give | Judged when |
 | --- | --- | --- | --- |
@@ -289,7 +289,7 @@ without a data migration.
   round trip and the speed test's traffic would disturb the check).
 * **D10** Window: its own script `connection-check.js` and style `connection-check.css`, like
   `speed-test.js`. It reuses the speed test's small DOM helpers and table styles and adds no
-  `window.confirm` (delete asks inline with a second button).
+  `window.confirm` (delete asks in the page's own dialog, `confirmWorkflow`, like the speed test).
 * **D11** Corruption has no number of its own (counted as loss). Speed cap is never judged by a
   burst. Duplicates are not judged together with bursty loss or corruption. Delay and jitter are
   not judged together with reordering.
@@ -361,7 +361,7 @@ change, focus returns to a live button when it closes, and live progress is anno
 status region once per change of state (not once per probe). The dashboard's lock hook
 (`privateDataLockHooks`) closes it and clears cached results. The result table has a row per
 number with the set value, the measured value and a **text** status (never only a colour), and
-scrolls sideways inside its own wrapper on a phone. Delete asks inline.
+scrolls sideways inside its own wrapper on a phone. Delete asks in the page's own dialog.
 
 ## Tests
 
@@ -408,7 +408,7 @@ scrolls sideways inside its own wrapper on a phone. Delete asks inline.
   `/api/connection-checks/start`, because start reads the Wi-Fi status and the queues with the
   same bounded retries.
 * `scripts/local-ci.sh`, `.github/workflows/wifi-recovery.yml` and `tests/unit/test_local_ci.py`:
-  the browser module `connection_check` is listed like `device_speed_test`. The kernel module is
+  the browser module `connection_check` is listed like `speed_test_window`. The kernel module is
   found by unittest discovery.
 
 ## Risk class and rollback (pull request template)
@@ -426,14 +426,15 @@ scrolls sideways inside its own wrapper on a phone. Delete asks inline.
   ranges next to every verdict, and "borderline" asks for a rerun instead of guessing.
 * **Probe rate on a weak device.** 10 small pings per second for at most 40 seconds is far below
   any normal traffic. The count and rate are bounded on the server.
-* **Stacking on PR 121.** This branch changes `api/speed_tests.py` (a refactor that extracts the
-  target resolution and the thread start so both kinds share them) and adds files. After PR 121
-  merges it must be retargeted to main and rebased. PR 121 is currently out of date with main
-  (the shared confirm dialog and announcer changes): the window follows the speed test window's
-  own in-dialog status region and inline delete, and may need small alignment after that rebase.
+* **Built on PR 121.** This branch changes `api/speed_tests.py` (a refactor that extracts the
+  target resolution and the thread start so both kinds share them) and adds files. It was first
+  stacked on the PR 121 branch and was rebased onto main after PR 121 was squash-merged. The
+  window follows the speed test window: its own in-dialog status region, and Delete asks in the
+  page's own dialog (`confirmWorkflow`).
 * **Panic-pinned files** are not touched. Nothing in `networking/helper.py`, `networking/access.py`,
   `panic_guard.py`, `dashboard_access.py`, `deadlines.py`, `diagnostic_records.py` or
   `diagnostic_privacy.py` changes, and `updates.py` is untouched.
-* **Known limit from PR 121:** the helper's client cleaner drops `loss_burst_packets`, so the start
-  check cannot see a burst length change. The check takes the burst length from the scheduler's
-  plan instead and notes when it is unknown.
+* **Burst length.** The helper's client used to drop `loss_burst_packets` from the queue counters.
+  Since the carry-forward fixes (PR 138) it keeps it, so the start check sees a burst length change
+  and the check reads the burst length from the queue the helper reports. A reading without it
+  counts as an unknown burst length and the result says so.
