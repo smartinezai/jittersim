@@ -75,10 +75,13 @@ class FollowRouterTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
 
     def boot(self):
+        self.executor.active = ""  # At boot the access point has not started yet.
         return wifi_follow.prepare_boot(self.controller, self.record, self.hold, self.previous,
                                         self.fingerprint)
 
     def run_cli(self, *argv):
+        if argv[0] == "boot":
+            self.executor.active = ""  # At boot the access point has not started yet.
         output, errors = io.StringIO(), io.StringIO()
         with redirect_stdout(output), redirect_stderr(errors):
             code = wifi_follow.main(list(argv), executor=self.executor, record_path=self.record,
@@ -384,6 +387,11 @@ class BootScanTests(unittest.TestCase):
     def setUp(self):
         FollowRouterTests.setUp(self)
         self.sleeps = []
+        self.now = 0.0
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
 
     def at_boot(self, *, on_router_name=False):
         """The Pi after a reboot: router copy recorded, the access point not started yet."""
@@ -393,7 +401,8 @@ class BootScanTests(unittest.TestCase):
         self.executor.active = ""
 
     def scan(self, ssid):
-        return wifi_follow.scan_air(self.controller, ssid, sleep=self.sleeps.append)
+        return wifi_follow.scan_air(self.controller, ssid, sleep=self.sleep,
+                                    clock=lambda: self.now)
 
     def boot(self):
         return wifi_follow.prepare_boot(self.controller, self.record, self.hold, self.previous,
@@ -438,9 +447,23 @@ class BootScanTests(unittest.TestCase):
         self.assertEqual(self.executor.settings[PSK], "home-test-password")
         self.assertEqual([command.arguments for command in self.writes_since(start)],
                          [("connection", "modify", "id", "jittersim-ap", SSID, RECOVERY_WIFI_NAME)])
-        # When Recovery does not start, the unit's fallback brings the router name back.
-        self.assertEqual(self.run_cli("boot-fallback")[0], 0)
-        self.assertEqual(self.executor.settings[SSID], "Home")
+        # Recovery does not start after ten tries: the fallback has nothing to restore
+        # (status 2), so the unit skips the second round and never starts the router name
+        # while the router sends it.
+        self.assertFalse(self.previous.exists())
+        start = len(self.executor.commands)
+        self.assertEqual(self.run_cli("boot-fallback")[0], wifi_follow.NOTHING_TO_RESTORE)
+        self.assertEqual(self.executor.settings[SSID], RECOVERY_WIFI_NAME)
+        self.assertEqual(self.writes_since(start), [])
+
+    def test_the_rename_to_recovery_drops_an_older_previous_name(self):
+        self.at_boot(on_router_name=True)
+        self.previous.write_text('{"ssid": "Home"}')  # From an earlier start in this boot.
+        self.executor.scan_output = listing(("Home", ROUTER_BSSID))
+        self.assertEqual(self.boot(), "router-on-air")
+        self.assertFalse(self.previous.exists())
+        self.assertEqual(self.run_cli("boot-fallback")[0], wifi_follow.NOTHING_TO_RESTORE)
+        self.assertEqual(self.executor.settings[SSID], RECOVERY_WIFI_NAME)
 
     def test_a_failed_rename_to_recovery_keeps_the_router_name(self):
         self.at_boot(on_router_name=True)
@@ -531,13 +554,44 @@ class BootScanTests(unittest.TestCase):
         self.assertEqual(result["result"], "timeout")
         self.assertEqual(self.lists(start), ["no"])
 
-    def test_a_running_access_point_is_never_scanned(self):
+    def test_a_running_access_point_is_never_scanned_or_renamed(self):
+        # For example `systemctl restart jittersim-ap` after a router-on-air boot: the radio
+        # sends Recovery. Renaming the saved profile would bring the router name back at the
+        # next start without a look.
         self.copy_router()
         self.controller.rename(RECOVERY_WIFI_NAME)  # The fake keeps jittersim-ap active.
         start = len(self.executor.commands)
-        self.assertEqual(self.boot(), "switched")
+        self.assertEqual(self.boot(), "ap-running")
         self.assertEqual(self.lists(start), [])
+        self.assertEqual(self.writes_since(start), [])
+        self.assertEqual(self.executor.settings[SSID], RECOVERY_WIFI_NAME)
+        self.assertFalse(self.previous.exists())
         self.assertEqual(json.loads(self.check.read_text())["scan_result"], "skipped")
+        text = self.run_cli("status")[1]
+        self.assertIn("state: ap-running", text)
+        self.assertIn("left the name alone", text)
+
+    def test_a_cold_boot_waits_for_wlan0_to_become_available(self):
+        self.at_boot()
+        self.executor.device_states = ["20 (unavailable)", "20 (unavailable)",
+                                       CommandExecutionError("Device not found")]
+        self.executor.scan_output = listing(("Home", ROUTER_BSSID))
+        self.assertEqual(self.boot(), "router-on-air")
+        self.assertEqual(self.sleeps, [wifi_follow.READY_STEP] * 3)
+        self.assertEqual(self.executor.settings[SSID], RECOVERY_WIFI_NAME)
+
+    def test_a_wlan0_that_stays_unavailable_fails_open_within_the_budget(self):
+        self.at_boot()
+        self.executor.device_state = "20 (unavailable)"
+        refused = CommandExecutionError("nmcli failed", return_code=10,
+                                        stderr="Error: Scanning not allowed while unavailable.")
+        self.executor.scan_replies = [refused, refused]
+        self.assertEqual(self.boot(), "switched")
+        self.assertLessEqual(sum(self.sleeps), wifi_follow.READY_WAIT)
+        self.assertLessEqual(self.now, wifi_follow.SCAN_BUDGET)
+        check = json.loads(self.check.read_text())
+        self.assertEqual(check["scan_result"], "failed")
+        self.assertIn("unavailable", check["scan_detail"])
 
     def test_held_or_changed_wifis_are_not_scanned(self):
         self.at_boot()
@@ -609,7 +663,7 @@ class UplinkCheckTests(unittest.TestCase):
                       ("192.168.0.0/16",)):
             with self.subTest(cidrs=cidrs):
                 code, text, executor = self.cli(addresses(*cidrs))
-                self.assertEqual(code, 1)
+                self.assertEqual(code, wifi_follow.UPLINK_CONFLICT_EXIT)
                 self.assertIn("does not start", text)
                 self.assertIn("192.168.50.0/24", text)
                 self.assertEqual(executor.commands[0].arguments,
@@ -624,18 +678,41 @@ class UplinkCheckTests(unittest.TestCase):
                 self.assertEqual(code, 0, text)
 
     def test_an_unusable_uplink_name_is_never_passed_to_ip(self):
-        code, text, executor = self.cli(addresses("192.168.50.2/24"), uplink="-x")
-        self.assertEqual(code, 0)
-        self.assertEqual(executor.commands, [])
+        for uplink in ("-x", "wlan0"):  # wlan0 is the test interface.
+            with self.subTest(uplink=uplink):
+                code, text, executor = self.cli(addresses("192.168.50.2/24"), uplink=uplink)
+                self.assertEqual(code, 0)
+                self.assertEqual(executor.commands, [])
+
+    def test_only_a_found_conflict_stops_the_unit(self):
+        # Exit 1 is a crash, 2 an argparse error (an older module without the action).
+        unit = (Path(__file__).resolve().parents[2] / "deploy" / "raspberry-pi"
+                / "jittersim-ap.service").read_text().splitlines()
+        line = [line for line in unit if "uplink-check" in line and line.startswith("ExecStartPre=")]
+        self.assertEqual(len(line), 1)
+        script = line[0].split("-c '", 1)[1].rsplit("'", 1)[0].replace("$$", "$")
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory) / "python"
+            for status, stops in ((0, False), (1, False), (2, False),
+                                  (wifi_follow.UPLINK_CONFLICT_EXIT, True)):
+                with self.subTest(status=status):
+                    fake.write_text("#!/bin/sh\nexit %d\n" % status)
+                    fake.chmod(0o755)
+                    done = subprocess.run(
+                        ["/bin/sh", "-c", script.replace("/opt/jittersim/.venv/bin/python",
+                                                         str(fake))], timeout=10)
+                    self.assertEqual(done.returncode != 0, stops)
 
     def test_the_unit_checks_the_uplink_before_the_rename_and_the_start(self):
         unit = (Path(__file__).resolve().parents[2] / "deploy" / "raspberry-pi"
                 / "jittersim-ap.service").read_text().splitlines()
         pre = [line.split("=", 1)[1] for line in unit if line.startswith("ExecStartPre=")]
         self.assertIn("nft list table", pre[0])
-        self.assertTrue(pre[1].endswith("wifi_follow uplink-check"))
-        self.assertFalse(pre[1].startswith("-"))  # A conflict stops the unit.
-        self.assertTrue(pre[2].startswith("-") and pre[2].endswith("wifi_follow boot"))
+        self.assertTrue(pre[1].startswith("-") and pre[1].endswith("wifi_follow boot"))
+        # Last before the start, without "-": its own exit status 3 stops the unit.
+        self.assertIn("wifi_follow uplink-check;", pre[2])
+        self.assertFalse(pre[2].startswith("-"))
+        self.assertEqual(len(pre), 3)
 
 
 if __name__ == "__main__":

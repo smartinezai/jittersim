@@ -39,7 +39,8 @@ commit ([local CI](local-ci.md)).
   router's own Wi-Fi was on. The boot step now looks once at the air and keeps
   `JitterSim-Recovery` for that boot when the router name is on the air from another BSSID
   (router safety audit round 2, owner decision D1). The test Wi-Fi also refuses to start when
-  the Ethernet uplink is inside `192.168.50.0/24` (D3). Open: a physical check on the Pi.
+  the Ethernet uplink is inside `192.168.50.0/24` (D3). Open: a physical check on the Pi that
+  includes a cold boot with the router Wi-Fi on and shows `boot_scan: seen`, not `failed`.
 - Panic and capacity: Panic stays reachable when silent connections fill the dashboard
   queue (PR 95). The Panic reserve and the waiting queue are kept for real Panic requests
   (PR 123). Reliability tests for Panic and capacity were added (PR 93).

@@ -371,11 +371,14 @@ waits for it about 20 seconds at most.
   `JitterSim-Recovery` for this boot, or takes it when it had the router name.
   Two Wi-Fis with one name on two subnets make phones and laptops switch
   between them, which looks like "connected but no internet". Household
-  devices then use the router Wi-Fi and test devices join `JitterSim-Recovery`
-  with the same password.
+  devices then use the router Wi-Fi, also the ones that were on the Pi under
+  the router name, and test devices join `JitterSim-Recovery` with the same
+  password. A neighbour, a guest network or a mesh repeater with exactly the
+  router name has the same effect.
 - When the look finds nothing, cannot run or the radio is busy, the boot does
   what it did before and uses the router name. A problem with the look never
-  keeps the test Wi-Fi off.
+  keeps the test Wi-Fi off. At a cold boot the Pi first waits a few seconds for
+  its Wi-Fi radio to be ready, so the look can run.
 - To use the router name again, switch the router Wi-Fi off and reboot the Pi,
   or run `sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow router`
   to use it now anyway.
