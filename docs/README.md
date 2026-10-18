@@ -65,6 +65,7 @@ a month (for example `2026-09`) was written in that month.
 | [research-router-pi-wifi-troubleshooting-2026-10-09.md](research-router-pi-wifi-troubleshooting-2026-10-09.md) | Ranked hypotheses and a safe experiment ladder for the outage |
 | [open-source-gap-review-2026-10-09.md](open-source-gap-review-2026-10-09.md) | Which hand-built parts a free tool would do better |
 | [open-source-adoption-2026-10-09.md](open-source-adoption-2026-10-09.md) | Free tools JitterSim could adopt (research) |
+| [review-results-device-speed-test-2026-10-10.md](review-results-device-speed-test-2026-10-10.md) | Review rounds of the device speed test (PR 121) and what is still open |
 | [dependency-audit-2026-10-09.md](dependency-audit-2026-10-09.md) | The 22 pip-audit findings in the release locks: reachability, fixes and what was left |
 | [outage-lab-results-2026-10-09.md](outage-lab-results-2026-10-09.md) | The Pi-only cutover rebuilt in network namespaces: 16 scenarios, one per failure mode of the outage dossier (PR 120) |
 | [carry-forward-panic-batch-2026-10-10.md](carry-forward-panic-batch-2026-10-10.md) | What the reviews of the combined Panic batch (PR 136) found and left open, and the owner action after a rollback from the first upload-safe release |
@@ -195,6 +196,8 @@ are grouped by theme.
 | [Choose a saved profile when assigning a device](implementation-plan-device-profile-picker-2026-10-04.md) | 2026-10-04 |
 | [Device names, traffic clarity, profile list, sidebar status and impact check](implementation-plan-device-visibility-2026-10-01.md) | 2026-10-01 |
 | [Device workflows and repeatable tests](implementation-plan-device-workflows-2026-09.md) | 2026-09 |
+| [Device speed test](implementation-plan-device-speed-test-2026-10-09.md) | 2026-10-09 |
+| [Device speed test review fixes](implementation-plan-device-speed-test-review-fixes-2026-10-14.md) | 2026-10-14 |
 | [Make raw diagnostics reachable from the keyboard](implementation-plan-diagnostics-keyboard-access-2026-10-03.md) | 2026-10-03 |
 | [Diagnostics keyboard request check](implementation-plan-diagnostics-preview-check-2026-10-04.md) | 2026-10-04 |
 | [Finish the coordinated dashboard changes](implementation-plan-final-dashboard-composition-2026-10-04.md) | 2026-10-04 |

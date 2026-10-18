@@ -15,6 +15,10 @@ next release takes them over.
   running, or while what runs is older than the saved settings. A failed start changes nothing. Start, Apply to all, Stop
   for everyone, Reset network and Panic end it for every device. The change adds a
   table to the settings database and needs the Pi helper restarted with the update.
+- Add a device speed test that records traffic through the applied profile, saves
+  results and compares them with numbers entered from a speed test run on the
+  device. Deleting a result asks in the page's own dialog. The start check
+  also compares the loss burst length of the queues with the applied profile.
 - The Pi Wi-Fi follows the router. After a **Copy router Wi-Fi to Pi** that
   worked, the Pi records the router's Wi-Fi name and security (no password).
   Every boot renames a saved Wi-Fi with another name, such as

@@ -50,6 +50,12 @@ from jittersim.api.access import (
 from jittersim.api.trust import TRUST_DOWNLOADS, dashboard_name_report, easy_address, read_trust_api
 from jittersim.localname import read_local_name
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
+from jittersim.api.speed_tests import (
+    SPEED_TEST_WRITES,
+    SpeedTestManager,
+    read_speed_test,
+    write_speed_test,
+)
 from jittersim.config.adblocking import MAX_STATE_BYTES as MAX_AD_BLOCKING_BODY_BYTES
 from jittersim.config.device_labels import (
     DeviceLabelError,
@@ -287,7 +293,7 @@ RELEASE_UPLOAD_HEADER = "X-Jittersim-Archive-Bytes"
 # dashboard serves one request at a time so a slow sender cannot hold it for longer.
 RELEASE_UPLOAD_SECONDS = 120.0
 WRITE_PATHS = (WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/preview"}
-               | {RELEASE_UPLOAD_PATH})
+               | {RELEASE_UPLOAD_PATH} | SPEED_TEST_WRITES)
 ACTION_PATHS = frozenset(
     ("/api/apply", "/api/reset", "/api/observations/scan", "/api/update-preferences",
      "/api/access-point/reset-name", "/api/updates/check-online", "/api/updates/retry")
@@ -1048,6 +1054,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         self.name_status_path = name_status_path
         self.helper_client = helper_client
         self.scheduler = scheduler
+        # The device speed test windows. One manager for the life of the server.
+        self._speed_test_manager = SpeedTestManager(self)
         # Protection-derived dashboard access: the last confirmed sync with the root helper.
         self._protected_access_lock = threading.Lock()
         self._protected_access_state: Dict[str, Any] = {
@@ -1834,6 +1842,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         workflow = read_workflow(self, path)
         if workflow is not None:
             return workflow
+        speed_test = read_speed_test(self, path, query)
+        if speed_test is not None:
+            return speed_test
         trust = read_trust_api(self, path)
         if trust is not None:
             return trust
@@ -2516,6 +2527,10 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                                     before_replace=None) -> Tuple[int, str, bytes]:
         if path == "/api/profiles/ranges":
             return self._write_response_for(path, payload)
+        # A speed test only reads counters and saves its own rows, so it never waits for an apply.
+        speed_test = write_speed_test(self, path, payload)
+        if speed_test is not None:
+            return speed_test
         control_intent = None
         live_access = path in ACCESS_WRITES and path not in (
             "/api/normal-access", "/api/site-blocks", "/api/site-blocks/delete"
@@ -3428,6 +3443,17 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
     def server_close(self) -> None:
         deadline = time.monotonic() + self.shutdown_timeout_seconds
+        # Speed test windows read the helper and write the repository. Stop them first, because
+        # the caller closes the repository right after this returns.
+        # A sampler stuck in a helper read must not stop the rest of the shutdown, so its error
+        # is raised at the end with the others and the caller keeps the repository open.
+        unresolved = []
+        speed_tests = getattr(self, "_speed_test_manager", None)
+        if speed_tests is not None:
+            try:
+                speed_tests.shutdown(timeout=self.shutdown_timeout_seconds)
+            except WorkersStillRunning as error:
+                unresolved.append(error)
         if self.scheduler is not None:
             self.scheduler.begin_shutdown()
         if self.homepage_store is not None:
@@ -3444,7 +3470,6 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             self._close_pending(connection)
         # The listener can close at once. Shared state must outlive every owner.
         super().server_close()
-        unresolved = []
         cleanup = self._cleanup_worker
         if cleanup is not None and cleanup is not threading.current_thread():
             cleanup.join(timeout=max(0.0, deadline - time.monotonic()))
