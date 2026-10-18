@@ -247,7 +247,9 @@ class AccessPointStartTests(unittest.TestCase):
     def test_boot_returns_to_the_router_copy_and_never_blocks_the_start(self):
         follow = "/opt/jittersim/.venv/bin/python -I -m jittersim.networking.wifi_follow"
         # A failing step is ignored ("-"), so the Wi-Fi always starts with some profile.
+        # Before it, the read-only uplink check (it fails the unit only for a found conflict).
         self.assertEqual(self.directives(self.unit, "ExecStartPre")[1:], [
+            [*follow.split(), "uplink-check"],
             ["-" + follow.split()[0], *follow.split()[1:], "boot"]])
         self.assertEqual(self.directives(self.unit, "ExecStartPost"), [
             ["-" + follow.split()[0], *follow.split()[1:], "boot-done"]])

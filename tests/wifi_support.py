@@ -29,6 +29,10 @@ class WifiExecutor(FakeExecutor):
         self.on_up = None
         self.keep_inactive = False
         self.radio_overrides = {}
+        # `nmcli device wifi list`: replies in order (text or an exception), then scan_output.
+        self.scan_replies = []
+        self.scan_output = ""
+        self.hwaddr = "B8\\:27\\:EB\\:00\\:00\\:01"  # As `nmcli -g` escapes it.
 
     def run(self, command):
         result = super().run(command)
@@ -55,6 +59,13 @@ class WifiExecutor(FakeExecutor):
         if command.executable != "nmcli":
             return result
         args = command.arguments
+        if "wifi" in args and "list" in args:
+            reply = self.scan_replies.pop(0) if self.scan_replies else self.scan_output
+            if isinstance(reply, Exception):
+                raise reply
+            return CommandResult(0, stdout=reply)
+        if "-g" in args and args[args.index("-g") + 1] == "GENERAL.HWADDR":
+            return CommandResult(0, stdout=self.hwaddr + "\n")
         if "-g" in args:
             fields = args[args.index("-g") + 1].split(",")
             if command.sensitive and command.expected_stdout is not None:

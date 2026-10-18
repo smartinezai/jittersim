@@ -16,6 +16,8 @@ from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.helper import HelperService
 from jittersim.networking.router import _settings_from_wifi_data
 from jittersim.networking.topology import Topology
+from jittersim.networking.commands import CommandResult
+from jittersim.networking.executor import CommandExecutionError
 from jittersim.networking.wifi import (
     RECOVERY_CONNECTION,
     RECOVERY_WIFI_NAME,
@@ -38,6 +40,7 @@ class FollowRouterTests(unittest.TestCase):
         self.hold = root / "wifi-recovery-hold"
         self.previous = root / "boot-previous.json"
         self.lock = root / "wifi.lock"
+        self.check = root / "boot-check.json"
         self.executor = CopyExecutor()
         self.source = source = {"SSID": "Home", "Passphrase": "home-test-password", "Enable": True,
                                 "ModeEnabled": "WPA2-Personal", "Enable5G": False}
@@ -80,7 +83,8 @@ class FollowRouterTests(unittest.TestCase):
         with redirect_stdout(output), redirect_stderr(errors):
             code = wifi_follow.main(list(argv), executor=self.executor, record_path=self.record,
                                     hold_path=self.hold, previous_path=self.previous,
-                                    lock_path=self.lock, fingerprint=self.fingerprint)
+                                    lock_path=self.lock, fingerprint=self.fingerprint,
+                                    check_path=self.check)
         return code, output.getvalue() + errors.getvalue()
 
     def writes_since(self, start):
@@ -357,6 +361,281 @@ class FollowRouterTests(unittest.TestCase):
         self.assertEqual(self.executor.settings[SSID], RECOVERY_WIFI_NAME)
         self.assertEqual(self.executor.active, "jittersim-ap")
         self.assertNotIn("home-test-password", text)
+
+
+ROUTER_BSSID = "AA:BB:CC:DD:EE:01"
+PI_BSSID = "B8:27:EB:00:00:01"
+
+
+def listing(*pairs):
+    """`nmcli --terse --escape yes -f SSID,BSSID device wifi list` output."""
+    return "".join("%s:%s\n" % (ssid.replace("\\", "\\\\").replace(":", "\\:"),
+                                bssid.replace(":", "\\:")) for ssid, bssid in pairs)
+
+
+class BootScanTests(unittest.TestCase):
+    """D1: the boot looks once at the air before it gives the Pi the router name."""
+
+    fingerprint = FollowRouterTests.fingerprint
+    copy_router = FollowRouterTests.copy_router
+    run_cli = FollowRouterTests.run_cli
+    writes_since = FollowRouterTests.writes_since
+
+    def setUp(self):
+        FollowRouterTests.setUp(self)
+        self.sleeps = []
+
+    def at_boot(self, *, on_router_name=False):
+        """The Pi after a reboot: router copy recorded, the access point not started yet."""
+        self.copy_router()
+        if not on_router_name:
+            self.controller.rename(RECOVERY_WIFI_NAME)
+        self.executor.active = ""
+
+    def scan(self, ssid):
+        return wifi_follow.scan_air(self.controller, ssid, sleep=self.sleeps.append)
+
+    def boot(self):
+        return wifi_follow.prepare_boot(self.controller, self.record, self.hold, self.previous,
+                                        self.fingerprint, self.check, self.scan)
+
+    def lists(self, start=0):
+        return [command.arguments[command.arguments.index("--rescan") + 1]
+                for command in self.executor.commands[start:]
+                if command.executable == "nmcli" and "list" in command.arguments]
+
+    def test_the_router_name_on_the_air_from_another_radio_keeps_recovery(self):
+        self.at_boot()
+        self.executor.scan_output = listing(("Neighbour", "11:22:33:44:55:66"),
+                                            ("Home", ROUTER_BSSID))
+        start = len(self.executor.commands)
+        self.assertEqual(self.boot(), "router-on-air")
+        self.assertEqual(self.executor.settings[SSID], RECOVERY_WIFI_NAME)
+        self.assertEqual(self.writes_since(start), [])
+        self.assertEqual(self.lists(start), ["no"])  # The cached list was enough: no scan.
+        self.assertFalse(self.previous.exists())
+        self.assertFalse(self.hold.exists())  # Not held: the next boot looks again.
+        check = json.loads(self.check.read_text())
+        self.assertEqual((check["decision"], check["scan_result"], check["scan_bssid"]),
+                         ("router-on-air", "seen", ROUTER_BSSID))
+        code, text = self.run_cli("status")
+        self.assertIn("state: router-on-air", text)
+        self.assertIn("boot_scan: seen from the cached list, 2 Wi-Fis listed", text)
+        self.assertIn(ROUTER_BSSID, text)
+        self.assertIn("Switch the router Wi-Fi off and reboot", text)
+        self.assertNotIn("home-test-password", text)
+        # The next boot without the router radio returns to the router name.
+        self.executor.scan_output = ""
+        self.assertEqual(self.boot(), "switched")
+        self.assertEqual(self.executor.settings[SSID], "Home")
+
+    def test_a_pi_already_on_the_router_name_switches_to_recovery_for_this_boot(self):
+        self.at_boot(on_router_name=True)
+        self.executor.scan_output = listing(("Home", ROUTER_BSSID))
+        start = len(self.executor.commands)
+        self.assertEqual(self.boot(), "router-on-air")
+        self.assertEqual(self.executor.settings[SSID], RECOVERY_WIFI_NAME)
+        self.assertEqual(self.executor.settings[PSK], "home-test-password")
+        self.assertEqual([command.arguments for command in self.writes_since(start)],
+                         [("connection", "modify", "id", "jittersim-ap", SSID, RECOVERY_WIFI_NAME)])
+        # When Recovery does not start, the unit's fallback brings the router name back.
+        self.assertEqual(self.run_cli("boot-fallback")[0], 0)
+        self.assertEqual(self.executor.settings[SSID], "Home")
+
+    def test_a_failed_rename_to_recovery_keeps_the_router_name(self):
+        self.at_boot(on_router_name=True)
+        self.executor.scan_output = listing(("Home", ROUTER_BSSID))
+        self.executor.failures.add(("modify", self.executor.calls["modify"] + 1))
+        with self.assertRaises(WifiError):
+            self.boot()
+        self.assertEqual(self.executor.settings[SSID], "Home")
+        self.assertFalse(self.previous.exists())
+        self.assertEqual(json.loads(self.check.read_text())["decision"], "rename-failed")
+
+    def test_only_the_pis_own_bssid_does_not_count(self):
+        self.at_boot()
+        self.executor.scan_output = listing(("Home", PI_BSSID.lower()))
+        self.assertEqual(self.boot(), "switched")
+        self.assertEqual(self.executor.settings[SSID], "Home")
+        self.assertEqual(json.loads(self.check.read_text())["scan_result"], "only-own")
+
+    def test_an_empty_list_scans_once_then_behaves_as_before(self):
+        self.at_boot()
+        start = len(self.executor.commands)
+        self.assertEqual(self.boot(), "switched")
+        self.assertEqual(self.lists(start), ["no", "yes"])
+        self.assertEqual(self.executor.settings[SSID], "Home")
+        check = json.loads(self.check.read_text())
+        self.assertEqual((check["scan_result"], check["scan_source"]), ("empty", "rescan"))
+
+    def test_the_rescan_finds_the_router_name_after_an_empty_cached_list(self):
+        self.at_boot()
+        self.executor.scan_replies = ["", listing(("Home", ROUTER_BSSID))]
+        self.assertEqual(self.boot(), "router-on-air")
+        self.assertEqual(self.executor.settings[SSID], RECOVERY_WIFI_NAME)
+
+    def test_other_names_on_the_air_behave_as_before(self):
+        self.at_boot()
+        self.executor.scan_output = listing(("Home-5G", ROUTER_BSSID), ("home", "AA:BB:CC:DD:EE:02"),
+                                            ("", "AA:BB:CC:DD:EE:03"))
+        self.assertEqual(self.boot(), "switched")
+        self.assertEqual(json.loads(self.check.read_text())["scan_result"], "not-seen")
+
+    def test_a_scan_error_fails_open(self):
+        failure = CommandExecutionError("nmcli failed", return_code=10,
+                                        stderr="Error: Scanning not allowed while unavailable.")
+        for replies in ([failure, failure], [failure, ""], [ValueError("surprise")] * 2):
+            with self.subTest(replies=replies):
+                self.setUp()
+                self.at_boot()
+                self.executor.scan_replies = list(replies)
+                self.assertEqual(self.boot(), "switched")
+                self.assertEqual(self.executor.settings[SSID], "Home")
+
+    def test_a_busy_radio_waits_once_and_reads_the_list_again(self):
+        busy = CommandExecutionError("nmcli failed", return_code=1,
+                                     stderr="Error: Device or resource busy")
+        self.at_boot()
+        self.executor.scan_replies = ["", busy, listing(("Home", ROUTER_BSSID))]
+        start = len(self.executor.commands)
+        self.assertEqual(self.boot(), "router-on-air")
+        self.assertEqual(self.lists(start), ["no", "yes", "no"])
+        self.assertEqual(self.sleeps, [wifi_follow.BUSY_WAIT])
+        self.assertEqual(json.loads(self.check.read_text())["scan_source"],
+                         "list after a busy radio")
+        # Still busy (or empty) after the wait: as before, and never a second scan.
+        self.setUp()
+        self.at_boot()
+        self.executor.scan_replies = ["", busy, busy]
+        start = len(self.executor.commands)
+        self.assertEqual(self.boot(), "switched")
+        self.assertEqual(self.lists(start), ["no", "yes", "no"])
+        self.assertEqual(json.loads(self.check.read_text())["scan_result"], "busy")
+
+    def test_a_timeout_fails_open_and_the_look_stays_within_its_budget(self):
+        timeout = CommandExecutionError("nmcli timed out", timed_out=True)
+        self.at_boot()
+        self.executor.scan_replies = [timeout, timeout]
+        self.assertEqual(self.boot(), "switched")
+        self.assertEqual(json.loads(self.check.read_text())["scan_result"], "timeout")
+        for command in self.executor.commands:
+            if command.executable == "nmcli" and "list" in command.arguments:
+                self.assertLessEqual(command.timeout_seconds, wifi_follow.RESCAN_TIMEOUT)
+        # A clock that has used the budget: no rescan is started at all.
+        self.setUp()
+        self.at_boot()
+        times = iter([0, 0, wifi_follow.SCAN_BUDGET, wifi_follow.SCAN_BUDGET])
+        start = len(self.executor.commands)
+        result = wifi_follow.scan_air(self.controller, "Home", sleep=self.sleeps.append,
+                                      clock=lambda: next(times))
+        self.assertEqual(result["result"], "timeout")
+        self.assertEqual(self.lists(start), ["no"])
+
+    def test_a_running_access_point_is_never_scanned(self):
+        self.copy_router()
+        self.controller.rename(RECOVERY_WIFI_NAME)  # The fake keeps jittersim-ap active.
+        start = len(self.executor.commands)
+        self.assertEqual(self.boot(), "switched")
+        self.assertEqual(self.lists(start), [])
+        self.assertEqual(json.loads(self.check.read_text())["scan_result"], "skipped")
+
+    def test_held_or_changed_wifis_are_not_scanned(self):
+        self.at_boot()
+        wifi_follow.use_recovery(self.controller, self.hold)
+        self.executor.active = ""
+        start = len(self.executor.commands)
+        self.assertEqual(self.boot(), "recovery-hold")
+        self.assertEqual(self.lists(start), [])
+        self.assertEqual(json.loads(self.check.read_text())["reason"], "an operator holds Recovery")
+
+    def test_the_cli_boot_says_why_and_status_shows_the_decision(self):
+        self.at_boot()
+        self.executor.scan_output = listing(("Home", ROUTER_BSSID))
+        output, errors = io.StringIO(), io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            code = wifi_follow.main(["boot"], executor=self.executor, record_path=self.record,
+                                    hold_path=self.hold, previous_path=self.previous,
+                                    lock_path=self.lock, fingerprint=self.fingerprint,
+                                    check_path=self.check, scan=self.scan)
+        self.assertEqual(code, 0)
+        self.assertIn("Wi-Fi at boot: router-on-air", output.getvalue())
+        self.assertIn("Why: the router name is on the air from %s" % ROUTER_BSSID,
+                      output.getvalue())
+        code, text = self.run_cli("status")
+        self.assertIn("boot_decision: router-on-air (", text)
+
+    def test_status_without_a_boot_record_says_so(self):
+        self.copy_router()
+        self.assertIn("boot_decision: - (no boot step ran", self.run_cli("status")[1])
+
+    def test_the_scan_parser_handles_escapes_and_bad_lines(self):
+        output = listing(("Ho:me\\x", ROUTER_BSSID)) + "garbage\n" + "Home:not-a-mac\n"
+        self.assertEqual(wifi_follow.parse_scan(output),
+                         [{"ssid": "Ho:me\\x", "bssid": ROUTER_BSSID}])
+        with self.assertRaises(ValueError):
+            wifi_follow.parse_scan("x" * (wifi_follow.MAX_SCAN_BYTES + 1))
+
+
+class IpExecutor:
+    def __init__(self, reply):
+        self.reply = reply
+        self.commands = []
+
+    def run(self, command):
+        self.commands.append(command)
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return CommandResult(0, stdout=self.reply)
+
+
+def addresses(*cidrs):
+    return json.dumps([{"ifname": "eth0", "addr_info": [
+        {"family": "inet", "local": cidr.split("/")[0], "prefixlen": int(cidr.split("/")[1])}
+        for cidr in cidrs]}])
+
+
+class UplinkCheckTests(unittest.TestCase):
+    """D3: no test Wi-Fi when the Ethernet uplink sits in 192.168.50.0/24."""
+
+    def cli(self, reply, uplink="eth0"):
+        output, errors = io.StringIO(), io.StringIO()
+        executor = IpExecutor(reply)
+        with redirect_stdout(output), redirect_stderr(errors):
+            code = wifi_follow.main(["uplink-check", "--uplink=" + uplink], executor=executor)
+        return code, output.getvalue() + errors.getvalue(), executor
+
+    def test_an_uplink_in_the_wifi_subnet_refuses_the_start(self):
+        for cidrs in (("192.168.50.23/24",), ("192.168.0.5/24", "192.168.50.2/24"),
+                      ("192.168.0.0/16",)):
+            with self.subTest(cidrs=cidrs):
+                code, text, executor = self.cli(addresses(*cidrs))
+                self.assertEqual(code, 1)
+                self.assertIn("does not start", text)
+                self.assertIn("192.168.50.0/24", text)
+                self.assertEqual(executor.commands[0].arguments,
+                                 ("-j", "-4", "address", "show", "dev", "eth0"))
+
+    def test_another_subnet_or_any_error_lets_the_wifi_start(self):
+        for reply in (addresses("192.168.0.23/24"), addresses("192.168.51.2/24"), "[]",
+                      "not json", '[{"addr_info": [{"family": "inet"}]}]',
+                      CommandExecutionError("ip failed")):
+            with self.subTest(reply=str(reply)[:30]):
+                code, text, _ = self.cli(reply)
+                self.assertEqual(code, 0, text)
+
+    def test_an_unusable_uplink_name_is_never_passed_to_ip(self):
+        code, text, executor = self.cli(addresses("192.168.50.2/24"), uplink="-x")
+        self.assertEqual(code, 0)
+        self.assertEqual(executor.commands, [])
+
+    def test_the_unit_checks_the_uplink_before_the_rename_and_the_start(self):
+        unit = (Path(__file__).resolve().parents[2] / "deploy" / "raspberry-pi"
+                / "jittersim-ap.service").read_text().splitlines()
+        pre = [line.split("=", 1)[1] for line in unit if line.startswith("ExecStartPre=")]
+        self.assertIn("nft list table", pre[0])
+        self.assertTrue(pre[1].endswith("wifi_follow uplink-check"))
+        self.assertFalse(pre[1].startswith("-"))  # A conflict stops the unit.
+        self.assertTrue(pre[2].startswith("-") and pre[2].endswith("wifi_follow boot"))
 
 
 if __name__ == "__main__":
