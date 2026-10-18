@@ -111,8 +111,9 @@ def check_firewall(*, uplink: str, test_interface: str, template: Path = FIREWAL
     `nft --check` sends the rules as a test transaction and changes no rules (it
     may load the kernel modules the rules need). It fails when the kernel lacks
     a module the rules need (such as nft_fib_inet), so an install or update stops
-    before it stops a service or replaces the running rules. Returns False when nft is not installed yet (a first install
-    adds nftables later and checks again with --firewall-only).
+    before it stops a service or replaces the running rules. Returns False when
+    nft is not installed yet (a first install adds nftables later and checks
+    again with --firewall-only).
     """
     for interface in (uplink, test_interface):
         if not INTERFACE_PATTERN.fullmatch(interface):
