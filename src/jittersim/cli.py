@@ -140,7 +140,7 @@ def _build_operations_parser() -> argparse.ArgumentParser:
         "--apply", action="store_true", help="apply all saved access rules after saving"
     )
     set_chance.add_argument(
-        "--yes", action="store_true", help="confirm a 100% failure chance without a prompt"
+        "--yes", action="store_true", help="confirm a 100%% failure chance without a prompt"
     )
     _add_local_options(set_chance)
 
