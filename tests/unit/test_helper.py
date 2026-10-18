@@ -24,7 +24,7 @@ from jittersim.engine.plan import (
     ServiceQuotaRule,
 )
 from jittersim.networking.applier import NetworkApplier
-from jittersim.networking.browser_proxy import load_active_plan
+from jittersim.networking.browser_proxy import _read_active_plan
 from jittersim.networking.commands import CommandResult
 from jittersim.networking.executor import CommandExecutionError, FakeExecutor
 from tests.helper_support import OldHelperService, OlderHelperService, captures, serving
@@ -306,7 +306,7 @@ class HelperServiceTests(unittest.TestCase):
                 {"action": "apply", "plan": plan_to_payload(make_plan())}
             )
             self.assertTrue(response["ok"])
-            self.assertEqual(load_active_plan(plan_path), make_plan())
+            self.assertEqual(_read_active_plan(plan_path)[0], make_plan())
             self.assertTrue(service.handle_payload({"action": "reset"})["ok"])
             self.assertFalse(plan_path.exists())
 
@@ -2772,6 +2772,7 @@ def good_queue(**changes):
         "impairment": {
             "delay_ms": 0, "jitter_ms": 0, "loss_percent": 20, "bandwidth_kbit": None,
             "reorder_percent": 0, "duplicate_percent": 0, "corrupt_percent": 0,
+            "loss_burst_packets": 0,
         },
         "packets": 10, "bytes": 1500, "drops": 3, "overlimits": 0, "requeues": 0,
         "backlog_bytes": 0, "qlen": 0, "generation": "a1b2c3d4-1",
@@ -2867,9 +2868,20 @@ class QueueStatsClientTests(unittest.TestCase):
         self.assertNotIn("loss_randomness", entry["impairment"])
         self.assertEqual(entry["impairment"]["loss_percent"], 20)
 
+    def test_keeps_the_burst_length_of_the_loss(self) -> None:
+        # The speed test start check compares it with the applied plan. A cleaner that
+        # dropped it would let a queue with another burst length pass as the same queue.
+        impairment = dict(good_queue()["impairment"], loss_burst_packets=8)
+
+        (entry,) = self.read([good_queue(impairment=impairment)])
+
+        self.assertEqual(entry["impairment"]["loss_burst_packets"], 8)
+
     def test_rejects_every_malformed_entry(self) -> None:
         bad_impairment = dict(good_queue()["impairment"])
         del bad_impairment["delay_ms"]
+        no_burst_impairment = dict(good_queue()["impairment"])
+        del no_burst_impairment["loss_burst_packets"]
         cases = {
             "negative counter": [good_queue(drops=-1)],
             "bool counter": [good_queue(packets=True)],
@@ -2922,6 +2934,15 @@ class QueueStatsClientTests(unittest.TestCase):
                 good_queue()["impairment"], duplicate_percent=101))],
             "corrupt above 100": [good_queue(impairment=dict(
                 good_queue()["impairment"], corrupt_percent=101))],
+            "burst above 100": [good_queue(impairment=dict(
+                good_queue()["impairment"], loss_burst_packets=101))],
+            "negative burst": [good_queue(impairment=dict(
+                good_queue()["impairment"], loss_burst_packets=-1))],
+            "boolean burst": [good_queue(impairment=dict(
+                good_queue()["impairment"], loss_burst_packets=True))],
+            "string burst": [good_queue(impairment=dict(
+                good_queue()["impairment"], loss_burst_packets="4"))],
+            "missing burst": [good_queue(impairment=no_burst_impairment)],
             "boolean bandwidth": [good_queue(impairment=dict(
                 good_queue()["impairment"], bandwidth_kbit=True))],
             "zero bandwidth": [good_queue(impairment=dict(
@@ -2942,7 +2963,7 @@ class QueueStatsClientTests(unittest.TestCase):
         largest = dict(
             good_queue()["impairment"], delay_ms=60_000, jitter_ms=60_000, loss_percent=100,
             reorder_percent=100, duplicate_percent=100, corrupt_percent=100,
-            bandwidth_kbit=1_000_000,
+            loss_burst_packets=100, bandwidth_kbit=1_000_000,
         )
 
         (entry,) = self.read([good_queue(impairment=largest, generation="0a-" + "f" * 21)])

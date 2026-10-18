@@ -38,8 +38,10 @@ Cuts release vX.Y.Z of $REPOSITORY from origin/main:
   --home DIR        where packages and evidence are kept (default: ~/jittersim-releases)
   --notes-file FILE use these release notes instead of GitHub's generated notes
   --yes             do not ask before merging and publishing (acceptance is still asked)
-  --dry-run         do every local step in a throwaway clone of this checkout's HEAD with
-                    fake checks: no push, PR, tag push, GitHub release or Pi
+  --dry-run         do every local step in a throwaway clone of this checkout's HEAD: no
+                    push, PR, tag push, GitHub release or Pi. The checks really run (point
+                    JITTERSIM_RELEASE_PYTHON at a python with the dev dependencies); set
+                    JITTERSIM_RELEASE_FAKE_CHECKS=1 for a quick run with fake ones
   -h, --help        show this help
 EOF
 }
@@ -118,13 +120,20 @@ set_version() {
     || fail "no release signing key at $key. Create it once with deploy/raspberry-pi/make-release-key.sh"
 [ -O "$key" ] || fail "the signing key $key belongs to another user"
 [ "$(ls -lLd "$key" | cut -c 5-10)" = '------' ] || fail "fix the key permissions: chmod 600 $key"
-if ! ssh-keygen -y -P '' -f "$key" >/dev/null 2>&1; then
-    fingerprint=$(ssh-keygen -l -f "$key.pub" | cut -d ' ' -f 2)
-    if ! ssh-add -l 2>/dev/null | grep -qF "$fingerprint"; then
-        say "The signing key has a passphrase. ssh-agent keeps it for one hour."
-        ssh-add -t 3600 "$key" </dev/tty || fail "the signing key could not be added to ssh-agent"
+# A passphrase key is kept by ssh-agent for one hour and every signature after that needs it
+# again, but the checks alone can take longer. So the key is made sure of before each step that
+# signs, not only once at the start. The step that signs may write its record first and sign
+# after, so a key that is gone then would leave an unsigned record that nothing can continue from.
+ensure_key() {
+    if ! ssh-keygen -y -P '' -f "$key" >/dev/null 2>&1; then
+        fingerprint=$(ssh-keygen -l -f "$key.pub" | cut -d ' ' -f 2)
+        if ! ssh-add -l 2>/dev/null | grep -qF "$fingerprint"; then
+            say "The signing key has a passphrase. ssh-agent keeps it for one hour."
+            ssh-add -t 3600 "$key" </dev/tty || fail "the signing key could not be added to ssh-agent"
+        fi
     fi
-fi
+}
+ensure_key
 
 if [ "$dry_run" = no ]; then
     login=$(gh api user -q .login 2>/dev/null) || fail "sign in to GitHub first: gh auth login"
@@ -177,10 +186,33 @@ print("v%d.%d.%d" % max(found) if found else "")')
         [ -z "$previous" ] || set -- "$@" -f "previous_tag_name=$previous"
         gh api "$@" -q .body >"$evidence/notes.md" || fail "GitHub could not generate the release notes"
     fi
+    # Approval accepts release notes of at most 16000 characters (the install sentence is added to
+    # them) and the Pi shows 16 KB. A longer text would fail at the end, after the evidence of every
+    # gate was typed, so stop now and leave nothing behind.
+    notes_size=$(wc -c <"$evidence/notes.md" | tr -d ' ')
+    if [ "$notes_size" -gt 15000 ]; then
+        if [ "$dry_run" = no ]; then
+            git -C "$REPO_ROOT" worktree remove --force "$src" >/dev/null 2>&1 || true
+            git -C "$REPO_ROOT" branch -D "release/$tag" >/dev/null 2>&1 || true
+        fi
+        rm -rf "$state"
+        fail "the release notes are $notes_size bytes and the limit is 15000. Nothing was kept. Run again with --notes-file and a shorter text"
+    fi
     python3 - "$src/CHANGELOG.md" "$tag" "$(date +%Y-%m-%d)" "$evidence/notes.md" <<'EOF'
 import sys
 from pathlib import Path
 path, tag, day, notes = Path(sys.argv[1]), sys.argv[2], sys.argv[3], Path(sys.argv[4]).read_text().strip()
+# GitHub's generated notes start with "## What's Changed". Left at that level the line would end
+# this release's section: build-release.sh cuts the archive's notes at the next "## " line, so the
+# Pi would never see the list, and CHANGELOG.md would get a stray top-level section.
+fenced, kept = False, []
+for line in notes.splitlines():
+    if line.startswith("```"):
+        fenced = not fenced
+    elif not fenced and (line.startswith("# ") or line.startswith("## ")):
+        line = "### " + line.split(" ", 1)[1]
+    kept.append(line)
+notes = "\n".join(kept)
 text = path.read_text() if path.exists() else "# Changelog\n\nEvery JitterSim release. The newest is first.\n"
 if f"\n## {tag} " in text or f"\n## {tag}\n" in text:
     sys.exit(f"CHANGELOG.md already has {tag}")
@@ -222,6 +254,13 @@ check_and_record() {
         python="$state/venv/bin/python"
     fi
     : >"$record_dir/checks.tsv"
+    # The checks use this python without activating its environment. Some tests start "python3"
+    # themselves and need the package importable there, so the environment's bin folder goes
+    # first on PATH, as scripts/local-ci.sh does.
+    check_path=$PATH
+    case ${python:-} in
+        */*) check_path="$(CDPATH='' cd -- "$(dirname -- "$python")" && pwd):$PATH" ;;
+    esac
     run_check() {
         name=$1
         shift
@@ -231,7 +270,7 @@ check_and_record() {
         if [ "$dry_run" = yes ] && [ "${JITTERSIM_RELEASE_FAKE_CHECKS:-}" = 1 ]; then
             printf 'fake check for the dry run: %s\n' "$*" >"$log"
         else
-            (cd "$src" && "$@") >"$log" 2>&1 || status=$?
+            (cd "$src" && PATH=$check_path && export PATH && "$@") >"$log" 2>&1 || status=$?
         fi
         printf '%s\t%s\t%s\t%s\n' "$name" "$*" "$status" "$(shasum -a 256 "$log" | cut -d ' ' -f 1)" \
             >>"$record_dir/checks.tsv"
@@ -240,8 +279,14 @@ check_and_record() {
     run_check lint "${python:-python3}" -m ruff check --select E9,F63,F7,F82,F811 src tests
     run_check python-tests "${python:-python3}" -m pytest -q -p no:cacheprovider
     run_check browser-journeys "${python:-python3}" -m tests.browser.journeys
-    if [ -f "$src/scripts/local-ci.sh" ]; then
-        run_check local-ci sh scripts/local-ci.sh
+    # scripts/local-ci.sh needs a command. Without one it prints its usage and exits 2. "all" runs
+    # every workflow job (Docker and the network included, so it takes long). Narrow it with e.g.
+    # JITTERSIM_RELEASE_LOCAL_CI="release-checks", or turn it off with "none". The checks the
+    # release policy requires are the three above, so this only adds assurance.
+    local_ci=${JITTERSIM_RELEASE_LOCAL_CI:-all}
+    if [ -f "$src/scripts/local-ci.sh" ] && [ "$local_ci" != none ]; then
+        # shellcheck disable=SC2086 # one word per local-ci argument on purpose
+        run_check local-ci bash scripts/local-ci.sh $local_ci
     fi
     python3 - "$record_dir/checks.tsv" "$record_dir/results.json" "$dry_run" <<'EOF'
 import json, sys
@@ -250,6 +295,7 @@ runner = "scripts/release.sh" + (" --dry-run (fake checks)" if sys.argv[3] == "y
 checks = [{"name": n, "command": c[:500], "exit_code": int(s), "log_sha256": h} for n, c, s, h in rows]
 json.dump({"runner": runner, "checks": checks}, open(sys.argv[2], "w"), indent=2)
 EOF
+    ensure_key
     rs record-local --ref "$checked" --results "$record_dir/results.json" --key "$key" \
         --output "$record_dir/local-verification.json"
 }
@@ -294,6 +340,7 @@ git -C "$src" checkout -q --detach "$commit"
 
 # --- 4. The exact package, signed.
 if [ ! -f "$package/release.json" ]; then
+    ensure_key
     if [ "$dry_run" = yes ]; then
         sequence=$(python3 -c 'import json, sys; print([r for r in json.load(open(sys.argv[1]))["reservations"] if r["version"] == sys.argv[2]][0]["sequence"])' \
             "$src/docs/releases/registry.json" "$number")
@@ -347,6 +394,7 @@ EOF
         { cat "$evidence/notes.md"; printf '\nInstall from the dashboard Updates page or run sudo jittersim update on the Pi. A failed install restores the previous installation automatically.\n'; } >"$evidence/release-notes.md"
         rs accept --bundle "$package" --notes-file "$evidence/release-notes.md" --target "$target" "$@"
     fi
+    ensure_key
     say "Signing the approval of $tag with $key"
     rs approve --bundle "$package" --evidence "$package/acceptance.json" --key "$key" --confirm-version "$number"
 fi

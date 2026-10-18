@@ -1,6 +1,6 @@
 # Dashboard UI overhaul: proposal (2026-10-09)
 
-Status: the visual refresh in this proposal is implemented in the same pull request. The framework prototype is an experiment under `experiments/ui-react-prototype/` and is not wired into the product.
+Status: the visual refresh in this proposal is implemented in the same pull request. The framework size experiment that backed it was removed from the tree afterwards. Its measured numbers are kept below, and its source is in git history at commit `36e0d2ce` under `experiments/ui-react-prototype/`.
 
 ## Recommendation in three sentences
 
@@ -33,7 +33,14 @@ Framework options judged against this project's constraints (no CDN, wheel packa
 | Svelte 5 | 2 to 10 KB, compiled | Vite or esbuild plugin | Smallest output, but a new language to maintain and a compile step for every page. |
 | React 19 | measured prototype page: 69.7 KB | esbuild or Vite | Works, but 11 times the Preact size for the same page. No benefit for a single owner here. |
 
-Measured with `experiments/ui-react-prototype` (`npm run sizes`): the same Devices page, minified, gzip level 9, runtime included: Preact 6,374 bytes, React 19 69,658 bytes. The shared CSS is 17.6 KB gzip in both. These numbers are for one page. A full port would add its own code on top of the runtime.
+Measured on 2026-10-09 with a throwaway prototype of the Devices page (`experiments/ui-react-prototype`, removed since; esbuild 0.28, preact 10.29, react 19.3, minified, whole page script including the app, shared dashboard CSS):
+
+| Build | Raw | Gzip level 9 | Brotli |
+| --- | --- | --- | --- |
+| Preact | 15.5 KB | 6.4 KB (6,374 bytes) | 5.8 KB |
+| React 19 | 224.4 KB | 69.7 KB (69,658 bytes) | 60.1 KB |
+
+The shared CSS is 17.6 KB gzip in both. For comparison `dashboard.js` was 423 KB raw and covers all nine pages. These numbers are for one page. A full port would add its own code on top of the runtime.
 
 Search results on bundle sizes were mostly blog posts. Treat the Preact and Svelte figures from the web as secondary. The table uses the measured numbers where they exist.
 

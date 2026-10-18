@@ -570,3 +570,35 @@ def test_a_short_release_transition_still_waits_to_record_its_end(store, tmp_pat
     holder.join(5)
     assert released.is_set()
     assert not store.read()["suspended"]
+
+
+def test_a_pause_whose_saves_stall_answers_in_time_and_keeps_the_lock(store, monkeypatch):
+    # Review of PR 138: Panic pauses ad blocking before it removes any rule.
+    import threading
+
+    release = threading.Event()
+    real_intent = store._intent
+
+    def stalled_intent(running):
+        release.wait(10)
+        real_intent(running)
+
+    monkeypatch.setattr(store, "_intent", stalled_intent)
+    started = time.monotonic()
+    try:
+        with pytest.raises(ValueError):
+            store.pause(wait=0.2)
+        assert time.monotonic() - started < 2.0
+        # A second stop never queues behind the stalled one.
+        with pytest.raises(ValueError, match="still being saved"):
+            store.pause(wait=5.0)
+        # The stalled saves still hold the settings lock, so nothing can overtake them.
+        with pytest.raises(ValueError, match="busy"):
+            with store.lock(0.1):
+                pass
+    finally:
+        release.set()
+    store._pause_saver.join(10)
+    assert not store._pause_saver.is_alive()
+    assert store.read()["running"] is False
+    store.pause(wait=1.0)

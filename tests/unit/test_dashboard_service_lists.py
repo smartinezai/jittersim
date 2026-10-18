@@ -35,7 +35,7 @@ let request = async (path, method, body) => {
 function makeNode(tag) {
   return {
     tag, id: "", value: "", textContent: "", className: "", checked: false, title: "",
-    type: "", disabled: false, children: [], listeners: new Map(), attributes: new Map(),
+    type: "", disabled: false, children: [], listeners: new Map(), attributes: new Map(), dataset: {},
     append(...items) {items.forEach((item) => this.appendChild(item))},
     appendChild(item) {
       if (item.parentElement) item.remove();

@@ -8,6 +8,9 @@ _INLINE_ASSETS = (
     ("__JITTERSIM_DASHBOARD_SCRIPT__", "dashboard.js"),
     ("__JITTERSIM_NAVIGATION_SCRIPT__", "dashboard-navigation.js"),
 )
+# The scripts that join dashboard.js inside its closure, right before this call.
+_START_CALL = "    startDashboard();"
+_EXTRA_SCRIPTS = ("workflows.js", "access.js", "reconnect.js", "trust.js", "speed-test.js")
 
 
 def assemble_dashboard() -> str:
@@ -25,10 +28,11 @@ def assemble_dashboard() -> str:
             (_ASSET_DIRECTORY / filename).read_text(encoding="utf-8") + "</style>",
             1,
         )
-    for filename in ("workflows.js", "access.js", "reconnect.js", "trust.js", "speed-test.js"):
-        page = page.replace(
-            "    startDashboard();",
-            (_ASSET_DIRECTORY / filename).read_text(encoding="utf-8")
-            + "\n    startDashboard();",
-        )
-    return page
+    scripts = "".join(
+        (_ASSET_DIRECTORY / filename).read_text(encoding="utf-8") + "\n"
+        for filename in _EXTRA_SCRIPTS
+    )
+    # A second call, in dashboard.js or in an extra script, would insert the scripts twice.
+    if page.count(_START_CALL) != 1 or _START_CALL in scripts:
+        raise ValueError(f"Dashboard script must contain {_START_CALL.strip()} exactly once")
+    return page.replace(_START_CALL, scripts + _START_CALL)

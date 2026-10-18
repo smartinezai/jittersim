@@ -21,11 +21,11 @@ class RecoveryOwnershipTests(unittest.TestCase):
         original = self.scheduler.publish_recovery
         results = []
 
-        def delayed(ticket, publish):
+        def delayed(ticket, publish, **options):
             if ticket[0] == 1:
                 entered.set()
                 assert release.wait(5)
-            return original(ticket, publish)
+            return original(ticket, publish, **options)
 
         with patch.object(self.scheduler, "publish_recovery", side_effect=delayed):
             worker = threading.Thread(

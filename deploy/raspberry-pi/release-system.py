@@ -944,7 +944,12 @@ def publish(git, folder, trusted_key, github, confirm, dry_run=False):
                 note_file.write_text(notes(record, approval))
                 github.call("release", "create", tag, "--repo", REPOSITORY, "--verify-tag", "--draft",
                             "--title", "JitterSim " + record["version"], "--notes-file", str(note_file))
-                same = [github.api(f"repos/{REPOSITORY}/releases/tags/{tag}")]
+                # GitHub's lookup by tag returns published releases only, never a draft. Find the new
+                # draft in the list of releases instead (the same list the retry path reads above).
+                listed = github.api(f"repos/{REPOSITORY}/releases?per_page=100")
+                same = [row for row in listed if isinstance(row, dict) and row.get("tag_name") == tag] \
+                    if isinstance(listed, list) else []
+                checked(len(same) == 1, "The new draft release was not found. Inspect GitHub before retrying.")
             release = same[0]
             checked(remote_tag(github, tag) == record["commit"], "The remote tag changed.")
             assets = release.get("assets", [])

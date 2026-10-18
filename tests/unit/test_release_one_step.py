@@ -246,8 +246,19 @@ class Publisher(HostedCI):
             return self.rows
         if "/git/ref/tags/" in path:
             return {"object": {"type": "commit", "sha": COMMIT}}
-        if "/releases/tags/" in path or path.endswith("releases/latest"):
-            return self.rows[0]
+        if "/releases/tags/" in path:
+            # GitHub documents this lookup as "a published release". A draft is a 404 here, so the
+            # tool must find a draft it just created in the list of releases instead.
+            tag = path.rsplit("/", 1)[1]
+            found = [row for row in self.rows if row["tag_name"] == tag and not row["draft"]]
+            if not found:
+                raise self.release.ReleaseError("A release command failed. No stable release was approved.")
+            return found[0]
+        if path.endswith("releases/latest"):
+            found = [row for row in self.rows if not row["draft"] and not row["prerelease"]]
+            if not found:
+                raise self.release.ReleaseError("A release command failed. No stable release was approved.")
+            return found[0]
         return super().api(path)
 
     def call(self, *args):
@@ -327,7 +338,7 @@ def source(tmp_path):
     return root
 
 
-def run_release(source, key, tmp_path, *args):
+def run_release(source, key, tmp_path, *args, env=None):
     fake = tmp_path / "bin"
     fake.mkdir(exist_ok=True)
     (fake / "gh").write_text("#!/bin/sh\ntouch " + str(tmp_path / "gh-was-called") + "\nexit 1\n")
@@ -335,6 +346,10 @@ def run_release(source, key, tmp_path, *args):
     environment = dict(os.environ, PATH=str(fake) + os.pathsep + os.environ["PATH"], HOME=str(tmp_path / "home"),
                        JITTERSIM_RELEASE_FAKE_CHECKS="1")
     environment.pop("SSH_AUTH_SOCK", None)
+    # The owner's own settings for a real run must not leak into these runs.
+    for name in ("JITTERSIM_RELEASE_PYTHON", "JITTERSIM_RELEASE_LOCAL_CI"):
+        environment.pop(name, None)
+    environment.update(env or {})
     return subprocess.run(["sh", str(source / "scripts/release.sh"), "--dry-run", "--home", str(tmp_path / "releases"),
                            "--key", str(key), *args], cwd=source, env=environment, capture_output=True,
                           text=True, stdin=subprocess.DEVNULL, timeout=180)
@@ -366,6 +381,139 @@ def test_release_script_dry_run_builds_signed_release_without_touching_github(re
     assert not git(tmp_path / "origin.git", "tag", "--list")
     assert git(tmp_path / "origin.git", "rev-parse", "main") == head
     assert not (tmp_path / "gh-was-called").exists()
+
+
+def recorded_checks(tmp_path, number="0.3.0"):
+    rows = (tmp_path / "releases" / number / "evidence" / "checks.tsv").read_text().splitlines()
+    return {row.split("\t")[0]: row.split("\t")[1] for row in rows}
+
+
+@pytest.mark.parametrize("scope, expected", [
+    (None, "bash scripts/local-ci.sh all"),
+    ("lint unit", "bash scripts/local-ci.sh lint unit"),
+    ("none", None),
+])
+def test_release_script_gives_local_ci_a_command_it_accepts(release, source, key, tmp_path, scope, expected):
+    """scripts/local-ci.sh without a command prints its usage and exits 2, so a bare call made
+    every real release stop at its last check. The scope is 'all' unless the owner narrows it."""
+    result = run_release(source, key, tmp_path, "0.3.0", env=None if scope is None else
+                         {"JITTERSIM_RELEASE_LOCAL_CI": scope})
+    assert result.returncode == 0, result.stdout + result.stderr
+    command = recorded_checks(tmp_path).get("local-ci")
+    assert command == expected
+    if command and (ROOT / ".git").exists():
+        # What would run is a command local-ci.sh itself accepts (it runs nothing under --dry-run).
+        # local-ci.sh refuses outside a git checkout, so the release test image (/app) skips this part.
+        words = command.split()[2:]
+        check = subprocess.run(["bash", str(ROOT / "scripts/local-ci.sh"), "--dry-run", "--allow-dirty", *words],
+                               cwd=ROOT, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
+        assert check.returncode == 0, check.stdout + check.stderr
+    # The three checks the policy requires are always recorded, whatever the local-ci scope is.
+    assert {"lint", "python-tests", "browser-journeys"} <= set(recorded_checks(tmp_path))
+
+
+def test_generated_github_notes_stay_inside_the_release_section(release, source, key, tmp_path):
+    """GitHub's generated notes start with a '## What's Changed' heading. Put into CHANGELOG.md as
+    they are, that line ends the release's section, so the archive (cut at the next '## ' line)
+    lost the whole generated list and CHANGELOG.md got a stray top-level section."""
+    notes = tmp_path / "github-notes.md"
+    notes.write_text("## What's Changed\n* Add a thing by @owner in https://github.com/o/r/pull/1\n\n"
+                     "## New Contributors\n* @someone made their first contribution\n\n"
+                     "**Full Changelog**: https://github.com/o/r/commits/v0.3.0\n")
+    result = run_release(source, key, tmp_path, "0.3.0", "--notes-file", str(notes))
+    assert result.returncode == 0, result.stdout + result.stderr
+    state = tmp_path / "releases/0.3.0"
+    manifest = release.inspect(state / "package" / release.ASSET, str(key) + ".pub")
+    with tarfile.open(state / "package" / release.ASSET) as bundle:
+        archived = bundle.extractfile("deploy/RELEASE-NOTES.md").read().decode()
+    assert archived.startswith("## v0.3.0 - ")
+    for line in ("Add a thing by @owner", "someone made their first", "**Full Changelog**"):
+        assert line in archived, line
+    changelog = git(state / "source", "show", manifest["commit"] + ":CHANGELOG.md")
+    headings = [line for line in changelog.splitlines() if line.startswith("## ")]
+    assert sum(line.startswith("## v0.3.0 - ") for line in headings) == 1
+    assert not any(line.startswith("## What's Changed") or line.startswith("## New Contributors")
+                   for line in headings)
+    assert "### What's Changed" in changelog and "### New Contributors" in changelog
+
+
+@pytest.mark.skipif(shutil.which("ssh-agent") is None or shutil.which("ssh-add") is None,
+                    reason="the passphrase key path needs ssh-agent and ssh-add")
+def test_release_script_asks_for_an_expired_key_before_it_writes_a_half_record(source, tmp_path):
+    """The passphrase key lives in ssh-agent for one hour. The checks can take longer, so the key can
+    be gone when the record is signed. The script wrote the unsigned record first and signing
+    failed after it, which left a record that later steps refused with no way to continue. It now
+    makes sure the key is in the agent before it writes anything that needs the signature."""
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    protected = keys / "protected"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "throwaway-passphrase", "-C", "test",
+                    "-f", str(protected)], check=True, capture_output=True, stdin=subprocess.DEVNULL)
+    askpass = tmp_path / "askpass.sh"
+    askpass.write_text("#!/bin/sh\necho throwaway-passphrase\n")
+    askpass.chmod(0o755)
+    agent = subprocess.run(["ssh-agent", "-s"], check=True, capture_output=True, text=True).stdout
+    values = dict(line.split(";")[0].split("=", 1) for line in agent.splitlines() if "=" in line.split(";")[0])
+    agent_env = {"SSH_AUTH_SOCK": values["SSH_AUTH_SOCK"]}
+    try:
+        subprocess.run(["ssh-add", str(protected)], check=True, capture_output=True, stdin=subprocess.DEVNULL,
+                       env=dict(os.environ, **agent_env, SSH_ASKPASS=str(askpass), SSH_ASKPASS_REQUIRE="force"))
+        # Stands in for the check tools. The first call ends the agent's hold on the key like the
+        # one hour lifetime does, so the key is gone when the checks are done.
+        tool = tmp_path / "fake-python"
+        tool.write_text(f"#!/bin/sh\nssh-add -d {protected}.pub >/dev/null 2>&1 || true\nexit 0\n")
+        tool.chmod(0o755)
+        # The script asks for the passphrase again. This answer is wrong, so the test never waits for
+        # a person, also when it runs in a terminal.
+        wrong = tmp_path / "wrong-askpass.sh"
+        wrong.write_text("#!/bin/sh\necho not-the-passphrase\n")
+        wrong.chmod(0o755)
+        result = run_release(source, protected, tmp_path, "0.3.0",
+                             env=dict(agent_env, JITTERSIM_RELEASE_PYTHON=str(tool),
+                                      JITTERSIM_RELEASE_LOCAL_CI="none", JITTERSIM_RELEASE_FAKE_CHECKS="0",
+                                      SSH_ASKPASS=str(wrong), SSH_ASKPASS_REQUIRE="force"))
+    finally:
+        subprocess.run(["ssh-agent", "-k"], capture_output=True, env=dict(os.environ, **values))
+    assert result.returncode != 0
+    assert "ssh-agent" in result.stderr, result.stdout + result.stderr
+    evidence = tmp_path / "releases/0.3.0/evidence"
+    assert not (evidence / "local-verification.json").exists()
+
+
+def test_checks_run_with_the_check_python_first_on_the_path(source, key, tmp_path):
+    """Some tests start 'python3' themselves and expect the package to be importable. In a real run
+    the checks use a virtual environment's python that nobody activated, so 'python3' was another
+    interpreter and test_local_ca failed in every real release. local-ci.sh puts the environment's
+    bin folder first on PATH. The release script does the same."""
+    bin_folder = tmp_path / "check-env" / "bin"
+    bin_folder.mkdir(parents=True)
+    seen = tmp_path / "seen-path"
+    tool = bin_folder / "fake-python"
+    tool.write_text(f"#!/bin/sh\nprintf '%s' \"$PATH\" > {seen}\nexit 0\n")
+    tool.chmod(0o755)
+    result = run_release(source, key, tmp_path, "0.3.0",
+                         env={"JITTERSIM_RELEASE_PYTHON": str(tool), "JITTERSIM_RELEASE_FAKE_CHECKS": "0",
+                              "JITTERSIM_RELEASE_LOCAL_CI": "none"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert seen.read_text().split(os.pathsep)[0] == str(bin_folder)
+
+
+def test_too_long_release_notes_stop_before_anything_is_left_behind(source, key, tmp_path):
+    """Approval accepts release notes of at most 16000 characters, and the Pi shows 16 KB of them.
+    GitHub's generated list for a first release is already near that, so a longer text would make
+    `accept` fail at the end, after the owner typed the evidence for every gate. It stops at the
+    start instead and leaves no half-made release behind."""
+    notes = tmp_path / "long-notes.md"
+    notes.write_text("## What's Changed\n" + "* A merged change by @owner in https://github.com/o/r/pull/1\n" * 250)
+    assert notes.stat().st_size > 15000
+    result = run_release(source, key, tmp_path, "0.3.0", "--notes-file", str(notes))
+    assert result.returncode != 0
+    assert "--notes-file" in result.stderr and "bytes" in result.stderr, result.stdout + result.stderr
+    assert not (tmp_path / "releases/0.3.0").exists()
+    # The same version can be started again with shorter notes.
+    notes.write_text("## What's Changed\n* One change.\n")
+    again = run_release(source, key, tmp_path, "0.3.0", "--notes-file", str(notes))
+    assert again.returncode == 0, again.stdout + again.stderr
 
 
 def test_release_script_refuses_an_old_or_malformed_version(source, key, tmp_path):
