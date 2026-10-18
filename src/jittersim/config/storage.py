@@ -195,6 +195,12 @@ class ConfigRepository:
 
         self._connection.close()
 
+    @property
+    def in_transaction(self) -> bool:
+        """Tell whether a write began on this connection and was neither committed nor undone."""
+
+        return self._connection.in_transaction
+
     def _commit(self) -> None:
         if not self._transaction_depth:
             self._connection.commit()
@@ -2678,6 +2684,10 @@ class ConfigRepository:
             return None
         if not isinstance(counter_bytes, int) or counter_bytes < 0:
             raise StorageError("device traffic counter is invalid")
+        if counter_bytes == data_limit.counter_bytes:
+            # Nothing moved since the last sample. The scheduler samples every 5 s, and an
+            # UPDATE that stores the same values still costs the SD card a journaled write.
+            return data_limit
         delta = counter_bytes if counter_bytes < data_limit.counter_bytes else counter_bytes - data_limit.counter_bytes
         updated_used = min(2**63 - 1, data_limit.used_bytes + delta)
         self._connection.execute(
@@ -2821,6 +2831,10 @@ class ConfigRepository:
             return None
         if not isinstance(counter_bytes, int) or counter_bytes < 0:
             raise StorageError("group traffic counter is invalid")
+        if counter_bytes == data_limit.counter_bytes:
+            # Nothing moved since the last sample. The scheduler samples every 5 s, and an
+            # UPDATE that stores the same values still costs the SD card a journaled write.
+            return data_limit
         delta = counter_bytes if counter_bytes < data_limit.counter_bytes else counter_bytes - data_limit.counter_bytes
         updated_used = min(2**63 - 1, data_limit.used_bytes + delta)
         self._connection.execute(
@@ -3078,6 +3092,10 @@ class ConfigRepository:
             return None
         if not isinstance(counter_bytes, int) or counter_bytes < 0:
             raise StorageError("service traffic counter is invalid")
+        if counter_bytes == quota.counter_bytes:
+            # Nothing moved since the last sample. The scheduler samples every 5 s, and an
+            # UPDATE that stores the same values still costs the SD card a journaled write.
+            return quota
         delta = counter_bytes if counter_bytes < quota.counter_bytes else counter_bytes - quota.counter_bytes
         weighted_delta = (delta * quota.weight_percent + 50) // 100
         updated_used = min(2**63 - 1, quota.used_bytes + weighted_delta)

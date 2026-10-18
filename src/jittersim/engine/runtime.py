@@ -208,6 +208,10 @@ class RuntimeScheduler:
         self._database_path = database_path
         self._helper_client = helper_client
         self._poll_seconds = poll_seconds
+        # The scheduler's own database connection, kept from one tick to the next. Opening a
+        # repository runs the whole schema check and the history pruning, and a tick comes
+        # every second: a new one per tick cost the Pi that work 3600 times an hour.
+        self._tick_repository: Optional[ConfigRepository] = None
         self._rolls: Dict[str, _DeviceRollState] = {}
         self._preview = False
         self._pending_events: List[dict] = []
@@ -350,6 +354,7 @@ class RuntimeScheduler:
             self._router_canary.stop(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
         if unresolved:
             raise WorkersStillRunning("Scheduler workers did not stop. Their state remains owned.")
+        self._close_tick_repository()
 
     def activate(self, *, applied_payload: object, counters_preserved: bool = False) -> None:
         """Resume scheduled work after a successful manual apply."""
@@ -842,7 +847,7 @@ class RuntimeScheduler:
         if halts_at_start is None:
             halts_at_start = self.halt_count
         owned_repository = repository is None
-        active_repository = repository or ConfigRepository(self._database_path)
+        active_repository = repository or self._open_tick_repository()
         configuration_version: Optional[int] = None
         helper_attempted = False
         diagnostic_operation = None
@@ -1022,7 +1027,30 @@ class RuntimeScheduler:
                 self._rolls = previous_rolls
             self._pending_events = []
             if owned_repository:
-                active_repository.close()
+                self._finish_tick_repository(active_repository)
+
+    def _open_tick_repository(self) -> ConfigRepository:
+        if self._tick_repository is None:
+            self._tick_repository = ConfigRepository(self._database_path)
+        return self._tick_repository
+
+    def _finish_tick_repository(self, repository: ConfigRepository) -> None:
+        """Keep the connection for the next tick unless this tick left a transaction open.
+
+        A failed write can leave SQLite's implicit transaction open, and with it the write
+        lock that the dashboard needs. Such a connection is closed, so the next tick starts
+        from a fresh one, as every tick did before the connection was kept.
+        """
+
+        if repository.in_transaction:
+            self._tick_repository = None
+            repository.close()
+
+    def _close_tick_repository(self) -> None:
+        with self._apply_lock:
+            repository, self._tick_repository = self._tick_repository, None
+        if repository is not None:
+            repository.close()
 
     def _undo_overtaken_apply(self, repository: ConfigRepository) -> None:
         ticket = self.begin_recovery(cancel=False)
