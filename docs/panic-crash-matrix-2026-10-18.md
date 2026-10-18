@@ -146,12 +146,15 @@ before anyone pressed Panic. Once step 8 has run (the experiment table is
 loaded) they shape traffic. Panic and Reset remove all of it, so this is not a Panic
 failure, but nobody is told to press them.
 
-Test: `test_a_restart_after_an_interrupted_apply_removes_what_nothing_owns`,
-marked `expectedFailure`. With the patch below it passes (checked in a separate
-image: "unexpected success"), and the helper and Panic unit tests pass except
-the hash pins in `tests/unit/test_update_panic_source.py`, which need a new
-`PANIC_APPROVED_SOURCES` entry. The patched `helper.py` has sha256
-`77b8985db62cf15389cbccb3b5dd0e01deef5a5338c4c5ca872fdf4e6924ed68`.
+Test: `test_a_restart_after_an_interrupted_apply_removes_what_nothing_owns`. It was
+first marked `expectedFailure`. The fix in PR 168 removed the marker and the test now
+passes as a normal test. The fixed `helper.py` has sha256
+`f1d0e704b8ad61b4ef677e25d4b1c3f40ea1e16dfceb67246568f8ca35366587` and has one entry in
+`PANIC_APPROVED_SOURCES`, added after an independent Opus review that found no blocker.
+The review noted one limit: the mark lives in `/run/jittersim`, which
+`RuntimeDirectoryPreserve=restart` keeps over a restart but systemd removes after a plain
+`systemctl stop` followed by `start`. If the helper dies during an apply and then stops for good,
+the partial plan stays and the next start releases nothing. Panic and Reset still remove it.
 
 Proposed patch: mark an apply in progress next to the published plan, remove
 the mark once the plan is published or rolled back, and at start remove the
