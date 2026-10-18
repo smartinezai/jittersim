@@ -9,7 +9,8 @@ next release takes them over.
 ## Unreleased
 
 - The look at the air before a boot rename no longer depends on the Pi's language. Its
-  `nmcli` calls run with English output, so a Pi with a German or other locale still waits
+  `nmcli` calls run with untranslated output (`LC_ALL=C.UTF-8`, so names with umlauts and
+  other non-ASCII letters still match). A Pi with a German or other locale still waits
   for wlan0 at a cold boot and still retries a busy radio, and the look stays within its
   20 s budget. The start of the test Wi-Fi may now take up to 480 s in the worst case
   (it was 420 s) before systemd gives up.

@@ -2,7 +2,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from jittersim.networking.commands import Command
+from jittersim.networking.commands import Command, CommandError
 from jittersim.networking.executor import CommandExecutionError, SubprocessExecutor
 
 
@@ -62,7 +62,7 @@ class SubprocessExecutorTests(unittest.TestCase):
         self.assertEqual(result.stdout, "ok")
 
     @patch("jittersim.networking.executor.subprocess.run")
-    def test_only_a_command_that_asks_for_it_runs_with_the_english_locale(self, run_command) -> None:
+    def test_only_a_command_that_asks_for_it_runs_untranslated_but_in_utf8(self, run_command) -> None:
         run_command.return_value = subprocess.CompletedProcess(
             args=("nmcli",), returncode=0, stdout="", stderr="")
         english = Command("nmcli", ("-g", "GENERAL.STATE", "device", "show", "wlan0"),
@@ -76,9 +76,17 @@ class SubprocessExecutorTests(unittest.TestCase):
             SubprocessExecutor().run(plain)
 
         asked, ignored = run_command.call_args_list
-        # The rest of the environment is kept. A command that does not ask inherits it.
-        self.assertEqual(asked.kwargs["env"], {"LC_ALL": "C", "LANGUAGE": "de", "PATH": "/bin"})
+        # UTF-8 so that names with umlauts stay readable (plain "C" prints "?"), and no
+        # LANGUAGE so that gettext cannot translate. The rest of the environment is kept.
+        # A command that does not ask inherits the environment as before.
+        self.assertEqual(asked.kwargs["env"], {"LC_ALL": "C.UTF-8", "PATH": "/bin"})
         self.assertNotIn("env", ignored.kwargs)
+
+    def test_a_sensitive_command_cannot_ask_for_the_locale(self) -> None:
+        # Sensitive commands run in their own path, which never reads the flag.
+        with self.assertRaisesRegex(CommandError, "c_locale"):
+            Command("nmcli", ("connection", "edit"), "save a password", sensitive=True,
+                    c_locale=True)
 
     @patch("jittersim.networking.executor.subprocess.run")
     def test_rejects_non_networking_executables(self, run_command) -> None:

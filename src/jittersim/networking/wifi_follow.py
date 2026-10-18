@@ -299,7 +299,7 @@ def _scan_error(error: CommandExecutionError) -> str:
     text = (error.stderr or "").lower()
     # NetworkManager: "Device or resource busy", "Scanning not allowed immediately following
     # previous scan", or a scan that is still in progress. These are English words, so every
-    # nmcli call of the look runs with LC_ALL=C (see _nmcli).
+    # nmcli call of the look runs untranslated (see _nmcli).
     if "busy" in text or "not allowed immediately" in text or "in progress" in text:
         return SCAN_BUSY
     return SCAN_FAILED
@@ -311,7 +311,8 @@ def _nmcli(controller: WifiController, arguments, timeout: float) -> str:
         executable="nmcli", arguments=tuple(arguments),
         purpose="read the Wi-Fi names on the air (read only)",
         timeout_seconds=max(1, timeout),
-        # The Pi may run in another language. The busy and not-ready texts below are English.
+        # The Pi may run in another language. The busy and not-ready texts here are English,
+        # and the names must stay UTF-8, so this is C.UTF-8 and not plain C.
         c_locale=True,
     )).stdout
 

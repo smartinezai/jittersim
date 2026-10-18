@@ -82,7 +82,14 @@ class SubprocessExecutor:
             return self._run_sensitive(command)
 
         # Only a command that asks for it gets its own environment. All others inherit.
-        extra = {"env": {**os.environ, "LC_ALL": "C"}} if command.c_locale else {}
+        # C.UTF-8 (glibc 2.35 and later, Debian) is untranslated and still UTF-8: plain "C"
+        # would print a name like "FRITZ!Box Müller" with "?". gettext takes LANGUAGE before
+        # LC_ALL unless the locale is exactly "C", so it goes away too.
+        extra = {}
+        if command.c_locale:
+            environment = {**os.environ, "LC_ALL": "C.UTF-8"}
+            environment.pop("LANGUAGE", None)
+            extra = {"env": environment}
         try:
             result = subprocess.run(
                 command.argv,

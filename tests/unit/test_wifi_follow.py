@@ -623,7 +623,7 @@ class BootScanTests(unittest.TestCase):
         self.assertIn("wlan0 was still 20 (nicht verf\u00fcgbar)",
                       json.loads(self.check.read_text())["scan_detail"])
 
-    def test_every_nmcli_call_of_the_look_asks_for_english_output(self):
+    def test_every_nmcli_call_of_the_look_asks_for_untranslated_output(self):
         self.at_boot()
         self.executor.scan_output = listing(("Neighbour", "11:22:33:44:55:66"))
         start = len(self.executor.commands)
@@ -637,9 +637,10 @@ class BootScanTests(unittest.TestCase):
                                                    "GENERAL.CONNECTION", "GENERAL.HWADDR"})
         self.assertTrue(all(command.c_locale for command in looked), looked)
 
-    def test_a_german_nmcli_is_asked_in_english_so_the_wait_and_the_busy_retry_work(self):
-        # A fake nmcli that answers in German unless it runs with LC_ALL=C, as the real one
-        # does. The Pi may run with de_DE.UTF-8, and the look must not depend on that.
+    def test_a_german_nmcli_is_asked_untranslated_so_the_wait_and_the_busy_retry_work(self):
+        # A fake nmcli that answers in German unless it runs with LC_ALL=C.UTF-8 and without
+        # LANGUAGE, as the real one does. The Pi may run with de_DE.UTF-8 and the look must
+        # not depend on that.
         directory = self.record.parent / "german"
         directory.mkdir()
         (directory / "other").write_text(listing(("Neighbour", "11:22:33:44:55:66")))
@@ -647,7 +648,7 @@ class BootScanTests(unittest.TestCase):
         fake = directory / "nmcli"
         fake.write_text(r"""#!/bin/sh
 dir=DIRECTORY
-english() { [ "$LC_ALL" = C ]; }
+english() { [ "$LC_ALL" = C.UTF-8 ] && [ -z "$LANGUAGE" ]; }
 case "$*" in
 *GENERAL.STATE*)
     n=$(cat "$dir/reads" 2>/dev/null || echo 0)
@@ -684,6 +685,33 @@ esac
         self.assertEqual(result["result"], "seen", result)
         self.assertEqual(result["source"], "list after a busy radio")
         self.assertEqual(slept, [wifi_follow.READY_STEP] * 2 + [wifi_follow.BUSY_WAIT])
+
+    def test_a_name_with_an_umlaut_still_matches_because_the_look_keeps_utf8(self):
+        # With plain LC_ALL=C the real nmcli prints such a name with "?", so it would never
+        # match and the look would silently do nothing for it.
+        directory = self.record.parent / "umlaut"
+        directory.mkdir()
+        fake = directory / "nmcli"
+        fake.write_text(r"""#!/bin/sh
+case "$*" in
+*GENERAL.STATE*) echo "30 (disconnected)" ;;
+*GENERAL.CONNECTION*) echo "" ;;
+*GENERAL.HWADDR*) echo 'B8\:27\:EB\:00\:00\:01' ;;
+*"wifi list"*)
+    case "$LC_ALL" in
+    *UTF-8) printf 'FRITZ!Box M\303\274ller:AA\\:BB\\:CC\\:DD\\:EE\\:01\n' ;;
+    *) printf 'FRITZ!Box M?ller:AA\\:BB\\:CC\\:DD\\:EE\\:01\n' ;;
+    esac ;;
+esac
+""")
+        fake.chmod(0o755)
+        environment = {"PATH": "%s:%s" % (directory, os.environ["PATH"]), "LC_ALL": "de_DE.UTF-8",
+                       "LANG": "de_DE.UTF-8", "LANGUAGE": "de"}
+        with mock.patch.dict(os.environ, environment):
+            controller = WifiController(SubprocessExecutor(timeout_seconds=15), "wlan0")
+            result = wifi_follow.scan_air(controller, "FRITZ!Box Müller", sleep=lambda _: None)
+        self.assertEqual(result["result"], "seen", result)
+        self.assertEqual(result["bssid"], ROUTER_BSSID)
 
     def test_a_wlan0_that_stays_unavailable_fails_open_within_the_budget(self):
         refused = CommandExecutionError("nmcli failed", return_code=10,
