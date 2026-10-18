@@ -112,6 +112,37 @@ class StoreAndMoveTests(unittest.TestCase):
             self.assertIsNone(re.search(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}", message), message)
             self.assertNotIn("dads-iphone", message.lower())
 
+    def test_unnamed_entries_put_no_address_into_activity_or_session_lines(self):
+        self.repository.delete_device("dad")
+        self.repository.delete_connected_device_label(mac_address=OLD)
+        # An unnamed protected device, and an empty-name label of another device.
+        self.repository.save_unaffected_device(UnaffectedDevice(OLD, "", 1))
+        other = "aa:bb:cc:00:00:05"
+        self.repository.save_connected_device_label(
+            mac_address=other, display_name="", device_type="phone")
+        self.store.observe([{"mac_address": other, "hostname": "kitchen-ipad",
+                             "ipv4_address": None, "connected_seconds": 1,
+                             "ipv4_verified": False}], saved={OLD, other}, now=NOW - 200)
+        # A running test session copies every activity line into its report.
+        self.repository._connection.execute(
+            "INSERT INTO test_sessions (id, name, target, notes, started_at, settings_json) "
+            "VALUES ('s1', 'Session', 'everyone-else', '', ?, '{}')", (NOW,))
+        self.repository._connection.commit()
+        items = self.suggestions(station(), station(mac="06:00:00:00:00:43",
+                                                    hostname="Kitchen-iPad", ipv4=None))
+        self.assertEqual(len(items), 2)
+        for item in items:
+            move_profile_and_label(self.repository, self.store, item, mode="ask", now=NOW,
+                                   protection_move_id="x" if item.old.protected else "")
+        for entry in self.store.history():
+            undo_profile_and_label(self.repository, self.store, entry, now=NOW)
+        lines = [event["message"] for event in self.repository.list_activity()]
+        lines += [row[0] for row in self.repository._connection.execute(
+            "SELECT message FROM test_session_events")]
+        self.assertGreaterEqual(len(lines), 4)
+        for line in lines:
+            self.assertIsNone(re.search(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}", line), line)
+
     def test_a_full_label_list_does_not_stop_a_move(self):
         for index in range(255):
             self.repository.save_connected_device_label(

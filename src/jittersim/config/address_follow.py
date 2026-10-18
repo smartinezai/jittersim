@@ -11,6 +11,7 @@ docs/implementation-plan-follow-address-changes-2026-10-17.md.
 """
 
 import json
+import re
 import sqlite3
 from dataclasses import asdict, replace
 from typing import Callable, Dict, List, Optional, Set, Tuple
@@ -381,6 +382,22 @@ class AddressFollowStore:
         ]
 
 
+_MAC_TEXT = re.compile(r"[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}", re.IGNORECASE)
+
+
+def activity_name(name: str, *, first: bool = True) -> str:
+    """The name for activity lines, which test session reports copy.
+
+    A saved entry without a name is named by its MAC address. That address never
+    goes into these lines: the address change history keeps it.
+    """
+
+    text = str(name or "").strip()
+    if not text or _MAC_TEXT.search(text):
+        return "A saved device" if first else "a saved device"
+    return text
+
+
 def station_rows(stations) -> List[dict]:
     """The verified Wi-Fi stations, with only the fields the rules use."""
 
@@ -564,7 +581,7 @@ def move_profile_and_label(
         repository.record_activities(
             # No address here: activity lines are copied into test session reports.
             # The address change history keeps the addresses.
-            [("address", f"{old.name} uses a new private Wi-Fi address. "
+            [("address", f"{activity_name(old.name)} uses a new private Wi-Fi address. "
                          f"Its {what} moved {how}.")],
             now=now,
             device_ids=[(old.device_id,) if old.device_id else ()],
@@ -643,7 +660,7 @@ def undo_profile_and_label(repository, store, entry: dict, *, now: int) -> None:
         if not store.mark_undone(entry["id"], now=now):
             raise FollowConflict("This move was already undone.")
         repository.record_activities(
-            [("address", f"Undid the address move of {entry['name']}.")],
+            [("address", f"Undid the address move of {activity_name(entry['name'], first=False)}.")],
             now=now,
             device_ids=[(entry["device_id"],) if entry["device_id"] else ()],
         )
