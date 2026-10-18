@@ -4636,6 +4636,7 @@ class ControlServerTests(unittest.TestCase):
             {
                 "configuration_version": 2,
                 "device_only": [],
+                "everyone_exceptions": [],
                 "last_action": None,
                 "last_error": None,
                 "last_result": None,

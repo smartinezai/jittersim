@@ -60,7 +60,7 @@ LISTS = [[], [{"name": "Games", "enabled": True}, {"name": "Off", "enabled": Fal
 
 def sidebar_inputs():
     inputs = []
-    for state, running, last_action, general, clients, available, lists, device_only in (
+    for state, running, last_action, general, clients, available, lists, device_only, beside in (
         itertools.product(
             ("applied", "unknown", "reset", "applying", "resetting", "error", None),
             (True, False),
@@ -70,12 +70,14 @@ def sidebar_inputs():
             (True, False),
             LISTS,
             (None, [], ["m", "9"]),
+            (None, ["m", "t"]),
         )
     ):
         inputs.append({
             "adminTokenVerified": True,
             "loaded": {name: True for name in rules.SIDEBAR_INPUTS},
             "deviceOnly": device_only,
+            "everyoneExceptions": beside,
             "runtimeState": state, "running": running, "lastAction": last_action,
             "generalState": general, "profiles": PROFILES, "clients": clients,
             "clientsAvailable": available, "serviceLists": lists,
@@ -105,10 +107,12 @@ def test_the_terminal_lists_every_affected_device_and_the_page_the_first_five():
 
 def test_runtime_status_text_matches_the_page():
     cases = [
-        [state, running, {"lastAction": action, "helperConfigured": helper, "deviceOnly": only}]
-        for state, running, action, helper, only in itertools.product(
+        [state, running, {"lastAction": action, "helperConfigured": helper, "deviceOnly": only,
+                          "everyoneExceptions": beside}]
+        for state, running, action, helper, only, beside in itertools.product(
             ("applied", "unknown", "reset", "applying", "resetting", "error", "other", None),
             (True, False), ("apply", "reset", None), (True, False, None), (None, [], ["air"]),
+            (None, [], ["air"], ["air", "tv"]),
         )
     ]
     page = run_node([function_source("runtimeStatusText")],

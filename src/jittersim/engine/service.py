@@ -8,18 +8,29 @@ from .access import build_access_plan
 from .compiler import compile_plan
 from .eligibility import eligible_clients
 from .general import compile_general_plan
-from .plan import EveryoneElseRule, NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
+from .plan import (
+    EveryoneElseRule,
+    GeneralProfileRule,
+    NetworkPlan,
+    ServiceAssignmentRule,
+    ServiceQuotaRule,
+)
 from .service_lists import build_service_list_rules
 from .website import build_website_filters, lookup_session, resolve_domains
 
 
 def compile_stored_plan(
-    *, repository: ConfigRepository, connected_snapshot=None, device_scope=None
+    *, repository: ConfigRepository, connected_snapshot=None, device_scope=None,
+    everyone_exceptions=None,
 ) -> NetworkPlan:
     """Compile every stored device assignment into one deterministic plan.
 
     With `device_scope` only those saved devices run: the saved Everyone and
     everyone-else profiles, service lists and every other device stay stopped.
+
+    While an Everyone profile runs, the saved devices in `everyone_exceptions` run
+    their own profile beside it and every other device stays on Everyone. None reads
+    the exceptions the repository holds. An empty set is the whole-scope plan.
 
     The website lookups share one deadline, so a DNS server that does not answer
     delays the plan by seconds and not for good.
@@ -27,17 +38,32 @@ def compile_stored_plan(
 
     with lookup_session():
         return _compile_stored_plan(
-            repository=repository, connected_snapshot=connected_snapshot, device_scope=device_scope
+            repository=repository, connected_snapshot=connected_snapshot,
+            device_scope=device_scope, everyone_exceptions=everyone_exceptions,
         )
 
 
 def _compile_stored_plan(
-    *, repository: ConfigRepository, connected_snapshot=None, device_scope=None
+    *, repository: ConfigRepository, connected_snapshot=None, device_scope=None,
+    everyone_exceptions=None,
 ) -> NetworkPlan:
     scoped = device_scope is not None
     general_profile = None if scoped else repository.get_general_profile()
+    general_rule = None
     if general_profile is not None:
-        return compile_general_plan(repository=repository, profile=general_profile)
+        if everyone_exceptions is None:
+            everyone_exceptions = repository.get_everyone_exceptions()
+        if not everyone_exceptions:
+            return compile_general_plan(repository=repository, profile=general_profile)
+        # Everyone runs and these devices opt out of it. Only they get device rules.
+        device_scope = frozenset(everyone_exceptions)
+        scoped = True
+        general_rule = GeneralProfileRule(
+            profile_id=general_profile.id,
+            allowed_addresses=resolve_domains(domains=general_profile.website_domains)
+            if general_profile.website_mode == "allow_only"
+            else None,
+        )
     clients = eligible_clients(repository, connected_snapshot)
     if scoped:
         clients = replace(
@@ -170,6 +196,10 @@ def _compile_stored_plan(
         website_filters=website_filters,
         service_quota_rules=service_quota_rules,
         service_assignment_rules=service_assignment_rules,
-        service_list_rules=() if scoped else build_service_list_rules(repository, profiles),
+        # Service lists cover every affected client, so they also run beside Everyone.
+        service_list_rules=(
+            () if scoped and general_rule is None else build_service_list_rules(repository, profiles)
+        ),
         everyone_else=everyone_else,
+        general_profile=general_rule,
     )
