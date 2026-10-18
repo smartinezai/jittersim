@@ -160,6 +160,8 @@ class UpdateTests(unittest.TestCase):
         def service_query(command, timeout):
             if command[:2] == ["systemctl", "show"]:
                 return "ActiveState=inactive\nMainPID=0\nControlPID=0\nTasksCurrent=0"
+            if query is None and command[:4] == ["tc", "-j", "qdisc", "show"]:
+                return "[]"
             return query(command, timeout) if query else self.wifi
 
         def identity(source, config, budget, **options):
@@ -368,6 +370,275 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse((self.code / "src").exists())
         self.assertIn("RECOVERY_FORMAT = 2", self.manager.read_text())
         self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
+
+    def intake_system(self, *, fail=None, ingress=True, ifb=True, proof=True):
+        """A Pi with the upload intake and ifb device of a newer release.
+
+        Answers pass the production answer limit, and a full filter dump of a
+        plan with 15 classes is larger than that limit. `proof` is JitterSim's
+        connmark filter on the intake. Without it the ingress qdisc belongs to
+        another tool, as far as the cleanup can tell.
+        """
+        state = {"ingress": ingress, "ifb": ifb, "proof": proof,
+                 "removed_while_new_code": [], "queries": []}
+        test_interface = updates.runtime_interfaces(self.config)[1]
+
+        def bounded(answer):
+            if len(answer.encode()) > updates.MAX_COMMAND_ANSWER:
+                raise UpdateError("release command answer exceeds its allowance")
+            return answer
+
+        def query(command, timeout):
+            state["queries"].append(command)
+            if command[:4] == ["tc", "-j", "qdisc", "show"]:
+                return bounded(json.dumps(
+                    [{"kind": "ingress", "handle": "ffff:", "parent": "ffff:fff1"}]
+                    if state["ingress"] else []))
+            if command[:4] == ["tc", "-j", "filter", "show"]:
+                if not (state["ingress"] and state["proof"]):
+                    return bounded("[]")
+                if command[-2:] != ["pref", updates.UPLOAD_INTAKE_PROOF_PREF]:
+                    # Every filter of a plan with 15 classes.
+                    return bounded(json.dumps([{"kind": "fw", "pref": 11 + index, "options": {
+                        "actions": [{"kind": "mirred", "to_dev": "jittersim-ifb"}]}}
+                        for index in range(30)]))
+                return bounded(json.dumps([
+                    {"protocol": "all", "pref": 2, "kind": "matchall", "chain": 0},
+                    {"protocol": "all", "pref": 2, "kind": "matchall", "chain": 0, "options": {
+                        "handle": 1, "actions": [{"order": 1, "kind": "connmark", "zone": 0}]}},
+                ]))
+            return self.wifi
+
+        def run(command, timeout):
+            if command[:3] == ["tc", "qdisc", "del"] and command[-1] == "ingress":
+                if fail == "ingress":
+                    raise UpdateError("simulated tc failure")
+                state["ingress"] = state["proof"] = False
+                state["removed_while_new_code"].append((self.code / "src").exists())
+            if command[:3] == ["ip", "link", "del"]:
+                state["ifb"] = False
+                state["removed_while_new_code"].append((self.code / "src").exists())
+
+        def link_present(name):
+            return name == test_interface or (name == "jittersim-ifb" and state["ifb"])
+
+        state["link_present"] = link_present
+        return state, run, query
+
+    def apply_with_intake(self, state, run, query, health=lambda: True):
+        with patch.object(updates, "_link_present", state["link_present"]):
+            return self.apply(run, health, query)
+
+    def test_a_requested_rollback_removes_the_upload_intake_before_restoring(self):
+        self.stage()
+        request_update("v1", root=self.root, code=self.code, config=self.config, run=lambda *args: None)
+        self.apply(lambda *args: None, lambda: True)
+        request_update("", rollback=True, root=self.root, code=self.code, config=self.config, run=lambda *args: None)
+        state, run, query = self.intake_system()
+        self.apply_with_intake(state, run, query)
+        self.assertFalse(state["ingress"] or state["ifb"])
+        # The intake goes first, then the device, both before the older code returns.
+        self.assertEqual(state["removed_while_new_code"], [True, True])
+        self.assertFalse((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
+        self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
+
+    def test_a_failed_update_removes_the_upload_intake_before_the_recovery_copy(self):
+        self.stage()
+        request_update("v1", root=self.root, code=self.code, config=self.config, run=lambda *args: None)
+        state, intake_run, query = self.intake_system()
+
+        def fail_package(command, timeout):
+            intake_run(command, timeout)
+            if "pip" in command and "install" in command and command[0] == str(self.code / ".venv/bin/python"):
+                raise UpdateError("package install failed")
+
+        with self.assertRaises(UpdateError):
+            self.apply_with_intake(state, fail_package, query)
+        self.assertFalse(state["ingress"] or state["ifb"])
+        self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
+
+    def test_a_cleanup_failure_is_reported_and_the_older_package_is_still_restored(self):
+        self.stage()
+        request_update("v1", root=self.root, code=self.code, config=self.config, run=lambda *args: None)
+        self.apply(lambda *args: None, lambda: True)
+        request_update("", rollback=True, root=self.root, code=self.code, config=self.config, run=lambda *args: None)
+        state, run, query = self.intake_system(fail="ingress")
+        messages = []
+        real_atomic_json = updates.atomic_json
+
+        def record(path, value, *args, **kwargs):
+            if isinstance(value, dict) and value.get("message"):
+                messages.append(value["message"])
+            return real_atomic_json(path, value, *args, **kwargs)
+
+        with patch.object(updates, "atomic_json", record):
+            self.apply_with_intake(state, run, query)
+        self.assertFalse((self.code / "src").exists(), "the older package was not restored")
+        self.assertFalse(state["ifb"])
+        self.assertTrue(any("upload intake could not be removed" in message for message in messages))
+        status = update_status(root=self.root, code=self.code, config=self.config)
+        self.assertEqual(status["phase"], "rolled-back")
+        # The final status keeps the warning instead of a plain success.
+        self.assertIn("upload intake could not be removed", status["message"])
+        self.assertIn("Previous installation restored", status["message"])
+
+    def test_a_retry_removes_a_redirect_whose_device_is_already_gone(self):
+        # A first attempt removed the ifb device but not the intake. Its
+        # redirect no longer names the device. The retry still removes it.
+        state, run, query = self.intake_system(ifb=False)
+        updates.remove_upload_intake(self.config, run, query, root=self.root,
+                                     link_present=state["link_present"])
+        self.assertFalse(state["ingress"])
+
+    def test_another_tools_ingress_qdisc_is_left_in_place(self):
+        state, run, query = self.intake_system(proof=False)
+        commands = []
+
+        def recording(command, timeout):
+            commands.append(command)
+            run(command, timeout)
+
+        updates.remove_upload_intake(self.config, recording, query, root=self.root,
+                                     link_present=state["link_present"])
+        self.assertTrue(state["ingress"])
+        self.assertFalse(state["ifb"])
+        self.assertEqual(commands, [["ip", "link", "del", "dev", "jittersim-ifb"]])
+        self.assertFalse((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
+
+    def test_the_ownership_proof_survives_a_partial_cleanup(self):
+        state, run, query = self.intake_system(fail="ingress")
+        with self.assertRaisesRegex(UpdateError, "simulated tc failure"):
+            updates.remove_upload_intake(self.config, run, query, root=self.root,
+                                         link_present=state["link_present"])
+        self.assertTrue((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
+        # The filters went but the qdisc stayed. The saved record still proves it.
+        retry_state, retry_run, retry_query = self.intake_system(proof=False, ifb=False)
+        updates.remove_upload_intake(self.config, retry_run, retry_query, root=self.root,
+                                     link_present=retry_state["link_present"])
+        self.assertFalse(retry_state["ingress"])
+        self.assertFalse((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
+
+    def test_a_retry_checks_the_recorded_interface_after_the_settings_changed(self):
+        state, run, query = self.intake_system(fail="ingress")
+        with self.assertRaisesRegex(UpdateError, "simulated tc failure"):
+            updates.remove_upload_intake(self.config, run, query, root=self.root,
+                                         link_present=state["link_present"])
+        recorded_interface = updates.runtime_interfaces(self.config)[1]
+        # The restore brought back settings that name another test interface.
+        (self.config / "runtime.env").write_text(
+            "JITTERSIM_UPLINK=eth7\nJITTERSIM_TEST_INTERFACE=wlan9\n")
+        retry_state, retry_run, retry_query = self.intake_system(proof=False, ifb=False)
+        asked = []
+
+        def query_recording(command, timeout):
+            asked.append(command)
+            return retry_query(command, timeout)
+
+        updates.remove_upload_intake(
+            self.config, retry_run, query_recording, root=self.root,
+            link_present=lambda name: name in (recorded_interface, "wlan9"))
+        self.assertIn(recorded_interface, {command[5] for command in asked})
+        self.assertFalse(retry_state["ingress"])
+        self.assertFalse((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
+
+    def test_a_record_from_an_earlier_boot_proves_nothing(self):
+        interface = updates.runtime_interfaces(self.config)[1]
+        updates.atomic_json(self.root / updates.UPLOAD_INTAKE_RECORD,
+                            {"boot": "earlier-boot", "interfaces": [interface]})
+        # Another tool made an ingress qdisc after the reboot.
+        state, run, query = self.intake_system(proof=False, ifb=False)
+        updates.remove_upload_intake(self.config, run, query, root=self.root,
+                                     link_present=state["link_present"], boot_id="this-boot")
+        self.assertTrue(state["ingress"])
+        self.assertFalse((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
+
+    def test_a_failed_cleanup_is_tried_again_after_the_restore(self):
+        self.stage()
+        request_update("v1", root=self.root, code=self.code, config=self.config, run=lambda *args: None)
+        self.apply(lambda *args: None, lambda: True)
+        request_update("", rollback=True, root=self.root, code=self.code, config=self.config, run=lambda *args: None)
+        state, run, query = self.intake_system()
+        failures = []
+
+        def fail_first(command, timeout):
+            if command[:3] == ["tc", "qdisc", "del"] and not failures:
+                failures.append(command)
+                raise UpdateError("transient tc failure")
+            run(command, timeout)
+
+        self.apply_with_intake(state, fail_first, query)
+        self.assertFalse(state["ingress"] or state["ifb"])
+        status = update_status(root=self.root, code=self.code, config=self.config)
+        self.assertEqual(status["phase"], "rolled-back")
+        self.assertNotIn("upload intake", status["message"])
+        self.assertFalse((self.root / updates.UPLOAD_INTAKE_RECORD).exists())
+
+    def test_unstopped_or_unowned_commands_are_never_turned_into_a_restore(self):
+        for error in (updates.CommandNotStopped("tc", None),
+                      updates.OperationOwnershipUnknown("tc")):
+            for where in ("query", "run"):
+                state, run, query = self.intake_system()
+
+                def failing_run(command, timeout, error=error, where=where):
+                    if where == "run":
+                        raise error
+                    run(command, timeout)
+
+                def failing_query(command, timeout, error=error, where=where):
+                    if where == "query":
+                        raise error
+                    return query(command, timeout)
+
+                with patch.object(updates, "_link_present", state["link_present"]):
+                    with self.assertRaises(type(error)):
+                        updates.remove_upload_intake_before_restore(
+                            self.config, failing_run, failing_query, lambda *args: None,
+                            root=self.root)
+
+    def test_a_failed_intake_removal_still_removes_the_ifb_device_and_is_raised(self):
+        state, run, query = self.intake_system(fail="ingress")
+        with self.assertRaisesRegex(UpdateError, "simulated tc failure"):
+            updates.remove_upload_intake(self.config, run, query, root=self.root,
+                                         link_present=state["link_present"])
+        self.assertFalse(state["ifb"])
+        self.assertTrue(state["ingress"])
+
+    def test_an_unexpected_filter_answer_is_an_ordinary_cleanup_problem(self):
+        # A filter list with an item that is not an object must never skip the restore.
+        state, run, query = self.intake_system()
+
+        def odd_query(command, timeout):
+            if command[:4] == ["tc", "-j", "filter", "show"]:
+                return json.dumps(["matchall"])
+            return query(command, timeout)
+
+        with patch.object(updates, "_link_present", state["link_present"]):
+            problem = updates.remove_upload_intake_before_restore(
+                self.config, run, odd_query, lambda *args: None, root=self.root)
+        # Nothing proves the qdisc is ours, so it stays and the restore goes on.
+        self.assertIsNone(problem)
+        self.assertTrue(state["ingress"])
+
+    def test_a_failed_record_removal_is_an_ordinary_cleanup_problem(self):
+        state, run, query = self.intake_system(fail="ingress")
+        with self.assertRaises(UpdateError):
+            updates.remove_upload_intake(self.config, run, query, root=self.root,
+                                         link_present=state["link_present"])
+        retry_state, retry_run, retry_query = self.intake_system(proof=False, ifb=False)
+        with patch.object(updates, "_link_present", retry_state["link_present"]), \
+                patch.object(updates, "_fsync_folder", side_effect=OSError("disk stalled")):
+            problem = updates.remove_upload_intake_before_restore(
+                self.config, retry_run, retry_query, lambda *args: None, root=self.root)
+        self.assertIsInstance(problem, UpdateError)
+        self.assertFalse(retry_state["ingress"])
+
+    def test_a_pi_without_the_intake_needs_no_command(self):
+        commands = []
+        updates.remove_upload_intake(
+            self.config, lambda command, timeout: commands.append(command),
+            lambda command, timeout: "[]", root=self.root,
+            link_present=lambda name: name != "jittersim-ifb")
+        self.assertEqual(commands, [])
 
     def test_failed_health_check_restores_the_previous_installation(self):
         self.stage()
@@ -946,6 +1217,57 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(token.stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.config / "control.env").read_text(), "private credentials")
         self.assertFalse((self.root / "keep").exists())
+
+    def test_a_rollback_never_brings_back_a_revoked_dashboard_grant(self):
+        access = self.config / "dashboard-access.json"
+        granted = '{"version": 1, "devices": [{"mac_address": "02:00:00:00:00:01"}]}'
+        access.write_text(granted)
+        access.chmod(0o640)
+        self.install()
+        self.assertEqual((self.backup("config") / access.name).read_text(), granted)
+        # The owner revokes the grant on the new release, then rolls back.
+        access.write_text('{"version": 1, "devices": []}')
+        access.chmod(0o640)
+        group = access.stat().st_gid
+        self.rollback()
+        self.assertEqual(access.read_text(), '{"version": 1, "devices": []}')
+        self.assertEqual(access.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(access.stat().st_gid, group)
+        self.assertEqual((self.config / "control.env").read_text(), "private credentials")
+        self.assertFalse((self.root / "keep").exists())
+
+    def test_a_rollback_never_restores_a_dashboard_access_file_removed_since(self):
+        access = self.config / "dashboard-access.json"
+        access.write_text('{"version": 1, "devices": [{"mac_address": "02:00:00:00:00:01"}]}')
+        access.chmod(0o640)
+        self.install()
+        access.unlink()
+        self.rollback()
+        self.assertFalse(access.exists())
+
+    def test_an_interrupted_restore_keeps_the_current_dashboard_access(self):
+        access = self.config / "dashboard-access.json"
+        access.write_text('{"version": 1, "devices": [{"mac_address": "02:00:00:00:00:01"}]}')
+        access.chmod(0o640)
+        self.install()
+        access.write_text('{"version": 1, "devices": []}')
+        access.chmod(0o640)
+        request_update("", rollback=True, root=self.root, code=self.code, config=self.config,
+                       run=lambda *args: None)
+        original = updates.snapshot_tree
+
+        def broken_data(source, destination, *args, **kwargs):
+            if Path(destination) == self.data:
+                raise OSError("disk error")
+            return original(source, destination, *args, **kwargs)
+
+        with patch("jittersim.updates.snapshot_tree", broken_data), \
+                patch("jittersim.updates.time.sleep"), self.assertRaises(OSError):
+            self.apply(lambda *args: None, lambda: True)
+        # The old grant never came back, not even while the restore was unfinished.
+        self.assertFalse(access.exists())
+        self.apply(lambda *args: None, lambda: True)
+        self.assertEqual(access.read_text(), '{"version": 1, "devices": []}')
 
     def test_a_rollback_never_brings_back_a_key_list_from_an_older_backup(self):
         self.install()

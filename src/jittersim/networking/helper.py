@@ -1,6 +1,7 @@
 """Unix-socket boundary for the privileged networking process."""
 
 import argparse
+import contextvars
 import copy
 import io
 import grp
@@ -106,6 +107,11 @@ PANIC_POST_LOCK_SECONDS = 6.0
 PANIC_NETWORK_LOCK_WAIT_SECONDS = PANIC_DEADLINE_SECONDS - PANIC_POST_LOCK_SECONDS
 PANIC_STEP_FLOOR_SECONDS = 0.5
 PANIC_RELEASE_RESERVE_SECONDS = 4.0
+# Panic saves its stop records (the Panic guard, then gateway.json) before it removes
+# any rule. A storage stall in those fsyncs must not keep the rules in place: Panic
+# waits this long for the saves (the guard's lock wait plus a margin), then removes
+# the rules anyway and answers that the stop could not be saved.
+PANIC_STOP_RECORD_WAIT_SECONDS = panic_guard_module.GUARD_LOCK_WAIT_SECONDS + 1.0
 PANIC_ANSWER_SECONDS = 26.0
 # Gateway reads run while the request holds the operation lock. They wait this long
 # for a reset that holds the network lock, then answer helper-busy, so they never
@@ -166,6 +172,7 @@ _QUEUE_IMPAIRMENT_LIMITS = {
     "delay_ms": 60_000,
     "jitter_ms": 60_000,
     "loss_percent": 100,
+    "loss_burst_packets": 100,
     "reorder_percent": 100,
     "duplicate_percent": 100,
     "corrupt_percent": 100,
@@ -288,6 +295,9 @@ class HelperService:
         self._load_gateway_state()
         self._panic_guard = panic_guard
         self._panic_guard_error = False
+        # The thread of Panic's first saves while they wait for storage. A later Panic
+        # never confirms a recovery while it may still replace the newer records.
+        self._stop_record_saver: Optional[Tuple[threading.Thread, List[BaseException]]] = None
         if panic_guard is not None:
             try:
                 guard = panic_guard.provision(gateway_state_path)
@@ -963,9 +973,10 @@ class HelperService:
             self._panic_stop_latched = True
             self._household_stop_latched = True
             self._panic_recovery_failed = True
-        self._write_panic_guard(deadline=deadline)
-        self._write_gateway_state(durable=True)
-        reset = self._handle_reset(deadline=deadline)
+        stalled, save_errors = self._save_stop_records(deadline)
+        # The reset's bookkeeping write is skipped: the result is saved below, after the
+        # household release, so no write can hold the release.
+        reset = self._handle_reset(deadline=deadline, record_state=False)
         access_ok = False
         incomplete = None
         try:
@@ -979,15 +990,30 @@ class HelperService:
         except Exception:  # noqa: BLE001 - any failure is recorded and answered (review O4)
             LOGGER.exception("could not disable household restrictions")
         failed = not reset["ok"] or not access_ok
+        if stalled.is_alive():
+            # The first saves still wait for storage. More saves would wait behind them
+            # under the network lock, and a later one could be overtaken by the stalled
+            # one. The stalled saves record a stop that is not confirmed, which is true.
+            LOGGER.error("Panic stop records are still being saved; recovery is unconfirmed")
+            return {"ok": False, "error": "normal access recovery state could not be saved",
+                    "experiments_stopped": reset["ok"], "access_disabled": access_ok}
+        if save_errors:
+            # The stalled saves ended during the reset with an error that is not a
+            # storage error. The rules are released; the error ends Panic unconfirmed.
+            raise save_errors[0]
         saved = self._write_gateway_state(durable=True, panic_recovery_failed=failed)
         saved = self._write_panic_guard(panic_recovery_failed=failed or not saved,
                                         deadline=deadline) and saved
         with self._revision_lock:
             self._panic_recovery_failed = failed or not saved
         if not saved:
-            # Record the unconfirmed result in whichever file still accepts it.
+            # Record the unconfirmed result in whichever file still accepts it. Without
+            # a working sync, an unsynced gateway.json still holds the stop until reboot.
             self._write_panic_guard(deadline=deadline)
-            self._write_gateway_state(durable=True)
+            if not self._write_gateway_state(durable=True):
+                self._write_gateway_state()
+                # Not durable, so the state error stays reported.
+                self._gateway_state_error = True
             return {"ok": False, "error": "normal access recovery state could not be saved",
                     "experiments_stopped": reset["ok"], "access_disabled": access_ok}
         if not reset["ok"] or not access_ok:
@@ -997,6 +1023,44 @@ class HelperService:
             return {"ok": False, "error": error,
                     "experiments_stopped": reset["ok"], "access_disabled": access_ok}
         return {"ok": True, "action": "normal-access", "experiments_stopped": True, "access_disabled": True}
+
+    def _save_stop_records(self, deadline: float) -> Tuple[threading.Thread, List[BaseException]]:
+        """Save the latched stop before the reset, waiting a bounded time for storage.
+
+        Returns the thread of the saves and the errors they raised (other than
+        storage errors, which they handle). The thread is still alive when they
+        stalled, and errors can still arrive until it ends. While the saves of an
+        earlier Panic are still stalled, no new ones start: that thread and its
+        errors are returned, so this Panic also stays unconfirmed.
+        """
+
+        previous = self._stop_record_saver
+        if previous is not None and previous[0].is_alive():
+            LOGGER.error("earlier Panic stop records are still being saved; removing the rules first")
+            return previous
+        raised: List[BaseException] = []
+
+        def save() -> None:
+            try:
+                self._write_panic_guard(deadline=deadline)
+                self._write_gateway_state(durable=True)
+            except BaseException as error:  # noqa: BLE001 - raised again by the caller
+                raised.append(error)
+
+        # The saves keep the deadline scope of this request.
+        saver = threading.Thread(target=contextvars.copy_context().run, args=(save,),
+                                 name="panic-stop-records", daemon=True)
+        self._stop_record_saver = (saver, raised)
+        saver.start()
+        saver.join(bounded_wait(PANIC_STOP_RECORD_WAIT_SECONDS, deadline,
+                                floor=PANIC_STEP_FLOOR_SECONDS))
+        if saver.is_alive():
+            LOGGER.error("Panic stop records stalled in storage; removing the rules first")
+        elif raised:
+            # The saves handle storage errors themselves. Anything else ends Panic as
+            # it did before the saves ran in their own thread.
+            raise raised[0]
+        return saver, raised
 
     def _release_incomplete(self):
         """The error of a household release that left a restriction in force, else None."""
@@ -1716,7 +1780,8 @@ class HelperService:
         return {"ok": True, "action": "router-check"}
 
     def _handle_reset(self, *, pause_ad_blocking: bool = True,
-                      deadline: Optional[float] = None) -> Dict[str, Any]:
+                      deadline: Optional[float] = None,
+                      record_state: bool = True) -> Dict[str, Any]:
         blocking_failed = False
         if pause_ad_blocking and self._ad_blocking_store is not None:
             # Panic's ad pause leaves time for the household release after it.
@@ -1736,7 +1801,10 @@ class HelperService:
             return {"ok": False, "error": "network reset failed"}
         self._recovery_pending = False
         self._outage_observed = False
-        self._write_gateway_state()
+        if record_state:
+            # Panic skips this and saves its result after the household release, so a
+            # storage stall here never holds that release.
+            self._write_gateway_state()
         if blocking_failed:
             return {"ok": False, "error": "Profiles are off but ad-blocking bypass could not be confirmed. Retry Panic."}
         return {"ok": True, "action": "reset", "commands_run": commands_run}
@@ -2186,7 +2254,18 @@ READ_ONLY_ACTIONS = frozenset((
     "ping", "control-revision", "dashboard-access", "gateway-status", "capabilities", "access-status",
     "update-status", "clients", "uplink-info", "observe-dns", "queue-stats", "traffic-counters",
     "router-preview-ap", "router-status", "router-check", "router-wifi-credentials",
+    # Status reads the dashboard polls. Counting them as changes discarded the
+    # client scan in flight, and /api/connected-devices answered 502.
+    "update-online-status", "ad-blocking",
 ))
+# Actions that only read when their payload carries no changes.
+READ_WITHOUT_CHANGES_ACTIONS = frozenset(("update-online-settings",))
+
+
+def _reads_only(payload: Dict[str, Any]) -> bool:
+    action = payload.get("action")
+    return action in READ_ONLY_ACTIONS or (
+        action in READ_WITHOUT_CHANGES_ACTIONS and payload.get("changes") is None)
 
 
 class _SnapshotFlight:
@@ -2917,7 +2996,7 @@ class HelperClient:
                                         reason="helper-busy")
             timeout_seconds = min(self.timeout_seconds if timeout_seconds is None else timeout_seconds,
                                   left)
-        if payload.get("action") in READ_ONLY_ACTIONS:
+        if _reads_only(payload):
             return self._send(payload, timeout_seconds=timeout_seconds)
         # Anything else may change who is connected, so no earlier scan stays valid.
         self.invalidate_connected_devices()

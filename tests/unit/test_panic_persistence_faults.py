@@ -15,6 +15,7 @@ Each failure is injected in one of three phases of one `normal-access` call:
 
 import json
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -30,8 +31,10 @@ from jittersim.api.server import ControlServer
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.access import AccessPlan
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.networking import adblocking as adblocking_module
 from jittersim.networking import helper as helper_module
 from jittersim.networking.access import AccessManager
+from jittersim.networking.adblocking import AdRouting, AdStore
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.executor import FakeExecutor
 from jittersim.networking.helper import HelperClient, HelperClientError, HelperService
@@ -408,6 +411,8 @@ def test_stalled_state_sync_blocks_a_second_panic_with_helper_busy_then_recovers
     monkeypatch.setattr(helper_module, "PANIC_NETWORK_LOCK_WAIT_SECONDS", 0.6)
     # This test checks the helper's own busy answer, not the client's retry.
     monkeypatch.setattr(helper_module, "NORMAL_ACCESS_BUSY_RETRY_SECONDS", 0)
+    # The first Panic waits for its stop records for the whole check below.
+    monkeypatch.setattr(helper_module, "PANIC_STOP_RECORD_WAIT_SECONDS", 30)
     with fault_rig(monkeypatch, "guard", "file-sync", stalled=True) as rig:
         socket_path = rig.directory / "helper.sock"
         outcome = {}
@@ -457,6 +462,196 @@ def test_stalled_state_sync_blocks_a_second_panic_with_helper_busy_then_recovers
         assert rig.guard.read() == STOPPED
         assert leftovers(rig.directory) == []
         assert_effects_stopped(rig)
+
+
+@pytest.mark.parametrize("target", ["guard", "gateway"])
+def test_a_stalled_stop_record_sync_does_not_keep_the_rules_in_place(monkeypatch, target):
+    # Carry-forward item b: a storage stall in the first saves held the network lock
+    # before any rule was removed. Panic now removes the rules after a bounded wait.
+    monkeypatch.setattr(helper_module, "PANIC_STOP_RECORD_WAIT_SECONDS", 0.3)
+    with fault_rig(monkeypatch, target, "file-sync", stalled=True) as rig:
+        rig.plan.armed = True
+        try:
+            started = time.monotonic()
+            answer = rig.service.handle_payload({"action": "normal-access"})
+            elapsed = time.monotonic() - started
+            assert rig.plan.entered.is_set(), "the save never reached the stalled sync"
+            assert not rig.plan.release.is_set()
+            assert elapsed < 5.0
+            assert answer["ok"] is False
+            assert answer["experiments_stopped"] is True
+            assert answer["access_disabled"] is True
+            # The rules are gone while the stop record still waits for storage.
+            assert_effects_stopped(rig)
+            assert rig.service._panic_recovery_failed is True
+            assert rig.service._panic_stop_latched is True
+            # A retry while the first saves still stall removes the rules again but
+            # never confirms: the stalled save could still replace its records.
+            retry = rig.service.handle_payload({"action": "normal-access"})
+            assert retry["ok"] is False
+            assert rig.service._panic_recovery_failed is True
+            assert rig.plan.hits == 1, "the retry started another save behind the stalled one"
+        finally:
+            rig.plan.armed = False
+            rig.plan.release.set()
+        for thread in threading.enumerate():
+            if thread.name == "panic-stop-records":
+                thread.join(10)
+        # A retry once storage answers again saves the confirmed stop.
+        assert rig.service.handle_payload({"action": "normal-access"})["ok"] is True
+        assert rig.guard.read() == STOPPED
+        assert flags(rig.service._gateway_status()) == flags(STOPPED)
+        assert leftovers(rig.directory) == []
+
+
+def test_a_stalled_gateway_write_does_not_hold_the_household_release(monkeypatch):
+    # Review of PR 138: the reset's own gateway.json write waited for the same stalled
+    # storage before the household rules were released.
+    monkeypatch.setattr(helper_module, "PANIC_STOP_RECORD_WAIT_SECONDS", 0.3)
+    with fault_rig(monkeypatch, "gateway", "write", stalled=True) as rig:
+        rig.plan.armed = True
+        try:
+            started = time.monotonic()
+            answer = rig.service.handle_payload({"action": "normal-access"})
+            assert time.monotonic() - started < 5.0
+            assert answer["ok"] is False
+            assert answer["access_disabled"] is True
+            assert_effects_stopped(rig)
+        finally:
+            rig.plan.armed = False
+            rig.plan.release.set()
+        for thread in threading.enumerate():
+            if thread.name == "panic-stop-records":
+                thread.join(10)
+
+
+def test_a_stall_after_the_first_saves_does_not_hold_the_household_release(monkeypatch):
+    # Third review of PR 138: the first saves finish, then the reset's own write stalls.
+    with fault_rig(monkeypatch, "gateway", "write", stalled=True) as rig:
+        service = rig.service
+        original_reset = service._handle_reset
+
+        def reset(**options):
+            rig.plan.armed = True
+            try:
+                return original_reset(**options)
+            finally:
+                rig.plan.armed = False
+
+        monkeypatch.setattr(service, "_handle_reset", reset)
+        started = time.monotonic()
+        try:
+            service.handle_payload({"action": "normal-access"})
+            assert time.monotonic() - started < 5.0
+            assert rig.plan.hits == 0, "the reset wrote gateway.json before the release"
+            assert_effects_stopped(rig)
+        finally:
+            rig.plan.release.set()
+
+
+class LateSaveFailure(Exception):
+    pass
+
+
+def test_an_error_of_a_late_stop_save_never_confirms_panic(monkeypatch):
+    # Review of PR 138: an error that the stalled saves raised during the reset was lost
+    # and Panic answered a confirmed recovery.
+    monkeypatch.setattr(helper_module, "PANIC_STOP_RECORD_WAIT_SECONDS", 0.2)
+    with fault_rig(monkeypatch, "guard", "write") as rig:
+        service = rig.service
+        release = threading.Event()
+        original_guard, original_reset = service._write_panic_guard, service._handle_reset
+        calls = []
+
+        def late_failing_guard(**options):
+            calls.append(options)
+            if len(calls) == 1:
+                release.wait(5)
+                raise LateSaveFailure("late")
+            return original_guard(**options)
+
+        def reset(**options):
+            release.set()
+            for thread in threading.enumerate():
+                if thread.name == "panic-stop-records":
+                    thread.join(5)
+            return original_reset(**options)
+
+        monkeypatch.setattr(service, "_write_panic_guard", late_failing_guard)
+        monkeypatch.setattr(service, "_handle_reset", reset)
+        try:
+            answer = service.handle_payload({"action": "normal-access"})
+        except LateSaveFailure:
+            answer = {"ok": False}
+        assert answer.get("ok") is not True
+        assert service._panic_recovery_failed is True
+        assert_effects_stopped(rig)
+
+
+class StalledFileSync:
+    """Behaves like `os` except that, while armed, a file sync waits for `release`."""
+
+    def __init__(self):
+        self.armed = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def fsync(self, descriptor):
+        if self.armed and not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            self.entered.set()
+            self.release.wait(FaultPlan.STALL_LIMIT_SECONDS)
+        return os.fsync(descriptor)
+
+
+def test_a_stalled_ad_blocking_stop_save_does_not_hold_the_network_release(monkeypatch):
+    # Sol review of PR 138, finding 2: Panic pauses ad blocking before any rule is
+    # removed, and that pause saves its stop intent with a plain fsync. This uses the
+    # real ad-blocking store. A stall there must not keep the rules in place.
+    monkeypatch.setattr(helper_module, "AD_PAUSE_PANIC_WAIT_SECONDS", 0.5)
+    with fault_rig(monkeypatch, "guard", "write") as rig:
+        ads = rig.directory / "ads"
+        ads.mkdir()
+        store = AdStore(
+            AdRouting("wlan0", FakeExecutor()), path=ads / "policy.json",
+            lock_path=ads / "lock", active_path=ads / "active.json",
+            status_path=ads / "status.json", intent_path=ads / "intent.json",
+            panic_guard=rig.guard,
+        )
+        rig.service._ad_blocking_store = store
+        stall = StalledFileSync()
+        monkeypatch.setattr(adblocking_module, "os", stall)
+        seen = {}
+
+        def release_later():
+            # Look while the save still stalls, then let storage answer again.
+            if stall.entered.wait(10):
+                time.sleep(2.0)
+                seen["stopped_during_stall"] = (rig.service._active_plan is None
+                                                and not rig.manager.applied.options.enabled)
+            stall.release.set()
+
+        releaser = threading.Thread(target=release_later, daemon=True)
+        stall.armed = True
+        releaser.start()
+        try:
+            answer = rig.service.handle_payload({"action": "normal-access"})
+        finally:
+            stall.armed = False
+            releaser.join(15)
+        assert seen.get("stopped_during_stall") is True, "the rules waited for the stalled save"
+        # The ad-blocking stop was not saved in time, so Panic is not confirmed.
+        assert answer["ok"] is False
+        assert rig.service._panic_recovery_failed is True
+        assert_effects_stopped(rig)
+        for thread in threading.enumerate():
+            if thread.name == "ad-blocking-pause":
+                thread.join(10)
+        # Once storage answers, a retry confirms the stop.
+        assert rig.service.handle_payload({"action": "normal-access"})["ok"] is True
+        assert store.read()["running"] is False
 
 
 # Restart rule: the guard and gateway.json are combined so that a stop in either
