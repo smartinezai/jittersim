@@ -428,7 +428,7 @@ Recovery changes only the name, so returning is a rename. At every boot
 `JitterSim-Recovery`, back to the router name before the start. Only the saved
 name changes and the router is never contacted. When the router name does not
 start after ten tries, the previous name comes back for that boot and the next
-boot tries again. A manual Wi-Fi change or **Reset Pi Wi-Fi name** deletes the
+boot tries again. A manual Wi-Fi change or **Reset Wi-Fi name** deletes the
 record, so the owner's own choice stays. The record also keeps a salted HMAC of the
 copy's password (openssl reads it from nmcli through a pipe, JitterSim never
 sees it), so a Wi-Fi whose security or password changed in another way, for

@@ -3,13 +3,13 @@
 The exact October2 fix list is preserved in [the historical archive](history/2026-10-02-backlog-and-ux/planned-fixes.md).
 New feature ideas are in [feature proposals](feature-proposals-2026-10-09.md).
 
-Baseline: `origin/main` at `2f68772` (the merge of PR 140 on 16 October 2026), checked on
-17 October 2026. Statuses come from the source and the merged pull requests on that commit. Nothing
+Baseline: `origin/main` at `8c3f8171` (the merge of PR 138 on 18 October 2026), checked on
+18 October 2026. Statuses come from the source and the merged pull requests on that commit. Nothing
 here was run on a Pi. The 4 October accepted main `5e0fed2` matched tested candidate 6fb864f. Hosted
 jobs cannot start (billing limit), so every pull request is gated by `scripts/local-ci.sh` on its head
 commit ([local CI](local-ci.md)).
 
-## Changes after that candidate (9 to 16 October 2026)
+## Changes after that candidate (9 to 18 October 2026)
 
 - Router Wi-Fi writes are permanently refused by the Pi helper and the dashboard
   switch is read only (PR 87, merge `3903581`). Read-only router status checks and
@@ -59,6 +59,31 @@ commit ([local CI](local-ci.md)).
   5 and 7 and the cheap part of 6 are fixed (PR 126). Three flaky tests are deterministic
   (PR 99). The 22 pip-audit findings in the release locks are triaged (PR 119).
 
+- The carry-forward fixes of the Panic batch landed with a second approved bundle (PR 138,
+  18 October): a stalled write of the stop records no longer holds Panic, dashboard Panic waits a
+  bounded time for the scheduler lock and answers unconfirmed when it cannot take it, a rollback
+  keeps the current `dashboard-access.json` and removes the upload intake it cannot leave behind,
+  the installer starts the unchanged installation again when that cleanup fails, and the status
+  reads of the Updates page and the ad blocking line no longer discard a running device scan (the
+  502 of the browser explorer). The review found items that stay open (see Open fixes).
+- Pi boot robustness (PR 142): the `.local` name is announced again because Avahi no longer refuses
+  records from other programs, the name service survives an early hangup and restarts after any
+  exit, the journal stays on disk under `90-jittersim-persistent.conf` and the boot noise of the
+  control firewall and AP units is gone.
+- Dashboard accessibility: every destructive action asks in one accessible in-page dialog (PR 141),
+  one announcer and quiet polled lists keep focus on refresh (PR 146), and the QA sweep fixed focus
+  after a question, Escape on the traffic page and save chatter (PR 152). The stability pass
+  (PR 143) made local CI run on Python 3.9, skipped the TLS tests LibreSSL cannot run and gave
+  every Python the same 4300-digit limit for JSON numbers.
+- Release tooling: a real dry run of v0.2.0 found six bugs that every real release would have hit
+  and PR 139 fixed them (the last local CI check, the Python path, the draft lookup, the notes
+  heading level, a key that left the agent and over-long notes). PR 117 raised the wheel build lock.
+  The Updates page names the staged release on its install button (PR 112).
+- Clean-up: dead and test-only code and two unused prototypes were removed (PR 147, 148), the
+  release test image copies the top-level pages (PR 154) and a pull request template and an
+  architecture test were added (PR 145). The roadmap and these lists were reconciled once on
+  17 October (PR 144) and again now.
+
 The coordinated 4 October candidate repaired watchdog timeout classification, bounded
 helper requests, preserved upload-timeout handling and refused unknown legacy
 router fields or write destinations. Manual router status checks prevent
@@ -89,30 +114,56 @@ new tickets. The archived list retains all details and proposed fixes.
 
 ## Open fixes
 
-In flight on 17 October 2026 (states are in the [roadmap](../ROADMAP.md)):
+Open on 18 October 2026. The open pull requests (111, 121, 149, 150, 151 and 153) and their states
+are in the [roadmap](../ROADMAP.md).
 
-- PR 138 works the carry-forward list of the Panic batch: a rollback that brought back a
-  revoked dashboard grant, a backup lock that delayed dashboard Panic, a stalled write of
-  the stop records and the rollback cleanup of the upload intake. It touches hash-pinned
-  files, so it needs the independent review and a matching approved bundle before merge. Two
-  owner decisions are open in its description.
-- PR 139 fixes release tooling bugs that a real dry run of v0.2.0 found. PR 111 and 112 add
-  signed release notes to the update status and name the version on the Updates button. PR 117
-  raises the wheel build lock. They belong to the first release, v0.2.0, which is not cut.
-- PR 142 (boot robustness), PR 143 (a stability pass), PR 141 and 146 (in-page confirmations, one accessibility announcer) and PR 121
-  (device speed test) are open as well.
-- Not in flight and still open:
-  - Every private request from a test-network peer still asks the helper for its own dashboard
-    access status (`_check_device_access`). PR 86 bounded the wait and kept the token and PR 136
-    added a bounded busy retry, but simultaneous requests do not share one answer and the sign-in retry after "Device
-    verification is busy" is manual. The probe with four simultaneous checks has not been
-    repeated on an installed Pi.
-  - Names accept control characters and bidirectional overrides through the API and import.
-    This is a log and display hygiene question ([QA report](qa-report-2026-10-09.md)). An
-    HTTP/0.9 request still gets an answer with no status line. The browser fixture is not
-    hermetic for update actions.
-  - Loaded Pi capacity was never measured (feature proposal 20 in
-    [feature proposals](feature-proposals-2026-10-09.md)).
+- Two owner decisions from the review of PR 138 ([review results](review-results-carry-forward-2026-10-16.md)).
+  The recommended default applies until the owner decides.
+  1. A rollback to a release that does not know the upload intake cannot always remove it. Today
+     the cleanup runs before the restore, runs again after it and the final status warns to press
+     Panic, check `tc qdisc show` and reboot the Pi. The alternatives are to block such a rollback
+     or to keep a cleanup-capable Panic path until the intake is gone.
+  2. A rollback restores the database, so a device removed from **Protected devices** after the
+     update comes back with its protection grant for the dashboard. The default is to accept that
+     and remove the device again. The alternatives are to keep the current protected list across
+     rollbacks or to ask before restored protection grants access.
+- Review notes carried forward from PR 138 ([carry-forward list](carry-forward-panic-batch-2026-10-10.md)).
+  A late error of the stop-record saver has no log line (O1). An early save error that is not a
+  storage error ends Panic before any rule is removed (O2). Both wait for the next change of the
+  pinned `helper.py`. The household release saves its suspension with a plain `fsync` inside
+  `AdStore.access_transition()`, so a stall that begins there still holds it. The stalled-save fix
+  bounds only the saves before the rules are removed. The helper socket still authorizes by group
+  only ([design note](design-helper-action-authorization-2026-10-09.md), a proposal). A boot with an
+  incomplete household release latches a Panic stop, and Panic can be unavailable for up to 90
+  seconds at boot if a restore hangs.
+- PR 111 (gated, needs the combined independent review and a new approved bundle) adds the signed
+  notes to the update status, makes manual checks check only and retries a development-label build.
+  Until it merges the dashboard's **Release notes** box stays empty and a manual check can install
+  when **Install automatically** is on.
+- Every private request from a test-network peer still asks the helper for its own dashboard
+  access status (`_check_device_access`). PR 86 bounded the wait and kept the token and PR 136
+  added a bounded busy retry, but simultaneous requests do not share one answer and the sign-in
+  retry after "Device verification is busy" is manual. The probe with four simultaneous checks has
+  not been repeated on an installed Pi. The backlog audit proposes one shared answer per peer
+  ([backlog audit](backlog-audit-2026-10-16.md), item 1).
+- Small dashboard defects the QA sweep of 17 October found and left (PR 152). **Revoke all homepage
+  pairings** asks nothing and says nothing to a screen reader. **Clear** on the Measurements page
+  drops the unsaved table without asking. The **Delete** and **Edit** buttons of the device table
+  and the schedule list have no row name, so with several rows a screen reader cannot tell them
+  apart (the profile list says "Delete Normal connection"). The Restore Wi-Fi name question repeats
+  its first sentence under the heading. The note under **Router outage behavior** says "until you
+  choose Apply" but the button is **Start**.
+- Names accept control characters and bidirectional overrides through the API and import.
+  This is a log and display hygiene question ([QA report](qa-report-2026-10-09.md)). An
+  HTTP/0.9 request still gets an answer with no status line. The browser fixture is not
+  hermetic for update actions.
+- Loaded Pi capacity was never measured (feature proposal 20 in
+  [feature proposals](feature-proposals-2026-10-09.md)).
+- Tooling notes. The usage text of `scripts/local-ci.sh browser` still says 28 Pi browser modules
+  (there are 32 besides the journeys). The advisory checks of local CI report findings
+  (zizmor 13, pip-audit 21, shellcheck 16 on 17 October) that never gate. The two overengineering
+  reviews list further removals ([backend](review-overengineering-backend.md) and
+  [front end and tests](review-overengineering-frontend-tests.md)).
 
 ## Observed accessibility improvements
 
@@ -128,7 +179,8 @@ reported `skip-link` in the 12 phone-width states, because axe treats the off-sc
 sidebar links (`#devices`, `#router` and so on) as skip links and wants matching
 element ids. The page keeps those hashes unmatched on purpose so Back works without
 scrolling. Resolving that needs a navigation design change and stays open. The scan was
-not repeated after the look refresh of PR 115.
+not repeated after the look refresh of PR 115 or the announcer change of PR 146 (which removed the
+`aria-live` attributes of the polled lists).
 
 ## Test fixture reliability
 
@@ -137,5 +189,11 @@ contents were written. The unchanged full retry passed. Both runs are retained.
 PR 99 fixed it: a test child now writes the marker under a temporary name and
 renames it into place (`tests/marker_support.py`), so a polling parent reads the whole
 marker or none. No production failure was demonstrated by this fixture race.
+
+The explorer test `test_every_page_is_clean_at_desktop_and_phone_width` failed about one run in
+ten with `GET /api/connected-devices -> 502` (`network changed during client scan`). Two status
+reads of the Updates page and the ad blocking line counted as network changes in the helper client
+and discarded a running scan. PR 143 hid it in the browser fixture and PR 138 fixed the cause by
+listing the reads as read-only (the fixture retry was removed again).
 
 See [final local verification](verification-final-local-release-2026-10-04.md).
