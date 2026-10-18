@@ -47,6 +47,13 @@ next release takes them over.
 - `jittersim remote update now` follows an install the Pi already started when
   Install automatically is on, and `--json` prints one JSON answer (it cannot
   ask, so it needs `--yes`).
+- A check that a person asks for (the dashboard's Check for updates, `jittersim
+  remote update check` and `now`, `sudo jittersim update check --online`) only
+  checks and stages a release. Only the daily check installs by itself, and only
+  when Install automatically is on.
+- The Pi's update status carries the signed release notes of a release that can
+  be installed now, and a development build (`X.Y.Z.dev+COMMIT`) that stopped
+  can be retried.
 - The Updates page names the staged release on its install button (**Install
   v1.1.0**), shows whether a recovery copy is kept, shows the release notes when
   the Pi reports them, and the install confirmation names the signer and the
