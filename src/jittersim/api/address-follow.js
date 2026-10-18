@@ -119,12 +119,13 @@ function renderAddressFollowHistory(data) {
         entry.moved_protection ? "protection" : null].filter(Boolean).join(", ");
       const how = entry.mode === "automatic" ? "Automatic" : "After Yes";
       const state = entry.undone_at ? " · Undone" : entry.replaced
-        ? " · Replaced by a move under Dashboard access" : "";
+        ? " · Replaced by a later move" : "";
       row.appendChild(addressFollowNode("span", addressFollowWhen(entry.happened_at) + " · " + entry.name +
         ": " + entry.old_mac + " to " + entry.new_mac + " · " + moved + " · " + how + state + " "));
       if (entry.can_undo) {
-        const undo = addressFollowButton("Undo");
-        undo.setAttribute("aria-label", "Undo the move of " + entry.name);
+        const undo = addressFollowButton(entry.protection_only ? "Undo protection" : "Undo");
+        undo.setAttribute("aria-label", (entry.protection_only ? "Undo the protection move of "
+          : "Undo the move of ") + entry.name);
         undo.addEventListener("click", () => undoAddressFollow(entry, undo));
         row.appendChild(undo);
       }
@@ -219,13 +220,17 @@ async function dismissAddressFollow(item, scope, button) {
 }
 
 async function undoAddressFollow(entry, button) {
-  if (!await confirmFromButton(button, "Undo the move of " + entry.name + "? Its settings go back to " +
-      entry.old_mac + " if nothing changed since the move.",
+  const question = entry.protection_only
+    ? "Put protection back on " + entry.old_mac + "? " + entry.name + " is then no longer protected " +
+      "at its new address. Its profile and name stay as they are."
+    : "Undo the move of " + entry.name + "? Its settings go back to " + entry.old_mac +
+      " if nothing changed since the move.";
+  if (!await confirmFromButton(button, question,
       {title: "Undo this move?", confirmLabel: "Undo move"})) return;
   try {
     const result = await request("/api/address-follow/undo", "POST", {id: entry.id});
-    await afterAddressFollowChange("Move undone. " + entry.name + " uses its old address again." +
-      (result.warning ? " " + result.warning : ""));
+    await afterAddressFollowChange(result.warning ||
+      "Move undone. " + entry.name + " uses its old address again.");
   } catch (error) {
     showMessage(error.message, "error");
     addressFollowLoadedAt = 0;

@@ -397,7 +397,11 @@ class AddressFollowStore:
         ]
 
 
-_MAC_TEXT = re.compile(r"[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}", re.IGNORECASE)
+_MAC_TEXT = re.compile(
+    r"[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}|[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}|"
+    r"(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])",
+    re.IGNORECASE,
+)
 
 
 def activity_name(name: str, *, first: bool = True) -> str:
@@ -607,14 +611,25 @@ def move_profile_and_label(
 
 
 def check_undo(repository, store, entry: dict, *, now: int) -> None:
-    """Refuse an Undo that would overwrite anything that changed since the move."""
+    """Refuse an Undo that would overwrite anything that changed since the move.
+
+    Raises StaleUndo only after every check that also guards putting protection
+    back on its own has passed, so a protection-only Undo never takes the old
+    address from another saved device.
+    """
 
     if entry["undone_at"] is not None:
         raise FollowConflict("This move was already undone.")
+    stale = None
     if now - entry["happened_at"] > UNDO_SECONDS:
-        raise StaleUndo("This move is too old to undo. Edit the device instead.")
+        stale = "the move is older than 7 days."
     if store.later_moves(entry):
         raise FollowConflict("A later move changed this device. Undo that one first.")
+    others = [item for item in repository.list_devices() if item.id != entry["device_id"]]
+    if any(item.mac_address == entry["old_mac"] for item in others):
+        # Protection on the old address would stop that device's profile.
+        raise FollowConflict("Another saved device uses the old address now. Nothing was undone.")
+    current = None
     if entry["device_after"] is not None:
         device = repository.get_device(entry["device_id"])
         current = _device_values(device) if device is not None else None
@@ -623,12 +638,10 @@ def check_undo(repository, store, entry: dict, *, now: int) -> None:
             # The scheduler's address check may have moved it to the new IPv4 address.
             after["ipv4_address"] = current["ipv4_address"]
         if current != after:
-            raise StaleUndo("The saved device changed since the move. Nothing was undone.")
-        others = [item for item in repository.list_devices() if item.id != entry["device_id"]]
-        if any(item.mac_address == entry["old_mac"] for item in others):
-            raise FollowConflict(
-                "Another saved device uses the old address now. Nothing was undone."
-            )
+            stale = stale or "the saved device was changed or deleted since the move."
+    if stale is not None:
+        raise StaleUndo("The profile and the name cannot be put back: " + stale)
+    if entry["device_after"] is not None:
         before_ipv4 = (entry["device_before"] or {}).get("ipv4_address")
         if before_ipv4 and before_ipv4 != current["ipv4_address"] and any(
             str(item.ipv4_address) == before_ipv4 for item in others

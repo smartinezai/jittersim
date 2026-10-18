@@ -21,7 +21,7 @@ from jittersim.config.address_follow import (
 )
 from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import DataLimit, Device, Profile
-from jittersim.config.storage import ConfigRepository
+from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.runtime import RuntimeScheduler
 from tests.unit.test_api import PlanRecordingHelper
 from tests.unit.test_runtime import ClientListingHelper
@@ -557,6 +557,84 @@ class RouteTests(unittest.TestCase):
         status, result = self.write("/api/address-follow/undo", {"id": entry["id"]})
         self.assert_protection_only(status, json.dumps(result))
 
+    def test_a_stale_undo_never_takes_the_old_address_from_another_saved_device(self):
+        for route in ("dashboard", "card"):
+            with self.subTest(route=route):
+                self.setUp()
+                self.protected_move()
+                device = self.repository.get_device("dad")
+                self.repository.save_device(Device("dad", "Renamed", "192.168.50.20", "slow", NEW),
+                                            expected=device)
+                self.repository.save_device(Device("other", "Other", "192.168.50.40", "slow", OLD))
+                if route == "dashboard":
+                    status, _, body = self.server.undo_device_address_move(OLD, "")
+                else:
+                    [entry] = self.read()["history"]
+                    status, body = self.write("/api/address-follow/undo", {"id": entry["id"]})
+                self.assertEqual(status, 409, body)
+                self.assertEqual(self.protected_at(), {NEW})
+                self.assertEqual(self.repository.get_address_move(OLD).phase, "saved")
+                self.assertIsNone(self.read()["history"][0]["undone_at"])
+
+    def test_a_stale_entry_is_offered_as_undo_protection_and_names_the_device(self):
+        self.protected_move()
+        device = self.repository.get_device("dad")
+        self.repository.save_device(Device("dad", "Renamed", "192.168.50.20", "slow", NEW),
+                                    expected=device)
+        [entry] = self.read()["history"]
+        self.assertTrue(entry["can_undo"] and entry["protection_only"])
+        status, _, body = self.server.undo_device_address_move(OLD, "")
+        warning = json.loads(body)["warning"]
+        self.assertIn("Dad's phone is no longer protected at its new address.", warning)
+        self.assertIn("cannot be put back: the saved device was changed", warning)
+        self.assertIsNone(re.search(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}", warning))
+
+    def test_a_failed_dismissal_inside_the_linked_undo_is_a_warning(self):
+        self.protected_move()
+
+        def fail(*args, **kwargs):
+            raise StorageError("could not save the dismissal")
+
+        with patch.object(AddressFollowStore, "dismiss", fail):
+            status, _, body = self.server.undo_device_address_move(OLD, "")
+        self.assertEqual(status, 200, body)
+        self.assertIn("may be suggested again", json.loads(body)["warning"])
+        self.assertEqual(self.repository.get_device("dad").mac_address, OLD)
+
+    def test_an_undo_that_lost_the_race_says_it_was_already_undone(self):
+        self.protected_move()
+        [entry] = self.read()["history"]
+        original = self.server.undo_device_address_move
+
+        def other_route_first(old_mac, peer, **kwargs):
+            original(old_mac, peer)  # the Undo under Dashboard access finishes first
+            return original(old_mac, peer, **kwargs)
+
+        self.server.undo_device_address_move = other_route_first
+        status, result = self.write("/api/address-follow/undo", {"id": entry["id"]})
+        self.assertEqual(status, 409)
+        self.assertEqual(result["error"], "This move was already undone.")
+
+    def test_a_protection_only_undo_of_an_unnamed_device_names_no_address(self):
+        # Only an unnamed protection entry: its name is its MAC address.
+        self.repository.delete_connected_device_label(mac_address=OLD)
+        self.repository.delete_device("dad")
+        self.repository.save_unaffected_device(UnaffectedDevice(OLD, "", 1))
+        [item] = self.read()["suggestions"]
+        self.assertEqual(item["name"], OLD)
+        status, result = self.write("/api/address-follow/accept",
+                                    {"old_mac": OLD, "new_mac": NEW, "move_protection": True})
+        self.assertEqual(status, 200, result)
+        self.repository._connection.execute(
+            "UPDATE address_follow_history SET happened_at = ?", (NOW - UNDO_SECONDS - 60,))
+        self.repository._connection.commit()
+        status, _, body = self.server.undo_device_address_move(OLD, "")
+        self.assertEqual(status, 200, body)
+        lines = [event["message"] for event in self.repository.list_activity()]
+        self.assertIn("Undid the protection move of", lines[0])
+        for line in lines + [json.loads(body)["warning"]]:
+            self.assertIsNone(re.search(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}", line), line)
+
     def test_every_undoable_move_stays_visible(self):
         with self.repository.transaction():
             for index in range(30):
@@ -647,3 +725,14 @@ class SchedulerTests(unittest.TestCase):
         self.scheduler.tick(repository=self.repository, now=NOW)
         self.assertEqual(self.repository.get_device("dad").mac_address, OLD)
         self.assertEqual(self.store.history(), [])
+
+
+def test_activity_names_hide_every_way_of_writing_an_address():
+    from jittersim.config.address_follow import activity_name
+
+    for name in ("", "  ", "aa:bb:cc:dd:ee:ff", "AA-BB-CC-DD-EE-FF", "aabbccddeeff",
+                 "aabb.ccdd.eeff", "Phone aabbccddeeff"):
+        assert activity_name(name) == "A saved device", name
+    assert activity_name("", first=False) == "a saved device"
+    assert activity_name("Dad's phone") == "Dad's phone"
+    assert activity_name("Room 101") == "Room 101"

@@ -384,3 +384,19 @@ Risks added:
   stays consistent) and needs the existing recovery under Dashboard access.
 - An automatic move changes `configuration_version`. PR 149 (device Apply beside
   Everyone) must check its refusal path again when it lands.
+
+## Third Opus review (delta 9449ae5b to c3bdc401)
+
+- Blocker fixed: a stale Undo (older than 7 days, or the saved device edited or
+  deleted) went protection-only before the remaining checks ran. It could put
+  protection back on an address that another saved device now uses, and that
+  device's profile would silently stop. `check_undo` now runs every check that
+  guards the protection restore first (later moves, another saved device on the
+  old address) and only then reports a stale Undo. A conflict refuses and the
+  move record stays in phase `saved`.
+- A stale entry is offered as "Undo protection". The reply names the device
+  (never its address) and says it is no longer protected at its new address.
+- "Replaced by a later move" replaces the Dashboard-access wording, because a
+  reverse move from the card replaces the record too.
+- Activity names also hide addresses written as 12 hex digits or in the dotted
+  form.

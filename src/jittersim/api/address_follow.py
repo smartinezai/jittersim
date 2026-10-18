@@ -21,6 +21,7 @@ from jittersim.config.address_follow import (
     AddressFollowStore,
     FollowConflict,
     StaleUndo,
+    activity_name,
     automatic_allowed,
     check_undo,
     current_suggestions,
@@ -132,6 +133,14 @@ def _history_payload(store, repository, *, now):
     result = []
     for index, entry in enumerate(store.history()):
         can_undo = _can_undo(entry, live_moves, now=now)
+        protection_only = False
+        if can_undo and entry["protection_move_id"]:
+            try:
+                check_undo(repository, store, entry, now=now)
+            except StaleUndo:
+                protection_only = True
+            except FollowConflict:
+                pass
         # Every move that can still be undone stays visible, plus the newest others.
         if index >= HISTORY_SHOWN and not can_undo:
             continue
@@ -147,6 +156,8 @@ def _history_payload(store, repository, *, now):
             "moved_protection": bool(entry["protection_move_id"]),
             "undone_at": entry["undone_at"],
             "can_undo": can_undo,
+            # Undo can only put protection back: the profile and the name stay.
+            "protection_only": protection_only,
             "replaced": bool(entry["protection_move_id"]) and entry["undone_at"] is None
             and entry["protection_move_id"] not in live_moves,
         })
@@ -314,15 +325,16 @@ class _LinkedUndo:
             check_undo(self.repository, self.store, self.entry, now=self.now)
         except StaleUndo as error:
             self.protection_only = True
-            self.reason = str(error).replace(" Nothing was undone.", "").replace(
-                " Edit the device instead.", "")
+            self.reason = str(error)
 
     def __call__(self, _record):
         if self.protection_only:
             mark_protection_only_undone(self.repository, self.store, self.entry, now=self.now)
             self.warning = (
-                "Protection is back at the old address. The profile and the name were left as "
-                "they are: " + self.reason + " Check the saved device on the Devices page and "
+                "Protection is back at the old address, so "
+                + activity_name(self.entry["name"], first=False)
+                + " is no longer protected at its new address. " + self.reason
+                + " They were left as they are. Check the saved device on the Devices page and "
                 "the Protected devices list, and change them there by hand."
             )
             return
