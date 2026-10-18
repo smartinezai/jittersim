@@ -81,7 +81,7 @@ jobs:
       - run: python -m tests.browser.ad_blocking
       - run: python -m tests.browser.group_devices
       - run: python -m tests.browser.impact_check
-      - run: python -m tests.browser.device_speed_test
+      - run: python -m tests.browser.speed_test_window
       - run: python -m tests.browser.sidebar_status
       - run: python -m tests.browser.apply_clarity
       - run: python -m tests.browser.router_copy

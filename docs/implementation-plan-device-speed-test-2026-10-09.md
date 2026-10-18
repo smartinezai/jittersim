@@ -236,7 +236,7 @@ running view.
   one-per-device and global limits, finish, cancel, update, delete, compare, CSV/JSON export
   without secrets, the ICMP prober's subnet guard and parser, QR rows match the provider list.
 * HTTP: token required for every new path, unknown fields refused.
-* Browser journey `tests/browser/device_speed_test.py` at desktop and phone width: open the
+* Browser journey `tests/browser/speed_test_window.py` at desktop and phone width: open the
   window from a device row, see the link and QR code, run a "No limits" baseline and a capped
   run, type in device numbers, compare, export, cancel, protected device disabled, no page
   errors, no horizontal scroll. Registered in `.github/workflows/wifi-recovery.yml`.

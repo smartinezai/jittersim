@@ -14,7 +14,7 @@ after a late Finish, service queues not mentioned) plus smaller items. All were 
 Mechanical CI failures, fixed on the branch after the review (the budget was raised on purpose: one more
 confirm call and about 26 KB of script and style):
 - GUI static budget, the off-origin address list (SVG namespace name), the local CI module list
-  (`device_speed_test`), a 500 for a very long id (`len(value) > 19`), a wrong link in docs/user-guide.md.
+  (`speed_test_window`), a 500 for a very long id (`len(value) > 19`), a wrong link in docs/user-guide.md.
 
 Still open (second fix round needed, then one more review of the final head):
 1. S2/S3. Protection can change between the final check and the insert (speed_tests.py `_end`). Recheck
@@ -48,7 +48,7 @@ open item was checked against the code and has a test:
 | Item | State | Test |
 | --- | --- | --- |
 | 1. Protection recheck and insert in one transaction | Fixed on 10 October | `test_protection_check_and_result_insert_share_a_repository_transaction` |
-| 2. Dialog stays after the dashboard locks | Fixed on 10 October | browser journey `device_speed_test` (lock section) |
+| 2. Dialog stays after the dashboard locks | Fixed on 10 October | browser journey `speed_test_window` (lock section) |
 | 3. Shutdown with live samplers | Fixed on 10 October. New this round: a stuck sampler no longer stops the rest of `server_close` (the listener, workers and other owners still stop; the error is raised at the end and the repository stays open) | `test_shutdown_reports_a_sampler_blocked_in_a_helper_read`, `test_a_sampler_that_does_not_stop_still_lets_the_server_close_the_rest` |
 | 4. Service rules from the applied plan, time quotas included | Fixed on 14 October | `test_applied_service_assignments_and_active_byte_or_time_quotas_match_device` |
 | 5. Same as everyone records the applied profile | Fixed on 14 October. New this round: the real general plan has no source entry, so its general profile rule and queue confirm it | `test_the_shared_general_profile_uses_the_applied_scheduler_source`, `test_the_real_general_plan_confirms_the_shared_profile_and_service_rules` |
@@ -110,7 +110,7 @@ overlapping files merged cleanly and were read once for meaning:
   counts as a regression. It now asks through `confirmWorkflow` (title "Delete speed test
   result", button "Delete result", danger style). The answer is dropped when the dashboard locked
   or another device was opened while the question was open. The browser journey
-  `device_speed_test` checks the question, Escape, Cancel, focus back on Delete, the answer
+  `speed_test_window` checks the question, Escape, Cancel, focus back on Delete, the answer
   and that no native browser question opens.
 - PR 146 (one announcer): the page-level status and alert regions stay inert while a modal window
   is open, so the speed test window keeps its own status line inside the window. Nothing in the
@@ -125,6 +125,12 @@ overlapping files merged cleanly and were read once for meaning:
   `test_the_start_check_sees_the_burst_length_of_the_loss` (burst 4 reported, burst 8 planned:
   503 "applying a change") and `test_a_queue_with_the_planned_burst_length_starts`. With the
   old cleaner the first test fails (the start returned 201).
+- Release image: the Docker image runs `pytest -q` over `tests/` and has no Playwright. The browser
+  module was named `tests/browser/device_speed_test.py`, which matches pytest's default
+  `*_test.py`, so the image failed at collection (`release-image-default-command`). It is now
+  `tests/browser/speed_test_window.py`, in the same place in the module lists, and
+  `test_no_browser_module_is_named_like_a_pytest_file` keeps any browser module from matching
+  again.
 - GUI budget: the speed test used five colours, one font size, three margins and two gaps that the
   page did not have. They now use existing tokens and values, so every distinct count is back to
   main's number. What is left is the size of the feature: about 36 KB of script (653 lines) and
