@@ -383,7 +383,14 @@ Risks added:
   exclusive lock. The protection record then stays in phase `undoing` (the data
   stays consistent) and needs the existing recovery under Dashboard access.
 - An automatic move changes `configuration_version`. PR 149 (device Apply beside
-  Everyone) must check its refusal path again when it lands.
+  Everyone) must check its refusal path again when it lands. Done in the merge with
+  main `3e825451`: PR 149 credited the running plan only when one tick's own address
+  move raised the saved version by exactly one. An Automatic follow adds its own saves
+  (the new MAC, then the IPv4 move), so `_follow_device_addresses` now returns how many
+  versions its own moves added, each Automatic move counted inside its transaction.
+  The tick credits the plan only when the version grew by exactly that many. Tests in
+  `tests/unit/test_device_apply_everyone.py`: after an Automatic follow a device Apply
+  beside Everyone works, and a follow plus another save in the same tick stays refused.
 
 ## Third Opus review (delta 9449ae5b to c3bdc401)
 
