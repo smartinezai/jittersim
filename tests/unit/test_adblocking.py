@@ -532,7 +532,7 @@ def test_download_is_fixed_https_bounded_and_rejects_redirects():
     response.__enter__ = Mock(return_value=response)
     response.__exit__ = Mock(return_value=False)
     response.status_code = 302
-    with patch("jittersim.networking.adblocking.requests.get", return_value=response) as get:
+    with patch("requests.get", return_value=response) as get:
         with pytest.raises(ValueError):
             download_bytes()
         assert get.call_args.kwargs == {"stream": True, "timeout": (5, 5), "allow_redirects": False}

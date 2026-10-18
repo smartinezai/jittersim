@@ -22,7 +22,6 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
-import requests
 
 from jittersim.diagnostic_privacy import configure_logging
 from jittersim.panic_guard import PanicGuard
@@ -485,6 +484,11 @@ def healthy():
 
 
 def download_bytes():
+    # Imported here: only the short-lived --fetch-domains child downloads. Every process that
+    # imports jittersim.networking loads this module, and requests with its TLS stack costs
+    # about 15 MB of memory in each of them (soak audit 2026-10-18).
+    import requests
+
     deadline = time.monotonic() + MAX_DOWNLOAD_SECONDS
     data = bytearray()
     with requests.get(
@@ -497,6 +501,13 @@ def download_bytes():
                 raise ValueError("The blocklist download exceeded its limit")
             data.extend(chunk)
     return bytes(data)
+
+
+def _download_errors():
+    """The requests error type when requests was loaded, else nothing more to catch."""
+
+    loaded = sys.modules.get("requests")
+    return (loaded.RequestException,) if loaded is not None else ()
 
 
 def download_domains():
@@ -724,8 +735,7 @@ def main(argv=None):
                 ValueError,
                 CommandExecutionError,
                 subprocess.SubprocessError,
-                requests.RequestException,
-            ):
+            ) + _download_errors():
                 store._clear()
                 write_json(
                     store.status_path,
