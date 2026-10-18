@@ -9,6 +9,7 @@ from jittersim.diagnostic_records import recorded
 from jittersim.config.models import MacPolicy, SiteBlock, normalize_mac_address
 from jittersim.config.storage import DeviceConflictError, RepositoryBusy, StorageError
 from jittersim.engine.access import build_access_plan
+from jittersim.engine.runtime import SchedulerBusy
 from jittersim.networking.helper import HelperClientError
 
 ACCESS_WRITES = frozenset(
@@ -31,6 +32,17 @@ ACCESS_WRITES = frozenset(
 # the history checkpoint and the action record. Together they stay inside
 # PANIC_DATABASE_ALLOWANCE_SECONDS (api/server.py).
 PANIC_REPOSITORY_WAIT_SECONDS = 0.5
+# A publish that waits for a backup holds the scheduler lock just as long. Panic's
+# scheduler steps (begin, the stop intent and the result) share one wait of this
+# length for that lock, and a step after a full wait still gets
+# PANIC_SCHEDULER_STEP_FLOOR_SECONDS. When a step cannot take the lock, Panic fences
+# the scheduler without it, still calls the helper and reports the recovery as
+# unconfirmed (and skips the later steps). Both counts are in
+# PANIC_DATABASE_ALLOWANCE_SECONDS with the steps above.
+PANIC_SCHEDULER_WAIT_SECONDS = 0.4
+PANIC_SCHEDULER_STEP_FLOOR_SECONDS = 0.1
+UNCONFIRMED_ERROR = ("Normal access was restored but the dashboard was busy, so the recovery is "
+                     "not confirmed. Automation is paused. Retry Panic before choosing Start.")
 PANIC_RESULT_WAIT_SECONDS = 1.5
 PANIC_REPOSITORY_STEPS = 6
 
@@ -90,14 +102,33 @@ def read_access_api(server, path):
 
 @recorded("panic", "dashboard")
 def normal_access(server):
+    try:
+        return _normal_access(server)
+    finally:
+        # A step that fenced the scheduler without its lock ends here, unconfirmed.
+        end = getattr(server.scheduler, "end_forced_recovery", None)
+        if end is not None:
+            end()
+
+
+def _normal_access(server):
     repository = server.repository
     if server.helper_client is None or not hasattr(server.helper_client, "normal_access"):
         return response(
             {"error": "A current networking helper is required to restore normal access."}, 503
         )
     ticket = None
+    # True when the scheduler lock was not free in time: the scheduler is fenced but
+    # cannot record a confirmed recovery, so the answer asks for another Panic.
+    unconfirmed = False
+    scheduler_deadline = time.monotonic() + PANIC_SCHEDULER_WAIT_SECONDS
+
+    def scheduler_wait():
+        return max(PANIC_SCHEDULER_STEP_FLOOR_SECONDS, scheduler_deadline - time.monotonic())
+
     if server.scheduler is not None:
-        ticket = server.scheduler.begin_recovery()
+        ticket = server.scheduler.begin_recovery(timeout=scheduler_wait())
+        unconfirmed = ticket is None
     persisted = True
     # A backup or slow commit holds the repository (review N3). The stop intent is
     # then saved after the helper call instead of before it: the scheduler fence of
@@ -126,7 +157,11 @@ def normal_access(server):
 
     try:
         if ticket:
-            server.scheduler.publish_recovery(ticket, prepare)
+            try:
+                server.scheduler.publish_recovery(ticket, prepare, timeout=scheduler_wait())
+            except SchedulerBusy:
+                ticket, unconfirmed = None, True
+                prepare()
         else:
             prepare()
     except BaseException:
@@ -138,6 +173,7 @@ def normal_access(server):
         result = server.helper_client.normal_access()
     except HelperClientError as helper_error:
         result = None
+        unconfirmed = False
         error = "Normal access was not fully restored. Automation is paused. Retry the panic button."
         # The helper's own reason (fixed wording, never command output) says what is left.
         detail = str(helper_error).strip()[:300]
@@ -147,6 +183,9 @@ def normal_access(server):
         if ticket:
             server.scheduler.abandon_recovery(ticket)
         raise
+
+    if unconfirmed:
+        error = UNCONFIRMED_ERROR
 
     def publish(overlap_failed=False):
         nonlocal persisted, error
@@ -170,7 +209,18 @@ def normal_access(server):
             error = "Traffic restrictions are off but the stopped state could not be saved. Retry before restarting."
         return state, error is None
 
-    state = server.scheduler.finish_recovery(ticket, publish, failed=error is not None or not persisted) if ticket else publish()[0]
+    state = None
+    if ticket:
+        try:
+            state = server.scheduler.finish_recovery(
+                ticket, publish, failed=error is not None or not persisted,
+                timeout=scheduler_wait())
+        except SchedulerBusy:
+            ticket = None
+            if error is None:
+                error = UNCONFIRMED_ERROR
+    if not ticket:
+        state = publish()[0]
     try:
         with server.bounded_repository(PANIC_REPOSITORY_WAIT_SECONDS):
             server._record_activity(

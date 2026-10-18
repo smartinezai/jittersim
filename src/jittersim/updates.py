@@ -57,6 +57,11 @@ TOKEN_NAME = "update-token"
 # Trust settings that a rollback keeps as they are now: restoring an older copy of
 # /etc/jittersim must never bring back a key or a token the owner removed.
 PRESERVED_CONFIG = (SIGNERS_NAME, TOKEN_NAME)
+# The saved dashboard access list. A rollback also keeps it as it is now, so a grant the
+# owner revoked after the recovery copy was made never comes back. Unlike the trust
+# settings the recovery copy still holds it, so the digests of existing copies stay valid.
+DASHBOARD_ACCESS_NAME = "dashboard-access.json"
+KEPT_CURRENT_CONFIG = PRESERVED_CONFIG + (DASHBOARD_ACCESS_NAME,)
 # The highest release sequence this Pi ever installed. A rollback keeps it.
 FLOOR_NAME = "release-floor.json"
 SUDOERS_PATH = Path("/etc/sudoers.d/jittersim-update")
@@ -1005,6 +1010,13 @@ PANIC_APPROVED_SOURCES = ({
     # networking/deadlines.py are pinned by tests/unit/test_dashboard_access_pin.py.
     "src/jittersim/panic_guard.py": "041cf171875d7b85d1c0664c2acff262542a3ac3c2b2e8fe51f80d2d59d6d639",
     "src/jittersim/networking/helper.py": "a765dc97cce4015e0d1189cf92373395e5ca88c9be19b2e25c000e0975c7314b",
+    "src/jittersim/networking/access.py": "41a0f6f96cf2a20616d7ac613dd95acf2cd31085a13018ce14667dea2e11e1f3",
+}, {
+    # See docs/review-results-carry-forward-2026-10-16.md. The carry-forward fixes: Panic saves its
+    # stop records through a bounded saver so a stalled write cannot hold the network lock, status
+    # reads are read-only, and the helper client passes the burst-loss length through.
+    "src/jittersim/panic_guard.py": "041cf171875d7b85d1c0664c2acff262542a3ac3c2b2e8fe51f80d2d59d6d639",
+    "src/jittersim/networking/helper.py": "a955a1517abd11013f37712b27750e1515614d4555b76170e8679ebbb6fe9f80",
     "src/jittersim/networking/access.py": "41a0f6f96cf2a20616d7ac613dd95acf2cd31085a13018ce14667dea2e11e1f3",
 },)
 
@@ -3701,6 +3713,184 @@ def check_operation(*, root=UPDATE_ROOT, descriptor=9):
 WRITERS = (WATCHER, *reversed(SERVICES))
 
 
+UPLOAD_DEVICE = "jittersim-ifb"
+UPLOAD_INTAKE_HANDLE = "ffff:"
+# networking/renderer.py adds the intake qdisc and then, at this preference, one
+# matchall filter whose only action is connmark. Nothing else on the Pi adds that
+# filter, and it is small enough to read within MAX_COMMAND_ANSWER for any plan.
+UPLOAD_INTAKE_PROOF_PREF = "2"
+# The proof, saved before the first removal so a retry after a partial cleanup
+# still knows that JitterSim owns the intake.
+UPLOAD_INTAKE_RECORD = "upload-intake-cleanup.json"
+
+
+def _link_present(name):
+    return (Path("/sys/class/net") / name).exists()
+
+
+def _answer_json(answer, problem):
+    try:
+        return json.loads(answer or "[]")
+    except ValueError as error:
+        raise UpdateError(problem) from error
+
+
+def _boot_id():
+    """This boot's identity. tc state and the ifb device never survive a reboot."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
+def remove_upload_intake(config, run, query, timeout=10, *, root=UPDATE_ROOT, link_present=None,
+                         boot_id=None):
+    """Remove the Wi-Fi upload intake and its ifb device before other code runs.
+
+    Releases with upload-safe impairments (PR 125) redirect corrupting upload
+    classes from the test interface's ingress to `jittersim-ifb`. An older
+    package's helper and Panic do not know either, so a rollback or a
+    recovery copy would leave corruption running that nothing can stop.
+
+    An ingress qdisc is removed only with proof that JitterSim made it: its
+    connmark filter at UPLOAD_INTAKE_PROOF_PREF, or the record a previous
+    attempt saved in `root` before it removed anything. The record names the
+    interfaces and the boot, so a retry checks the interface it was saved for
+    even if the restored settings name another one, and a record from before a
+    reboot (which removed the kernel state) proves nothing. Another tool's
+    ingress qdisc stays. Only one-line lookups are read, so a plan with many
+    classes cannot exceed the command answer limit. Each step is tried even if
+    another fails, the result is read back and the first problem is raised.
+    Commands that may still run, or whose ownership is unknown, are raised at once.
+    """
+    link_present = link_present or _link_present
+    boot = _boot_id() if boot_id is None else boot_id
+    record = root / UPLOAD_INTAKE_RECORD
+    problems = []
+    try:
+        _, test_interface = runtime_interfaces(config)
+    except (OSError, UpdateError) as error:
+        # A partly restored configuration. The recorded interfaces are still checked.
+        problems.append(error if isinstance(error, UpdateError) else UpdateError(str(error)))
+        test_interface = None
+
+    def ingress_present(interface):
+        if not link_present(interface):
+            return False
+        queues = _answer_json(
+            query(["tc", "-j", "qdisc", "show", "dev", interface, "ingress"], timeout),
+            "the upload intake could not be read before recovery")
+        return isinstance(queues, list) and any(
+            isinstance(queue, dict) and queue.get("kind") == "ingress" for queue in queues)
+
+    def proven(interface):
+        filters = _answer_json(
+            query(["tc", "-j", "filter", "show", "dev", interface, "parent",
+                   UPLOAD_INTAKE_HANDLE, "pref", UPLOAD_INTAKE_PROOF_PREF], timeout),
+            "the upload intake could not be read before recovery")
+        for item in filters if isinstance(filters, list) else ():
+            options = item.get("options") if isinstance(item, dict) else None
+            actions = options.get("actions") if isinstance(options, dict) else None
+            if (isinstance(item, dict) and item.get("kind") == "matchall" and isinstance(actions, list)
+                    and any(isinstance(action, dict) and action.get("kind") == "connmark"
+                            for action in actions)):
+                return True
+        return False
+
+    try:
+        saved = read_json(record)
+    except (OSError, ValueError) as error:
+        raise UpdateError("the saved upload intake record could not be read") from error
+    recorded = []
+    if isinstance(saved, dict) and saved.get("boot") == boot and isinstance(saved.get("interfaces"), list):
+        recorded = [name for name in saved["interfaces"]
+                    if isinstance(name, str) and INTERFACE.fullmatch(name)]
+    interfaces = list(dict.fromkeys([*recorded, *([test_interface] if test_interface else [])]))
+    owned = []
+    for interface in interfaces:
+        try:
+            if ingress_present(interface) and (interface in recorded or proven(interface)):
+                owned.append(interface)
+        except (CommandNotStopped, OperationOwnershipUnknown):
+            raise
+        except UpdateError as error:
+            problems.append(error)
+            if interface in recorded:
+                # Unknown, but proven before: keep checking it on the next attempt.
+                owned.append(interface)
+    # The record keeps every interface still owed a check until all of them pass.
+    pending = list(dict.fromkeys([*recorded, *owned]))
+    if pending != recorded:
+        try:
+            atomic_json(record, {"boot": boot, "interfaces": pending})
+        except OSError as error:
+            # The proof is still in place for this attempt, so the intake goes anyway.
+            problems.append(UpdateError(f"the upload intake record could not be saved: {error}"))
+    try:
+        device = link_present(UPLOAD_DEVICE)
+    except OSError as error:
+        problems.append(UpdateError(f"the upload device could not be checked: {error}"))
+        device = False
+    steps = [["tc", "qdisc", "del", "dev", interface, "handle", UPLOAD_INTAKE_HANDLE, "ingress"]
+             for interface in owned]
+    if device:
+        steps.append(["ip", "link", "del", "dev", UPLOAD_DEVICE])
+    for command in steps:
+        try:
+            run(command, timeout)
+        except (CommandNotStopped, OperationOwnershipUnknown):
+            raise
+        except UpdateError as error:
+            problems.append(error)
+    left = False
+    for interface in pending:
+        try:
+            left = ingress_present(interface) or left
+        except (CommandNotStopped, OperationOwnershipUnknown):
+            raise
+        except UpdateError as error:
+            problems.append(error)
+    try:
+        left = link_present(UPLOAD_DEVICE) or left
+    except OSError as error:
+        problems.append(UpdateError(f"the upload device could not be checked: {error}"))
+    if left:
+        problems.append(UpdateError("the upload intake could not be removed before recovery"))
+    if problems:
+        raise problems[0]
+    try:
+        if record.exists() or record.is_symlink():
+            record.unlink()
+            _fsync_folder(root)
+    except OSError as error:
+        # The intake is gone. A record left behind only makes the next attempt check again.
+        raise UpdateError(f"the upload intake record could not be removed: {error}") from error
+
+
+def upload_intake_warning(error):
+    return (f"The upload intake could not be removed ({error}). Press Panic and check "
+            "`tc qdisc show` on the test Wi-Fi interface. If it is still there, reboot the Pi.")
+
+
+def remove_upload_intake_before_restore(config, run, query, progress, *, root=UPDATE_ROOT):
+    """Clean up but never stop the older package from being restored.
+
+    A leftover intake only corrupts uploads before the Pi forwards them. Not
+    restoring would leave the Pi without its helper and dashboard. The
+    problem is reported in the update progress and returned so the final
+    status keeps it. A command that may still run, or whose ownership is
+    unknown, is raised: recovery must wait for it.
+    """
+    try:
+        remove_upload_intake(config, run, query, root=root)
+    except (CommandNotStopped, OperationOwnershipUnknown):
+        raise
+    except UpdateError as error:
+        progress("rolling-back", "Restoring the previous installation. " + upload_intake_warning(error))
+        return error
+    return None
+
+
 def writers_stopped(names, query, budget):
     for name in names:
         answer = query(["systemctl", "show", "--property=ActiveState", "--property=MainPID",
@@ -3715,7 +3905,7 @@ def writers_stopped(names, query, budget):
 
 
 def quiesce_manual_install(source, *, root=UPDATE_ROOT, descriptor=9, units=UNITS_ROOT,
-                           run=run_command, query=read_command):
+                           run=run_command, query=read_command, config=CONFIG_ROOT):
     """Provision current intent only after the installer's writers have ended."""
     with manual_identity_operation(root, descriptor=descriptor):
         if not _inherited_installer(_operation_record(root, "installer-pending.json")):
@@ -3733,6 +3923,20 @@ def quiesce_manual_install(source, *, root=UPDATE_ROOT, descriptor=9, units=UNIT
         if not writers_stopped(names, query, budget):
             raise UpdateError("the installer settings writers did not stop")
         budget.check()
+        try:
+            remove_upload_intake(config, lambda command, timeout: run(command, budget.limit(timeout)),
+                                 lambda command, timeout: query(command, budget.limit(timeout)),
+                                 root=root)
+            budget.check()
+        except (CommandNotStopped, OperationOwnershipUnknown):
+            # A command may still run: never start the services over it.
+            raise
+        except UpdateError:
+            # Nothing is installed yet and install.sh stops on this error. Start the
+            # unchanged installation again so its helper and Panic run.
+            if names:
+                run(["systemctl", "start", *reversed(names)], 60)
+            raise
         # Never publish the earlier preview. The real producer rereads latest
         # intent after stop so a concurrent Panic cannot be lost in migration.
         _panic_candidate(source)
@@ -4064,10 +4268,10 @@ def apply_update(
             an older list."""
             keep = _trust_keep_directory(root, create=True)
             # Validate existing snapshots before changing any live folder.
-            for name in PRESERVED_CONFIG:
+            for name in KEPT_CURRENT_CONFIG:
                 _check_trust_file(keep / name)
             trusted_keys(keep)
-            for name in PRESERVED_CONFIG:
+            for name in KEPT_CURRENT_CONFIG:
                 current = config / name
                 _check_trust_file(current)
                 # The filtered restore never copies old trust into the live
@@ -4085,7 +4289,12 @@ def apply_update(
             os.close(descriptor)
             try:
                 shutil.copy2(source, temporary)
-                Path(temporary).chmod(0o600 if destination.name == TOKEN_NAME else 0o644)
+                if destination.name == DASHBOARD_ACCESS_NAME:
+                    # Root owns it and the helper's group reads it, like AccessStore writes it.
+                    os.chown(temporary, -1, source.stat().st_gid)
+                    Path(temporary).chmod(0o640)
+                else:
+                    Path(temporary).chmod(0o600 if destination.name == TOKEN_NAME else 0o644)
                 with open(temporary, "rb") as handle:
                     os.fsync(handle.fileno())
                 os.replace(temporary, destination)
@@ -4095,7 +4304,7 @@ def apply_update(
                 Path(temporary).unlink(missing_ok=True)
 
         def put_back_trust_settings(keep):
-            for name in PRESERVED_CONFIG:
+            for name in KEPT_CURRENT_CONFIG:
                 restored = config / name
                 # A recovery copy from an older manager may hold one.
                 if restored.is_symlink() or restored.exists():
@@ -4133,7 +4342,7 @@ def apply_update(
             for name, destination in (("code", code), ("config", config), ("data", data)):
                 if destination.exists():
                     remove_tree(destination, budget)
-                preserved = PRESERVED_CONFIG + (
+                preserved = KEPT_CURRENT_CONFIG + (
                     ".certificate-adoption", "ca", "dashboard.crt", "dashboard.key",
                     "dashboard-wifi.crt", "trust.env",
                 ) if name == "config" else ()
@@ -4221,6 +4430,28 @@ def apply_update(
         recovered = False
         keep_request = True
         stopped = bool(request.get("restart_only"))
+        # A cleanup problem of the upload intake. The final status keeps it, so the
+        # owner never sees a plain success while the intake may still run.
+        intake_problem = None
+
+        def with_intake_warning(message):
+            return message if intake_problem is None else message + " " + upload_intake_warning(intake_problem)
+
+        def retry_intake_cleanup():
+            """Try a failed cleanup once more after the restore. The older helper never
+            adds the intake, and the saved record still proves which one is ours."""
+            nonlocal intake_problem
+            if intake_problem is None:
+                return
+            try:
+                remove_upload_intake(config, run, query, root=root)
+            except (CommandNotStopped, OperationOwnershipUnknown):
+                raise
+            except UpdateError as error:
+                intake_problem = error
+            else:
+                intake_problem = None
+
         try:
             # Even preflight is supervised by the new durable command lease.
             compatible_manager(Path(__file__))
@@ -4311,12 +4542,16 @@ def apply_update(
             panic_safety.provision(*selected)
             if request.get("rollback"):
                 progress("rolling-back", "Restoring the previous installation and settings.")
+                intake_problem = remove_upload_intake_before_restore(
+                    config, run, query, progress, root=root)
                 restore()
                 if not wait_restarted_healthy():
                     raise UpdateError("recovery health check failed")
+                retry_intake_cleanup()
                 cleanup_generations(root, budget)
                 recovered = True
-                progress("rolled-back", "Previous installation restored and health check passed.")
+                progress("rolled-back", with_intake_warning(
+                    "Previous installation restored and health check passed."))
                 finish_certificate_recovery(root, budget=budget)
                 keep_request = False
                 return
@@ -4450,8 +4685,12 @@ def apply_update(
                     run(["systemctl", "stop", *names], 60)
                     if not writers_stopped(names, query, budget):
                         raise UpdateError("the settings writers did not stop before recovery")
+                    intake_problem = remove_upload_intake_before_restore(
+                        config, run, query, progress, root=root)
                     restore()
                     recovered = wait_restarted_healthy()
+                    if recovered:
+                        retry_intake_cleanup()
                 elif stopped:
                     restart_services()
                     recovered = wait_restarted_healthy()
@@ -4478,7 +4717,8 @@ def apply_update(
                 message = "Update stopped before it changed anything. Check the update service log."
             else:
                 message = "Update or recovery failed. Check the update service log."
-            progress("rolled-back" if recovered and needs_recovery else "failed", message)
+            progress("rolled-back" if recovered and needs_recovery else "failed",
+                     with_intake_warning(message))
             if recovered and needs_recovery:
                 finish_certificate_recovery(root, budget=budget)
             raise
