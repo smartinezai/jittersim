@@ -60,6 +60,7 @@ a month (for example `2026-09`) was written in that month.
 | [upstream-safe-impairments-2026-10-09.md](upstream-safe-impairments-2026-10-09.md) | Where each impairment runs, why the router never receives damaged, copied or reordered uploads, and the hardware experiment |
 | [router-incident-findings-2026-10-04.md](router-incident-findings-2026-10-04.md) | The Vodafone router outage of 4 October. The cause is unproven |
 | [pi-only-datapath-audit-2026-10-09.md](pi-only-datapath-audit-2026-10-09.md) | Every way a device can end up on the Pi without working internet, and what was fixed |
+| [router-safety-audit-round2-2026-10-17.md](router-safety-audit-round2-2026-10-17.md) | Everything the Pi can put on the router cable, mode by mode, with the router-side capture test, the fixes and the read-only checks for the real hardware |
 | [update-path-audit-2026-10-09.md](update-path-audit-2026-10-09.md) | The update and release path mapped step by step |
 | [research-router-pi-wifi-troubleshooting-2026-10-09.md](research-router-pi-wifi-troubleshooting-2026-10-09.md) | Ranked hypotheses and a safe experiment ladder for the outage |
 | [open-source-gap-review-2026-10-09.md](open-source-gap-review-2026-10-09.md) | Which hand-built parts a free tool would do better |

@@ -90,6 +90,10 @@ if dpkg-query -W -f='${Status}' hostapd 2>/dev/null | grep -q 'install ok instal
 fi
 apt-get update
 apt-get install -y dnsmasq-base iputils-ping iw wpasupplicant nftables openssl python3-venv tcpdump unbound dnsutils hostapd conntrack
+# The kernel must be able to load the management firewall before anything is
+# replaced or restarted. nft --check changes nothing.
+python3 "$SOURCE_DIR/deploy/raspberry-pi/preflight.py" --firewall-only \
+    --uplink "$JITTERSIM_UPLINK" --test-interface "$JITTERSIM_TEST_INTERFACE"
 # New package defaults must not take over existing DNS or Wi-Fi services.
 if [ "$existing_unbound" = no ]; then systemctl disable --now unbound.service; fi
 if [ "$existing_hostapd" = no ]; then systemctl disable --now hostapd.service; fi

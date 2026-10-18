@@ -73,20 +73,17 @@ class BootNoiseTests(unittest.TestCase):
         return subprocess.run(command, capture_output=True, text=True, env=self.env, timeout=10)
 
     def test_the_control_firewall_clears_an_old_table_without_an_error_either_way(self) -> None:
-        steps = pre_steps(PI / "jittersim-control-firewall.service")
-        self.assertTrue(steps)
-        for existing in (False, True):
-            with self.subTest(table_exists=existing):
-                self.state.unlink(missing_ok=True)
-                if existing:
-                    self.state.write_text("")
-                for _ignore, arguments in steps:
-                    done = self.run_step(arguments)
-                    self.assertEqual(done.returncode, 0, arguments)
-                    self.assertEqual(done.stderr, "", arguments)
-                    self.assertEqual(done.stdout, "", arguments)
-                # The rules file then creates the table afresh.
-                self.assertFalse(self.state.exists())
+        # The rules file itself replaces the table in one transaction: `add table`
+        # (a no-op when it exists) before `delete table`, so the delete always
+        # finds a table and never logs "No such file or directory" at boot. There
+        # is no separate nft step that would leave a moment without the rules.
+        self.assertEqual(pre_steps(PI / "jittersim-control-firewall.service"), [])
+        commands = [line.strip() for line in
+                    (PI / "jittersim-control-firewall.nft").read_text().splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")]
+        self.assertEqual(commands[:3], ["add table inet jittersim_control",
+                                        "delete table inet jittersim_control",
+                                        "table inet jittersim_control {"])
 
     def test_the_wifi_unit_checks_the_table_without_listing_the_ruleset(self) -> None:
         steps = pre_steps(PI / "jittersim-ap.service")
