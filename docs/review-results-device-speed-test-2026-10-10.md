@@ -98,6 +98,45 @@ of the full diff at 208a38f found two S1 and two S2. All four are fixed:
 These last fixes were not reviewed again. Without a readable applied plan the saved MAC address
 still decides the queue, as before, and the service-rule state is then recorded as unknown.
 
+## Round 4 (18 October 2026)
+
+Main (8c3f8171) was merged in again. Two files conflicted: `dashboard.py` (main moved the page
+scripts into one list, so `speed-test.js` now joins `_EXTRA_SCRIPTS` after `trust.js`) and
+`gui-stats.json` (main's numbers were kept, then the budget was checked again). The other
+overlapping files merged cleanly and were read once for meaning:
+
+- PR 141 (one accessible question for every destructive action): the speed test window still
+  asked "Delete result" through the browser's `window.confirm`, which the strict budget of main
+  counts as a regression. It now asks through `confirmWorkflow` (title "Delete speed test
+  result", button "Delete result", danger style). The answer is dropped when the dashboard locked
+  or another device was opened while the question was open. The browser journey
+  `device_speed_test` checks the question, Escape, Cancel, focus back on Delete, the answer
+  and that no native browser question opens.
+- PR 146 (one announcer): the page-level status and alert regions stay inert while a modal window
+  is open, so the speed test window keeps its own status line inside the window. Nothing in the
+  window sets `aria-live` and the window is not part of the polled lists. No change.
+- PR 152 and PR 141 Escape rules: the page ignores Escape while any `dialog[open]` exists, which
+  covers the speed test window. No change.
+- PR 138 (`loss_burst_packets` through the helper client cleaner) closes the last open S2 of the
+  Sol delta review: the start check compared only the keys the client kept, so a queue that
+  dropped in other bursts than the applied plan passed. No workaround was in the speed test code,
+  so nothing had to be removed. The unit fixture now reports the field like the real helper, and
+  two tests read the queues through the real `HelperClient.queue_stats` cleaner:
+  `test_the_start_check_sees_the_burst_length_of_the_loss` (burst 4 reported, burst 8 planned:
+  503 "applying a change") and `test_a_queue_with_the_planned_burst_length_starts`. With the
+  old cleaner the first test fails (the start returned 201).
+- GUI budget: the speed test used five colours, one font size, three margins and two gaps that the
+  page did not have. They now use existing tokens and values, so every distinct count is back to
+  main's number. What is left is the size of the feature: about 36 KB of script (653 lines) and
+  2.5 KB of style (33 lines). The budget was raised on purpose with
+  `python -m tests.browser.gui_stats --update --allow-growth` (page 781743 to 816372 bytes,
+  script 567151 to 603632, style 98570 to 101103). No strict count changed.
+
+Owner decisions D1 to D4 are still open. Nothing in `panic_guard.py`, `networking/helper.py` or
+`networking/access.py` changed on this branch (the helper change came from main). The gate results
+for the final head are in the PR body. This PR is not merged and a separate independent review of
+the merged head is still needed.
+
 ### Local gates
 
 Hosted CI is blocked by billing. Local results only:

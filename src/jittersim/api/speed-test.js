@@ -548,11 +548,18 @@ function speedTestEdit(result) {
 }
 
 async function speedTestDelete(result) {
-  if (!window.confirm('Delete the speed test result from ' + speedTestWhen(result.started_at) + '? This cannot be undone.')) return;
+  // The question is the page's own dialog (confirmWorkflow), like every other delete. The serial
+  // is read first so that a lock or another device opened during the question drops the answer.
   const serial = speedTestState.serial;
+  const confirmed = await confirmWorkflow(
+    'Delete the speed test result from ' + speedTestWhen(result.started_at) + '? This cannot be undone.',
+    {title: 'Delete speed test result', confirmLabel: 'Delete result', danger: true});
+  if (!confirmed || serial !== speedTestState.serial) return;
   await request('/api/speed-tests/delete', 'POST', {result_id: result.id});
   if (serial !== speedTestState.serial) return;
   if (speedTestState.editing === result.id) element('speed-test-editor').hidden = true;
+  // The Delete button leaves with its row, so focus starts again at the title.
+  speedTestFocusTitle();
   speedTestSay('Result deleted.');
   await speedTestLoad();
 }

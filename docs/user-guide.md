@@ -855,8 +855,9 @@ JSON exports, so share those files with care. **Compare**
 shows the change in each number between two results and whether the speed
 matches the profile's cap (`Matches the cap`, `Faster than the cap`, `Slower
 than the cap`, `No speed limit set`). **Export CSV** and **Export JSON** download
-the device's results without any token or password. The Pi keeps the newest 50
-results per device and 500 in total.
+the device's results without any token or password. **Delete** on a result asks
+in the page first (**Delete result** or **Cancel**) and cannot be undone. The Pi
+keeps the newest 50 results per device and 500 in total.
 
 Limits:
 
@@ -873,6 +874,10 @@ Limits:
   pings the address the device has now. While the Wi-Fi connection status is
   unknown the button stays off. If the Pi cannot read its counters it asks you
   to try again. If most reads fail during a test the result is saved as `fault`.
+- A test starts only when the queues the Pi reads carry the same numbers as the
+  applied profile: delay, jitter, loss and its burst length, reordering,
+  duplication, corruption and the speed cap. While a change is being applied they
+  differ, and Start asks you to try again in a moment.
 - A service rule or service list sends some traffic through other queues. The
   result then says it covers the ordinary queue only and does not judge the cap:
   compare the numbers typed in from the device's speed test page.

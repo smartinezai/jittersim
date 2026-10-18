@@ -59,6 +59,10 @@ def check_width(browser, width, height):
         page = context.new_page()
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
+        # The page asks in its own dialog. A browser question would be a regression.
+        native_questions = []
+        page.on("dialog", lambda question: (native_questions.append(question.message),
+                                            question.dismiss()))
 
         def post(path, data):
             response = page.request.post(base + path, headers=HEADERS, data=data)
@@ -184,13 +188,30 @@ def check_width(browser, width, height):
         page.locator("#speed-test-cancel").click()
         expect(page.locator("#speed-test-announce")).to_have_text("Cancelled. Nothing was saved.")
 
-        # deleting one result asks first
-        page.once("dialog", lambda confirm: confirm.dismiss())
-        history.first.get_by_role("button", name=re.compile("^Delete result")).click()
+        # deleting one result asks first, in the page's own question above the open window
+        delete = history.first.get_by_role("button", name=re.compile("^Delete result"))
+        question = page.locator("dialog.workflow-confirm")
+        delete.click()
+        expect(question).to_be_visible()
+        expect(question.get_by_role("heading", name="Delete speed test result")).to_be_visible()
+        expect(question).to_contain_text("This cannot be undone.")
+        expect(question.get_by_role("button", name="Cancel", exact=True)).to_be_focused()
+        page.keyboard.press("Escape")
+        expect(question).to_have_count(0)
+        expect(dialog).to_be_visible()
         expect(history).to_have_count(2)
-        page.once("dialog", lambda confirm: confirm.accept())
-        history.first.get_by_role("button", name=re.compile("^Delete result")).click()
+        expect(delete).to_be_focused()
+        delete.click()
+        question.get_by_role("button", name="Cancel", exact=True).click()
+        expect(question).to_have_count(0)
+        expect(history).to_have_count(2)
+        expect(delete).to_be_focused()
+        delete.click()
+        question.get_by_role("button", name="Delete result", exact=True).click()
+        expect(question).to_have_count(0)
         expect(history).to_have_count(1)
+        expect(page.locator("#speed-test-announce")).to_have_text("Result deleted.")
+        expect(page.locator("#speed-test-title")).to_be_focused()
 
         # A result saved after its applied profile changes must be marked incomplete in the UI.
         page.locator("#speed-test-label").fill("Changed during test")
@@ -309,6 +330,7 @@ def check_width(browser, width, height):
                                     data={"mac_address": MAC_ADDRESS})
         assert refused.status == 409, refused.text()
         assert not errors, errors
+        assert not native_questions, native_questions
         context.close()
     finally:
         process.terminate()

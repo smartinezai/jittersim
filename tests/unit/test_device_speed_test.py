@@ -38,7 +38,7 @@ from jittersim.engine.plan import (
     ServiceListRule,
     ServiceQuotaRule,
 )
-from jittersim.networking.helper import HelperClientError
+from jittersim.networking.helper import HelperClient, HelperClientError
 from jittersim.request_workers import WorkersStillRunning
 from jittersim.speed_test import (
     PROVIDERS,
@@ -330,7 +330,7 @@ def queue(device_id, direction, moved, **changes):
         "device_id": device_id, "direction": direction,
         "interface": "eth0" if direction == "upload" else "wlan0", "handle": "41:",
         "kind": "netem", "generation": "0a1b2c3d-1",
-        "impairment": {"delay_ms": 0, "jitter_ms": 0, "loss_percent": 0,
+        "impairment": {"delay_ms": 0, "jitter_ms": 0, "loss_percent": 0, "loss_burst_packets": 0,
                        "bandwidth_kbit": 250 if direction == "download" else None,
                        "reorder_percent": 0, "duplicate_percent": 0, "corrupt_percent": 0},
         "packets": moved // 100, "bytes": moved, "drops": 0, "overlimits": 0, "requeues": 0,
@@ -338,6 +338,15 @@ def queue(device_id, direction, moved, **changes):
     }
     entry.update(changes)
     return entry
+
+
+def through_the_client(entries):
+    """What the dashboard sees: the helper's answer after the client has checked and cleaned it."""
+
+    client = HelperClient(socket_path=Path("unused.sock"))
+    client._request = lambda payload, **kwargs: {
+        "ok": True, "action": "queue-stats", "queues": entries}
+    return client.queue_stats()
 
 
 class CountingHelper(FakeHelper):
@@ -1009,6 +1018,43 @@ class StartChecksTests(ManagerBase):
         self.assertEqual(status, 503, body)
         self.assertIn("applying a change", body["error"])
         self.assertEqual(self.manager.active(), [])
+
+    def burst_loss_plan_and_reading(self, planned_burst, reported_burst):
+        """The lab phone's upload queue drops 5 percent in bursts, read through the real client."""
+
+        plan = self.scheduler.plan
+        self.scheduler.plan = replace(plan, queues=tuple(
+            replace(spec, impairment=Impairment(loss_percent=5, loss_burst_packets=planned_burst))
+            if spec.device_id == "lab" and spec.direction == Direction.UPLOAD else spec
+            for spec in plan.queues))
+        reading = self.helper.queue_stats
+
+        def read_raw():
+            return through_the_client([
+                dict(entry, impairment=dict(entry["impairment"], loss_percent=5,
+                                            loss_burst_packets=reported_burst))
+                if entry["device_id"] == "lab" and entry["direction"] == "upload" else entry
+                for entry in reading()])
+
+        self.helper.queue_stats = read_raw
+
+    def test_the_start_check_sees_the_burst_length_of_the_loss(self) -> None:
+        # The helper client used to drop loss_burst_packets, so a queue that drops 5 percent in
+        # bursts of 4 passed for a plan that asks for bursts of 8. The client keeps it now.
+        self.burst_loss_plan_and_reading(planned_burst=8, reported_burst=4)
+
+        status, body = self.start_short()
+
+        self.assertEqual(status, 503, body)
+        self.assertIn("applying a change", body["error"])
+        self.assertEqual(self.manager.active(), [])
+
+    def test_a_queue_with_the_planned_burst_length_starts(self) -> None:
+        self.burst_loss_plan_and_reading(planned_burst=8, reported_burst=8)
+
+        status, run = self.start_short()
+
+        self.assertEqual((status, run["source"]), (201, "device"))
 
     def test_missing_dedicated_counters_never_fall_back_to_a_shared_queue(self) -> None:
         # The plan marks the phone into its own queue and keeps it out of Everyone else. If the
