@@ -322,9 +322,9 @@ def test_a_service_hostname_needs_two_parts_and_is_not_an_address():
     assert normalize_service_hostname("Example.COM") == "example.com"
     refuses("browser service domains must have at least two parts such as example.com",
             normalize_service_hostname, "localhost")
-    for address in ("10.0.0.1", "1.2.3.4", "::1"):
+    for address in ("10.0.0.1", "1.2.3.4", "192.168.50.7"):
         refuses("browser service domains must be hostnames, not IP addresses",
-                normalize_service_hostname, address.replace("::1", "1.1.1.1"))
+                normalize_service_hostname, address)
 
 
 def test_a_mac_address_is_lowercase_with_colons():

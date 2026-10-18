@@ -77,23 +77,40 @@ MODULES = {
     },
     "updates": {
         "source": "src/jittersim/updates.py",
-        "tests": ["tests/unit/test_updates.py", "tests/unit/test_signed_releases.py",
-                  "tests/unit/test_release_versions.py", "tests/unit/test_signed_version_labels.py",
-                  "tests/unit/test_stable_releases.py", "tests/unit/test_online_release.py",
-                  "tests/unit/test_online_api.py", "tests/unit/test_update_preparation.py",
-                  "tests/unit/test_trust_downloads.py", "tests/unit/test_update_decisions.py"],
+        # The tests that start the whole installer (test_updates, test_update_preparation,
+        # test_stable_releases) take a minute per pass and add no direct check of these
+        # functions, so they only run for the floor in "updates_floor".
+        "tests": ["tests/unit/test_signed_releases.py", "tests/unit/test_release_versions.py",
+                  "tests/unit/test_signed_version_labels.py", "tests/unit/test_online_release.py",
+                  "tests/unit/test_online_api.py", "tests/unit/test_trust_downloads.py",
+                  "tests/unit/test_update_decisions.py"],
         # The mutated module is much bigger than the real one. These size limits are about the
         # module's own file (the installer refuses a manager over 512 KiB), so they are raised
         # in the scratch copy. No function below reads them.
         "loosen": [("512 * 1024", "64 * 1024 * 1024"),
                    ("maximum=1024 * 1024", "maximum=64 * 1024 * 1024")],
+        # These two start updates.py as a separate program, which a mutated copy cannot be.
+        "deselect": [
+            "tests/unit/test_signed_releases.py::"
+            "test_the_installer_refuses_passwordless_staging_without_a_trusted_key",
+            "tests/unit/test_signed_releases.py::test_the_installer_without_the_flag_needs_no_key",
+        ],
         # Version order, signature and manifest checks, the sequence floor and key parsing.
         "functions": [
             "version_key", "validate_archive", "key_fingerprint", "_check_key_text",
             "parse_public_key", "_signer_lines", "_signature_fields", "_is_sequence",
-            "read_manifest", "_record", "release_floor", "_raise_floor", "staged_problem",
-            "_parse_release", "_is_id", "verify_signature", "trusted_keys", "_check_trust_file",
+            "read_manifest", "_record", "release_floor", "staged_problem", "_parse_release",
+            "_is_id", "verify_signature", "trusted_keys",
         ],
+    },
+    "updates_floor": {
+        "source": "src/jittersim/updates.py",
+        "tests": ["tests/unit/test_updates.py", "tests/unit/test_update_preparation.py",
+                  "tests/unit/test_update_decisions.py"],
+        "loosen": [("512 * 1024", "64 * 1024 * 1024"),
+                   ("maximum=1024 * 1024", "maximum=64 * 1024 * 1024")],
+        # The high-water mark that stops a release from going back, and the trust file check.
+        "functions": ["_raise_floor", "_check_trust_file"],
     },
     "storage": {
         "source": "src/jittersim/config/storage.py",
@@ -111,6 +128,17 @@ MODULES = {
             "ConfigRepository._record_domain_list_cleared",
             "ConfigRepository._add_column_if_missing",
         ],
+    },
+    "engine_rules": {
+        "source": [
+            "src/jittersim/engine/schedules.py", "src/jittersim/engine/conditions.py",
+            "src/jittersim/engine/progression.py", "src/jittersim/engine/randomizer.py",
+            "src/jittersim/engine/eligibility.py", "src/jittersim/engine/scenarios.py",
+        ],
+        "tests": ["tests/unit/test_schedules.py", "tests/unit/test_conditions.py",
+                  "tests/unit/test_randomizer.py", "tests/unit/test_random_value_ranges.py",
+                  "tests/unit/test_scenarios.py", "tests/unit/test_protected_device_without_mac.py",
+                  "tests/unit/test_engine_rules.py"],
     },
     "dashboard_rules": {
         "source": "src/jittersim/dashboard_rules.py",
@@ -130,10 +158,19 @@ def run(command, **kwargs):
 EXTRAS = ("deploy", "scripts", "docs", "extensions", "experiments")
 
 
+def sources(spec):
+    """The files to mutate: `source` is one path or a list of paths."""
+
+    return [spec["source"]] if isinstance(spec["source"], str) else list(spec["source"])
+
+
 def config_text(spec):
     tests = [test for test in spec["tests"] if (ROOT / test).exists()]
     extras = [name for name in EXTRAS if (ROOT / name).exists()]
     extras += sorted(path.name for path in ROOT.glob("*.md"))
+    deselect = []
+    for node in spec.get("deselect", ()):
+        deselect += ["--deselect", node]
 
     def quoted(values):
         return "[" + ", ".join(json.dumps(value) for value in values) + "]"
@@ -143,9 +180,9 @@ def config_text(spec):
         "[tool.mutmut]",
         'source_paths = ["src"]',
         f"also_copy = {quoted(extras)}",
-        f"only_mutate = {quoted([spec['source']])}",
+        f"only_mutate = {quoted(sources(spec))}",
         f"pytest_add_cli_args_test_selection = {quoted(tests)}",
-        'pytest_add_cli_args = ["-p", "no:cacheprovider"]',
+        f"pytest_add_cli_args = {quoted(['-p', 'no:cacheprovider'] + deselect)}",
         "use_git_change_detection = false",
         "track_dependencies = false",
         "",
@@ -217,15 +254,16 @@ def prepare(name, spec, fresh):
         shutil.copytree(ROOT / folder, destination, ignore=ignore)
     for document in ROOT.glob("*.md"):
         shutil.copy2(document, target / document.name)
-    source = target / spec["source"]
-    text = source.read_text(encoding="utf-8")
-    for old, new in spec.get("loosen", ()):
-        if old not in text:
-            raise SystemExit(f"loosen: {old!r} is not in {spec['source']}")
-        text = text.replace(old, new)
-    if spec.get("functions"):
-        text = limit_to_functions(text, spec["functions"])
-    source.write_text(text, encoding="utf-8")
+    if spec.get("loosen") or spec.get("functions"):
+        source = target / sources(spec)[0]
+        text = source.read_text(encoding="utf-8")
+        for old, new in spec.get("loosen", ()):
+            if old not in text:
+                raise SystemExit(f"loosen: {old!r} is not in {source.name}")
+            text = text.replace(old, new)
+        if spec.get("functions"):
+            text = limit_to_functions(text, spec["functions"])
+        source.write_text(text, encoding="utf-8")
     (target / "pyproject.toml").write_text(
         (ROOT / "pyproject.toml").read_text(encoding="utf-8") + config_text(spec),
         encoding="utf-8",
@@ -247,7 +285,7 @@ def command_setup(args):
 
 def command_list(_args):
     for name, spec in MODULES.items():
-        print(f"{name}: {spec['source']}\n    tests: {' '.join(spec['tests'])}")
+        print(f"{name}: {' '.join(sources(spec))}\n    tests: {' '.join(spec['tests'])}")
         if spec.get("functions"):
             print(f"    only: {' '.join(spec['functions'])}")
     return 0
@@ -346,21 +384,42 @@ def is_message_text(source_lines, raise_spans, removed, added):
     return in_raise or bool(LABEL_CALL.search(old))
 
 
+SQL_WORDS = re.compile(r"(?i)\b(select|insert|update|delete|alter|drop|pragma|begin|create)\b")
+ROW_KEY = re.compile(r"""\w+\[["'][A-Za-z_]+["']\]""")
+
+
+def is_sql_case(removed, added, path=""):
+    """True when the mutant only changed letter case in SQL text or in a sqlite3.Row key.
+
+    SQL keywords, table and column names and sqlite3.Row keys are not case sensitive, so
+    such a mutant behaves like the original. It cannot be killed.
+    """
+    if len(removed) != 1 or len(added) != 1:
+        return False
+    old, new = removed[0], added[0]
+    if old == new or old.lower() != new.lower():
+        return False
+    return bool(SQL_WORDS.search(old) or ("storage" in path and ROW_KEY.search(old)))
+
+
 def classify(module):
-    """Name -> (status, category, diff). Category is logic or message."""
-    source = ROOT / MODULES[module]["source"]
-    text = source.read_text(encoding="utf-8")
-    spans = [
-        (node.lineno, node.end_lineno)
-        for node in ast.walk(ast.parse(text))
-        if isinstance(node, ast.Raise)
-    ]
+    """Name -> (status, category, diff). Category is logic, message or sql."""
+    texts = {path: (ROOT / path).read_text(encoding="utf-8") for path in sources(MODULES[module])}
+    spans = {
+        path: [(node.lineno, node.end_lineno)
+               for node in ast.walk(ast.parse(text)) if isinstance(node, ast.Raise)]
+        for path, text in texts.items()
+    }
     result = {}
     for name, (status, diff) in read_results(module).items():
         category = "logic"
         if status in SURVIVING:
             removed, added = diff_lines(diff)
-            if is_message_text(text.splitlines(), spans, removed, added):
+            header = re.search(r"^--- (\S+)", diff, re.MULTILINE)
+            path = header.group(1) if header and header.group(1) in texts else next(iter(texts))
+            if is_sql_case(removed, added, path):
+                category = "sql"
+            elif is_message_text(texts[path].splitlines(), spans[path], removed, added):
                 category = "message"
         result[name] = (status, category, diff)
     return result
@@ -375,13 +434,15 @@ def command_summary(args):
         counts[key] = counts.get(key, 0) + 1
     killed = sum(1 for status, _, _ in rows.values()
                  if status in ("killed", "timeout", "segfault"))
-    logic = sum(1 for status, category, _ in rows.values()
-                if status in SURVIVING and category == "logic")
-    message = sum(1 for status, category, _ in rows.values()
-                  if status in SURVIVING and category == "message")
+    surviving = {"logic": 0, "message": 0, "sql": 0}
+    for status, category, _ in rows.values():
+        if status in SURVIVING:
+            surviving[category] += 1
     print(f"{args.module}: {len(rows)} mutants, {dict(sorted(counts.items()))}")
-    for label, judged in (("all mutants", killed + logic + message),
-                          ("without error-text mutants", killed + logic)):
+    everything = killed + sum(surviving.values())
+    logic = killed + surviving["logic"]
+    for label, judged in (("all mutants", everything),
+                          ("mutants that change behaviour (not error text, not SQL case)", logic)):
         rate = 100.0 * killed / judged if judged else 100.0
         print(f"{args.module}: kill rate {rate:.1f} percent of {label} ({killed} of {judged})")
     return 0

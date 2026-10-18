@@ -158,6 +158,8 @@ def test_a_group_is_uniform_when_every_name_has_the_same_category():
     assert rules.group_categories_uniform(group(None, "Video")) is False
     assert rules.group_categories_uniform(group("Video")) is True
     assert rules.group_categories_uniform(group("", "Video", "Video")) is False
+    # A missing category is not a category that happens to be spelled like a placeholder.
+    assert rules.group_categories_uniform(group("XXXX", None)) is False
     assert rules.group_categories_uniform({"names": [
         observation("a.com", label={"category": ""}), observation("b.com", label={"other": "x"}),
     ]}) is True
@@ -177,6 +179,7 @@ def test_a_row_label_hides_a_name_or_category_that_the_group_already_shows():
     assert rules.row_label_parts(row, "", True)["showCategory"] is True
     assert rules.row_label_parts(row, "", True)["showName"] is True
     assert rules.row_label_parts(row, "Mail")["showCategory"] is True
+    assert rules.row_label_parts(observation("a.com", label={"name": "XXXX"}))["showName"] is True
     assert rules.row_label_parts({}) == {
         "labelName": "", "category": "", "kind": "", "showName": False, "showCategory": False}
     no_category = observation("a.com", label={"name": "Mail"})

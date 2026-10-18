@@ -103,7 +103,7 @@ def full_plan(**changes):
             Impairment(delay_ms=200), Impairment(loss_percent=5), active=True),),
         service_assignment_rules=(ServiceAssignmentRule(
             "bob-news", "bob", A("192.168.50.11"), ("news.example.com", "x.example.org"), 0,
-            Impairment(delay_ms=210, duplicate_percent=3), Impairment(loss_percent=6)),),
+            Impairment(delay_ms=210), Impairment(loss_percent=6)),),
         service_list_rules=LISTS,
         everyone_else=EveryoneElseRule(
             0, Impairment(delay_ms=230, corrupt_percent=1), Impairment(loss_percent=8),
@@ -169,6 +169,49 @@ def change(plan, device_ids, directions=("upload", "download"), whole=None, **fi
     return replace(plan, queues=tuple(new(queue) for queue in plan.queues))
 
 
+RULES = {
+    "list": ("service_list_rules", "servicelist:", "list_id", "games"),
+    "assignment": ("service_assignment_rules", "assignment:", "assignment_id", "bob-news"),
+    "quota": ("service_quota_rules", "quota:", "quota_id", "alice-video"),
+}
+
+
+def change_rule(plan, kind, direction, **fields):
+    """One service rule and its queue changed together, the way a profile change does it."""
+
+    attribute, prefix, key, rule_id = RULES[kind]
+    name = f"{direction}_impairment"
+    rules = tuple(
+        replace(rule, **{name: replace(getattr(rule, name), **fields)})
+        if getattr(rule, key) == rule_id else rule
+        for rule in getattr(plan, attribute)
+    )
+    queues = tuple(
+        replace(queue, impairment=replace(queue.impairment, **fields))
+        if queue.device_id == prefix + rule_id and queue.direction.value == direction else queue
+        for queue in plan.queues
+    )
+    return replace(plan, **{attribute: rules}, queues=queues)
+
+
+def change_structure(plan, kind):
+    """A change that live queue changes cannot make: a rule or a queue with other contents."""
+
+    if kind == "queue-mark":
+        first, *rest = plan.queues
+        return replace(plan, queues=(replace(first, mark=14), *rest))
+    if kind == "list":
+        return replace(plan, service_list_rules=tuple(
+            replace(rule, domains=rule.domains + ("more.example.com",))
+            if rule.list_id == "games" else rule for rule in plan.service_list_rules))
+    if kind == "assignment":
+        return replace(plan, service_assignment_rules=tuple(
+            replace(rule, domains=("other.example.com",)) for rule in plan.service_assignment_rules))
+    return replace(plan, service_quota_rules=tuple(
+        replace(rule, destination_addresses=(A("203.0.113.99"),))
+        for rule in plan.service_quota_rules))
+
+
 def live(previous, plan, upload_device=None):
     commands = render_live_queue_changes(
         previous=previous, plan=plan, topology=TOPOLOGY, upload_device=upload_device)
@@ -176,76 +219,103 @@ def live(previous, plan, upload_device=None):
 
 
 def scenarios():
+    """Each scenario is built when its test runs, not when the module is imported."""
+
     full = full_plan()
+    quota_without_lists = full_plan(service_list_rules=(), everyone_else=None)
     without_corruption = full_plan(
         profiles={**PROFILES, "heavy": replace(
             PROFILES["heavy"], upload=replace(HEAVY_UP, corrupt_percent=0))},
         everyone_else=None,
     )
     return {
-        "individual-with-upload-device": dump(render_command_plan(
+        "individual-with-upload-device": lambda: dump(render_command_plan(
             plan=full, topology=TOPOLOGY, service_addresses=ADDRESSES,
             upload_device=UPLOAD_DEVICE)),
-        "individual-without-upload-device": dump(render_command_plan(
+        "individual-without-upload-device": lambda: dump(render_command_plan(
             plan=full, topology=TOPOLOGY)),
-        "individual-without-corruption": dump(render_command_plan(
+        "individual-without-corruption": lambda: dump(render_command_plan(
             plan=without_corruption, topology=TOPOLOGY, upload_device=UPLOAD_DEVICE)),
-        "individual-allowlist-and-access": dump(render_command_plan(
+        "individual-allowlist-and-access": lambda: dump(render_command_plan(
             plan=full_plan(
                 mac_policy=MacPolicy(mode="allowlist", allowlist=("aa:bb:cc:dd:ee:01",)),
                 global_allowed_addresses=(), access=access_plan(),
                 website_filters=(WebsiteFilter(A("192.168.50.10"), (), ()),)),
             topology=TOPOLOGY)),
-        "individual-blocked-everyone-else": dump(render_command_plan(
+        "individual-blocked-everyone-else": lambda: dump(render_command_plan(
             plan=full_plan(
                 everyone_else=EveryoneElseRule(
                     0, Impairment(delay_ms=230), Impairment(loss_percent=8), blocked=True),
                 global_allowed_addresses=None, mac_policy=MacPolicy(mode="allowlist",
                                                                       allowlist=("aa:bb:cc:dd:ee:01",))),
             topology=TOPOLOGY, upload_device=UPLOAD_DEVICE)),
-        "general-with-outage-and-destinations": dump(render_command_plan(
+        "general-with-outage-and-destinations": lambda: dump(render_command_plan(
             plan=general_plan(), topology=TOPOLOGY, service_addresses=ADDRESSES,
             upload_device=UPLOAD_DEVICE)),
-        "general-with-an-empty-allowlist": dump(render_command_plan(
+        "general-with-an-empty-allowlist": lambda: dump(render_command_plan(
             plan=general_plan(allowed_addresses=(), outage_active=False), topology=TOPOLOGY)),
-        "general-open": dump(render_command_plan(
+        "general-open": lambda: dump(render_command_plan(
             plan=general_plan(allowed_addresses=None, outage_active=True),
             topology=TOPOLOGY)),
-        "everyone-else-alone": dump(render_command_plan(
+        "everyone-else-alone": lambda: dump(render_command_plan(
             plan=compile_plan(
                 devices=(), profiles=PROFILES,
                 everyone_else=EveryoneElseRule(0, Impairment(delay_ms=5), Impairment())),
             topology=Topology("uplink0", "ap0"))),
-        "no-rules": dump(render_command_plan(
+        "no-rules": lambda: dump(render_command_plan(
             plan=compile_plan(devices=(), profiles=PROFILES), topology=TOPOLOGY)),
-        "reset": dump(render_reset_commands(topology=TOPOLOGY)),
-        "service-addresses": dump(render_service_address_commands(
+        "reset": lambda: dump(render_reset_commands(topology=TOPOLOGY)),
+        "service-addresses": lambda: dump(render_service_address_commands(
             plan=full,
             additions={"games": (A("203.0.113.9"), A("203.0.113.3"), A("203.0.113.3")),
-                       "video": (), "unknown": (A("203.0.113.1"),)},
+                       "video": (A("203.0.113.41"), A("203.0.113.40")),
+                       "unknown": (A("203.0.113.1"),)},
             removals={"games": (A("203.0.113.4"), A("203.0.113.2")), "video": (),
                       "unknown": (A("203.0.113.1"),)})),
-        "live-delay-change": live(full, change(full, ("bob", "carol"), delay_ms=17)),
-        "live-delay-change-with-the-upload-device": live(
+        "service-addresses-none": lambda: dump(render_service_address_commands(
+            plan=full, additions={"games": ()}, removals={})),
+        "live-delay-change": lambda: live(full, change(full, ("bob", "carol"), delay_ms=17)),
+        "live-delay-change-with-the-upload-device": lambda: live(
             full, change(full, ("bob", "carol"), delay_ms=17), upload_device=UPLOAD_DEVICE),
-        "live-corruption-change-on-the-upload-device": live(
+        "live-corruption-change-on-the-upload-device": lambda: live(
             full, change(full, ("carol",), directions=("upload",), corrupt_percent=9),
             upload_device=UPLOAD_DEVICE),
-        "live-corruption-change-without-an-upload-device": live(
+        "live-corruption-change-without-an-upload-device": lambda: live(
             full, change(full, ("carol",), directions=("upload",), corrupt_percent=9)),
-        "live-change-of-the-set-of-corrupting-queues": live(
+        "live-change-of-the-set-of-corrupting-queues": lambda: live(
             full, change(full, ("carol",), directions=("upload",), corrupt_percent=0),
             upload_device=UPLOAD_DEVICE),
-        "live-change-to-a-duplicating-queue": live(
+        "live-change-to-a-duplicating-queue": lambda: live(
             full, change(full, ("bob",), duplicate_percent=2)),
-        "live-change-from-a-duplicating-queue": live(
+        "live-change-from-a-duplicating-queue": lambda: live(
             full, change(full, ("alice",), duplicate_percent=0)),
-        "live-change-to-the-default-impairment": live(
+        "live-change-to-the-default-impairment": lambda: live(
             full, change(full, ("bob",), whole=Impairment())),
-        "live-change-from-the-default-impairment": live(
+        "live-change-from-the-default-impairment": lambda: live(
             change(full, ("bob",), directions=("upload",), whole=Impairment()), full),
-        "live-change-of-a-rule": live(full, full_plan(blocked_device_addresses=())),
-        "live-no-change": live(full, full),
+        "live-change-of-a-rule": lambda: live(full, full_plan(blocked_device_addresses=())),
+        "live-change-of-a-list-upload": lambda: live(full, change_rule(
+            full, "list", "upload", delay_ms=41)),
+        "live-change-of-a-list-download": lambda: live(full, change_rule(
+            full, "list", "download", loss_percent=11)),
+        "live-change-of-a-browser-rule-upload": lambda: live(full, change_rule(
+            full, "assignment", "upload", delay_ms=41)),
+        "live-change-of-a-browser-rule-download": lambda: live(full, change_rule(
+            full, "assignment", "download", loss_percent=11)),
+        "live-change-of-a-quota-upload": lambda: live(full, change_rule(
+            full, "quota", "upload", delay_ms=41)),
+        "live-change-of-a-quota-download": lambda: live(full, change_rule(
+            full, "quota", "download", loss_percent=11)),
+        "live-change-of-a-queue-mark": lambda: live(full, change_structure(full, "queue-mark")),
+        "live-change-of-the-hostnames-of-a-list": lambda: live(
+            full, change_structure(full, "list")),
+        "live-change-of-the-hostnames-of-a-browser-rule": lambda: live(
+            full, change_structure(full, "assignment")),
+        "live-change-of-the-addresses-of-a-quota": lambda: live(
+            full, change_structure(full, "quota")),
+        "individual-quota-without-lists": lambda: dump(render_command_plan(
+            plan=quota_without_lists, topology=TOPOLOGY)),
+        "live-no-change": lambda: live(full, full),
     }
 
 
@@ -255,7 +325,7 @@ SCENARIOS = scenarios()
 @pytest.mark.parametrize("name", sorted(SCENARIOS))
 def test_the_renderer_writes_exactly_these_commands(name):
     path = FIXTURES / f"{name}.txt"
-    text = SCENARIOS[name]
+    text = SCENARIOS[name]()
     if os.environ.get("JITTERSIM_UPDATE_GOLDEN") == "1":
         FIXTURES.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")

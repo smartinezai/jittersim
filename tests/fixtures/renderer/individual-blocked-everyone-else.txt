@@ -73,6 +73,7 @@ $ tc qdisc del dev eth0 parent 10:3 handle 52:  # remove the duplicate queue of 
 $ tc qdisc del dev eth0 parent 10:4 handle 53:  # remove the duplicate queue of device carol on eth0 before its queue changes kind  [ignore_failure]
 $ tc qdisc del dev eth0 parent 10:5 handle 54:  # remove the duplicate queue of device dave on eth0 before its queue changes kind  [ignore_failure]
 $ tc qdisc del dev eth0 parent 10:6 handle 55:  # remove the duplicate queue of device quota:alice-video on eth0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev eth0 parent 10:7 handle 56:  # remove the duplicate queue of device assignment:bob-news on eth0 before its queue changes kind  [ignore_failure]
 $ tc qdisc del dev eth0 parent 10:8 handle 57:  # remove the duplicate queue of device rule:everyone-else on eth0 before its queue changes kind  [ignore_failure]
 $ tc qdisc del dev eth0 parent 10:9 handle 58:  # remove the duplicate queue of device servicelist:games on eth0 before its queue changes kind  [ignore_failure]
 $ tc qdisc replace dev eth0 parent 10:a handle 69: fq_codel  # preserve fair queuing for device servicelist:video on eth0
@@ -90,6 +91,9 @@ $ tc filter replace dev eth0 protocol ipv6 parent 10: pref 104 handle 4 fw flowi
 $ tc qdisc replace dev eth0 parent 10:6 handle 45: netem delay 200ms corrupt 0% rate 0bit  # apply upload impairment for device quota:alice-video on eth0
 $ tc filter replace dev eth0 protocol ip parent 10: pref 5 handle 5 fw flowid 10:6  # route ip mark 5 on eth0
 $ tc filter replace dev eth0 protocol ipv6 parent 10: pref 105 handle 5 fw flowid 10:6  # route ipv6 mark 5 on eth0
+$ tc qdisc replace dev eth0 parent 10:7 handle 46: netem delay 210ms corrupt 0% rate 0bit  # apply upload impairment for device assignment:bob-news on eth0
+$ tc filter replace dev eth0 protocol ip parent 10: pref 6 handle 6 fw flowid 10:7  # route ip mark 6 on eth0
+$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 106 handle 6 fw flowid 10:7  # route ipv6 mark 6 on eth0
 $ tc qdisc replace dev eth0 parent 10:8 handle 47: netem delay 230ms corrupt 0% rate 0bit  # apply upload impairment for device rule:everyone-else on eth0
 $ tc filter replace dev eth0 protocol ip parent 10: pref 7 handle 7 fw flowid 10:8  # route ip mark 7 on eth0
 $ tc filter replace dev eth0 protocol ipv6 parent 10: pref 107 handle 7 fw flowid 10:8  # route ipv6 mark 7 on eth0
@@ -100,10 +104,6 @@ $ tc qdisc del dev eth0 parent 10:2 handle 41:  # remove the netem queue of devi
 $ tc qdisc replace dev eth0 parent 10:2 handle 51: netem delay 100ms 20ms loss gemodel 0.7732% 25.0000% corrupt 0% rate 1500kbit  # apply upload impairment for device alice on eth0
 $ tc filter replace dev eth0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2  # route ip mark 1 on eth0
 $ tc filter replace dev eth0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2  # route ipv6 mark 1 on eth0
-$ tc qdisc del dev eth0 parent 10:7 handle 46:  # remove the netem queue of device assignment:bob-news on eth0 before its queue changes kind  [ignore_failure]
-$ tc qdisc replace dev eth0 parent 10:7 handle 56: netem delay 210ms corrupt 0% rate 0bit  # apply upload impairment for device assignment:bob-news on eth0
-$ tc filter replace dev eth0 protocol ip parent 10: pref 6 handle 6 fw flowid 10:7  # route ip mark 6 on eth0
-$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 106 handle 6 fw flowid 10:7  # route ipv6 mark 6 on eth0
 $ tc qdisc replace dev jittersim-ifb root handle 10: prio bands 4 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0  # create project queue root on jittersim-ifb
 $ tc qdisc replace dev jittersim-ifb parent 10:1 handle 100: fq_codel  # preserve fair queuing for ordinary traffic on jittersim-ifb
 $ tc qdisc del dev jittersim-ifb parent 10:4 handle 53:  # remove the duplicate queue of device carol on jittersim-ifb before its queue changes kind  [ignore_failure]
