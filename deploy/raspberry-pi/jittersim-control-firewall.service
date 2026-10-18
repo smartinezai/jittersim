@@ -22,7 +22,7 @@ RemainAfterExit=yes
 # NetworkManager waits for this unit (Before=). Never let a stuck nft hold the
 # network. After 30 s systemd sends nft SIGTERM, waits TimeoutStopSec, then
 # sends SIGKILL (and waits that long once more if nft cannot be killed yet), so
-# the unit fails after about 40 s at most. The default TimeoutStopSec is 90 s
+# the unit fails within under a minute. The default TimeoutStopSec is 90 s
 # and would hold NetworkManager for about 3.5 minutes. NetworkManager then
 # brings up Ethernet and the test Wi-Fi stays off, because jittersim-ap.service
 # refuses to start without this table. If nft is killed after the kernel

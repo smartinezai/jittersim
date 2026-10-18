@@ -80,4 +80,4 @@ next release takes them over.
   motion. Nothing behaves differently.
 - The installer checks the management firewall after it turns off a newly
   installed Unbound and hostapd, so a failed check no longer leaves them running.
-  The firewall unit stops a stuck `nft` within about 40 seconds.
+  The firewall unit stops a stuck `nft` within under a minute.
