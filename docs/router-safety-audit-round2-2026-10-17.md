@@ -55,8 +55,8 @@ contacted. Earlier records: `outage-dossier-2026-10-04-2026-10-09.md`,
 | same | The file starts with `add table` and `delete table`, so loading it replaces the table in one transaction | An install or update reload never leaves a moment without the rules, and a file that fails to load keeps the old ones |
 | same | `forward`: `iifname uplink oifname uplink drop` | The Pi is a gateway for its Wi-Fi only, never a router for the LAN |
 | `deploy/raspberry-pi/jittersim-control-firewall.service` | `ExecStartPre` sets `net.ipv4.conf.all.arp_ignore=1`, `arp_announce=2` and `send_redirects=0` on every interface | No ARP answer for the Wi-Fi address on the LAN, the uplink address in ARP requests, no ICMP redirects (sent before the forward hook, so nft alone cannot stop them) |
-| same | `Before=NetworkManager.service`; no separate `nft delete` steps and no `ExecStop`; `TimeoutStartSec=30` | The rules load before any connection starts. A restart (install, update) no longer deletes the table first, and shutdown never removes it while the Wi-Fi still runs. If nft hangs, the unit fails after 30 s: NetworkManager then starts and Ethernet comes up (the dashboard over Ethernet and SSH stay reachable once their own units start), but the test Wi-Fi stays off because `jittersim-ap.service` refuses to start without this table. That is the safe failure |
-| `deploy/raspberry-pi/preflight.py`, `install.sh` | `nft --check -f -` of the rendered rules against the running kernel. The updater already runs the staged `preflight.py` before it stops any service; `install.sh` runs it again with `--firewall-only` right after installing nftables | The rules use `fib` for the first time. A kernel without `nft_fib_inet` or `nft_fib_ipv4` would fail to load the whole file; the dashboard, browser proxy and service watcher need this unit. The check stops the install or update with a clear message before anything is stopped or replaced |
+| same | `Before=NetworkManager.service`; no separate `nft delete` steps and no `ExecStop`; `TimeoutStartSec=30` and `TimeoutStopSec=5` | The rules load before any connection starts. A restart (install, update) no longer deletes the table first, and shutdown never removes it while the Wi-Fi still runs. If nft hangs, systemd sends it SIGTERM after 30 s, then SIGKILL 5 s later (the default `TimeoutStopSec` is 90 s, which would hold NetworkManager about 3.5 minutes when nft sits in an uninterruptible kernel wait), so the unit fails after under a minute. NetworkManager then starts and Ethernet comes up. SSH stays reachable; the dashboard, browser proxy and service watcher do not start, because they require this unit. Recover with `sudo systemctl restart jittersim-control-firewall`. The test Wi-Fi stays off because `jittersim-ap.service` refuses to start without this table. That is the safe failure. If nft is killed after the kernel already committed the batch, the table is loaded but the unit is failed: the test Wi-Fi then starts (safe, the rules exist) but the dashboard does not |
+| `deploy/raspberry-pi/preflight.py`, `install.sh` | `nft --check -f -` of the rendered rules against the running kernel (it changes no rules; it may load the kernel modules it needs). The updater already runs the staged `preflight.py` before it stops any service; `install.sh` runs it again with `--firewall-only` after installing the packages and after the guards that turn off a newly installed unbound and hostapd | The rules use `fib` for the first time. A kernel without `nft_fib_inet` or `nft_fib_ipv4` would fail to load the whole file; the dashboard, browser proxy and service watcher need this unit. The check stops the install or update with a clear message before anything is stopped or replaced |
 | `tests/kernel/test_router_wire_guard.py` | The router-side capture test (below) | Closes the gaps with tests, not prose |
 | `tests/unit/test_deployment.py` | Static checks of the new rules and unit lines | Fast guard in the unit suite |
 
@@ -212,7 +212,8 @@ Pi's own frames.
 0. The kernel can load the rules (the installer checks this too):
    `modinfo nft_fib_inet nft_fib_ipv4` lists both modules, and
    `sudo nft --check -f /etc/jittersim/jittersim-control-firewall.nft` (the
-   rendered copy; `--check` loads nothing) prints nothing and exits 0.
+   rendered copy; `--check` changes no rules, though it may load the needed kernel
+   modules) prints nothing and exits 0.
 1. Settings and rules are in place:
    `cat /proc/sys/net/ipv4/conf/all/arp_ignore /proc/sys/net/ipv4/conf/all/arp_announce`
    (expect `1` and `2`), `grep . /proc/sys/net/ipv4/conf/*/send_redirects`
@@ -258,6 +259,16 @@ capture now stops only after every generator finished and fails if it reached
 its own deadline; and the documentation corrections in this file (corruption
 evidence, the D1 triggers and the active scan, `tcpdump -p`, the check-3
 filter, severities).
+
+An independent Opus review of the merged PR 150 left a few optional items,
+done in one follow-up: the installer now runs the `--firewall-only` check after
+the guards that turn off a newly installed unbound and hostapd (a failed check
+under `set -eu` used to leave both enabled, and the re-run no longer turned them
+off); the failure message says that packages may have been installed; the
+firewall unit gets `TimeoutStopSec=5`; the wording of `nft --check` says it
+changes no rules and may load kernel modules; the two other wire-guard cases
+also fail when the capture ended at its own limit; and the README says that
+`192.168.50.1` is not a household access path.
 
 ## Gate
 

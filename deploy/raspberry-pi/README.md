@@ -235,9 +235,15 @@ installer prints the authority's fingerprint. It also links the `jittersim` comm
 (Avahi) on Ethernet, where it answers with the current Ethernet address, and on
 the test Wi-Fi, where it answers `192.168.50.1`. A Mac on the home router's
 Wi-Fi and the same Mac on the Pi's test Wi-Fi therefore use the same address
-and the same remembered sign-in. The Pi's Ethernet address and `192.168.50.1`
+and the same remembered sign-in. On the test Wi-Fi the Pi's Ethernet address and `192.168.50.1`
 remain as a fallback, and `https://pi.home.arpa:8080` still works on the test
 Wi-Fi for bookmarks made with the earlier name.
+
+From the household network, reach the dashboard only through the Ethernet
+address or the `.local` name. `192.168.50.1` is the test Wi-Fi address: replies
+to a household host that connected to it through `eth0` (for example through a
+static route) leave without NAT and with source `192.168.50.1`, and the
+management firewall drops them. That is not a supported access path.
 
 Changing the dashboard name requires completed certificate adoption. If the
 command reports an old self-signed identity or an unfinished adoption, complete
@@ -1271,12 +1277,13 @@ the signature at most 16 KiB and the whole upload must finish within 120 seconds
 `jittersim remote update status|upload|install` does the same from the command
 line. `jittersim remote update now` asks the Pi to check GitHub with its own
 token, shows the release, installs it after you confirm and waits until that
-install reached `complete`, with the same failure reports as on the Pi. When
-Install automatically is on and the check made the Pi start installing, `now`
-follows that install instead of asking. `jittersim remote update check` only
-checks while Install automatically is off; with it on, a check that finds a
-new release starts the install (until the Pi update service treats manual
-checks as check-only). `now --json` prints one JSON answer and needs `--yes`. Publishing stable releases requires the retained signed package and owner
+install reached `complete`, with the same failure reports as on the Pi. When an
+install is already running (for example one the daily check started because
+Install automatically is on), `now` follows it instead of asking. A check that a
+person asks for (`jittersim remote update check`, `now`, the dashboard's Check
+for updates and `sudo jittersim update check --online`) only checks and stages;
+it never installs on its own, even with Install automatically on. Only the daily
+check installs by itself. `now --json` prints one JSON answer and needs `--yes`. Publishing stable releases requires the retained signed package and owner
 approval. Follow the [release guide](../../docs/releases/README.md).
 
 ### Who can do what

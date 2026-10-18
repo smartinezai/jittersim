@@ -109,3 +109,28 @@ class FirewallPreflightTests(unittest.TestCase):
         restart = installer.index("systemctl restart jittersim-control-firewall.service")
         self.assertLess(packages, check)
         self.assertLess(check, restart)
+
+    def test_a_failed_firewall_check_cannot_leave_new_unbound_and_hostapd_running(self) -> None:
+        # set -eu ends the script at a failed check. The packages just installed start their
+        # services in their own postinst, so the guards that turn them off must already have
+        # run, and nothing is replaced before the check.
+        installer = (PREFLIGHT_PATH.parent / "install.sh").read_text()
+        check = installer.index("preflight.py\" --firewall-only")
+        unbound_guard = installer.index(
+            'if [ "$existing_unbound" = no ]; then systemctl disable --now unbound.service; fi')
+        hostapd_guard = installer.index(
+            'if [ "$existing_hostapd" = no ]; then systemctl disable --now hostapd.service; fi')
+        self.assertLess(installer.index("apt-get install -y dnsmasq-base"), unbound_guard)
+        self.assertLess(unbound_guard, check)
+        self.assertLess(hostapd_guard, check)
+        for step in ("check-egress-hook.py", 'install -d -m 0750 -o root -g jittersim "$CONFIG_DIR"',
+                     "replace-source.py", "systemctl restart"):
+            self.assertLess(check, installer.index(step), step)
+
+    def test_the_failure_message_does_not_claim_that_nothing_was_changed(self) -> None:
+        os.environ["FAKE_NFT_EXIT"] = "1"
+        with self.assertRaises(preflight.PreflightError) as caught:
+            preflight.check_firewall(uplink="eth0", test_interface="wlan0", nft=str(self.nft))
+        message = str(caught.exception)
+        self.assertNotIn("Nothing was changed", message)
+        self.assertIn("may already have added packages", message)
