@@ -10,11 +10,12 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from jittersim.networking import wifi_follow
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.commands import CommandResult
-from jittersim.networking.executor import CommandExecutionError
+from jittersim.networking.executor import CommandExecutionError, SubprocessExecutor
 from jittersim.networking.helper import HelperService
 from jittersim.networking.router import _settings_from_wifi_data
 from jittersim.networking.topology import Topology
@@ -368,6 +369,7 @@ class FollowRouterTests(unittest.TestCase):
 
 ROUTER_BSSID = "AA:BB:CC:DD:EE:01"
 PI_BSSID = "B8:27:EB:00:00:01"
+LOOK_PURPOSE = "read the Wi-Fi names on the air (read only)"
 
 
 def listing(*pairs):
@@ -388,6 +390,17 @@ class BootScanTests(unittest.TestCase):
         FollowRouterTests.setUp(self)
         self.sleeps = []
         self.now = 0.0
+        self.looking = False
+        self.slow_calls = False
+        run = self.executor.run
+
+        def run_on_the_test_clock(command):
+            # Worst case: while the look runs, every nmcli call takes its whole timeout.
+            if self.slow_calls and self.looking and command.executable == "nmcli":
+                self.now += command.timeout_seconds
+            return run(command)
+
+        self.executor.run = run_on_the_test_clock
 
     def sleep(self, seconds):
         self.sleeps.append(seconds)
@@ -401,8 +414,12 @@ class BootScanTests(unittest.TestCase):
         self.executor.active = ""
 
     def scan(self, ssid):
-        return wifi_follow.scan_air(self.controller, ssid, sleep=self.sleep,
-                                    clock=lambda: self.now)
+        self.looking = True
+        try:
+            return wifi_follow.scan_air(self.controller, ssid, sleep=self.sleep,
+                                        clock=lambda: self.now)
+        finally:
+            self.looking = False
 
     def boot(self):
         return wifi_follow.prepare_boot(self.controller, self.record, self.hold, self.previous,
@@ -544,13 +561,22 @@ class BootScanTests(unittest.TestCase):
         for command in self.executor.commands:
             if command.executable == "nmcli" and "list" in command.arguments:
                 self.assertLessEqual(command.timeout_seconds, wifi_follow.RESCAN_TIMEOUT)
-        # A clock that has used the budget: no rescan is started at all.
+        # The budget is used up by the cached list: no rescan is started at all.
         self.setUp()
         self.at_boot()
-        times = iter([0, 0, wifi_follow.SCAN_BUDGET, wifi_follow.SCAN_BUDGET])
+        run = self.executor.run
+
+        def run_and_use_the_budget(command):
+            try:
+                return run(command)
+            finally:
+                if "list" in command.arguments:
+                    self.now = wifi_follow.SCAN_BUDGET
+
+        self.executor.run = run_and_use_the_budget
         start = len(self.executor.commands)
         result = wifi_follow.scan_air(self.controller, "Home", sleep=self.sleeps.append,
-                                      clock=lambda: next(times))
+                                      clock=lambda: self.now)
         self.assertEqual(result["result"], "timeout")
         self.assertEqual(self.lists(start), ["no"])
 
@@ -580,18 +606,132 @@ class BootScanTests(unittest.TestCase):
         self.assertEqual(self.sleeps, [wifi_follow.READY_STEP] * 3)
         self.assertEqual(self.executor.settings[SSID], RECOVERY_WIFI_NAME)
 
-    def test_a_wlan0_that_stays_unavailable_fails_open_within_the_budget(self):
+    def test_a_translated_state_still_waits_for_wlan0(self):
+        # The state text follows the locale. The number does not: 20 is "unavailable".
         self.at_boot()
-        self.executor.device_state = "20 (unavailable)"
+        self.executor.device_states = ["20 (nicht verf\u00fcgbar)", "20 (non disponible)"]
+        self.executor.device_state = "30 (getrennt)"
+        self.executor.scan_output = listing(("Home", ROUTER_BSSID))
+        self.assertEqual(self.boot(), "router-on-air")
+        self.assertEqual(self.sleeps, [wifi_follow.READY_STEP] * 2)
+
+    def test_a_translated_state_in_the_detail_is_still_called_unavailable(self):
+        self.at_boot()
+        self.executor.device_state = "20 (nicht verf\u00fcgbar)"
+        self.executor.scan_replies = [CommandExecutionError("nmcli failed", return_code=10)] * 2
+        self.assertEqual(self.boot(), "switched")
+        self.assertIn("wlan0 was still 20 (nicht verf\u00fcgbar)",
+                      json.loads(self.check.read_text())["scan_detail"])
+
+    def test_every_nmcli_call_of_the_look_asks_for_english_output(self):
+        self.at_boot()
+        self.executor.scan_output = listing(("Neighbour", "11:22:33:44:55:66"))
+        start = len(self.executor.commands)
+        self.boot()
+        looked = [command for command in self.executor.commands[start:]
+                  if command.executable == "nmcli"
+                  and command.purpose == LOOK_PURPOSE]
+        self.assertEqual({command.arguments[command.arguments.index("--rescan") + 1]
+                          if "--rescan" in command.arguments else command.arguments[1]
+                          for command in looked}, {"no", "yes", "GENERAL.STATE",
+                                                   "GENERAL.CONNECTION", "GENERAL.HWADDR"})
+        self.assertTrue(all(command.c_locale for command in looked), looked)
+
+    def test_a_german_nmcli_is_asked_in_english_so_the_wait_and_the_busy_retry_work(self):
+        # A fake nmcli that answers in German unless it runs with LC_ALL=C, as the real one
+        # does. The Pi may run with de_DE.UTF-8, and the look must not depend on that.
+        directory = self.record.parent / "german"
+        directory.mkdir()
+        (directory / "other").write_text(listing(("Neighbour", "11:22:33:44:55:66")))
+        (directory / "home").write_text(listing(("Home", ROUTER_BSSID)))
+        fake = directory / "nmcli"
+        fake.write_text(r"""#!/bin/sh
+dir=DIRECTORY
+english() { [ "$LC_ALL" = C ]; }
+case "$*" in
+*GENERAL.STATE*)
+    n=$(cat "$dir/reads" 2>/dev/null || echo 0)
+    echo $((n + 1)) > "$dir/reads"
+    if [ "$n" -lt 2 ]; then
+        if english; then echo "20 (unavailable)"; else echo "20 (nicht verfuegbar)"; fi
+    elif english; then echo "30 (disconnected)"; else echo "30 (getrennt)"; fi ;;
+*GENERAL.CONNECTION*) echo "" ;;
+*GENERAL.HWADDR*) echo 'B8\:27\:EB\:00\:00\:01' ;;
+*"wifi list"*)
+    if [ "$(cat "$dir/reads" 2>/dev/null || echo 0)" -lt 3 ]; then
+        if english; then echo "Error: Scanning not allowed while unavailable." >&2
+        else echo "Fehler: Scannen ist nicht erlaubt, solange das Geraet nicht verfuegbar ist." >&2
+        fi
+        exit 10
+    fi
+    case "$*" in
+    *"--rescan yes"*)
+        touch "$dir/rescanned"
+        if english; then echo "Error: Device or resource busy" >&2
+        else echo "Fehler: Das Geraet oder die Ressource ist belegt" >&2; fi
+        exit 1 ;;
+    *)  if [ -e "$dir/rescanned" ]; then cat "$dir/home"; else cat "$dir/other"; fi ;;
+    esac ;;
+esac
+""".replace("DIRECTORY", str(directory)))
+        fake.chmod(0o755)
+        slept = []
+        environment = {"PATH": "%s:%s" % (directory, os.environ["PATH"]), "LC_ALL": "de_DE.UTF-8",
+                       "LANG": "de_DE.UTF-8", "LANGUAGE": "de"}
+        with mock.patch.dict(os.environ, environment):
+            controller = WifiController(SubprocessExecutor(timeout_seconds=15), "wlan0")
+            result = wifi_follow.scan_air(controller, "Home", sleep=slept.append)
+        self.assertEqual(result["result"], "seen", result)
+        self.assertEqual(result["source"], "list after a busy radio")
+        self.assertEqual(slept, [wifi_follow.READY_STEP] * 2 + [wifi_follow.BUSY_WAIT])
+
+    def test_a_wlan0_that_stays_unavailable_fails_open_within_the_budget(self):
         refused = CommandExecutionError("nmcli failed", return_code=10,
                                         stderr="Error: Scanning not allowed while unavailable.")
-        self.executor.scan_replies = [refused, refused]
-        self.assertEqual(self.boot(), "switched")
-        self.assertLessEqual(sum(self.sleeps), wifi_follow.READY_WAIT)
-        self.assertLessEqual(self.now, wifi_follow.SCAN_BUDGET)
-        check = json.loads(self.check.read_text())
-        self.assertEqual(check["scan_result"], "failed")
-        self.assertIn("unavailable", check["scan_detail"])
+        for slow in (False, True):
+            with self.subTest(slow_calls=slow):
+                self.setUp()
+                self.slow_calls = slow
+                self.at_boot()
+                self.executor.device_state = "20 (unavailable)"
+                self.executor.scan_replies = [refused, refused]
+                self.assertEqual(self.boot(), "switched")
+                self.assertLessEqual(sum(self.sleeps), wifi_follow.READY_WAIT)
+                self.assertLessEqual(self.now, wifi_follow.SCAN_BUDGET)
+                check = json.loads(self.check.read_text())
+                self.assertIn(check["scan_result"], ("failed", "timeout"))
+                if not slow:
+                    self.assertEqual(check["scan_result"], "failed")
+                    self.assertIn("unavailable", check["scan_detail"])
+
+    def test_the_look_stays_within_its_budget_when_every_call_takes_its_whole_timeout(self):
+        timeout = CommandExecutionError("nmcli timed out", timed_out=True)
+        busy = CommandExecutionError("nmcli failed", return_code=1,
+                                     stderr="Error: Device or resource busy")
+        other = listing(("Neighbour", "11:22:33:44:55:66"))
+        cases = {
+            "wlan0 never becomes available": dict(device_state="20 (unavailable)",
+                                                  scan_replies=[timeout, timeout]),
+            "wlan0 is unknown to NetworkManager": dict(
+                device_state=CommandExecutionError("Device not found"),
+                scan_replies=[timeout, timeout]),
+            "wlan0 becomes available late": dict(
+                device_states=["20 (unavailable)"] * 6, scan_replies=[other, busy, other]),
+            "the radio stays busy": dict(scan_replies=[other, busy, busy]),
+            "every list times out": dict(scan_replies=[timeout, timeout, timeout]),
+        }
+        for name, settings in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                self.slow_calls = True
+                self.at_boot()
+                for key, value in settings.items():
+                    setattr(self.executor, key, value)
+                self.boot()
+                self.assertLessEqual(self.now, wifi_follow.SCAN_BUDGET)
+                for command in self.executor.commands:
+                    if command.purpose == LOOK_PURPOSE:
+                        self.assertGreaterEqual(command.timeout_seconds, 1)
 
     def test_held_or_changed_wifis_are_not_scanned(self):
         self.at_boot()

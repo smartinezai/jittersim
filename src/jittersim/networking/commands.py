@@ -21,6 +21,9 @@ class Command:
     timeout_is_success: bool = False
     sensitive: bool = False
     expected_stdout: Optional[str] = field(default=None, repr=False)
+    # Run with LC_ALL=C so the output and the error text are English and a program that
+    # reads them does not depend on the system language (nmcli follows it).
+    c_locale: bool = False
 
     def __post_init__(self) -> None:
         if not self.executable or "/" in self.executable or " " in self.executable:

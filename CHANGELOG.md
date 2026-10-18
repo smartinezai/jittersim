@@ -8,6 +8,11 @@ next release takes them over.
 
 ## Unreleased
 
+- The look at the air before a boot rename no longer depends on the Pi's language. Its
+  `nmcli` calls run with English output, so a Pi with a German or other locale still waits
+  for wlan0 at a cold boot and still retries a busy radio, and the look stays within its
+  20 s budget. The start of the test Wi-Fi may now take up to 480 s in the worst case
+  (it was 420 s) before systemd gives up.
 - The boot step of the Pi Wi-Fi looks once at the Wi-Fi names on the air before it
   renames the Pi Wi-Fi to the router name. When the router's own Wi-Fi already sends
   that name, the Pi keeps or takes `JitterSim-Recovery` for that boot, so one name

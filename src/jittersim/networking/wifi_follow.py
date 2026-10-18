@@ -298,7 +298,8 @@ def _scan_error(error: CommandExecutionError) -> str:
         return SCAN_TIMEOUT
     text = (error.stderr or "").lower()
     # NetworkManager: "Device or resource busy", "Scanning not allowed immediately following
-    # previous scan", or a scan that is still in progress.
+    # previous scan", or a scan that is still in progress. These are English words, so every
+    # nmcli call of the look runs with LC_ALL=C (see _nmcli).
     if "busy" in text or "not allowed immediately" in text or "in progress" in text:
         return SCAN_BUSY
     return SCAN_FAILED
@@ -310,14 +311,20 @@ def _nmcli(controller: WifiController, arguments, timeout: float) -> str:
         executable="nmcli", arguments=tuple(arguments),
         purpose="read the Wi-Fi names on the air (read only)",
         timeout_seconds=max(1, timeout),
+        # The Pi may run in another language. The busy and not-ready texts below are English.
+        c_locale=True,
     )).stdout
 
 
-def _own_bssids(controller: WifiController) -> List[str]:
+def _time_left(clock: Callable[[], float], start: float, limit: float = SCAN_BUDGET) -> float:
+    return limit - (clock() - start)
+
+
+def _own_bssids(controller: WifiController, timeout: float = CACHED_TIMEOUT) -> List[str]:
     """The MAC of the Pi's own Wi-Fi device. It is the Pi's BSSID while it sends."""
     try:
         output = _nmcli(controller, ("-g", "GENERAL.HWADDR", "device", "show",
-                                     controller.interface), CACHED_TIMEOUT)
+                                     controller.interface), timeout)
     except CommandExecutionError:
         return []
     value = output.strip().replace("\\", "").upper()
@@ -339,38 +346,56 @@ def scan_air(controller: WifiController, ssid: str, *, sleep: Sleep = time.sleep
         return {"result": SCAN_FAILED, "detail": "the Wi-Fi list could not be read"}
 
 
-def _device_state(controller: WifiController) -> str:
+def _device_state(controller: WifiController, timeout: float = CACHED_TIMEOUT) -> str:
     """Like "30 (disconnected)". Empty when nmcli does not know the device yet."""
     try:
         return _nmcli(controller, ("-g", "GENERAL.STATE", "device", "show",
-                                   controller.interface), CACHED_TIMEOUT).strip()
+                                   controller.interface), timeout).strip()
     except CommandExecutionError:
         return ""
 
 
+def _not_ready(state: str) -> bool:
+    """Unknown to NetworkManager or "unavailable" (driver or firmware not ready yet).
+
+    The number is the NetworkManager state code (20 is "unavailable"). The words after it
+    can be translated, so only the number counts.
+    """
+    return not state or state.split(None, 1)[0] == "20"
+
+
 def _wait_until_available(controller, sleep, clock, start) -> str:
-    state = _device_state(controller)
-    while (not state or "unavailable" in state) and clock() - start + READY_STEP <= READY_WAIT:
+    # Every read gets at most the time that is left of READY_WAIT, and the loop sleeps only
+    # when at least 1 s is left for the read after it. So the wait ends within READY_WAIT.
+    state = _device_state(controller, min(CACHED_TIMEOUT, _time_left(clock, start, READY_WAIT)))
+    while _not_ready(state) and _time_left(clock, start, READY_WAIT) >= READY_STEP + 1:
         sleep(READY_STEP)
-        state = _device_state(controller)
+        state = _device_state(controller,
+                              min(CACHED_TIMEOUT, _time_left(clock, start, READY_WAIT)))
     return state
 
 
 def _scan_air(controller, ssid, sleep, clock) -> Dict[str, str]:
     start = clock()
     state = _wait_until_available(controller, sleep, clock, start)
-    try:
-        active = _nmcli(controller, ("-g", "GENERAL.CONNECTION", "device", "show",
-                                     controller.interface), CACHED_TIMEOUT).strip()
-    except CommandExecutionError:
-        active = ""
+    # The two reads below count against the budget too. Without a second left for one, the
+    # look goes on (a read that cannot be made is "unknown") and look() then reports "timeout".
+    active = ""
+    left = _time_left(clock, start)
+    if left >= 1:
+        try:
+            active = _nmcli(controller, ("-g", "GENERAL.CONNECTION", "device", "show",
+                                         controller.interface), min(CACHED_TIMEOUT, left)).strip()
+        except CommandExecutionError:
+            active = ""
     if active == AP_CONNECTION:
         # A scan would take the running access point off its channel for a moment.
         return {"result": SCAN_SKIPPED, "detail": "the Pi Wi-Fi already runs"}
-    own = _own_bssids(controller)
+    left = _time_left(clock, start)
+    own = _own_bssids(controller, min(CACHED_TIMEOUT, left)) if left >= 1 else []
 
     def look(rescan: str, timeout: float) -> Dict[str, str]:
-        left = SCAN_BUDGET - (clock() - start)
+        left = _time_left(clock, start)
         if left < 1:
             return {"result": SCAN_TIMEOUT, "detail": "no time was left for the look"}
         try:
@@ -379,7 +404,7 @@ def _scan_air(controller, ssid, sleep, clock) -> Dict[str, str]:
                                          "ifname", controller.interface), min(timeout, left))
         except CommandExecutionError as error:
             detail = "nmcli %s" % ("timed out" if error.timed_out else "refused the Wi-Fi list")
-            if not state or "unavailable" in state:
+            if _not_ready(state):
                 detail += " (wlan0 was still %s)" % (state or "not known to NetworkManager")
             return {"result": _scan_error(error), "detail": detail}
         networks = parse_scan(output)
@@ -402,7 +427,7 @@ def _scan_air(controller, ssid, sleep, clock) -> Dict[str, str]:
         return cached
     fresh = look("yes", RESCAN_TIMEOUT)
     fresh["source"] = "rescan"
-    if fresh["result"] == SCAN_BUSY and SCAN_BUDGET - (clock() - start) > BUSY_WAIT + 1:
+    if fresh["result"] == SCAN_BUSY and _time_left(clock, start) > BUSY_WAIT + 1:
         # Another scan runs. Its results land in the list NetworkManager keeps.
         sleep(BUSY_WAIT)
         fresh = look("no", CACHED_TIMEOUT)

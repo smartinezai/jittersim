@@ -81,6 +81,8 @@ class SubprocessExecutor:
         if command.sensitive:
             return self._run_sensitive(command)
 
+        # Only a command that asks for it gets its own environment. All others inherit.
+        extra = {"env": {**os.environ, "LC_ALL": "C"}} if command.c_locale else {}
         try:
             result = subprocess.run(
                 command.argv,
@@ -90,6 +92,7 @@ class SubprocessExecutor:
                 # A Panic deadline shortens it (see deadlines.py).
                 timeout=command_timeout(command.timeout_seconds or self.timeout_seconds),
                 check=False,
+                **extra,
             )
         except subprocess.TimeoutExpired as error:
             stdout = error.stdout or ""

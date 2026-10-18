@@ -62,6 +62,25 @@ class SubprocessExecutorTests(unittest.TestCase):
         self.assertEqual(result.stdout, "ok")
 
     @patch("jittersim.networking.executor.subprocess.run")
+    def test_only_a_command_that_asks_for_it_runs_with_the_english_locale(self, run_command) -> None:
+        run_command.return_value = subprocess.CompletedProcess(
+            args=("nmcli",), returncode=0, stdout="", stderr="")
+        english = Command("nmcli", ("-g", "GENERAL.STATE", "device", "show", "wlan0"),
+                          "read the state", c_locale=True)
+        plain = Command("nmcli", ("-g", "GENERAL.STATE", "device", "show", "wlan0"),
+                        "read the state")
+
+        with patch.dict("os.environ", {"LC_ALL": "de_DE.UTF-8", "LANGUAGE": "de", "PATH": "/bin"},
+                        clear=True):
+            SubprocessExecutor().run(english)
+            SubprocessExecutor().run(plain)
+
+        asked, ignored = run_command.call_args_list
+        # The rest of the environment is kept. A command that does not ask inherits it.
+        self.assertEqual(asked.kwargs["env"], {"LC_ALL": "C", "LANGUAGE": "de", "PATH": "/bin"})
+        self.assertNotIn("env", ignored.kwargs)
+
+    @patch("jittersim.networking.executor.subprocess.run")
     def test_rejects_non_networking_executables(self, run_command) -> None:
         command = Command("sh", ("-c", "echo unsafe"), "unsafe command")
 
