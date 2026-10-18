@@ -73,8 +73,10 @@ dependencies. `scripts/mutation-test.py setup` makes it.
 The five rows marked "rerun" were measured again on this branch after it was merged with main
 (0b9fe90f, which contains PR 149). "Before" is the first run on 8c3f8171 and the mutant counts
 differ a little because PR 149 changed those files. The other rows (`config/models.py`,
-`networking/deadlines.py`, `updates.py`, the engine rules) are from the first run: PR 149 did not
-change those files, and `git diff 8c3f8171 HEAD` is empty for each of them.
+`networking/deadlines.py`, `updates.py`, the engine rules) are from the first run. PR 149 did not
+change those files. Main later changed `updates.py` for the signed update notes, the status and
+the online checks (#111), but not one of the functions that the two `updates` rows mutate (`only`
+in `MODULES`), so those figures still hold. `git diff 8c3f8171 HEAD` is empty for the other three.
 
 `engine/compiler.py` already killed every mutant, so no test was added for it. The `engine_rules` run
 was stopped after 1051 of its 1396 mutants, so its figures are partial. The 30 `updates.py` survivors
