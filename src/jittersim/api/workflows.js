@@ -561,10 +561,12 @@ async function openTestSession(id) {
 async function saveTestSession(finish=false, attach=false) {
   if (!activeTestRecord) throw new Error('Choose a test session.');
   const submittedDraft = formDrafts.get('test-session-edit');
+  const attached = measurementRuns;
   const result = await request('/api/test-sessions/save', 'POST', {
     id:activeTestRecord.id, revision:activeTestRecord.revision, notes:element('test-session-notes').value,
-    finish, ...(attach ? {measurements:measurementRuns} : {})
+    finish, ...(attach ? {measurements:attached} : {})
   });
+  if (attach) keptMeasurementRuns = attached;
   activeTestRecord = result.session;
   if (formDrafts.get('test-session-edit') === submittedDraft) formDrafts.delete('test-session-edit');
   await loadTestSessions(); await openTestSession(activeTestRecord.id);
@@ -676,6 +678,7 @@ function restoreWorkflowFocus(opener, anchor) {
   if (!opener.isConnected) {
     const twin = anchor && controlAtAnchor(anchor);
     if (twin && !twin.disabled) twin.focus({preventScroll:true});
+    else if (anchor) focusListInstead(anchor.scope);
     return;
   }
   if (!opener.disabled) { opener.focus({preventScroll:true}); return; }
@@ -689,6 +692,15 @@ function restoreWorkflowFocus(opener, anchor) {
   });
   watcher.observe(opener, {attributes:true, attributeFilter:['disabled']});
   window.setTimeout(() => watcher.disconnect(), 120000);
+}
+
+// The row that asked is gone (removed while the question was open): its list is the nearest place.
+function focusListInstead(listId) {
+  const list = document.getElementById(listId);
+  const active = document.activeElement;
+  if (!list || !list.isConnected || list.closest('[hidden]') || (active && active !== document.body)) return;
+  if (!list.hasAttribute('tabindex')) list.setAttribute('tabindex', '-1');
+  list.focus({preventScroll:true});
 }
 
 let releaseState = null;

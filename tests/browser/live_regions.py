@@ -16,6 +16,8 @@ import sys
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.route_support import keep_interception_on, release_route, watched
+
 TOKEN = "browser-test"
 HEADERS = {"Authorization": "Bearer " + TOKEN}
 DEVICE = "alice"
@@ -308,6 +310,93 @@ def check_a_question_returns_focus_after_its_list_is_drawn_again(page, cases=QUE
         assert after and after[1] == label, (listing, label, after)
 
 
+def check_a_row_that_left_the_page_has_no_anchor(page):
+    """rowAnchor runs for every control that takes focus. A row whose parent is gone (a row that
+    was taken out of the page, with the focus event still on its way) has no list to name, and
+    asking for it used to throw."""
+
+    anchor = page.evaluate("""() => {
+      const row = document.createElement('div'); row.dataset.key = 'gone';
+      const button = document.createElement('button'); button.textContent = 'Edit'; row.append(button);
+      return rowAnchor(button);
+    }""")
+    assert anchor is None, anchor
+
+
+def check_the_loading_note_is_never_announced(page):
+    """A choice under the random website table starts a read. When a refresh makes that read stale
+    the line still holds its loading note, and the announcer used to say "Loading randomized
+    website choices..." as if it were the answer."""
+
+    page.locator('[data-page-link="traffic"]').click()
+    advance(page, 3)
+    days = page.locator("#random-website-days")
+    closed = days.locator("xpath=ancestor::section[1]").locator("h2 .card-toggle[aria-expanded='false']")
+    if closed.count():
+        closed.first.click()
+    expect(days).to_be_visible()
+    held = []
+    handler = watched(lambda route: held.append(route))
+    page.route("**/api/devices", handler)
+    page.evaluate("""() => {
+      window.said = [];
+      for (const id of ['action-announcer', 'action-alert']) {
+        const region = document.getElementById(id);
+        new MutationObserver(() => { if (region.textContent) window.said.push(region.textContent); })
+          .observe(region, {childList: true, characterData: true, subtree: true});
+      }
+    }""")
+    days.select_option("7" if days.input_value() != "7" else "30")
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
+    assert held, "the choice did not start a read"
+    status = page.locator("#random-website-status")
+    expect(status).to_have_text("Loading randomized website choices...")
+    # A refresh begins and the read that is waiting becomes stale.
+    page.evaluate("invalidateAdminTools()")
+    for route in held:
+        route.continue_()
+    page.wait_for_timeout(400)
+    release_route(page, "**/api/devices", handler)
+    expect(status).to_have_text("Loading randomized website choices...")
+    said = page.evaluate("window.said")
+    assert not [text for text in said if text.startswith("Loading")], said
+    page.evaluate("refresh()")
+
+
+def check_focus_goes_to_the_list_when_its_row_is_gone(page, base):
+    """Somebody else removes a device while the question about it is open. The control that asked
+    is gone and so is its twin. Focus goes to the list that held it instead of falling to the top of
+    the page."""
+
+    page.locator('[data-page-link="devices"]').click()
+    advance(page, 6)
+    post(page, base, "/api/devices", {
+        "id": "spare", "name": "Spare laptop", "ipv4_address": "192.168.50.99", "profile_id": "slow",
+        "mac_address": None,
+    })
+    page.evaluate("refresh()")
+    button = page.locator("#device-table").get_by_role("button", name="Delete Spare laptop", exact=True)
+    expect(button).to_be_visible()
+    button.focus()
+    page.evaluate("() => { window.firstOpener = document.activeElement; }")
+    button.click()
+    expect(page.get_by_role("dialog")).to_have_count(1)
+    assert page.request.post(base + "/api/devices/delete", headers=HEADERS, data={"id": "spare"}).ok
+    for _ in range(4):
+        advance(page, 6)
+        if page.evaluate("!window.firstOpener.isConnected"):
+            break
+    assert page.evaluate("!window.firstOpener.isConnected"), "the list was not drawn again"
+    expect(page.locator("#device-table").get_by_role("button", name="Delete Spare laptop")).to_have_count(0)
+    page.keyboard.press("Escape")
+    expect(page.get_by_role("dialog")).to_have_count(0)
+    page.wait_for_function(
+        "() => document.activeElement && document.activeElement.id === 'device-table'", timeout=3000)
+
+
 def check_a_full_refresh_is_quiet(page):
     """A save, a delete or Apply makes the page read everything again. That read is not an answer
     to anything the person asked, so no line of the page may speak because of it. The result of the
@@ -355,6 +444,7 @@ def run():
             )
             context = browser.new_context(viewport={"width": 1440, "height": 1000})
             page = context.new_page()
+            keep_interception_on(page)
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             try:
@@ -367,6 +457,9 @@ def run():
                 check_a_full_refresh_is_quiet(page)
                 check_random_website_choices_say_the_last_answer_once(page)
                 check_a_question_returns_focus_after_its_list_is_drawn_again(page)
+                check_focus_goes_to_the_list_when_its_row_is_gone(page, base)
+                check_a_row_that_left_the_page_has_no_anchor(page)
+                check_the_loading_note_is_never_announced(page)
                 check_long_idle_is_quiet(page)
                 check_focus_survives_refresh(page)
                 # On a phone the saved devices are cards, and the sidebar is a bar.
