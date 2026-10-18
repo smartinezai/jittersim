@@ -8,6 +8,10 @@ next release takes them over.
 
 ## Unreleased
 
+- A helper that restarts after it died during an apply removes the queues and
+  tables that apply left. Before, devices could stay shaped while the dashboard
+  showed nothing running. If that removal fails, the helper still starts and
+  asks for Panic before profiles can start again.
 - The boot step of the Pi Wi-Fi looks once at the Wi-Fi names on the air before it
   renames the Pi Wi-Fi to the router name. When the router's own Wi-Fi already sends
   that name, the Pi keeps or takes `JitterSim-Recovery` for that boot, so one name
