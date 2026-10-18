@@ -111,9 +111,31 @@ def _suggestion_payload(item, manual, store, *, now, mode):
     }
 
 
-def _history_payload(store, *, now):
-    return [
-        {
+def _can_undo(entry, live_moves, *, now):
+    """Whether Undo can still do something for this entry.
+
+    A protection move stays undoable while its protection record exists, also
+    after 7 days (then protection goes back on its own). A verified move back
+    under Dashboard access replaces that record, and then this Undo could only
+    refuse, so it is not offered.
+    """
+
+    if entry["undone_at"] is not None:
+        return False
+    if entry["protection_move_id"]:
+        return entry["protection_move_id"] in live_moves
+    return now - entry["happened_at"] <= UNDO_SECONDS
+
+
+def _history_payload(store, repository, *, now):
+    live_moves = {move.move_id for move in repository.list_address_moves() if move.move_id}
+    result = []
+    for index, entry in enumerate(store.history()):
+        can_undo = _can_undo(entry, live_moves, now=now)
+        # Every move that can still be undone stays visible, plus the newest others.
+        if index >= HISTORY_SHOWN and not can_undo:
+            continue
+        result.append({
             "id": entry["id"],
             "happened_at": entry["happened_at"],
             "mode": entry["mode"],
@@ -124,13 +146,11 @@ def _history_payload(store, *, now):
             "moved_label": entry["label_after"] is not None,
             "moved_protection": bool(entry["protection_move_id"]),
             "undone_at": entry["undone_at"],
-            "can_undo": entry["undone_at"] is None and now - entry["happened_at"] <= UNDO_SECONDS,
-        }
-        for index, entry in enumerate(store.history())
-        # Every move that can still be undone stays visible, plus the newest others.
-        if index < HISTORY_SHOWN or (
-            entry["undone_at"] is None and now - entry["happened_at"] <= UNDO_SECONDS)
-    ]
+            "can_undo": can_undo,
+            "replaced": bool(entry["protection_move_id"]) and entry["undone_at"] is None
+            and entry["protection_move_id"] not in live_moves,
+        })
+    return result
 
 
 def read_address_follow(server, path):
@@ -148,7 +168,7 @@ def read_address_follow(server, path):
         "suggestions": [
             _suggestion_payload(item, manual, store, now=now, mode=mode) for item in suggestions
         ],
-        "history": _history_payload(store, now=now),
+        "history": _history_payload(store, repository, now=now),
         "undo_days": UNDO_SECONDS // 86400,
     })
 

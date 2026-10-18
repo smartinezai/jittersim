@@ -16,6 +16,7 @@ from jittersim.config.address_follow import (
     current_suggestions,
     follow_automatically,
     move_profile_and_label,
+    reset_prune_clock,
     undo_profile_and_label,
 )
 from jittersim.config.exemptions import UnaffectedDevice
@@ -42,6 +43,7 @@ def snapshot(*stations):
 
 
 def seed(repository, *, protected=False, label=True):
+    reset_prune_clock()
     repository.save_profile(Profile(id="slow", name="Slow"))
     repository.save_device(Device("dad", "Dad", "192.168.50.20", "slow", OLD))
     if label:
@@ -533,6 +535,25 @@ class RouteTests(unittest.TestCase):
         self.protected_move()
         self.repository.delete_device("dad")
         [entry] = self.read()["history"]
+        status, result = self.write("/api/address-follow/undo", {"id": entry["id"]})
+        self.assert_protection_only(status, json.dumps(result))
+
+    def test_a_verified_move_back_replaces_the_card_undo(self):
+        self.protected_move()
+        # The phone itself moves back under Dashboard access (the verified route).
+        status, _, body = self.server.move_device_address(NEW, OLD, access_moved=False)
+        self.assertEqual(status, 200, body)
+        [entry] = self.read()["history"]
+        self.assertFalse(entry["can_undo"])
+        self.assertTrue(entry["replaced"])
+
+    def test_an_old_protection_move_can_still_be_undone_from_the_card(self):
+        self.protected_move()
+        self.repository._connection.execute(
+            "UPDATE address_follow_history SET happened_at = ?", (NOW - UNDO_SECONDS - 60,))
+        self.repository._connection.commit()
+        [entry] = self.read()["history"]
+        self.assertTrue(entry["can_undo"])
         status, result = self.write("/api/address-follow/undo", {"id": entry["id"]})
         self.assert_protection_only(status, json.dumps(result))
 

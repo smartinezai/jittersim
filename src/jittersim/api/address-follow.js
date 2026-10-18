@@ -118,7 +118,8 @@ function renderAddressFollowHistory(data) {
       const moved = [entry.moved_profile ? "profile" : null, entry.moved_label ? "name" : null,
         entry.moved_protection ? "protection" : null].filter(Boolean).join(", ");
       const how = entry.mode === "automatic" ? "Automatic" : "After Yes";
-      const state = entry.undone_at ? " · Undone" : "";
+      const state = entry.undone_at ? " · Undone" : entry.replaced
+        ? " · Replaced by a move under Dashboard access" : "";
       row.appendChild(addressFollowNode("span", addressFollowWhen(entry.happened_at) + " · " + entry.name +
         ": " + entry.old_mac + " to " + entry.new_mac + " · " + moved + " · " + how + state + " "));
       if (entry.can_undo) {

@@ -360,3 +360,27 @@ Left as documented risks:
   return. This needs real hardware to measure.
 - The existing `address_moves` table refuses a new move once it holds 64 rows. A protection move from the card then fails with that error and nothing
   is moved.
+
+## Second Opus review (delta 43e2b826 to 9449ae5b)
+
+- An unnamed protected device or a label without a name was named by its MAC
+  address in activity lines and test session reports. One helper now names it
+  "a saved device".
+- When the profile and the name cannot be put back (older than 7 days, the saved
+  device edited or deleted), every Undo route now still puts protection back,
+  closes the history entry and says what stayed and that it can be changed by
+  hand on the Devices page and the Protected devices list. A wrong protection
+  move therefore never has to stay. A protection entry stays undoable while its
+  protection record exists. A verified move back under Dashboard access replaces
+  that record, and the history then shows the entry as replaced without Undo.
+- A failed dismissal inside a linked Undo is a warning, and an Undo that loses a
+  race to another route says the move was already undone.
+
+Risks added:
+
+- The pre-check and the final transaction of an Undo can disagree when a device
+  edit lands in between from a path that does not hold the scheduler's
+  exclusive lock. The protection record then stays in phase `undoing` (the data
+  stays consistent) and needs the existing recovery under Dashboard access.
+- An automatic move changes `configuration_version`. PR 149 (device Apply beside
+  Everyone) must check its refusal path again when it lands.
