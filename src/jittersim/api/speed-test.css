@@ -1,0 +1,27 @@
+/* Device speed test window (speed-test.js). */
+.speed-test-line { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .4rem; }
+.speed-test-line small { color: var(--tx-muted-2); }
+dialog.speed-test-dialog { max-width: min(46rem, calc(100vw - 2rem)); width: 100%; max-height: calc(100vh - 2rem); overflow-y: auto; box-sizing: border-box; }
+.speed-test-dialog h2 { margin-top: 0; overflow-wrap: anywhere; }
+.speed-test-dialog h3 { margin: 1rem 0 0; font-size: 1rem; }
+.speed-test-dialog label { display: block; margin: 0.6rem 0; }
+.speed-test-dialog label input, .speed-test-dialog label select { display: block; width: 100%; max-width: 22rem; box-sizing: border-box; margin-top: .2rem; }
+.speed-test-help { color: var(--tx-soft-2); font-size: 0.9rem; }
+.speed-test-announce:empty { display: none; }
+.speed-test-announce { color: var(--ok-text-2); }
+.speed-test-progress { font-weight: 600; }
+.speed-test-dialog a { color: var(--accent-text); overflow-wrap: anywhere; }
+.speed-test-qr-box { margin: 0.6rem 0; }
+.speed-test-qr { display: block; width: 11rem; height: 11rem; max-width: 60vw; max-height: 60vw; }
+.speed-test-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .7rem; }
+.speed-test-dialog .speed-test-actions button + button, .speed-test-dialog .row-actions button + button { margin-left: 0; }
+.speed-test-table-wrap { max-width: 100%; overflow-x: auto; }
+.speed-test-table td small { display: block; color: var(--tx-muted-2); }
+.speed-test-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0.5rem 1rem; }
+.speed-test-grid label { margin: 0; }
+.speed-test-compare { display: flex; flex-wrap: wrap; align-items: end; gap: 0.6rem; }
+.speed-test-compare label { flex: 1 1 12rem; margin: 0; }
+.speed-test-verdicts { padding-left: 1.2rem; }
+.speed-test-warning { color: var(--warn-text); }
+.speed-test-close { margin-top: .8rem; }
+.speed-test-table tbody th { text-transform: none; letter-spacing: normal; font-size: 0.9rem; color: inherit; }
