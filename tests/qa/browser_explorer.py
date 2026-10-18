@@ -3,8 +3,9 @@
 Run it as `python -m tests.qa.browser_explorer [output-folder]`. It starts the browser
 fixture (a dashboard with a fake network executor) and drives Chromium through each page at a
 desktop and a phone width. It records console errors, uncaught page errors, failed requests,
-server errors, layout overflow, controls without an accessible name, focus that cannot move on
-and text that stays on "Loading". Anything wrong is written to report.json with a screenshot.
+server errors, layout overflow, controls without an accessible name, focus that cannot move on,
+text that stays on "Loading" and focus that is lost when a question is answered. Anything wrong
+is written to report.json with a screenshot.
 The posted JSON bodies are saved to seeds.json as real payloads for the API fuzz tests.
 """
 
@@ -339,6 +340,9 @@ class Explorer:
             if dialog.count():
                 page.keyboard.press("Escape")
                 page.wait_for_timeout(250)
+                if page.evaluate("() => !document.querySelector('dialog[open]') && document.activeElement === document.body"):
+                    # A question that is answered must give focus back to the control that asked.
+                    self.note("focus-lost-after-dialog", f"focus is on the page body after Escape closed the question opened by {descriptor}", page, f"{name}-focus")
                 if dialog.count() and dialog.first.is_visible():
                     # A pinned help tip takes the first Escape. A second one must close the dialog.
                     page.keyboard.press("Escape")

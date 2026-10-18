@@ -4,6 +4,11 @@ The combined Panic batch was reviewed by an Opus agent and by Sol (GPT-6.1) in s
 These items were found and are NOT fixed in the batch. None is new in the batch except the
 rollback cleanup, which was left out on purpose.
 
+## Status (16 October 2026)
+Branch `fix/carry-forward-2026-10-16` works the rollback cleanup and the first three
+pre-existing items below. See docs/review-results-carry-forward-2026-10-16.md for what is
+fixed and what is still open (two owner decisions).
+
 ## Rollback cleanup of the upload intake (left out)
 Only a rollback from the first release that contains the upload-safe layout (PR 125) to an older
 release is affected. The older release does not know the ifb device and the ingress redirect that

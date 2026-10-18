@@ -227,24 +227,6 @@ class PatientHelperClient(HelperClient):
                     raise
             time.sleep(BUSY_WAIT_SECONDS)
 
-    def connected_device_snapshot(self):
-        """Scan again when a status poll invalidated the scan that was running.
-
-        The client scan reports "network changed during client scan" (helper-busy) when an
-        action that is not on the client's read-only list ran meanwhile. The page polls the
-        update status together with the clients, so the dashboard answered 502 now and then.
-        The scan makes that check itself, outside _request, so the wait above does not cover
-        it. A person would reload. The cause is in tests/unit/test_snapshot_status_poll.py.
-        """
-
-        for attempt in range(BUSY_ATTEMPTS):
-            try:
-                return super().connected_device_snapshot()
-            except HelperClientError as error:
-                if error.reason != "helper-busy" or attempt == BUSY_ATTEMPTS - 1:
-                    raise
-            time.sleep(BUSY_WAIT_SECONDS)
-
 
 # JITTERSIM_BROWSER_TEST_WIDE_FONTS=1 puts a wider face and a larger root size on the page so a
 # journey can show that it holds on a machine whose fonts are taller than the ones it was

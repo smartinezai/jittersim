@@ -1,10 +1,12 @@
 """Optional DNS filtering with expiring routing and no lookup logs."""
 
 import argparse
+import contextvars
 import fcntl
 import grp
 import hashlib
 import json
+import logging
 import os
 import pwd
 import re
@@ -14,6 +16,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -55,8 +58,11 @@ DNS_PORT = 5354
 LEASE_SECONDS = 5
 # The end of a household access transition waits at least this long for the settings lock.
 TRANSITION_END_WAIT_SECONDS = 3.0
+# A pause waits at least this long for its saves once it holds the settings lock.
+PAUSE_SAVE_FLOOR_SECONDS = 0.5
 REFRESH_SECONDS = 1
 MAX_DOWNLOAD_SECONDS = 20
+LOGGER = logging.getLogger(__name__)
 
 
 def read_json(path, default=None):
@@ -179,6 +185,8 @@ class AdStore:
         self.group_id = group_id
         self.intent_path = intent_path
         self.panic_guard = panic_guard or PanicGuard()
+        # The thread of a pause whose saves outlived its wait, if any.
+        self._pause_saver = None
 
     @contextmanager
     def lock(self, wait=3.0):
@@ -290,17 +298,60 @@ class AdStore:
         return self.status()
 
     def pause(self, *, wait=3.0):
-        """Stop ad blocking. Panic passes a longer `wait` for the settings lock."""
-        with self.lock(wait):
-            self._intent(False)
+        """Stop ad blocking within about `wait` seconds. Panic passes a longer `wait`.
+
+        `wait` bounds the wait for the settings lock and the saves together, and the
+        saves get at least PAUSE_SAVE_FLOOR_SECONDS. Panic pauses before it removes
+        any rule, so a storage stall here must not hold that (review of PR 138). The
+        saves then go on in their own thread, which keeps the settings lock until
+        they end, and the pause raises so the stop counts as unconfirmed.
+        """
+        previous = self._pause_saver
+        if previous is not None and previous.is_alive():
+            raise ValueError("An earlier ad-blocking stop is still being saved. Try again.")
+        deadline = time.monotonic() + wait
+        held = self.lock(wait)
+        held.__enter__()
+        raised = []
+        late = threading.Event()
+
+        def save():
             try:
-                state = self.read()
-            except (OSError, ValueError):
-                self._clear()
-                return
-            state.update(running=False, generation=secrets.token_hex(8))
-            write_json(self.path, state, self.group_id)
+                self._pause_locked()
+            except BaseException as error:  # noqa: BLE001 - raised again below, or logged
+                raised.append(error)
+                if late.is_set():
+                    LOGGER.error("a late ad-blocking stop save failed (%s)", type(error).__name__)
+            finally:
+                held.__exit__(None, None, None)
+
+        saver = threading.Thread(target=contextvars.copy_context().run, args=(save,),
+                                 name="ad-blocking-pause", daemon=True)
+        try:
+            saver.start()
+        except BaseException:
+            held.__exit__(None, None, None)
+            raise
+        self._pause_saver = saver
+        saver.join(max(PAUSE_SAVE_FLOOR_SECONDS, deadline - time.monotonic()))
+        if saver.is_alive():
+            late.set()
+            LOGGER.error("ad-blocking stop is still being saved; the stop is unconfirmed")
+            raise ValueError("The ad-blocking stop could not be saved in time")
+        if raised:
+            raise raised[0]
+
+    def _pause_locked(self):
+        """The saves of `pause`, with the settings lock held."""
+        self._intent(False)
+        try:
+            state = self.read()
+        except (OSError, ValueError):
             self._clear()
+            return
+        state.update(running=False, generation=secrets.token_hex(8))
+        write_json(self.path, state, self.group_id)
+        self._clear()
 
     @contextmanager
     def access_transition(self, *, wait=3.0):
