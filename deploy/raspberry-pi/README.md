@@ -428,7 +428,36 @@ Recovery changes only the name, so returning is a rename. At every boot
 `JitterSim-Recovery`, back to the router name before the start. Only the saved
 name changes and the router is never contacted. When the router name does not
 start after ten tries, the previous name comes back for that boot and the next
-boot tries again. A manual Wi-Fi change or **Reset Pi Wi-Fi name** deletes the
+boot tries again.
+
+Before that rename the boot step reads the Wi-Fi names on the air once: the
+list NetworkManager already has, then at most one rescan
+(`nmcli device wifi list --rescan yes`, an active scan that sends probe
+requests), about 20 seconds at most. When the router name is on the air from a
+BSSID that is not the Pi's own, the Pi keeps `JitterSim-Recovery` for this
+boot, or renames to it when it had the router name, so one name never runs on
+two subnets. No hold is written, so the next boot looks again. When Recovery
+then does not start, the router name is not tried as a fallback for that boot.
+A neighbour, a guest network or a mesh repeater with exactly the router name
+also keeps the Pi on Recovery. Devices that joined the Pi under the router name
+move to the router after such a boot. At a cold boot the step first waits up to
+10 seconds (inside the 20) for `wlan0` to leave the NetworkManager state
+`unavailable`. An empty list, a failed or timed out scan and a busy radio change
+nothing: the boot then behaves as before. A running access point is never
+scanned and keeps its name (`ap-running`), for example after
+`systemctl restart jittersim-ap`. `status` shows the decision, the scan result
+and the reason (`boot_decision`, `boot_scan`), kept in
+`/run/jittersim-wifi-boot-check.json` until the next boot. The physical check
+of this step must include a cold boot (power off and on) with the router Wi-Fi
+on, and `status` must then show `boot_scan: seen`, not `failed`.
+
+`jittersim-ap.service` also refuses to start the Wi-Fi when the uplink has an
+IPv4 address inside `192.168.50.0/24` (`wifi_follow uplink-check`, exit status
+3), because the Pi's own routing cannot work with two routes for one subnet. The
+install preflight refuses the same case. Only status 3 stops the unit: an
+unreadable address, a crash or an older module without the action lets the Wi-Fi
+start. It runs once, last before the start, so an address that DHCP hands out
+later is not seen until the next start. A manual Wi-Fi change or **Reset Pi Wi-Fi name** deletes the
 record, so the owner's own choice stays. The record also keeps a salted HMAC of the
 copy's password (openssl reads it from nmcli through a pipe, JitterSim never
 sees it), so a Wi-Fi whose security or password changed in another way, for
@@ -442,7 +471,7 @@ change is unfinished.
 
 ```sh
 F="sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow"
-$F status     # router, recovery-hold, returns-at-boot, not-remembered, security- or password-differs
+$F status     # router, recovery-hold, router-on-air, returns-at-boot, not-remembered, security- or password-differs
 $F recovery   # JitterSim-Recovery, same password and security, held across reboots
 $F router     # end the hold and rename back to the router name now
 ```
