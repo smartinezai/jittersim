@@ -13,11 +13,11 @@ from pathlib import Path
 
 from jittersim.networking import wifi_follow
 from jittersim.networking.applier import NetworkApplier
+from jittersim.networking.commands import CommandResult
+from jittersim.networking.executor import CommandExecutionError
 from jittersim.networking.helper import HelperService
 from jittersim.networking.router import _settings_from_wifi_data
 from jittersim.networking.topology import Topology
-from jittersim.networking.commands import CommandResult
-from jittersim.networking.executor import CommandExecutionError
 from jittersim.networking.wifi import (
     RECOVERY_CONNECTION,
     RECOVERY_WIFI_NAME,
