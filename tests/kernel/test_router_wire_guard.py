@@ -103,6 +103,9 @@ ARP_LIMIT = 10
 # The capture stops one second after the last generator finished; this is only
 # its safety limit, and reaching it fails the test.
 CAPTURE_SECONDS = 90.0
+# The capture keeps listening this long after the last generator finished, so
+# frames still in the Pi's queues arrive. A frame delayed for longer than this is
+# missed; that is fine for the delays and rate limits of the lab's impairments.
 SETTLE_SECONDS = 1.0
 # Names each client asks the Pi's resolver: one name many times, then distinct ones.
 REPEATED_QUERIES, DISTINCT_NAMES = 30, 10
@@ -919,7 +922,9 @@ class RouterWireGuardTests(unittest.TestCase):
             if capture.poll() is None:
                 capture.kill()
                 capture.wait()
-        frames = [(moment, bytes.fromhex(data)) for moment, data in json.loads(output)["frames"]]
+        result = json.loads(output)
+        self.assertEqual(result["ended"], "stopped", "the capture ended before the traffic")
+        frames = [(moment, bytes.fromhex(data)) for moment, data in result["frames"]]
         problems, stats = audit_frames(frames, pi_mac=self.pi_mac, router_mac=self.router_mac,
                                        pi_ip=PI_UPLINK, pi_ipv6=self.pi_ipv6)
         self.assertEqual(dict(problems), {}, dict(stats))
@@ -1002,7 +1007,9 @@ class SameSubnetRouterTests(unittest.TestCase):
             if capture.poll() is None:
                 capture.kill()
                 capture.wait()
-        frames = [(moment, bytes.fromhex(data)) for moment, data in json.loads(output)["frames"]]
+        result = json.loads(output)
+        self.assertEqual(result["ended"], "stopped", "the capture ended before the traffic")
+        frames = [(moment, bytes.fromhex(data)) for moment, data in result["frames"]]
         problems, stats = audit_frames(
             frames, pi_mac=self.pi_mac, router_mac=self.router_mac, pi_ip=self.PI_ON_SAME_SUBNET,
             pi_ipv6=tuple(_ipv6_of(PI, "eth0")), test_wifi=IPv4Network("192.0.2.0/24"),
