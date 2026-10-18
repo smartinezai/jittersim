@@ -37,6 +37,7 @@ a month (for example `2026-09`) was written in that month.
 | [architecture.md](architecture.md) | Which file owns which part of the dashboard source |
 | [../DESIGN.md](../DESIGN.md) | The dark visual baseline of the dashboard |
 | [local-ci.md](local-ci.md) | Running the workflow commands on a Mac with `scripts/local-ci.sh`. Hosted CI cannot start jobs, so this is the gate of every pull request |
+| [mutation-testing-2026-10-18.md](mutation-testing-2026-10-18.md) | The mutation-testing run on the plan logic: method, kill rates before and after per module, what was added, and how to run `scripts/mutation-test.py` again |
 | [releasing.md](releasing.md) | Cutting a release with `scripts/release.sh`, installing it and what the local verification record is |
 | [releases/README.md](releases/README.md) | The rules and manual commands behind a release: reserve, build, approve and publish |
 | [../CHANGELOG.md](../CHANGELOG.md) | The notes of every published release |

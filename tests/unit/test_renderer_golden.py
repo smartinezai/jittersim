@@ -206,7 +206,8 @@ def change_structure(plan, kind):
             if rule.list_id == "games" else rule for rule in plan.service_list_rules))
     if kind == "assignment":
         return replace(plan, service_assignment_rules=tuple(
-            replace(rule, domains=("other.example.com",)) for rule in plan.service_assignment_rules))
+            replace(rule, domains=("other.example.com",))
+            for rule in plan.service_assignment_rules))
     return replace(plan, service_quota_rules=tuple(
         replace(rule, destination_addresses=(A("203.0.113.99"),))
         for rule in plan.service_quota_rules))

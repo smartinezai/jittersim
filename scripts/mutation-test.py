@@ -26,6 +26,7 @@ import difflib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -81,8 +82,7 @@ MODULES = {
         # test_stable_releases) take a minute per pass and add no direct check of these
         # functions, so they only run for the floor in "updates_floor".
         "tests": ["tests/unit/test_signed_releases.py", "tests/unit/test_release_versions.py",
-                  "tests/unit/test_signed_version_labels.py", "tests/unit/test_online_release.py",
-                  "tests/unit/test_online_api.py", "tests/unit/test_trust_downloads.py",
+                  "tests/unit/test_signed_version_labels.py",
                   "tests/unit/test_update_decisions.py"],
         # The mutated module is much bigger than the real one. These size limits are about the
         # module's own file (the installer refuses a manager over 512 KiB), so they are raised
@@ -99,9 +99,18 @@ MODULES = {
         "functions": [
             "version_key", "validate_archive", "key_fingerprint", "_check_key_text",
             "parse_public_key", "_signer_lines", "_signature_fields", "_is_sequence",
-            "read_manifest", "_record", "release_floor", "staged_problem", "_parse_release",
-            "_is_id", "verify_signature", "trusted_keys",
+            "read_manifest", "_record", "release_floor", "staged_problem",
+            "verify_signature", "trusted_keys",
         ],
+    },
+    "updates_release_reader": {
+        "source": "src/jittersim/updates.py",
+        "tests": ["tests/unit/test_online_release.py", "tests/unit/test_online_api.py",
+                  "tests/unit/test_update_decisions.py"],
+        "loosen": [("512 * 1024", "64 * 1024 * 1024"),
+                   ("maximum=1024 * 1024", "maximum=64 * 1024 * 1024")],
+        # What GitHub's latest release says, as the dashboard check reads it.
+        "functions": ["_parse_release", "_is_id"],
     },
     "updates_floor": {
         "source": "src/jittersim/updates.py",
@@ -164,8 +173,8 @@ def sources(spec):
     return [spec["source"]] if isinstance(spec["source"], str) else list(spec["source"])
 
 
-def config_text(spec):
-    tests = [test for test in spec["tests"] if (ROOT / test).exists()]
+def config_text(spec, tests_root):
+    tests = [test for test in spec["tests"] if (tests_root / test).exists()]
     extras = [name for name in EXTRAS if (ROOT / name).exists()]
     extras += sorted(path.name for path in ROOT.glob("*.md"))
     deselect = []
@@ -239,7 +248,7 @@ def limit_to_functions(text, keep):
     return "\n".join(lines) + "\n"
 
 
-def prepare(name, spec, fresh):
+def prepare(name, spec, fresh, tests_from=None):
     target = WORK / name
     if fresh and target.exists():
         shutil.rmtree(target)
@@ -254,6 +263,12 @@ def prepare(name, spec, fresh):
         shutil.copytree(ROOT / folder, destination, ignore=ignore)
     for document in ROOT.glob("*.md"):
         shutil.copy2(document, target / document.name)
+    if tests_from:
+        # The tests as they were at a git ref, against today's source: the "before" of a run.
+        shutil.rmtree(target / "tests")
+        subprocess.run(
+            f"git -C {shlex.quote(str(ROOT))} archive {shlex.quote(tests_from)} tests"
+            f" | tar -x -C {shlex.quote(str(target))}", shell=True, check=True)
     if spec.get("loosen") or spec.get("functions"):
         source = target / sources(spec)[0]
         text = source.read_text(encoding="utf-8")
@@ -265,7 +280,7 @@ def prepare(name, spec, fresh):
             text = limit_to_functions(text, spec["functions"])
         source.write_text(text, encoding="utf-8")
     (target / "pyproject.toml").write_text(
-        (ROOT / "pyproject.toml").read_text(encoding="utf-8") + config_text(spec),
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8") + config_text(spec, target),
         encoding="utf-8",
     )
     return target
@@ -293,7 +308,7 @@ def command_list(_args):
 
 def command_run(args):
     spec = MODULES[args.module]
-    target = prepare(args.module, spec, fresh=not args.resume)
+    target = prepare(args.module, spec, fresh=not args.resume, tests_from=args.tests_from)
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     env.pop("PYTHONPATH", None)
     names = []
@@ -467,6 +482,8 @@ def main(argv=None):
     run_parser.add_argument("module", choices=sorted(MODULES))
     run_parser.add_argument("--max-children", type=int, default=2)
     run_parser.add_argument("--resume", action="store_true", help="keep the earlier results")
+    run_parser.add_argument("--tests-from", metavar="REF",
+                            help="use the tests of this git ref (for example origin/main)")
     run_parser.set_defaults(handler=command_run)
     for name, handler in (("summary", command_summary), ("survivors", command_survivors)):
         item = sub.add_parser(name)
