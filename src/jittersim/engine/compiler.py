@@ -83,8 +83,8 @@ def compile_plan(
     if len(devices) > MAX_DEVICES_PER_PLAN:
         raise PlanError(f"a plan cannot contain more than {MAX_DEVICES_PER_PLAN} devices")
     if general_profile is not None:
-        if devices or service_quota_rules or service_assignment_rules or website_filters or blocked_device_addresses:
-            raise PlanError("a general profile cannot contain individual profile rules")
+        # Devices beside Everyone are exceptions: each one opts out of the shared
+        # profile and runs its own. Their rules are checked against the devices below.
         if general_profile.profile_id not in profiles:
             raise PlanError("the general profile is missing")
         if type(general_profile.outage_active) is not bool:
@@ -114,13 +114,20 @@ def compile_plan(
 
     mark_rules = []
     queues = []
+    first_device_mark = 1
     if general_profile is not None:
+        if GENERAL_QUEUE_ID in devices_by_id:
+            raise PlanError(f"a device cannot use the id {GENERAL_QUEUE_ID} beside Everyone")
         profile = profiles[general_profile.profile_id]
         queues.extend((
             QueueSpec(GENERAL_QUEUE_ID, Direction.UPLOAD, 1, profile.upload),
             QueueSpec(GENERAL_QUEUE_ID, Direction.DOWNLOAD, 1, profile.download),
         ))
-    for index, device_id in enumerate(sorted(devices_by_id), start=1):
+        # Everyone keeps mark 1 and the service lists keep the marks they have under
+        # Everyone alone, so a device that leaves Everyone never moves them. The
+        # devices beside Everyone and their service rules come after the lists.
+        first_device_mark = 2 + len(service_list_rules)
+    for index, device_id in enumerate(sorted(devices_by_id), start=first_device_mark):
         device = devices_by_id[device_id]
         profile = profiles[device.profile_id]
         mark = index
@@ -186,7 +193,7 @@ def compile_plan(
     service_queues = []
     for index, quota_rule in enumerate(
         sorted(service_quota_rules, key=lambda rule: rule.quota_id),
-        start=len(mark_rules) + 1,
+        start=len(mark_rules) + first_device_mark,
     ):
         if quota_rule.quota_id in quota_ids:
             raise PlanError(f"duplicate service quota id: {quota_rule.quota_id}")
@@ -238,7 +245,10 @@ def compile_plan(
         )
         for rule, mark in zip(
             sorted(service_quota_rules, key=lambda rule: rule.quota_id),
-            range(len(mark_rules) + 1, len(mark_rules) + 1 + len(service_quota_rules)),
+            range(
+                len(mark_rules) + first_device_mark,
+                len(mark_rules) + first_device_mark + len(service_quota_rules),
+            ),
         )
     )
 
@@ -248,7 +258,7 @@ def compile_plan(
     normalized_assignments = []
     for index, rule in enumerate(
         sorted(service_assignment_rules, key=lambda assignment: assignment.assignment_id),
-        start=len(mark_rules) + len(service_quota_rules) + 1,
+        start=len(mark_rules) + len(service_quota_rules) + first_device_mark,
     ):
         if rule.assignment_id in assignment_ids:
             raise PlanError(f"duplicate service assignment id: {rule.assignment_id}")
@@ -341,10 +351,11 @@ def compile_plan(
     normalized_lists = []
     list_domains = []
     first_list_mark = (
-        len(mark_rules)
+        2
+        if general_profile is not None
+        else len(mark_rules)
         + len(service_quota_rules)
         + len(service_assignment_rules)
-        + (1 if general_profile is not None else 0)
         + (1 if everyone_else is not None else 0)
         + 1
     )
