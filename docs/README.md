@@ -71,6 +71,7 @@ a month (for example `2026-09`) was written in that month.
 | [carry-forward-panic-batch-2026-10-10.md](carry-forward-panic-batch-2026-10-10.md) | What the reviews of the combined Panic batch (PR 136) found and left open, and the owner action after a rollback from the first upload-safe release |
 | [upstream-safe-gated-notes-2026-10-10.md](upstream-safe-gated-notes-2026-10-10.md) | The Panic-gated part of the upstream-safe impairments: the helper apply report (merged) and the rollback cleanup (not merged) |
 | [design-helper-action-authorization-2026-10-09.md](design-helper-action-authorization-2026-10-09.md) | A proposal for per-caller authorization on the helper socket. Nothing is implemented |
+| [security-audit-2026-10-18.md](security-audit-2026-10-18.md) | Adversarial security audit of main: threat model, verdicts per area, four fixes, the open findings and a proposed helper patch |
 | [qa-report-2026-10-09.md](qa-report-2026-10-09.md) | Exploratory QA of 9 October: seven findings, which PR 126 fixed and what was left as it was (PR 107) |
 
 ### Release records
