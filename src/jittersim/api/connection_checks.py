@@ -318,12 +318,25 @@ class ConnectionCheckManager:
              *, reason: Optional[str] = None) -> None:
         """End a running check and save its result. The caller holds the manager lock."""
 
-        speed = self.speed
         run.state = "ended"
         run.ended_reason = reason
         if status == "cancelled":
             run.ended_reason = "Cancelled. Nothing was saved."
             return
+        try:
+            # Like the speed test, judge the end state inside the repository transaction that
+            # saves the row. A request that changes the device's protection then happens entirely
+            # before the judgement or after the saved row.
+            with self.repository.transaction():
+                run.result = self._store().save(self._result_row(run, status, end))
+        except (StorageError, sqlite3.Error):
+            run.ended_reason = "The result could not be saved."
+
+    def _result_row(self, run: ConnectionCheckRun, status: str, end: Dict[str, Any]
+                    ) -> Dict[str, Any]:
+        """Judge how the check ended and build the row to save. It changes only the run."""
+
+        speed = self.speed
         changed = self._changed_reason(run, end) if status == "complete" else None
         if changed is not None:
             status = "changed"
@@ -349,7 +362,7 @@ class ConnectionCheckManager:
             profile_unchanged=unchanged, grace=round(run.grace, 1))
         if status == "fault":
             summary["ended_reason"] = run.ended_reason
-        row = {
+        return {
             "started_at": run.started_at,
             "finished_at": speed.clock(),
             "mac_address": run.mac_address,
@@ -363,10 +376,6 @@ class ConnectionCheckManager:
             "profile": run.profile,
             "summary": summary,
         }
-        try:
-            run.result = self._store().save(row)
-        except (StorageError, sqlite3.Error):
-            run.ended_reason = "The result could not be saved."
 
     def cancel(self, run_id: Any) -> Dict[str, Any]:
         speed = self.speed

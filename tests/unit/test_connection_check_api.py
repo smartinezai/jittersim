@@ -480,6 +480,22 @@ class ChangeTests(CheckBase):
         self.assertEqual(result["summary"]["verdict"], "changed")
         self.assertIn("protection changed", result["summary"]["notes"][0])
 
+    def test_the_end_is_judged_inside_the_transaction_that_saves_the_row(self) -> None:
+        # A request that protects the device must come entirely before the judgement or after
+        # the saved row, as it does for a speed test.
+        _, run = self.start()
+        depths = []
+        real = self.manager._protected
+
+        def spy(mac_address):
+            depths.append(self.repository._transaction_depth)
+            return real(mac_address)
+
+        with mock.patch.object(self.manager, "_protected", spy):
+            result = self.finish(run["id"])["result"]
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(depths, [1])
+
     def test_a_profile_applied_during_a_baseline_check_is_seen(self) -> None:
         # The device has no profile when the check starts. The scheduler then marks its address.
         def apply_profile(index):
