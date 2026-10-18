@@ -15,6 +15,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.phone import sidebar_control
+from tests.browser.route_support import keep_interception_on, watched
 
 TOKEN = "browser-test"
 HEADERS = {"Authorization": "Bearer " + TOKEN}
@@ -69,6 +70,8 @@ def run_journey(title, check):
                         viewport={"width": width, "height": height}, locale="en-US"
                     )
                     page = context.new_page()
+                    # Interception stays on, so removing a route never loses a request (route_support).
+                    keep_interception_on(page)
                     errors = []
                     page.on("pageerror", lambda error: errors.append(str(error)))
                     check(page, base, width)
@@ -182,7 +185,8 @@ def record_writes(page):
 
 
 def fail_posts(page, pattern, message, status=503):
-    """Answer every save to the matching path with an error and return the handler to remove."""
+    """Answer every save to the matching path with an error. Give the handler it returns to
+    release_route (route_support) to take the route off again."""
 
     def handler(route):
         if route.request.method == "POST":
@@ -192,6 +196,7 @@ def fail_posts(page, pattern, message, status=503):
         else:
             route.continue_()
 
+    handler = watched(handler)
     page.route(pattern, handler)
     return handler
 
