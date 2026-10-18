@@ -274,6 +274,9 @@ See
 - Optional DNS ad blocking for each protected device without saved browsing history.
 - An impact check in Diagnostics that shows packet loss and speed limits
   actually happening to each device.
+- A **Test speed** button on each connected device that measures its real speed
+  through the Pi while it runs a public speed test, keeps the results and compares
+  a result before a profile with one after it.
 
 ### Data quotas
 
@@ -357,6 +360,42 @@ Pi's software and Wi-Fi radio. Saved settings alone do not prove support.
 Copying the router's Wi-Fi name can make the debugging computer join the Pi.
 Use saved dashboard access below to keep control while testing. SSH still
 requires the router network or a local Pi terminal.
+
+#### The Pi Wi-Fi name after a reboot
+
+After a copy that worked the Pi returns to the router's Wi-Fi name at every
+boot, for example from `JitterSim-Recovery`. Before that it reads the Wi-Fi
+names on the air once: first the list the Pi already has, then at most one
+fresh scan. That scan is active (the Pi asks nearby Wi-Fis to answer, as a
+phone does), but it never signs in to or changes the router, and the boot
+waits for it about 20 seconds at most.
+
+- When the router's own Wi-Fi already sends the router name, the Pi keeps
+  `JitterSim-Recovery` for this boot, or takes it when it had the router name.
+  Two Wi-Fis with one name on two subnets make phones and laptops switch
+  between them, which looks like "connected but no internet". Household
+  devices then use the router Wi-Fi, also the ones that were on the Pi under
+  the router name, and test devices join `JitterSim-Recovery` with the same
+  password. A neighbour, a guest network or a mesh repeater with exactly the
+  router name has the same effect.
+- When the look finds nothing, cannot run or the radio is busy, the boot does
+  what it did before and uses the router name. A problem with the look never
+  keeps the test Wi-Fi off. At a cold boot the Pi first waits a few seconds for
+  its Wi-Fi radio to be ready, so the look can run.
+- To use the router name again, switch the router Wi-Fi off and reboot the Pi,
+  or run `sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow router`
+  to use it now anyway.
+
+`sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow status`
+shows what the last boot saw and why it chose the name (`boot_decision` and
+`boot_scan`, for example `router-on-air` and `seen`). The dashboard does not
+show this yet.
+
+The test Wi-Fi also does not start when the Pi's Ethernet address is inside
+`192.168.50.0/24`, the Pi Wi-Fi's own subnet, because the Pi could not route
+both. `systemctl status jittersim-ap` and the `uplink` line of `status` say so.
+Change the router's LAN to another subnet, for example `192.168.0.0/24`, and
+reboot the Pi. The check runs only when the Wi-Fi starts.
 
 ### Dashboard access from Pi Wi-Fi
 
@@ -592,6 +631,15 @@ line says `Running for N devices only` and **Start** resumes every saved
 setting. **Reset network** or **Panic** stops the devices again. After Panic or
 a router outage, choose **Start** first.
 
+While a profile for Everyone runs you can also give one device its own profile.
+Choose a profile beside the connected client and click **Apply profile**. That
+device leaves Everyone and runs the profile you chose. Everyone keeps running for
+every other device with the same profile and the same shared limit. The status
+line says how many devices run their own profile. **Start**, **Apply to all**,
+**Stop for everyone**, **Reset network** and **Panic** end this for every device,
+and deleting the device ends it for that device. Nothing paused starts as a side
+effect.
+
 The line under the button counts what is saved. The message after a start counts
 what JitterSim really started. Access rules also run after a start so a start
 with no profiles saved says that they apply. Without the Pi helper the dashboard
@@ -667,10 +715,11 @@ current override.
 **Apply profile** starts the profile for that client at once. While JitterSim
 runs, the saved settings are applied again with it. After **Reset network**
 only that client starts and everything else stays paused. While a profile for
-Everyone is active, or before its first start, **Apply profile** is refused and
-nothing is saved. Stop it with **Stop for everyone**, choose **Reset network**,
-or save the choice under **Saved devices** for later. An **Apply profile**
-request during Reset or Panic is refused too. If a device-only start fails,
+Everyone runs, that client leaves Everyone and runs its own profile. While
+Everyone is saved but not running, or a saved change has not reached the network
+yet, **Apply profile** is refused and nothing is saved. Choose **Start**, choose
+**Reset network**, or save the choice under **Saved devices** for later. An
+**Apply profile** request during Reset or Panic is refused too. If a device-only start fails,
 JitterSim resets the Pi and retries that reset when needed.
 
 Click **Protect** to protect a connected client from every profile,
@@ -822,6 +871,71 @@ Protected devices are listed on one muted line and never get a row. Applying a
 plan restarts the history. A busy helper keeps the rows and shows `Update
 paused`. Counters describe packets and drops. They cannot prove how much delay
 a device saw. An older helper makes the card ask for an update.
+
+### Device speed test
+
+**Test speed** on a connected device in **Devices** compares the device's speed
+before and after a profile. The Pi cannot run a speed test as the phone, so:
+
+1. Choose the speed test site (Cloudflare by default, or LibreSpeed), a length
+   (45 seconds by default, 15 to 90) and an optional label, then **Start measuring**.
+2. On the device, open the link or scan the QR code and run the test there.
+3. The Pi reads the device's queue counters once per second (the counters the
+   Impact check uses) and saves download and upload speed: average while busy,
+   median, 90th percentile, peak, bytes and drops. It also sends one ping per
+   second from the Pi to the device for the round trip and loss over the test
+   Wi-Fi. For a device with its own profile that round trip includes the
+   profile's download delay and the waiting the running speed test causes. With
+   **Same as everyone** or **Everyone else** the Pi's own ping does not pass the
+   shared queue, so the result calls it an unshaped Wi-Fi round trip and it does
+   not include the profile's delay. A device that blocks ping shows `No answer`.
+4. **Finish now** saves early, **Cancel test** saves nothing, and closing the
+   window keeps the measurement running. A new apply during the window ends it
+   and marks the result `changed`.
+
+Each result keeps the time, the device's MAC address and name, the profile that
+really applied (a schedule, timer, scenario or group profile is named as such)
+and its values, the label and the numbers you type in from the device's own
+speed test page. Results are part of the configuration backup and of the CSV and
+JSON exports, so share those files with care. **Compare**
+shows the change in each number between two results and whether the speed
+matches the profile's cap (`Matches the cap`, `Faster than the cap`, `Slower
+than the cap`, `No speed limit set`). **Export CSV** and **Export JSON** download
+the device's results without any token or password. **Delete** on a result asks
+in the page first (**Delete result** or **Cancel**) and cannot be undone. The Pi
+keeps the newest 50 results per device and 500 in total.
+
+Limits:
+
+- The Pi only has a counter for a device while a profile applies to it. A
+  device with no profile is `Not measured on the Pi`: type in the numbers the
+  speed test page showed. For a measured baseline without limits, save a
+  profile with nothing set (for example `No limits`), apply it and test, then
+  apply the real profile and test again.
+- With **Same as everyone** or **Everyone else** the counters are shared with
+  other devices and the result says so.
+- Protected devices cannot be tested: they are never shaped and their traffic
+  is not measured.
+- The device must be connected to the test Wi-Fi. The Pi checks this first and
+  pings the address the device has now. While the Wi-Fi connection status is
+  unknown the button stays off. If the Pi cannot read its counters it asks you
+  to try again. If most reads fail during a test the result is saved as `fault`.
+- A test starts only when the queues the Pi reads carry the same numbers as the
+  applied profile: delay, jitter, loss and its burst length, reordering,
+  duplication, corruption and the speed cap. While a change is being applied they
+  differ, and Start asks you to try again in a moment.
+- A service rule or service list sends some traffic through other queues. The
+  result then says it covers the ordinary queue only and does not judge the cap:
+  compare the numbers typed in from the device's speed test page.
+- At most two tests run at once, one per device. A dashboard restart drops a
+  running test.
+- Cloudflare's speed test is free and needs no account. Cloudflare keeps each
+  result for its own statistics. JitterSim only links to the page; it does not
+  call Cloudflare itself. M-Lab is not offered because it publishes every
+  result with the tester's IP address.
+
+The design and the open decisions are in
+[implementation-plan-device-speed-test-2026-10-09.md](implementation-plan-device-speed-test-2026-10-09.md).
 
 ## Network layout
 
