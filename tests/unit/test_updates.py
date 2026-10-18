@@ -788,6 +788,13 @@ class UpdateTests(unittest.TestCase):
                         # It prints a notice for the person who runs the installer. An update
                         # from the dashboard has no terminal and the Traffic page says it.
                         continue
+                    if script == "preflight.py" and "--firewall-only" in words:
+                        # The installer checks the firewall again after it installed
+                        # nftables. The update's full preflight (asserted from the
+                        # first preflight line) already includes that check.
+                        full = [word for word in words if word != "--firewall-only"]
+                        self.assertIn(full, commands)
+                        continue
                     if script == "replace-source.py":
                         # The update replaces the same folders itself.
                         self.assertFalse((self.code / "build").exists())
