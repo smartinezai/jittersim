@@ -11,7 +11,7 @@ from tests.soak import harness, instrument
 
 
 def _sample(t, **values):
-    base = {"t": t, "rss_kb": 60000, "fds": 10, "sockets": 3, "threads": 6, "native_threads": 6,
+    base = {"t": t, "rss_kb": 60000, "heap_blocks": 200000, "gc_objects": 90000, "fds": 10, "sockets": 3, "threads": 6, "native_threads": 6,
             "db_bytes": 400000, "journal_bytes": 0, "wal_bytes": 0, "state_bytes": 410000,
             "helper_calls": 0, "network_commands": 0, "writes": 0, "blocks_out": 0,
             "cpu_user": t / 100, "cpu_system": 0, "helper_accepted": 5, "helper_closed": 5}
@@ -31,13 +31,15 @@ def test_steady_numbers_pass():
 
 
 def test_growth_after_the_warmup_fails():
-    samples = [_sample(t, fds=10 + t // 30, rss_kb=60000 + t * 100, threads=6 + t // 60)
+    samples = [_sample(t, fds=10 + t // 30, rss_kb=60000 + t * 100, threads=6 + t // 60,
+                       heap_blocks=200000 + t * 200)
                for t in range(0, 600, 10)]
     problems, _ = _judge(samples)
     text = " ".join(problems)
     assert "open descriptors grew" in text
     assert "resident memory grew" in text
     assert "Python threads grew" in text
+    assert "Python heap grew" in text
 
 
 def test_growth_during_the_warmup_alone_passes():

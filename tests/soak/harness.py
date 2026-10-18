@@ -81,6 +81,7 @@ BUSY_STATUSES = (502, 503)
 # Growth from the start to the end of the run (after the warm-up) that fails the run.
 DEFAULT_LIMITS = {
     "rss_mb": 24.0,          # resident memory
+    "heap_share": 0.25,      # Python heap blocks, as a share of the start
     "fds": 8,                # open descriptors
     "threads": 4,            # Python threads
     "native_threads": 4,     # threads of the process
@@ -125,8 +126,21 @@ class Results:
 
 
 class Client:
-    def __init__(self, port, results, token=TOKEN, timeout=60.0):
+    def __init__(self, port, results, token=TOKEN, timeout=60.0, tls=False):
         self.port, self.results, self.token, self.timeout = port, results, token, timeout
+        self.tls = None
+        if tls:
+            import ssl
+            # The target's certificate is a throwaway one: the client checks nothing.
+            self.tls = ssl.create_default_context()
+            self.tls.check_hostname = False
+            self.tls.verify_mode = ssl.CERT_NONE
+
+    def _connection(self):
+        if self.tls is not None:
+            return http.client.HTTPSConnection("127.0.0.1", self.port, timeout=self.timeout,
+                                               context=self.tls)
+        return http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.timeout)
 
     def call(self, method, path, body=None, *, token=None, record=True):
         headers = {"Authorization": "Bearer " + (token or self.token)}
@@ -135,7 +149,7 @@ class Client:
             headers["Content-Type"] = "application/json"
         route = path.split("?")[0]
         begin = time.monotonic()
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.timeout)
+        connection = self._connection()
         try:
             connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()
@@ -304,7 +318,7 @@ def judge(samples, final, results, *, warmup, limits, seconds):
     window = max(1, len(settled) // 10)
     first, last = settled[:window], settled[-window:]
     span_hours = max(1e-9, (last[-1]["t"] - first[0]["t"]) / 3600)
-    keys = ("rss_kb", "fds", "sockets", "threads", "native_threads", "db_bytes", "journal_bytes",
+    keys = ("rss_kb", "heap_blocks", "gc_objects", "fds", "sockets", "threads", "native_threads", "db_bytes", "journal_bytes",
             "wal_bytes", "state_bytes", "helper_calls", "network_commands", "writes", "blocks_out")
     for key in keys:
         start, end = _median(first, key), _median(last, key)
@@ -323,6 +337,9 @@ def judge(samples, final, results, *, warmup, limits, seconds):
               ("native_threads", 1, "native_threads", "process threads grew by %d"),
               ("db_bytes", 1 << 20, "db_mb", "the database grew by %.1f MB"),
               ("state_bytes", 1 << 20, "state_mb", "the state folder grew by %.1f MB"))
+    if grow("heap_blocks") > limits["heap_share"] * max(1, figures["heap_blocks"]["start"]):
+        problems.append("the Python heap grew by %d blocks (%.0f%%)" % (
+            grow("heap_blocks"), 100 * grow("heap_blocks") / max(1, figures["heap_blocks"]["start"])))
     for key, divisor, limit, message in checks:
         if grow(key, divisor) > limits[limit]:
             problems.append(message % grow(key, divisor))
@@ -382,14 +399,15 @@ def writes_per_hour(final):
 
 def run(*, minutes, browsers, out, speed=1.0, actions_every=30.0, sample_seconds=10.0,
         warmup_seconds=120.0, page_seconds=120.0, limits=None, tracemalloc=False, seed=1,
-        apply_first=True):
+        apply_first=True, tls=True):
     """Run one soak and return the report (a dict). report["problems"] is empty on a pass."""
 
     limits = {**DEFAULT_LIMITS, **(limits or {})}
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     command = [sys.executable, "-W", "ignore", "-m", "tests.soak.target", str(out / "target"),
-               "--sample-seconds", str(sample_seconds)] + (["--tracemalloc"] if tracemalloc else [])
+               "--sample-seconds", str(sample_seconds)] + (["--tracemalloc"] if tracemalloc else []) \
+        + (["--tls"] if tls else [])
     errors = open(out / "target-stderr.txt", "wb")
     process = subprocess.Popen(command, cwd=str(REPOSITORY), stdout=subprocess.PIPE, stderr=errors,
                                env={**os.environ, "PYTHONPATH": os.pathsep.join(
@@ -403,19 +421,25 @@ def run(*, minutes, browsers, out, speed=1.0, actions_every=30.0, sample_seconds
         if apply_first:
             # Like a Pi in use: a device has a slow profile and the network is applied, so the
             # scheduler, the traffic counters and ad blocking run as they do after Apply.
-            setup = Client(ready["port"], results)
+            setup = Client(ready["port"], results, tls=tls)
             _action_save_device(setup, 1)
+            # Quotas make the scheduler sample counters every 5 s, as on a Pi that uses them.
+            setup.call("POST", "/api/data-limits",
+                       {"device_id": "alice", "profile_id": "slow", "limit_bytes": 10 ** 12})
+            setup.call("POST", "/api/groups", {"id": "family", "name": "Family", "device_ids": ["alice"]})
+            setup.call("POST", "/api/group-data-limits",
+                       {"group_id": "family", "profile_id": "slow", "limit_bytes": 10 ** 12})
             _action_apply(setup, 0)
         stop = threading.Event()
         threads = []
         for number in range(browsers):
-            client = Client(ready["port"], results)
+            client = Client(ready["port"], results, tls=tls)
             threads.append(threading.Thread(
                 target=browser, name=f"browser-{number}", daemon=True,
                 args=(client, number, stop, speed, page_seconds, random.Random(seed + number))))
         if actions_every > 0:
             threads.append(threading.Thread(target=owner, name="owner", daemon=True,
-                                            args=(Client(ready["port"], results), stop,
+                                            args=(Client(ready["port"], results, tls=tls), stop,
                                                   actions_every, results)))
         for thread in threads:
             thread.start()
@@ -448,12 +472,13 @@ def run(*, minutes, browsers, out, speed=1.0, actions_every=30.0, sample_seconds
         problems.append("the target wrote no final report")
     report = {
         "problems": problems, "figures": figures, "minutes": minutes, "browsers": browsers,
-        "speed": speed, "actions_every": actions_every, "limits": limits,
+        "speed": speed, "actions_every": actions_every, "limits": limits, "tls": tls,
         "actions": {name: dict(outcomes) for name, outcomes in results.actions.items()},
         "unanswered": dict(results.unanswered), "server_errors": results.server_errors,
         "routes": {route: dict(statuses) for route, statuses in sorted(results.by_route.items())},
         "writes_per_hour": writes_per_hour(final),
         "helper_actions": final.get("helper_actions", {}),
+        "helper_busy": final.get("helper_busy", {}),
         "network_commands": final.get("network_commands", {}),
         "tracemalloc_growth": final.get("tracemalloc_growth", []),
         "table_rows": {name: [final.get("tables_start", {}).get(name), count]
@@ -469,7 +494,7 @@ def summary(report):
     figures = report["figures"]
     lines = ["Soak: %s min, %s browsers, speed %s, owner action every %s s"
              % (report["minutes"], report["browsers"], report["speed"], report["actions_every"])]
-    for key in ("rss_kb", "fds", "sockets", "threads", "native_threads", "db_bytes", "journal_bytes",
+    for key in ("rss_kb", "heap_blocks", "gc_objects", "fds", "sockets", "threads", "native_threads", "db_bytes", "journal_bytes",
                 "state_bytes", "helper_calls", "network_commands", "writes", "blocks_out"):
         if key in figures:
             item = figures[key]
@@ -480,6 +505,8 @@ def summary(report):
         if key in figures:
             lines.append(f"  {key}: {figures[key]}")
     lines.append("  owner actions: %s" % report["actions"])
+    lines.append("  helper calls: %s" % report["helper_actions"])
+    lines.append("  helper busy refusals the fixture waited out: %s" % report["helper_busy"])
     grown = {name: rows for name, rows in report.get("table_rows", {}).items() if rows[0] != rows[1]}
     lines.append("  table rows that changed (start, end): %s" % grown)
     lines.append("  busiest writers per hour:")
@@ -504,6 +531,8 @@ def main(argv=None):
                         help="record where memory grew (slower; for leak hunting)")
     parser.add_argument("--no-apply-first", dest="apply_first", action="store_false",
                         help="start from a network that was never applied")
+    parser.add_argument("--plain-http", dest="tls", action="store_false",
+                        help="serve plain HTTP (the Pi serves HTTPS, the default here too)")
     parser.add_argument("--out", type=Path)
     for name, value in DEFAULT_LIMITS.items():
         parser.add_argument("--limit-" + name.replace("_", "-"), type=type(value), default=value,
@@ -514,7 +543,7 @@ def main(argv=None):
                  speed=arguments.speed, actions_every=arguments.actions_every,
                  sample_seconds=arguments.sample_seconds, warmup_seconds=arguments.warmup_seconds,
                  page_seconds=arguments.page_seconds, tracemalloc=arguments.tracemalloc,
-                 apply_first=arguments.apply_first,
+                 apply_first=arguments.apply_first, tls=arguments.tls,
                  limits={name: getattr(arguments, "limit_" + name) for name in DEFAULT_LIMITS})
     print(summary(report))
     print("Report:", out / "report.json")

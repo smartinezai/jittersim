@@ -118,6 +118,7 @@ def main(argv=None):
     parser.add_argument("output", type=Path)
     parser.add_argument("--sample-seconds", type=float, default=5.0)
     parser.add_argument("--tracemalloc", action="store_true")
+    parser.add_argument("--tls", action="store_true", help="serve HTTPS like the Pi does")
     arguments = parser.parse_args(argv)
     output = arguments.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -129,6 +130,7 @@ def main(argv=None):
         import tracemalloc
         tracemalloc.start(8)
 
+    import gc
     import logging
     import resource
     import tempfile
@@ -165,6 +167,21 @@ def main(argv=None):
             helper_open[1] += 1
             return super().shutdown_request(request)
 
+    busy = Counter()
+
+    class BusyCountingClient(fixture.PatientHelperClient):
+        """The fixture waits when the helper is busy. Count each wait: the installed dashboard
+        does not wait, so each one is a read that a real page would have seen fail."""
+
+        def _send(self, payload, *, timeout_seconds=None):
+            from jittersim.networking.helper import HelperClientError
+            try:
+                return super()._send(payload, timeout_seconds=timeout_seconds)
+            except HelperClientError as error:
+                if error.reason == "helper-busy":
+                    busy[str(payload.get("action"))] += 1
+                raise
+
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -200,10 +217,16 @@ def main(argv=None):
             with ConfigRepository(database) as repository:
                 fixture.seed_observations(repository)
                 fixture.seed_demo_data(repository)
-                helper_client = fixture.PatientHelperClient(socket_path=root / "wifi.sock")
+                helper_client = BusyCountingClient(socket_path=root / "wifi.sock")
                 scheduler = RuntimeScheduler(database_path=database, helper_client=helper_client)
+                tls = {}
+                if arguments.tls:
+                    from tests.remote_support import make_certificate
+                    certificate, key = make_certificate(root)
+                    tls = {"tls_certfile": certificate, "tls_keyfile": key}
                 server = fixture.FixtureServer(("127.0.0.1", 0), repository, admin_token=TOKEN,
-                                               helper_client=helper_client, scheduler=scheduler)
+                                               helper_client=helper_client, scheduler=scheduler,
+                                               **tls)
                 server.recover_saved_network_state()
                 threading.Thread(target=server.serve_forever, name="soak-dashboard", daemon=True).start()
                 started = time.time()
@@ -217,6 +240,9 @@ def main(argv=None):
                     fds, sockets = _descriptors()
                     return {
                         "t": round(time.time() - started, 2), "rss_kb": _rss_kb(),
+                        # Python's own heap. macOS compresses and pages out idle memory, so
+                        # its resident size can fall under load: these two do not.
+                        "heap_blocks": sys.getallocatedblocks(), "gc_objects": len(gc.get_objects()),
                         "max_rss": usage.ru_maxrss, "fds": fds, "sockets": sockets,
                         "threads": threading.active_count(), "native_threads": _native_threads(),
                         "cpu_user": round(usage.ru_utime, 3), "cpu_system": round(usage.ru_stime, 3),
@@ -226,6 +252,7 @@ def main(argv=None):
                         "state_bytes": _tree_size(root),
                         "helper_accepted": helper_open[0], "helper_closed": helper_open[1],
                         "helper_calls": sum(helper_actions.values()),
+                        "helper_busy": sum(busy.values()),
                         "network_commands": sum(commands_by_tool.values()),
                         "writes": sum(row["count"] for row in instrument.snapshot()
                                       if row["kind"] != "sql write statements"),
@@ -240,7 +267,7 @@ def main(argv=None):
                             tracemalloc_first = tracemalloc.take_snapshot()
                 finally:
                     final = {"sample": sample(), "writes": instrument.snapshot(),
-                             "helper_actions": dict(helper_actions),
+                             "helper_actions": dict(helper_actions), "helper_busy": dict(busy),
                              "network_commands": dict(commands_by_tool),
                              "outside_attempts": [str(item) for item in attempts],
                              "tables_start": tables_start, "tables_end": _table_rows(database),
