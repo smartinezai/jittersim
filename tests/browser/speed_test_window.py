@@ -10,6 +10,7 @@ import re
 import selectors
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
@@ -20,6 +21,10 @@ NAME = "Fixture phone"
 HEADERS = {"Authorization": "Bearer browser-test"}
 LIMIT = 20000
 LIVE = re.compile(r"Now: download 2\d\d kbit/s, upload 2\d\d kbit/s")
+PEAK = re.compile(r"Peak: download 2\d\d kbit/s, upload 2\d\d kbit/s")
+# The Pi judges a speed only after it counted at least three busy seconds (and enough bytes).
+# The test waits for five, however slowly the machine runs.
+BUSY_SECONDS = 5
 
 
 def start_fixture():
@@ -48,6 +53,25 @@ def sign_in(page, base):
     expect(page.locator("#message")).to_contain_text(
         "Token accepted. Diagnostics loaded.", timeout=LIMIT
     )
+
+
+def wait_for_busy_seconds(page, base, minimum):
+    """Wait until the Pi has counted `minimum` busy seconds of the running test.
+
+    The fixture's fake kernel moves traffic through every queue each second, so each sample after
+    the first closes one busy second. Counting samples does not depend on how fast the machine is.
+    """
+
+    deadline = time.monotonic() + 2 * LIMIT / 1000
+    counted = 0
+    while time.monotonic() < deadline:
+        active = page.request.get(base + "/api/speed-tests?mac=" + MAC_ADDRESS,
+                                  headers=HEADERS).json()["active"]
+        counted = max(0, active[0]["samples"] - 1) if active else 0
+        if counted >= minimum:
+            return
+        page.wait_for_timeout(500)
+    raise AssertionError(f"the Pi counted {counted} busy seconds, wanted {minimum}")
 
 
 def check_width(browser, width, height):
@@ -94,7 +118,7 @@ def check_width(browser, width, height):
         expect(page.locator("#speed-test-provider")).to_have_value("cloudflare")
         expect(page.locator("#speed-test-history")).to_contain_text("No speed tests saved")
 
-        def measure(label, seconds_before_finish=5):
+        def measure(label, busy_seconds=BUSY_SECONDS):
             page.locator("#speed-test-duration").fill("30")
             page.locator("#speed-test-label").fill(label)
             page.locator("#speed-test-begin").click()
@@ -106,7 +130,8 @@ def check_width(browser, width, height):
             expect(page.locator("#speed-test-progress")).to_contain_text("Measuring:")
             expect(page.locator("#speed-test-source")).to_contain_text("This device's own queues")
             expect(page.locator("#speed-test-live")).to_contain_text(LIVE, timeout=LIMIT)
-            page.wait_for_timeout(seconds_before_finish * 1000)
+            wait_for_busy_seconds(page, base, busy_seconds)
+            expect(page.locator("#speed-test-live")).to_contain_text(PEAK)
             assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
             dialog.screenshot(path=f"test-results/device-speed-test-running-{width}.png")
             page.locator("#speed-test-finish").click()
@@ -114,8 +139,26 @@ def check_width(browser, width, height):
                 "Speed test saved.", timeout=LIMIT)
             expect(page.locator("#speed-test-start")).to_be_visible()
 
+        # A length that is not a whole number is refused in the window with a message. It is not
+        # swapped for the default, and the page's toast (under the window) stays unused.
+        alert = dialog.locator("#speed-test-alert")
+        expect(alert).to_have_attribute("role", "alert")
+        expect(alert).to_be_hidden()
+        page.locator("#speed-test-duration").fill("45.5")
+        page.locator("#speed-test-begin").click()
+        expect(alert).to_have_text("Length must be a whole number of seconds from 15 to 90.")
+        expect(alert).to_be_visible()
+        expect(page.locator("#speed-test-duration")).to_be_focused()
+        expect(page.locator("#speed-test-start")).to_be_visible()
+        expect(page.locator("#toast-message")).not_to_contain_text("Length must")
+        expect(page.locator("#action-alert")).not_to_contain_text("Length must")
+        active = page.request.get(base + "/api/speed-tests?mac=" + MAC_ADDRESS,
+                                  headers=HEADERS).json()["active"]
+        assert not active, active
+
         # a baseline without limits, with the numbers the device's page showed typed in
         measure("Before")
+        expect(alert).to_have_text("")
         history = page.locator("#speed-test-history tbody tr")
         expect(history).to_have_count(1)
         expect(history.first).to_contain_text("No limits")
@@ -142,6 +185,24 @@ def check_width(browser, width, height):
         assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
         dialog.screenshot(path=f"test-results/device-speed-test-compare-{width}.png")
 
+        # An error shows in the open window, on its own alert line and not on the status line.
+        # The page's toast would sit under the window and its regions are inert behind it.
+        def refuse_compare(route):
+            route.fulfill(status=400, content_type="application/json",
+                          body='{"error":"Choose two saved results"}')
+
+        page.route("**/api/speed-tests/compare*", refuse_compare)
+        page.locator("#speed-test-compare-button").click()
+        expect(alert).to_have_text("Choose two saved results")
+        expect(alert).to_be_visible()
+        expect(page.locator("#speed-test-announce")).to_have_text("")
+        expect(page.locator("#toast-message")).not_to_contain_text("Choose two saved results")
+        expect(page.locator("#action-alert")).not_to_contain_text("Choose two saved results")
+        page.unroute("**/api/speed-tests/compare*", refuse_compare)
+        page.locator("#speed-test-compare-button").click()
+        expect(page.locator("#speed-test-announce")).to_have_text("Comparison ready.")
+        expect(alert).to_have_text("")
+
         with page.expect_download() as download_info:
             page.locator("#speed-test-export-csv").click()
         exported = Path(download_info.value.path()).read_text()
@@ -149,6 +210,18 @@ def check_width(browser, width, height):
         assert lines[0].startswith("id,started_at"), lines[0]
         assert len(lines) == 3, exported
         assert "browser-test" not in exported and "Bearer" not in exported
+
+        # A failed export says why in the window (the dashboard's own error text) and adds no
+        # "information is out of date" note, because a download is one click and not a poll.
+        def refuse_export(route):
+            route.fulfill(status=503, content_type="application/json",
+                          body='{"error":"The Pi is busy. Try again."}')
+
+        page.route("**/api/speed-tests/export*", refuse_export)
+        page.locator("#speed-test-export-json").click()
+        expect(alert).to_have_text("The Pi is busy. Try again.")
+        expect(page.locator("#connection-notice")).to_be_hidden()
+        page.unroute("**/api/speed-tests/export*", refuse_export)
 
         # cancelling saves nothing
         page.locator("#speed-test-label").fill("Cancelled")

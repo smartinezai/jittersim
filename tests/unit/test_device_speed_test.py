@@ -312,11 +312,50 @@ class StoreTests(unittest.TestCase):
     def test_a_fault_is_a_saved_status(self) -> None:
         self.assertEqual(self.store.save(self.row(status="fault"))["status"], "fault")
 
+    def test_a_database_fault_on_a_read_is_a_storage_error(self) -> None:
+        saved = self.store.save(self.row())
+        with mock.patch.object(self.store, "db") as database:
+            database.execute.side_effect = sqlite3.OperationalError("database is locked")
+            with self.assertRaises(StorageError):
+                self.store.get(saved["id"])
+            with self.assertRaises(StorageError):
+                self.store.list(PHONE)
+            with self.assertRaises(StorageError):
+                self.store.list()
+
+    def test_one_malformed_row_does_not_hide_the_others(self) -> None:
+        first = self.store.save(self.row(label="first"))
+        broken_json = self.store.save(self.row(label="broken json"))
+        not_an_object = self.store.save(self.row(label="not an object"))
+        last = self.store.save(self.row(label="last"))
+        self.repository._connection.execute(
+            "UPDATE speed_test_results SET summary_json = '{' WHERE id = ?", (broken_json["id"],))
+        self.repository._connection.execute(
+            "UPDATE speed_test_results SET profile_json = '[1]' WHERE id = ?",
+            (not_an_object["id"],))
+        for call in (lambda: self.store.list(PHONE), lambda: self.store.list()):
+            with self.assertLogs(store_module.LOGGER, "WARNING") as logged:
+                listed = call()
+            self.assertEqual([item["id"] for item in listed], [last["id"], first["id"]])
+            self.assertEqual(len(logged.records), 2)
+        # A row that is asked for by number still fails clearly, as a storage error.
+        with self.assertRaises(StorageError):
+            self.store.get(broken_json["id"])
+        with self.assertRaises(StorageError):
+            self.store.get(not_an_object["id"])
+        self.assertEqual(self.store.get(first["id"])["label"], "first")
+
     def test_label_and_reported_validation(self) -> None:
         self.assertEqual(clean_label(None), "")
-        for bad in ("x" * 81, 5, "a\x00b"):
+        for bad in ("x" * 81, 5, "a\x00b", "a\x7fb"):
             with self.assertRaises(ValueError):
                 clean_label(bad)
+        # C1 controls (Cc) and format characters (Cf): the NEL control is whitespace and is folded
+        # into a space, so the checks use the others.
+        for bad in ("a\x80b", "a\x9bb", "a\u202eb", "\u2066a", "a\u200bb", "\ufeffa", "a\u00adb"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                clean_label(bad)
+        self.assertEqual(clean_label("Café 日本語 😀  No\tlimits"), "Café 日本語 😀 No limits")
         for bad in ({"other": 1}, {"download_mbit": -1}, {"download_mbit": True},
                     {"download_mbit": "fast"}, {"latency_ms": 1e9}, [1]):
             with self.assertRaises(ValueError):
@@ -1351,6 +1390,56 @@ class EndingTests(ManagerBase):
                                       {"result_id": result["id"], "label": "x"})
         self.assertEqual(status, 500)
         self.assertIn("could not be saved", body["error"])
+
+    def test_a_database_fault_on_a_read_is_a_clean_error_and_one_bad_row_is_skipped(self) -> None:
+        for _ in range(2):
+            _, run = self.write("/api/speed-tests/start", {"mac_address": PHONE})
+            self.run_seconds(run["id"], 5)
+            self.write("/api/speed-tests/finish", {"run_id": run["id"]})
+        first, second = (item["id"] for item in reversed(SpeedTestStore(self.repository).list()))
+        self.repository._connection.execute(
+            "UPDATE speed_test_results SET reported_json = 'oops' WHERE id = ?", (second,))
+        with self.assertLogs(store_module.LOGGER, "WARNING"):
+            status, _, body = self.read("/api/speed-tests", "mac=" + PHONE)
+        self.assertEqual(status, 200)
+        self.assertEqual([item["id"] for item in json.loads(body)["results"]], [first])
+        with self.assertLogs(routes.LOGGER, "ERROR"):
+            status, _, body = self.read("/api/speed-tests/compare", f"baseline={first}&result={second}")
+        self.assertEqual(status, 500)
+        self.assertIn("could not be read", json.loads(body)["error"])
+        broken = mock.MagicMock()
+        broken.execute.side_effect = sqlite3.OperationalError("database is locked")
+        for path, query in (("/api/speed-tests", "mac=" + PHONE),
+                            ("/api/speed-tests/export", "format=csv"),
+                            ("/api/speed-tests/compare", f"baseline={first}&result={first}")):
+            with mock.patch.object(self.repository, "_connection", broken), \
+                    self.assertLogs(routes.LOGGER, "ERROR"):
+                status, _, body = self.read(path, query)
+            self.assertEqual(status, 500, path)
+            self.assertIn("could not be read", json.loads(body)["error"], path)
+
+    def test_the_active_list_builds_each_run_while_holding_the_manager_lock(self) -> None:
+        self.start_short()
+        owned = []
+        payload = routes.SpeedTestRun.payload
+
+        def watching(run, now):
+            # The sampler trims a run's samples under this lock, so the page's copy must be made
+            # under it too.
+            owned.append(self.manager.lock._is_owned())
+            return payload(run, now)
+
+        with mock.patch.object(routes.SpeedTestRun, "payload", watching):
+            self.assertEqual(self.read("/api/speed-tests", "mac=" + PHONE)[0], 200)
+        self.assertEqual(owned, [True])
+
+    def test_a_label_with_a_hidden_control_or_format_character_is_refused(self) -> None:
+        for label in ("a\u202eb", "a\x9bb", "a\u200bb"):
+            status, body = self.write("/api/speed-tests/start",
+                                      {"mac_address": PHONE, "label": label})
+            self.assertEqual(status, 400, repr(label))
+            self.assertIn("control character", body["error"])
+        self.assertEqual(self.manager.active(), [])
 
 
 class RouteTests(unittest.TestCase):

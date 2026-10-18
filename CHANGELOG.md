@@ -12,6 +12,10 @@ next release takes them over.
   results and compares them with numbers entered from a speed test run on the
   device. Deleting a result asks in the page's own dialog. The start check
   also compares the loss burst length of the queues with the applied profile.
+- Speed test follow-ups: errors show in the open speed test window instead of
+  under it, a length such as 45.5 is refused with a message, the export uses the
+  dashboard's request handling, and one damaged saved result no longer hides the
+  others. Labels reject hidden control and format characters.
 - The Pi Wi-Fi follows the router. After a **Copy router Wi-Fi to Pi** that
   worked, the Pi records the router's Wi-Fi name and security (no password).
   Every boot renames a saved Wi-Fi with another name, such as

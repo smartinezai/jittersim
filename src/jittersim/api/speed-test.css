@@ -9,6 +9,7 @@ dialog.speed-test-dialog { max-width: min(46rem, calc(100vw - 2rem)); width: 100
 .speed-test-help { color: var(--tx-soft-2); font-size: 0.9rem; }
 .speed-test-announce:empty { display: none; }
 .speed-test-announce { color: var(--ok-text-2); }
+.speed-test-alert:empty { display: none; }
 .speed-test-progress { font-weight: 600; }
 .speed-test-dialog a { color: var(--accent-text); overflow-wrap: anywhere; }
 .speed-test-qr-box { margin: 0.6rem 0; }
