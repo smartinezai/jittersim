@@ -1,0 +1,1 @@
+$ tc qdisc change dev eth0 parent 10:7 handle 46: netem delay 41ms corrupt 0% rate 0bit  # update upload settings for assignment:bob-news
