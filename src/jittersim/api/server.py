@@ -293,6 +293,10 @@ ACTION_PATHS = frozenset(
      "/api/access-point/reset-name", "/api/updates/check-online", "/api/updates/retry")
 )
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
+# The health check answers without the token, so a device on the test Wi-Fi could
+# turn every request into a call to the root helper. Without the token the helper
+# is asked at most once in this many seconds (security audit 2026-10-18, A2).
+PUBLIC_HEALTH_REUSE_SECONDS = 1.0
 # What the dashboard says when the standard library refuses a request before any route runs.
 REFUSED_REQUEST_SENTENCES = {
     400: "the request could not be understood",
@@ -1847,20 +1851,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 "default_ssid": DEFAULT_ACCESS_POINT_SSID,
             })
         if path == "/api/health":
-            helper_reachable = False
-            if self.helper_client is not None:
-                try:
-                    helper_reachable = self.helper_client.ping().get("ok") is True
-                except HelperClientError:
-                    LOGGER.warning("network helper health check failed")
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "status": "ok" if self.helper_client is None or helper_reachable else "degraded",
-                    "mode": "hardware" if self.helper_client is not None else "configuration-only",
-                    "helper_configured": self.helper_client is not None,
-                    "helper_reachable": helper_reachable,
-                }
-            )
+            return self.health_response(fresh=True)
         if path == "/api/system-health":
             # The public health check carries only the mode like the Pi base. The
             # version and free disk and temperature and uptime need the admin token.
@@ -5921,6 +5912,47 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             {"result": result, "state": self._runtime_state_with_running(state)}
         )
 
+    def health_response(self, *, fresh: bool) -> Tuple[int, str, bytes]:
+        """The health check. Without `fresh` a helper answer from the last second is reused."""
+
+        helper_reachable = False
+        if self.helper_client is not None:
+            helper_reachable = self._helper_reachable(fresh=fresh)
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "status": "ok" if self.helper_client is None or helper_reachable else "degraded",
+                "mode": "hardware" if self.helper_client is not None else "configuration-only",
+                "helper_configured": self.helper_client is not None,
+                "helper_reachable": helper_reachable,
+            }
+        )
+
+    def _helper_reachable(self, *, fresh: bool) -> bool:
+        # Created on first use (dict.setdefault is atomic), so servers that tests build
+        # without __init__ answer too.
+        lock = self.__dict__.setdefault("_health_lock", threading.Lock())
+        if not fresh:
+            # One ping at a time for every caller without the token: the others wait
+            # for it and take its answer.
+            with lock:
+                checked_at, reachable = self.__dict__.get("_health_answer", (float("-inf"), False))
+                if time.monotonic() - checked_at < PUBLIC_HEALTH_REUSE_SECONDS:
+                    return reachable
+                reachable = self._ping_helper()
+                self._health_answer = (time.monotonic(), reachable)
+                return reachable
+        reachable = self._ping_helper()
+        with lock:
+            self._health_answer = (time.monotonic(), reachable)
+        return reachable
+
+    def _ping_helper(self) -> bool:
+        try:
+            return self.helper_client.ping().get("ok") is True
+        except HelperClientError:
+            LOGGER.warning("network helper health check failed")
+            return False
+
     def is_authorized(self, authorization_header: Optional[str]) -> bool:
         """Return whether an Authorization header matches the configured admin token."""
 
@@ -6117,6 +6149,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 identity = self.server.dashboard_access(self.client_address[0])
                 status, content_type, body = (HTTPStatus.OK, "application/json",
                                               _json_bytes(self.server.address_move_offer(identity)))
+            elif path == "/api/health" and not self.server.is_authorized(self.headers.get("Authorization")):
+                status, content_type, body = self.server.health_response(fresh=False)
             elif path in ("/api/dashboard-access/status", "/api/dashboard-access"):
                 data = self.server.dashboard_access(
                     self.client_address[0], "status" if path.endswith("/status") else "list")

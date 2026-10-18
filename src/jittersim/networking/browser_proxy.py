@@ -7,6 +7,7 @@ import os
 import socket
 import socketserver
 import threading
+import time
 from concurrent.futures import CancelledError, Future
 from concurrent.futures import TimeoutError as FutureTimeout
 from ipaddress import IPv4Address, ip_address, ip_network
@@ -165,9 +166,16 @@ def destination_allowed(
 
 
 def _read_connect_request(client: socket.socket) -> Tuple[str, bytes]:
-    client.settimeout(CONNECT_TIMEOUT_SECONDS)
+    # One deadline for the whole request. A timeout per read let a client that sends
+    # one byte every few seconds hold a tunnel slot for good (security audit
+    # 2026-10-18, finding A3).
+    deadline = time.monotonic() + CONNECT_TIMEOUT_SECONDS
     received = bytearray()
     while b"\r\n\r\n" not in received:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProxyError("browser request took too long")
+        client.settimeout(remaining)
         chunk = client.recv(4096)
         if not chunk:
             raise ProxyError("browser closed before sending a request")

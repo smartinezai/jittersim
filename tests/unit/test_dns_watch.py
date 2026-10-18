@@ -61,6 +61,7 @@ def frame_for(
     options=b"",
     ethertype=0x0800,
     dst_mac=b"\x02" * 6,
+    source="192.168.50.1",
 ):
     udp = struct.pack("!HHHH", sport, 40000, 8 + len(message), 0) + message
     ihl = 5 + len(options) // 4
@@ -74,7 +75,7 @@ def frame_for(
         64,
         protocol,
         0,
-        socket.inet_aton("192.168.50.1"),
+        socket.inet_aton(source),
         socket.inet_aton("192.168.50.10"),
     )
     return dst_mac + b"\x04" * 6 + struct.pack("!H", ethertype) + ip + options + udp
@@ -539,3 +540,107 @@ class FilterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ForwardedAnswerTests(unittest.TestCase):
+    """Security audit 2026-10-18, finding A1.
+
+    Without household DNS rules a test client may ask any DNS server on the internet.
+    The Pi forwards that server's answer out of the test interface, so it is an
+    outgoing frame from port 53 like the Pi's own. Such an answer must not add an
+    address to a service list, which is shared by every affected test device.
+    """
+
+    FORGED = "8.8.8.8"
+
+    def setUp(self) -> None:
+        self.helper = Helper()
+        self.redirected = False
+        self.watcher = ServiceWatcher(
+            helper_client=self.helper,
+            applied_plan=lambda: plan_payload(STREAMING),
+            clock=Clock(),
+            dns_redirected=lambda: self.redirected,
+        )
+        self.watcher.refresh_lists()
+
+    def forged_answer(self, source="203.0.113.53"):
+        message = dns_message("www.netflix.com", [a_record(b"\xc0\x0c", self.FORGED)])
+        self.watcher.observe(frame_for(message, source=source), OUTGOING)
+
+    def test_an_answer_from_another_dns_server_is_ignored(self) -> None:
+        self.forged_answer()
+
+        self.assertFalse(self.watcher.flush())
+        self.assertEqual(self.helper.calls, [])
+
+    def test_the_pis_own_resolver_still_counts(self) -> None:
+        self.forged_answer(source="192.168.50.1")
+
+        self.assertTrue(self.watcher.flush())
+        self.assertEqual(self.helper.calls, [{"streaming": [IPv4Address(self.FORGED)]}])
+
+    def test_while_household_dns_rules_redirect_every_lookup_other_sources_count(self) -> None:
+        # Then direct DNS is dropped and a redirected answer from the Pi's resolver
+        # leaves with the address the client asked.
+        self.redirected = True
+        self.forged_answer()
+
+        self.assertTrue(self.watcher.flush())
+
+    def test_a_failing_redirect_check_trusts_only_the_resolver(self) -> None:
+        def broken():
+            raise OSError("unreadable")
+
+        self.watcher = ServiceWatcher(
+            helper_client=self.helper, applied_plan=lambda: plan_payload(STREAMING),
+            clock=Clock(), dns_redirected=broken,
+        )
+        self.watcher.refresh_lists()
+        self.forged_answer()
+
+        self.assertFalse(self.watcher.flush())
+
+    def test_frames_that_are_not_ipv4_have_no_source(self) -> None:
+        self.assertIsNone(dns_watch.frame_source(b""))
+        self.assertIsNone(dns_watch.frame_source(b"\x00" * 12 + b"\x86\xdd" + b"\x60" + b"\x00" * 40))
+        self.assertEqual(dns_watch.frame_source(frame_for(b"x" * 12, source="198.51.100.7")),
+                         IPv4Address("198.51.100.7"))
+
+
+class RedirectFileTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = Path(self.directory.name) / "access-policy.json"
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def write(self, text):
+        import os
+
+        temporary = self.path.with_suffix(".new")
+        temporary.write_text(text)
+        os.replace(temporary, self.path)
+
+    def test_follows_whether_household_dns_rules_are_on(self) -> None:
+        import json
+
+        from jittersim.config.models import AccessOptions
+        from jittersim.engine.access import AccessPlan
+
+        state = dns_watch._RedirectFile(self.path)
+        self.assertFalse(state())
+        self.write(json.dumps(AccessPlan(options=AccessOptions(enabled=True, dns_failure_percent=5)).payload()))
+        self.assertTrue(state())
+        self.write(json.dumps(AccessPlan(options=AccessOptions(enabled=False, dns_failure_percent=5)).payload()))
+        self.assertFalse(state())
+
+    def test_garbage_means_not_redirected(self) -> None:
+        state = dns_watch._RedirectFile(self.path)
+        for text in ("not json", "[]", '{"version": 1, "options": 5}'):
+            self.write(text)
+            self.assertFalse(state(), text)
