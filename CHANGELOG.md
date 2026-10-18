@@ -53,6 +53,11 @@ next release takes them over.
   The question about restoring the Wi-Fi name has a short heading and no longer
   repeats it in the first sentence. If the row that asked a question is gone
   when it closes (somebody removed it meanwhile), focus goes to its list.
+- Checking the admin token no longer fails by itself. Two checks that overlapped
+  (for example Allow this device followed at once by Remove) locked the dashboard
+  with "Token check failed: undefined", and so did a save that refreshed the page
+  while the check was still loading. A check now waits for the one that is
+  running, and a read that a refresh made stale is read again.
 - A save, an Apply or a delete no longer makes the dashboard read out its
   loading notes and device count again. The ad blocking line speaks only when
   its words change, and the random website line speaks only when you ask for it.

@@ -226,7 +226,7 @@ def test_every_restarting_action_announces_the_restart_and_follows_it():
 
 
 def test_a_lost_connection_does_not_mark_the_token_as_rejected():
-    source = function_source("checkAdminToken")
+    source = function_source("runAdminTokenCheck")
     catch = source[source.index("} catch (error) {"):]
     assert "isConnectionLost(error)" in catch
     assert "forgetCredential" not in source

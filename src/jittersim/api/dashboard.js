@@ -5792,7 +5792,31 @@
       };
     }
 
+    // Checks never overlap: two share the token state and the first one's end locked the dashboard
+    // under the second. A call during a check waits for it, then checks once for every caller.
     async function checkAdminToken() {
+      if (!adminTokenCheckRunning) return startAdminTokenCheck();
+      if (!adminTokenCheckNext) {
+        adminTokenCheckNext = adminTokenCheckRunning.catch(() => {}).then(() => {
+          adminTokenCheckNext = null;
+          return startAdminTokenCheck();
+        });
+      }
+      return adminTokenCheckNext;
+    }
+
+    let adminTokenCheckRunning = null;
+    let adminTokenCheckNext = null;
+
+    function startAdminTokenCheck() {
+      const run = runAdminTokenCheck().finally(() => {
+        if (adminTokenCheckRunning === run) adminTokenCheckRunning = null;
+      });
+      adminTokenCheckRunning = run;
+      return run;
+    }
+
+    async function runAdminTokenCheck() {
       const button = element("check-admin-token");
       const status = element("token-check-status");
       const tokenRevision = adminTokenRevision;
@@ -5833,8 +5857,16 @@
           showMessage(status.textContent, "info");
           return;
         }
-        const result = await loadAdminTools();
+        let result = await loadAdminTools();
+        // A refresh during the read (a save) makes it answer stale. The token is fine: read again.
+        for (let again = 0; result.stale && again < 3 && tokenRevision === adminTokenRevision; again += 1) {
+          result = await loadAdminTools();
+        }
         if (tokenRevision !== adminTokenRevision) return;
+        if (result.stale) {
+          result = {ok: false, interrupted: true,
+            message: "Another refresh kept interrupting the check. Choose Check token to try again."};
+        }
         if (result.connectionLost) throw lostConnectionError(new Error(result.message));
         if (result.ok) {
           adminTokenVerified = true;
@@ -5863,7 +5895,7 @@
           if (typeof scheduleProfileRangePreview === "function") scheduleProfileRangePreview();
         } else {
           adminTokenVerified = false;
-          adminTokenRejected = true;
+          adminTokenRejected = !result.interrupted;
           adminTokenRefused = result.status === 401;
           setPrivateDataPanels("Token check failed: " + result.message);
         }
