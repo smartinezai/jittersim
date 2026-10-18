@@ -20,9 +20,11 @@ from jittersim.config.address_follow import (
     UNDO_SECONDS,
     AddressFollowStore,
     FollowConflict,
+    StaleUndo,
     automatic_allowed,
     check_undo,
     current_suggestions,
+    mark_protection_only_undone,
     move_profile_and_label,
     undo_profile_and_label,
 )
@@ -42,6 +44,7 @@ ADDRESS_FOLLOW_WRITES = frozenset(
 )
 HISTORY_SHOWN = 20
 DISMISS_SECONDS = {"later": 24 * 60 * 60, "never": 90 * 24 * 60 * 60}
+DISMISS_WARNING = "The move was undone, but this pair may be suggested again."
 
 
 def _response(value, status=200):
@@ -231,6 +234,10 @@ def _undo(server, store, payload, *, now):
     repository = server.repository
     try:
         check_undo(repository, store, entry, now=now)
+    except StaleUndo as error:
+        # Protection can still go back on its own. Without protection there is nothing left.
+        if not entry["protection_move_id"]:
+            return _response({"error": str(error), "saved": False}, 409)
     except FollowConflict as error:
         return _response({"error": str(error), "saved": False}, 409)
     status, result = 200, {}
@@ -242,11 +249,14 @@ def _undo(server, store, payload, *, now):
                 "error": "Protection changed since this move. Nothing was undone.", "saved": False,
             }, 409)
         # The profile and the name go back inside the existing protection Undo's transaction.
-        status, _, body = server.undo_device_address_move(
-            entry["old_mac"], "", also=_LinkedUndo(repository, store, entry),
-        )
+        hook = _LinkedUndo(repository, store, entry)
+        status, _, body = server.undo_device_address_move(entry["old_mac"], "", also=hook)
         result = json.loads(body)
         if result.get("saved") is not True:
+            again = store.history_entry(entry["id"])
+            if again is not None and again["undone_at"] is not None:
+                # Another Undo, for example under Dashboard access, finished first.
+                return _response({"error": "This move was already undone.", "saved": False}, 409)
             return _response({"error": result.get("error") or "This move could not be undone.",
                               "saved": False}, status)
     else:
@@ -259,30 +269,50 @@ def _undo(server, store, payload, *, now):
             store.dismiss(entry["old_mac"], entry["new_mac"],
                           until=now + DISMISS_SECONDS["never"], now=now)
         except StorageError:
-            result = {**result, "warning": "The move was undone, but this pair may be "
-                                           "suggested again."}
+            result = {**result, "warning": DISMISS_WARNING}
     return _response(_with_live_outcome({"saved": True, "undone": entry["id"]}, status, result))
 
 
 class _LinkedUndo:
-    """Put a card move's profile and name back inside the existing protection Undo."""
+    """Put a card move's profile and name back inside the existing protection Undo.
+
+    When they can no longer be put back (the move is older than 7 days, or the
+    saved device was edited or deleted) protection still goes back on its own, so
+    a wrong protection move never has to stay. The entry is closed and `warning`
+    says what was left.
+    """
 
     def __init__(self, repository, store, entry):
         self.repository, self.store, self.entry = repository, store, entry
         self.now = int(time.time())
+        self.protection_only = False
+        self.warning = None
 
     def check(self):
         # Before the protection Undo changes anything, so a refusal leaves no half state.
-        check_undo(self.repository, self.store, self.entry, now=self.now)
+        try:
+            check_undo(self.repository, self.store, self.entry, now=self.now)
+        except StaleUndo as error:
+            self.protection_only = True
+            self.reason = str(error).replace(" Nothing was undone.", "").replace(
+                " Edit the device instead.", "")
 
     def __call__(self, _record):
+        if self.protection_only:
+            mark_protection_only_undone(self.repository, self.store, self.entry, now=self.now)
+            self.warning = (
+                "Protection is back at the old address. The profile and the name were left as "
+                "they are: " + self.reason + " Check the saved device on the Devices page and "
+                "the Protected devices list, and change them there by hand."
+            )
+            return
         undo_profile_and_label(self.repository, self.store, self.entry, now=self.now)
         try:
             # The owner said this was wrong, so the same pair is not suggested again.
             self.store.dismiss(self.entry["old_mac"], self.entry["new_mac"],
                                until=self.now + DISMISS_SECONDS["never"], now=self.now)
         except StorageError:
-            pass
+            self.warning = DISMISS_WARNING
 
 
 def linked_address_follow_undo(repository, move_id):

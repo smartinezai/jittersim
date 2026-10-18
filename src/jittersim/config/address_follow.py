@@ -93,6 +93,14 @@ class FollowConflict(ValueError):
     """Something changed, so nothing was moved or undone."""
 
 
+class StaleUndo(FollowConflict):
+    """The profile and the name can no longer be put back: too old, edited or deleted.
+
+    Protection may still be undone on its own, so a wrong protection move never
+    has to stay.
+    """
+
+
 class AddressFollowStore:
     """Use the repository's connection and lock, like the workflow store."""
 
@@ -597,7 +605,7 @@ def check_undo(repository, store, entry: dict, *, now: int) -> None:
     if entry["undone_at"] is not None:
         raise FollowConflict("This move was already undone.")
     if now - entry["happened_at"] > UNDO_SECONDS:
-        raise FollowConflict("This move is too old to undo. Edit the device instead.")
+        raise StaleUndo("This move is too old to undo. Edit the device instead.")
     if store.later_moves(entry):
         raise FollowConflict("A later move changed this device. Undo that one first.")
     if entry["device_after"] is not None:
@@ -608,7 +616,7 @@ def check_undo(repository, store, entry: dict, *, now: int) -> None:
             # The scheduler's address check may have moved it to the new IPv4 address.
             after["ipv4_address"] = current["ipv4_address"]
         if current != after:
-            raise FollowConflict("The saved device changed since the move. Nothing was undone.")
+            raise StaleUndo("The saved device changed since the move. Nothing was undone.")
         others = [item for item in repository.list_devices() if item.id != entry["device_id"]]
         if any(item.mac_address == entry["old_mac"] for item in others):
             raise FollowConflict(
@@ -660,7 +668,23 @@ def undo_profile_and_label(repository, store, entry: dict, *, now: int) -> None:
         if not store.mark_undone(entry["id"], now=now):
             raise FollowConflict("This move was already undone.")
         repository.record_activities(
-            [("address", f"Undid the address move of {activity_name(entry['name'], first=False)}.")],
+            [("address",
+              f"Undid the address move of {activity_name(entry['name'], first=False)}.")],
+            now=now,
+            device_ids=[(entry["device_id"],) if entry["device_id"] else ()],
+        )
+
+
+def mark_protection_only_undone(repository, store, entry: dict, *, now: int) -> None:
+    """Close an entry whose protection went back while its profile and name stay."""
+
+    with repository.transaction():
+        if not store.mark_undone(entry["id"], now=now):
+            raise FollowConflict("This move was already undone.")
+        repository.record_activities(
+            [("address", "Undid the protection move of "
+                         f"{activity_name(entry['name'], first=False)}. "
+                         "Its profile and name stayed as they are.")],
             now=now,
             device_ids=[(entry["device_id"],) if entry["device_id"] else ()],
         )

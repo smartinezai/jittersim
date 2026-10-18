@@ -484,19 +484,57 @@ class RouteTests(unittest.TestCase):
         self.assertFalse(entry["can_undo"])
         self.assertIsNone(self.repository.get_address_move(OLD))
 
-    def test_undo_under_dashboard_access_refuses_before_anything_changes(self):
+    def protected_move(self):
         self.repository.save_unaffected_device(UnaffectedDevice(OLD, "Dad's phone", 1))
-        self.write("/api/address-follow/accept",
-                   {"old_mac": OLD, "new_mac": NEW, "move_protection": True})
+        status, result = self.write("/api/address-follow/accept",
+                                    {"old_mac": OLD, "new_mac": NEW, "move_protection": True})
+        self.assertEqual(status, 200, result)
+
+    def protected_at(self):
+        return {item.mac_address for item in self.repository.list_unaffected_devices()}
+
+    def test_undo_under_dashboard_access_refuses_before_anything_changes(self):
+        self.protected_move()
+        # Another saved device takes the old address: putting the profile back would clash.
+        self.repository.save_device(Device("other", "Other", "192.168.50.40", "slow", OLD))
+        status, _, body = self.server.undo_device_address_move(OLD, "")
+        self.assertEqual(status, 409, body)
+        self.assertEqual(self.protected_at(), {NEW})
+        # Nothing is left half undone: the move record is still saved, not in recovery.
+        self.assertEqual(self.repository.get_address_move(OLD).phase, "saved")
+
+    def assert_protection_only(self, status, body):
+        self.assertEqual(status, 200, body)
+        self.assertIn("Protected devices list", json.loads(body)["warning"])
+        self.assertEqual(self.protected_at(), {OLD})
+        self.assertIsNone(self.repository.get_address_move(OLD))
+        [entry] = self.read()["history"]
+        self.assertIsNotNone(entry["undone_at"])
+        self.assertFalse(entry["can_undo"])
+
+    def test_an_old_move_still_lets_protection_go_back(self):
+        self.protected_move()
+        self.repository._connection.execute(
+            "UPDATE address_follow_history SET happened_at = ?", (NOW - UNDO_SECONDS - 60,))
+        self.repository._connection.commit()
+        self.assert_protection_only(*self.server.undo_device_address_move(OLD, "")[::2])
+        # The profile and the name stay where they are.
+        self.assertEqual(self.repository.get_device("dad").mac_address, NEW)
+
+    def test_an_edited_device_still_lets_protection_go_back(self):
+        self.protected_move()
         device = self.repository.get_device("dad")
         self.repository.save_device(Device("dad", "Renamed", "192.168.50.20", "slow", NEW),
                                     expected=device)
-        status, _, body = self.server.undo_device_address_move(OLD, "")
-        self.assertEqual(status, 409, body)
-        self.assertEqual({item.mac_address for item in self.repository.list_unaffected_devices()},
-                         {NEW})
-        # Nothing is left half undone: the move record is still saved, not in recovery.
-        self.assertEqual(self.repository.get_address_move(OLD).phase, "saved")
+        self.assert_protection_only(*self.server.undo_device_address_move(OLD, "")[::2])
+        self.assertEqual(self.repository.get_device("dad").name, "Renamed")
+
+    def test_a_deleted_device_still_lets_protection_go_back_from_the_card(self):
+        self.protected_move()
+        self.repository.delete_device("dad")
+        [entry] = self.read()["history"]
+        status, result = self.write("/api/address-follow/undo", {"id": entry["id"]})
+        self.assert_protection_only(status, json.dumps(result))
 
     def test_every_undoable_move_stays_visible(self):
         with self.repository.transaction():

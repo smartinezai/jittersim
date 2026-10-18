@@ -4835,6 +4835,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 "saved": True,
                 "undone": {"old_mac": record.old_mac, "new_mac": record.new_mac},
             }
+            if getattr(also, "warning", None):
+                fields["warning"] = also.warning
             if not record.moved_protection:
                 return HTTPStatus.OK, "application/json", _json_bytes(fields)
             return self._with_protected_access(self._address_saved_response(fields))
