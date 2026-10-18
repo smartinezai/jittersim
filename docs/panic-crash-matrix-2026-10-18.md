@@ -129,8 +129,12 @@ retried Panic.
 
 ### D1: a restart after an interrupted apply keeps a plan that nothing owns
 
-Severity S3. File: `src/jittersim/networking/helper.py` (Panic-pinned, not
-changed here).
+Severity S3. File: `src/jittersim/networking/helper.py` (Panic-pinned). Fixed
+by the follow-up branch `fix/release-interrupted-apply-at-start`, which also
+removes the `expectedFailure` marker below. The fix differs from the patch here
+in four ways: an apply that failed without a rollback keeps the mark, a release that fails at start holds the unconfirmed Panic stop
+(so profiles do not start until Panic is retried), a mark that cannot be removed
+after a good apply is only logged, and Reset and Panic clear the mark.
 
 `_handle_apply` writes `active-plan.json` only after a complete apply. When the
 helper dies during an apply (killed, out of memory), the kernel keeps what was

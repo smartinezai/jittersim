@@ -598,17 +598,14 @@ class PanicCrashMatrixTests(unittest.TestCase):
                 self.assertTrue(service.handle_payload({"action": "normal-access"})["ok"])
                 self.assert_normal(f"after a stalled {name} and a second Panic")
 
-    @unittest.expectedFailure
     def test_a_restart_after_an_interrupted_apply_removes_what_nothing_owns(self) -> None:
-        """Defect D1 (docs/panic-crash-matrix-2026-10-18.md), in Panic-pinned helper.py.
+        """Defect D1 (docs/panic-crash-matrix-2026-10-18.md), fixed in helper.py.
 
         The helper dies during an apply after the experiment table and most
         queues are in place. systemd restarts it. The restarted helper has no
         published plan (active-plan.json is written only after a complete
-        apply), so it reports that nothing runs, yet device a is still shaped
-        until someone presses Panic or Reset. The proposed fix marks an apply in
-        progress and removes its state at start (release_interrupted_apply_at_start).
-        Remove this marker when that fix lands.
+        apply). The apply-in-progress mark makes the start remove what the
+        apply left (release_interrupted_apply_at_start, called by run_helper).
         """
 
         from jittersim.networking import helper as helper_module
@@ -620,9 +617,7 @@ class PanicCrashMatrixTests(unittest.TestCase):
         outcome, _ = self.apply_until(payload, self.helper(), crash_at=len(steps) - 1)
         self.assertEqual(outcome, "crashed")
         restarted = self.helper(restart=True)
-        release = getattr(helper_module, "release_interrupted_apply_at_start", None)
-        if release is not None:
-            release(restarted)
+        self.assertTrue(helper_module.release_interrupted_apply_at_start(restarted))
         self.assertIsNone(restarted._current_plan())
         # The saved household rules come back at start by design; only the
         # experiment must be gone.

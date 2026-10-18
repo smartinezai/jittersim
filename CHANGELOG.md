@@ -8,6 +8,10 @@ next release takes them over.
 
 ## Unreleased
 
+- A helper that restarts after it died during an apply removes the queues and
+  tables that apply left. Before, devices could stay shaped while the dashboard
+  showed nothing running. If that removal fails, the helper still starts and
+  asks for Panic before profiles can start again.
 - The Pi Wi-Fi follows the router. After a **Copy router Wi-Fi to Pi** that
   worked, the Pi records the router's Wi-Fi name and security (no password).
   Every boot renames a saved Wi-Fi with another name, such as
