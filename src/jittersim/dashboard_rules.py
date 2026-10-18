@@ -46,6 +46,10 @@ def sidebar_status(
     steady = running and state in ("applied", "unknown")
     # A device-only start runs its own devices. Everyone and the rest stay paused.
     device_only = data.get("deviceOnly") if isinstance(data.get("deviceOnly"), list) else []
+    # While Everyone runs, these saved devices run their own profile beside it.
+    everyone_exceptions = (
+        data.get("everyoneExceptions") if isinstance(data.get("everyoneExceptions"), list) else []
+    )
     general_in_effect = (
         general_profile is not None
         and steady
@@ -96,7 +100,15 @@ def sidebar_status(
 
         if general_in_effect:
             affected = [
-                {"name": name_of(client), "profile": general_name}
+                {
+                    "name": name_of(client),
+                    "profile": profile_name_of(
+                        client.get("group_profile_id") or client.get("assigned_profile_id")
+                    )
+                    if client.get("assigned_device_id")
+                    and client.get("assigned_device_id") in everyone_exceptions
+                    else general_name,
+                }
                 for client in clients
                 if not client.get("unaffected") and client.get("association_verified") is not False
             ]
@@ -164,6 +176,16 @@ def runtime_status_text(
         return {
             "text": "Running for " + str(count) + (" device" if count == 1 else " devices")
             + " only. Everyone and other saved settings stay paused. Start resumes them all.",
+            "tone": "ok",
+        }
+    exceptions = options.get("everyoneExceptions")
+    beside = len(exceptions) if isinstance(exceptions, list) else 0
+    if running is True and beside > 0 and state in ("applied", "unknown"):
+        return {
+            "text": "Running. Everyone covers all devices except " + str(beside)
+            + (" device that runs its own profile" if beside == 1
+               else " devices that run their own profile")
+            + ". Start puts them back on Everyone.",
             "tone": "ok",
         }
     if running is True:

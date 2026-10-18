@@ -273,3 +273,16 @@ also fail when the capture ended at its own limit; and the README says that
 ## Gate
 
 See the pull request for the local gate results on the exact head.
+
+## Follow-up: D1 and D3
+
+PR 160 implements D1 and D3 as the owner agreed. `wifi_follow boot` waits up to 10 s for
+`wlan0` to leave `unavailable`, reads the cached Wi-Fi list, then runs at most one active
+rescan (20 s budget in total). When the router name is on the air from a BSSID that is not
+the Pi's own, the Pi keeps or takes `JitterSim-Recovery` for that boot and the router name
+is not used as a fallback. Every failure of the look keeps the behaviour of PR 140, and a
+running access point keeps its name. `wifi_follow status` shows the decision, the scan
+result and the reason. For D3 `jittersim-ap.service` runs `wifi_follow uplink-check` last
+before the start: only its exit status 3 (an uplink address inside `192.168.50.0/24`)
+stops the start. The physical check still to do: a cold boot with the router Wi-Fi on must
+show `boot_scan: seen`, and one with the router Wi-Fi off must give the router name.

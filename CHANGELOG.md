@@ -8,6 +8,26 @@ next release takes them over.
 
 ## Unreleased
 
+- The boot step of the Pi Wi-Fi looks once at the Wi-Fi names on the air before it
+  renames the Pi Wi-Fi to the router name. When the router's own Wi-Fi already sends
+  that name, the Pi keeps or takes `JitterSim-Recovery` for that boot, so one name
+  never runs on two subnets. A neighbour, guest network or mesh repeater with
+  exactly that name has the same effect, and devices that joined the Pi under the
+  router name move to the router after such a boot. A failed, busy or empty look
+  changes nothing. `wifi_follow status` shows the decision, the scan result and the
+  reason. The test Wi-Fi also does not start when the Ethernet address is inside
+  `192.168.50.0/24`.
+- Applying a profile to one connected device while a profile for Everyone runs now
+  starts it for that device. The device leaves Everyone and runs its own profile,
+  and Everyone keeps running for every other device. Before, the dashboard refused
+  with "Everyone uses ... right now". It is refused while Everyone is saved but not
+  running, or while what runs is older than the saved settings. A failed start changes nothing. Start, Apply to all, Stop
+  for everyone, Reset network and Panic end it for every device. The change adds a
+  table to the settings database and needs the Pi helper restarted with the update.
+- Add a device speed test that records traffic through the applied profile, saves
+  results and compares them with numbers entered from a speed test run on the
+  device. Deleting a result asks in the page's own dialog. The start check
+  also compares the loss burst length of the queues with the applied profile.
 - The Pi Wi-Fi follows the router. After a **Copy router Wi-Fi to Pi** that
   worked, the Pi records the router's Wi-Fi name and security (no password).
   Every boot renames a saved Wi-Fi with another name, such as
