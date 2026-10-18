@@ -1,9 +1,12 @@
-"""Apply a profile to one connected device after a Reset: only that device starts.
+"""Apply a profile to one connected device: only that device starts or leaves Everyone.
 
 Reproduces the reported sequence through the served dashboard and a real helper
 with simulated commands: low saved for Everyone, Reset, then Apply slow-test to
 the connected client. The client gets slow-test at once while Everyone and the
 other saved device stay paused. Start then resumes every saved setting.
+
+While Everyone runs, the same Apply makes the client leave Everyone and run its own
+profile. Everyone keeps running for every other device.
 """
 
 import os
@@ -21,6 +24,10 @@ from tests.browser.protected_clients import IP_ADDRESS, MAC_ADDRESS, controls, s
 HEADERS = {"Authorization": "Bearer browser-test"}
 CLIENT_ID = "client-" + MAC_ADDRESS.replace(":", "")
 ONLY_ONE = "Running for 1 device only. Everyone and other saved settings stay paused. Start resumes them all."
+BESIDE_EVERYONE = (
+    "Running. Everyone covers all devices except 1 device that runs its own profile. "
+    "Start puts them back on Everyone."
+)
 
 
 def start_fixture():
@@ -66,16 +73,50 @@ def check_width(browser, base, width, height):
                           "profile_id": "low"})
     sign_in(page, base)
 
-    # Everyone runs low, so a device of its own is refused before anything is saved.
+    # Everyone runs low. The client leaves it and runs its own profile.
     post("/api/general-profile", {"profile_id": "low"})
     page.reload()
     row = page.locator(f'.connected-row[data-mac-address="{MAC_ADDRESS}"]')
     expect(row).to_be_visible(timeout=20000)
     controls(row)["profile"].select_option("slow-test")
     controls(row)["apply"].click()
+    expect(page.locator("#message")).to_contain_text("Started for", timeout=20000)
     expect(page.locator("#message")).to_contain_text(
-        "Everyone uses daily climb manual right now", timeout=20000)
-    assert all(device["id"] != CLIENT_ID for device in get("/api/devices")["devices"])
+        "Everyone keeps using daily climb manual for every other device")
+    expect(page.locator("#runtime-summary")).to_have_text(BESIDE_EVERYONE, timeout=20000)
+    open_status(page)
+    expect(page.locator("#status-general")).to_have_text("Everyone: daily climb manual · active")
+    expect(page.locator("#status-devices-list li")).to_have_count(1)
+    expect(page.locator("#status-devices-list li")).to_contain_text("Slow test")
+    row = page.locator(f'.connected-row[data-mac-address="{MAC_ADDRESS}"]')
+    expect(row).to_contain_text("Profile: Slow test")
+    expect(row).to_contain_text("Runs its own profile while Everyone covers the rest")
+    expect(row).not_to_contain_text("Same as everyone")
+    state = get("/api/state")["state"]
+    assert state["everyone_exceptions"] == [CLIENT_ID], state
+    assert state["device_only"] == [], state
+    assert state["last_action"] == "apply", state
+    conditions = get("/api/conditions")
+    assert conditions["applied"] is True, conditions
+    assert set(conditions["devices"]) == {CLIENT_ID}, conditions
+    general = get("/api/general-profile")
+    assert general["profile"]["id"] == "low" and general["active"] is True, general
+    saved = {device["id"]: device for device in get("/api/devices")["devices"]}
+    assert saved[CLIENT_ID]["profile_id"] == "slow-test"
+    assert saved["tv"]["profile_id"] == "low"
+    page.screenshot(path=f"test-results/device-apply-beside-everyone-{width}.png")
+    assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
+
+    # Start is the explicit whole-scope action: every device follows Everyone again.
+    close_controls(page)
+    sidebar_control(page, "#apply-button").click()
+    expect(page.locator("#runtime-summary")).not_to_have_text(BESIDE_EVERYONE, timeout=20000)
+    expect(page.locator("#runtime-summary")).to_have_text(re.compile("^Running"), timeout=20000)
+    state = get("/api/state")["state"]
+    assert state["everyone_exceptions"] == [], state
+    assert get("/api/conditions")["devices"] == {}
+    assert get("/api/general-profile")["active"] is True
+    assert get("/api/general-profile")["profile"]["id"] == "low"
 
     # The reported sequence: Reset with low saved for Everyone, then Apply slow-test.
     post("/api/reset", {})

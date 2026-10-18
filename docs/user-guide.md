@@ -595,6 +595,15 @@ line says `Running for N devices only` and **Start** resumes every saved
 setting. **Reset network** or **Panic** stops the devices again. After Panic or
 a router outage, choose **Start** first.
 
+While a profile for Everyone runs you can also give one device its own profile.
+Choose a profile beside the connected client and click **Apply profile**. That
+device leaves Everyone and runs the profile you chose. Everyone keeps running for
+every other device with the same profile and the same shared limit. The status
+line says how many devices run their own profile. **Start**, **Apply to all**,
+**Stop for everyone**, **Reset network** and **Panic** end this for every device,
+and deleting the device ends it for that device. Nothing paused starts as a side
+effect.
+
 The line under the button counts what is saved. The message after a start counts
 what JitterSim really started. Access rules also run after a start so a start
 with no profiles saved says that they apply. Without the Pi helper the dashboard
@@ -670,10 +679,11 @@ current override.
 **Apply profile** starts the profile for that client at once. While JitterSim
 runs, the saved settings are applied again with it. After **Reset network**
 only that client starts and everything else stays paused. While a profile for
-Everyone is active, or before its first start, **Apply profile** is refused and
-nothing is saved. Stop it with **Stop for everyone**, choose **Reset network**,
-or save the choice under **Saved devices** for later. An **Apply profile**
-request during Reset or Panic is refused too. If a device-only start fails,
+Everyone runs, that client leaves Everyone and runs its own profile. While
+Everyone is saved but not running, or a saved change has not reached the network
+yet, **Apply profile** is refused and nothing is saved. Choose **Start**, choose
+**Reset network**, or save the choice under **Saved devices** for later. An
+**Apply profile** request during Reset or Panic is refused too. If a device-only start fails,
 JitterSim resets the Pi and retries that reset when needed.
 
 Click **Protect** to protect a connected client from every profile,

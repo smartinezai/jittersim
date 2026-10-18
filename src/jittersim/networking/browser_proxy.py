@@ -76,6 +76,12 @@ def _check_mac_access(policy: MacPolicy, client_mac: Optional[str]) -> None:
         raise ProxyError("client is blocked by global access rules")
 
 
+def _runs_beside_everyone(plan: NetworkPlan, client_ip: IPv4Address) -> bool:
+    """A device that opted out of Everyone has its own rules in the same plan."""
+
+    return any(rule.ipv4_address == client_ip for rule in plan.mark_rules)
+
+
 def select_mark(
     plan: Optional[NetworkPlan],
     *,
@@ -102,7 +108,7 @@ def select_mark(
             if service_list.outage_active:
                 raise ProxyError("this service is in a random outage of its service list")
             return service_list.mark, f"service-list:{service_list.list_id}"
-    if plan.general_profile is not None:
+    if plan.general_profile is not None and not _runs_beside_everyone(plan, client_ip):
         if plan.general_profile.outage_active:
             raise ProxyError("the general profile is temporarily disconnected")
         return 1, "general-profile"
@@ -144,7 +150,7 @@ def destination_allowed(
         return False
     if service_list or client_mac in plan.protected_mac_addresses:
         return True
-    if plan.general_profile is not None:
+    if plan.general_profile is not None and not _runs_beside_everyone(plan, client_ip):
         general = plan.general_profile
         return not general.outage_active and (
             general.allowed_addresses is None or destination in general.allowed_addresses
