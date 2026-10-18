@@ -70,6 +70,7 @@ a month (for example `2026-09`) was written in that month.
 | [upstream-safe-gated-notes-2026-10-10.md](upstream-safe-gated-notes-2026-10-10.md) | The Panic-gated part of the upstream-safe impairments: the helper apply report (merged) and the rollback cleanup (not merged) |
 | [design-helper-action-authorization-2026-10-09.md](design-helper-action-authorization-2026-10-09.md) | A proposal for per-caller authorization on the helper socket. Nothing is implemented |
 | [qa-report-2026-10-09.md](qa-report-2026-10-09.md) | Exploratory QA of 9 October: seven findings, which PR 126 fixed and what was left as it was (PR 107) |
+| [soak-and-resource-audit-2026-10-18.md](soak-and-resource-audit-2026-10-18.md) | The soak harness (`tests/soak/`), leaks and SD-card writes over time, the memory and CPU budget of each service on a Pi 3B+, three fixes and the proposals left |
 
 ### Release records
 

@@ -444,8 +444,14 @@ def run(*, minutes, browsers, out, speed=1.0, actions_every=30.0, sample_seconds
         for thread in threads:
             thread.start()
         deadline = time.monotonic() + minutes * 60
-        while time.monotonic() < deadline and process.poll() is None:
-            time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+        interrupted = False
+        try:
+            while time.monotonic() < deadline and process.poll() is None:
+                time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+        except KeyboardInterrupt:
+            # Ctrl-C ends a long run early (the target got it too and stops cleanly). The
+            # report covers the time it ran.
+            interrupted = True
         alive = process.poll() is None
         stop.set()
         for thread in threads:
@@ -466,7 +472,7 @@ def run(*, minutes, browsers, out, speed=1.0, actions_every=30.0, sample_seconds
     final = json.loads(final_path.read_text()) if final_path.exists() else {}
     problems, figures = judge(samples, final, results, warmup=warmup_seconds, limits=limits,
                               seconds=seconds)
-    if not alive:
+    if not alive and not interrupted:
         problems.insert(0, "the target process stopped during the run (exit %s)" % process.returncode)
     if not final:
         problems.append("the target wrote no final report")
