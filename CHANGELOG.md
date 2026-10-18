@@ -78,3 +78,6 @@ next release takes them over.
 - The dashboard has a new look: layered dark surfaces, a type scale, an icon
   beside each page link, a logo mark and short motion that stops under reduced
   motion. Nothing behaves differently.
+- The installer checks the management firewall after it turns off a newly
+  installed Unbound and hostapd, so a failed check no longer leaves them running.
+  The firewall unit stops a stuck `nft` within under a minute.
