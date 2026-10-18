@@ -4,8 +4,11 @@ Tests here run real `tc`, `nft`, Unbound and friends inside network namespaces.
 They are skipped unless `JITTERSIM_KERNEL_TESTS=1` is set on Linux as root, so a
 normal `pytest` run on a Mac skips them.
 
-- `run-in-docker.sh`: the datapath and access tests (`test_datapath.py`,
-  `test_access.py`) plus the smoke check, in one privileged container.
+- `run-in-docker.sh`: every test here except the outage lab (among them
+  `test_datapath.py`, `test_access.py` and the Panic crash matrix
+  `test_panic_crash_matrix.py`, about six minutes, see
+  `docs/panic-crash-matrix-2026-10-18.md`) plus the smoke check, in one
+  privileged container.
 - `run-outage-lab.sh [output-dir] [unittest selection]`: the Pi-only cutover lab
   (`test_outage_lab.py`, built on `outage_lab.py`). About 15 minutes. It also
   needs `JITTERSIM_OUTAGE_LAB=1`, which only its image (`Dockerfile.outage-lab`,

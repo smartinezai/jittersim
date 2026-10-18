@@ -450,8 +450,15 @@ class PanicCrashMatrixTests(unittest.TestCase):
             self.fresh_state()
             service = self.helper()
             outcome, _ = self.apply_until(payload, service, **{f"{inject}_at": step})
+            before = ""
             if stop != "panic":
                 service = self.helper(restart=True)
+                # Recorded, not asserted: what the restarted helper holds before
+                # anyone presses Panic or Reset.
+                plan_file = (self.directory / "state" / "active-plan.json").exists()
+                before = (f"before the stop: {len(self.leftovers(household=False))} "
+                          f"experiment objects, active plan file "
+                          f"{'present' if plan_file else 'absent'}")
             answer = service.handle_payload(
                 {"action": "reset" if stop == "reset" else "normal-access"})
             household = stop != "reset"
@@ -466,7 +473,8 @@ class PanicCrashMatrixTests(unittest.TestCase):
                 else "DEFECT"
             print(f"MATRIX|{name}|{inject}|{stop}|{step}|{command}|{outcome}|"
                   f"{'ok' if answer.get('ok') else answer.get('error')}|"
-                  f"{'; '.join(leftovers + traffic_problems) or '-'}|{verdict}", flush=True)
+                  f"{'; '.join(leftovers + traffic_problems) or '-'}|{verdict}"
+                  f"{'|' + before if before else ''}", flush=True)
             if verdict != "clean":
                 failures.append((step, command, outcome, answer, leftovers, traffic_problems))
             if stop == "reset":
@@ -589,6 +597,38 @@ class PanicCrashMatrixTests(unittest.TestCase):
                 # The stall ends and Panic is pressed again.
                 self.assertTrue(service.handle_payload({"action": "normal-access"})["ok"])
                 self.assert_normal(f"after a stalled {name} and a second Panic")
+
+    @unittest.expectedFailure
+    def test_a_restart_after_an_interrupted_apply_removes_what_nothing_owns(self) -> None:
+        """Defect D1 (docs/panic-crash-matrix-2026-10-18.md), in Panic-pinned helper.py.
+
+        The helper dies during an apply after the experiment table and most
+        queues are in place. systemd restarts it. The restarted helper has no
+        published plan (active-plan.json is written only after a complete
+        apply), so it reports that nothing runs, yet device a is still shaped
+        until someone presses Panic or Reset. The proposed fix marks an apply in
+        progress and removes its state at start (release_interrupted_apply_at_start).
+        Remove this marker when that fix lands.
+        """
+
+        from jittersim.networking import helper as helper_module
+
+        payload = {"action": "apply", "plan": plan_to_payload(heavy_plan())}
+        steps = self.count_steps(payload)
+        self.fresh_state()
+        # Before the last queue command: the tables and nearly every queue are in.
+        outcome, _ = self.apply_until(payload, self.helper(), crash_at=len(steps) - 1)
+        self.assertEqual(outcome, "crashed")
+        restarted = self.helper(restart=True)
+        release = getattr(helper_module, "release_interrupted_apply_at_start", None)
+        if release is not None:
+            release(restarted)
+        self.assertIsNone(restarted._current_plan())
+        # The saved household rules come back at start by design; only the
+        # experiment must be gone.
+        self.assertEqual(self.leftovers(household=False), [],
+                         "the restarted helper keeps an unowned plan")
+        self.assertEqual(self.traffic_problems(((CLIENT, DEVICE_A),)), [])
 
     def test_without_the_ifb_module(self) -> None:
         payload = {"action": "apply", "plan": plan_to_payload(heavy_plan())}

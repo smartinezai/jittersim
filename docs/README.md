@@ -67,6 +67,7 @@ a month (for example `2026-09`) was written in that month.
 | [dependency-audit-2026-10-09.md](dependency-audit-2026-10-09.md) | The 22 pip-audit findings in the release locks: reachability, fixes and what was left |
 | [outage-lab-results-2026-10-09.md](outage-lab-results-2026-10-09.md) | The Pi-only cutover rebuilt in network namespaces: 16 scenarios, one per failure mode of the outage dossier (PR 120) |
 | [carry-forward-panic-batch-2026-10-10.md](carry-forward-panic-batch-2026-10-10.md) | What the reviews of the combined Panic batch (PR 136) found and left open, and the owner action after a rollback from the first upload-safe release |
+| [panic-crash-matrix-2026-10-18.md](panic-crash-matrix-2026-10-18.md) | Panic and Reset in the kernel lab after a crash, a failure or a stall at every step of a heavy apply: results and one defect in a Panic-pinned file |
 | [upstream-safe-gated-notes-2026-10-10.md](upstream-safe-gated-notes-2026-10-10.md) | The Panic-gated part of the upstream-safe impairments: the helper apply report (merged) and the rollback cleanup (not merged) |
 | [design-helper-action-authorization-2026-10-09.md](design-helper-action-authorization-2026-10-09.md) | A proposal for per-caller authorization on the helper socket. Nothing is implemented |
 | [qa-report-2026-10-09.md](qa-report-2026-10-09.md) | Exploratory QA of 9 October: seven findings, which PR 126 fixed and what was left as it was (PR 107) |
