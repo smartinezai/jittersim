@@ -88,7 +88,7 @@ def test_instrument_books_changed_and_unchanged_commits(tmp_path):
 
 def test_short_real_soak(tmp_path):
     report = harness.run(
-        minutes=0.15, browsers=3, out=tmp_path, speed=10, actions_every=0.4, sample_seconds=0.5,
+        minutes=0.2, browsers=3, out=tmp_path, speed=10, actions_every=0.1, sample_seconds=0.5,
         warmup_seconds=2, page_seconds=2,
         # Seconds of run cannot show a trend, and a loaded CI machine is slow: only the
         # leaks that show at once fail here.

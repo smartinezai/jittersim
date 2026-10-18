@@ -99,8 +99,18 @@ code of `8c3f8171` (plain HTTP, the TLS option came later). "After" ran this bra
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | before, real load | 32 min | 4 tabs, owner action every 30 s | 14,298 | 10, 10, 11 | 6, 6 | 0 of 5,335 | 393 kB, 578 kB | 2.0 ms, 1.5 ms |
 | before, 5x load, tracemalloc | 30 min | 6 tabs at 5x, owner action every 3 s | 99,630 | 10, 10, 13 | 6, 6 | 0 of 23,611 | 606 kB, 1,356 kB | 5.1 ms, 4.8 ms |
-| after, real load | AFTER_REAL |
-| after, 5x load | AFTER_FAST |
+| after, real load, HTTPS | 30 min | 4 tabs, owner action every 30 s | 13,252 | 11, 11, 12 | 6, 6 | 0 of 5,299 | 410 kB, 586 kB | 13.7 ms, 20.2 ms |
+| after, 5x load, HTTPS | 25 min | 6 tabs at 5x, owner action every 3 s | 81,595 | 11, 11, 14 | 6, 6 | 0 of 19,992 | 614 kB, 1,237 kB | 28.8 ms, 9.8 ms |
+
+The Python heap, sampled in the after runs: 192,781 to 197,812 allocated blocks at real load
+(+2.6% in 27 minutes) and 204,011 to 208,054 at 5x load (+2%), with the garbage collector's
+object count flat at about 36,500 in both. That is caches settling, not a leak: the 5x run made
+six times as many requests and grew no more.
+
+The two after runs ran at the same time on the same Mac, and the soak's throwaway certificate
+is RSA and its clients never resume a TLS session. That made the HTTPS runs slower and costlier
+than the Pi: the Pi's certificate is ECDSA P-256 (`localca.py`), browsers resume sessions, and
+the before runs used plain HTTP. Compare latency within a run, not between runs.
 
 The database growth in each run is the history tables filling up to their caps (settings
 history reached its 20 versions, action history its 500 rows in the 5x run). tracemalloc over
@@ -140,6 +150,8 @@ schema statements an hour (`jittersim-scheduler engine/runtime.py:_tick` under `
 SQLite does not touch the file for an empty commit, so this was CPU and not SD wear. A
 microbenchmark of 300 ticks on the seeded database: 1.63 ms CPU per tick with a new connection,
 0.62 ms with the kept one.
+In the after runs the scheduler opened its connection once per run (4 empty commits at the
+first tick) and booked no schema work after that.
 
 What still writes to the SD card on a schedule (from reading the code, the fixture has no
 traffic counters):
@@ -204,6 +216,7 @@ scheduler, once a tick), `ping` 1,555 (every health poll), `clients` 816, `traff
 | 8 | Service watch imports the whole helper module for `HelperClient` | 14 MB heap, of which the client needs a small part | move `HelperClient` to its own module (needs a change to `networking/helper.py`, which is pinned) | proposed, pinned |
 | 9 | Time quotas write every 5 s while quiet | 720 commits an hour per enabled time quota | keep `last_sample_at` in memory and write it only with a change of the usage | proposed |
 | 10 | Rollback journal with full sync | every changed commit is 3 or more syncs | WAL with `synchronous = NORMAL`. It needs care: other users read the database (the CLI and the update scripts) and WAL needs write access to the folder for its `-shm` file | proposed, owner decision |
+| 11 | Every request is a new TLS connection (the server speaks HTTP/1.0 and closes after each answer, which keeps a worker per request) | one handshake per poll, 7 a second with 4 tabs; ECDSA keys and session resumption keep it small | measure the handshake share on the Pi with the budget and soak scripts before changing anything | measure first |
 
 Proposal 8 is the only one that touches a Panic-pinned file. It is not needed for stability. If
 the owner wants it, the smallest patch is a new module `jittersim/networking/helper_client.py`

@@ -22,7 +22,6 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
-
 from jittersim.diagnostic_privacy import configure_logging
 from jittersim.panic_guard import PanicGuard
 
@@ -486,7 +485,7 @@ def healthy():
 def download_bytes():
     # Imported here: only the short-lived --fetch-domains child downloads. Every process that
     # imports jittersim.networking loads this module, and requests with its TLS stack costs
-    # about 15 MB of memory in each of them (soak audit 2026-10-18).
+    # about 5 MB of Python heap in each of them (soak audit 2026-10-18).
     import requests
 
     deadline = time.monotonic() + MAX_DOWNLOAD_SECONDS
