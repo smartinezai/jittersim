@@ -141,6 +141,16 @@ def test_every_listed_module_exists_and_is_runnable():
         assert "__main__" in source, name
 
 
+def test_no_browser_module_is_named_like_a_pytest_file():
+    # The release image runs `pytest -q` over tests/ and has no Playwright. A browser module named
+    # test_*.py or *_test.py would be collected there and fail to import.
+    collected = sorted(
+        path.name for path in (ROOT / "tests" / "browser").glob("*.py")
+        if path.name.startswith("test_") or path.stem.endswith("_test")
+    )
+    assert collected == []
+
+
 def test_the_list_command_prints_the_workflow_modules():
     result = run_script("list")
     assert result.returncode == 0, result.stderr

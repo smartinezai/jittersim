@@ -45,6 +45,9 @@ class DashboardWifiExecutor(WifiExecutor):
         super().__init__()
         self.queue_reads = {}
         self.queue_started = {}
+        # The child queue an apply put under each band: {interface: {parent: (kind, handle)}}.
+        # A band whose profile direction sets nothing gets a fair queue, not a netem.
+        self.queue_children = {}
         # The server stamps each sample with time.time(), so the byte counter uses the same clock.
         self.clock = clock
 
@@ -90,9 +93,12 @@ class DashboardWifiExecutor(WifiExecutor):
             reads = self.queue_reads[interface] = self.queue_reads.get(interface, 0) + 1
             now = self.clock()
             queue_bytes = int(QUEUE_KBIT_PER_SECOND * 125 * (now - self.queue_started.setdefault(interface, now)))
+            children = self.queue_children.get(interface, {})
             queues = [
                 {
-                    "kind": "netem", "handle": queue_handle(mark), "parent": queue_parent(mark),
+                    "kind": children.get(queue_parent(mark), ("netem",))[0],
+                    "handle": children.get(queue_parent(mark), (None, queue_handle(mark)))[1],
+                    "parent": queue_parent(mark),
                     "bytes": queue_bytes, "packets": 100 * reads, "drops": 11 * reads,
                     "overlimits": 0, "requeues": 0, "backlog": 0, "qlen": 0,
                 }
@@ -105,6 +111,11 @@ class DashboardWifiExecutor(WifiExecutor):
             if "root" in command.arguments:
                 self.queue_reads.pop(command.arguments[3], None)
                 self.queue_started.pop(command.arguments[3], None)
+                self.queue_children.pop(command.arguments[3], None)
+            elif command.arguments[1] == "replace" and command.arguments[4:5] == ("parent",) \
+                    and command.arguments[6:7] == ("handle",) and len(command.arguments) > 8:
+                self.queue_children.setdefault(command.arguments[3], {})[command.arguments[5]] = (
+                    command.arguments[8], command.arguments[7])
         return super().run(command)
 
 
@@ -252,7 +263,57 @@ def allow_wide_fonts_style():
     )
 
 
+class FixtureProber:
+    """Answers the speed test's echo probes without sending any packet.
+
+    The developer's machine may itself sit on a 192.168.50.0/24 network, so the fixture must
+    never let the real prober reach a real device.
+    """
+
+    def __init__(self, target):
+        self.sent = 0
+
+    def send(self):
+        self.sent += 1
+
+    def collect(self, until):
+        pass
+
+    def summary(self):
+        return {"status": "measured", "sent": self.sent, "received": self.sent,
+                "loss_percent": 0.0 if self.sent else None, "rtt_min_ms": 11.0,
+                "rtt_median_ms": 12.0, "rtt_p90_ms": 14.0, "rtt_max_ms": 15.0}
+
+    def close(self):
+        pass
+
+
 class FixtureServer(ControlServer):
+    speed_test_prober_factory = FixtureProber
+
+    def write_response_for(self, path, payload):
+        response = super().write_response_for(path, payload)
+        if path != "/api/speed-tests/start" or payload.get("label") != "Fixture fault":
+            return response
+        status, _, body = response
+        if status != 201:
+            return response
+
+        run_id = json.loads(body)["id"]
+        manager = self._speed_test_manager
+        run = manager.runs[run_id]
+        read_queues = manager._read_queues
+
+        def fail_this_run():
+            current = manager.runs.get(run_id)
+            if current is not None and current.state == "running":
+                raise HelperClientError("fixture queue read failed")
+            return read_queues()
+
+        manager._read_queues = fail_this_run
+        run.deadline = time.monotonic() + 2.5
+        return response
+
     def response_for(self, path, query=""):
         status, content_type, body = super().response_for(path, query)
         if path == "/" and os.environ.get("JITTERSIM_BROWSER_TEST_WIDE_FONTS") == "1":

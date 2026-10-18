@@ -271,11 +271,15 @@
     const REQUEST_TIMEOUT_MS = 15000;
 
     const SLOW_REQUEST_TIMEOUT_MS = 45000;
+    const SPEED_TEST_START_TIMEOUT_MS = 75000;
 
     // Applying, resetting and anything that talks to the router or Wi-Fi can take a while.
     const SLOW_REQUEST_PATHS = /^\/api\/(apply|reset|normal-access|general-profile|router|wifi|release|import)/;
 
     function requestTimeoutMs(path, method) {
+      if (path === "/api/speed-tests/start" && method === "POST") {
+        return SPEED_TEST_START_TIMEOUT_MS;
+      }
       const slow = SLOW_REQUEST_PATHS.test(path) && (method !== "GET" || /^\/api\/(router|wifi)/.test(path));
       return slow ? SLOW_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
     }
@@ -2516,6 +2520,8 @@
       const steady = running && (state === "applied" || state === "unknown");
       // A device-only start runs its own devices. Everyone and the rest stay paused.
       const deviceOnly = Array.isArray(input.deviceOnly) ? input.deviceOnly : [];
+      // While Everyone runs, these saved devices run their own profile beside it.
+      const everyoneExceptions = Array.isArray(input.everyoneExceptions) ? input.everyoneExceptions : [];
       const generalInEffect = !!generalProfile && steady && deviceOnly.length === 0 &&
         (generalState.active === true || state === "unknown");
       const generalName = generalProfile ? generalProfile.name || generalProfile.id : "";
@@ -2554,7 +2560,13 @@
         const affected = generalInEffect
           ? clients
               .filter((client) => !client.unaffected && client.association_verified !== false)
-              .map((client) => ({name: nameOf(client), profile: generalName}))
+              .map((client) => ({
+                name: nameOf(client),
+                profile: client.assigned_device_id &&
+                  everyoneExceptions.includes(client.assigned_device_id)
+                  ? profileNameOf(client.group_profile_id || client.assigned_profile_id)
+                  : generalName
+              }))
           : clients
               .filter((client) => !client.unaffected && client.assigned_device_id &&
                 client.assigned_effective_state !== "unverified" &&
@@ -2620,6 +2632,7 @@
         running: !!lastRuntimeState && lastRuntimeState.running === true,
         lastAction: lastRuntimeState ? lastRuntimeState.last_action : null,
         deviceOnly: lastRuntimeState ? lastRuntimeState.device_only : null,
+        everyoneExceptions: lastRuntimeState ? lastRuntimeState.everyone_exceptions : null,
         generalState: generalProfileState,
         profiles,
         clients: connectedClients,
@@ -2764,6 +2777,15 @@
           tone: "ok"
         };
       }
+      const beside = Array.isArray(options.everyoneExceptions) ? options.everyoneExceptions.length : 0;
+      if (running === true && beside > 0 && (state === "applied" || state === "unknown")) {
+        return {
+          text: "Running. Everyone covers all devices except " + beside +
+            (beside === 1 ? " device that runs its own profile" : " devices that run their own profile") +
+            ". Start puts them back on Everyone.",
+          tone: "ok"
+        };
+      }
       if (running === true) {
         if (state === "applied") {
           return {
@@ -2864,6 +2886,7 @@
         {
           lastAction: lastRuntimeState.last_action,
           deviceOnly: lastRuntimeState.device_only,
+          everyoneExceptions: lastRuntimeState.everyone_exceptions,
           helperConfigured: helperKnown ? helperConfigured : true
         }
       );
@@ -3015,7 +3038,8 @@
           device.general_profile_name ? "Same as everyone: " + device.general_profile_name +
             " · Shared speed limit" :
           "Profile: " + (device.assigned_profile_id ? savedProfileName(device.assigned_profile_id) : "None") +
-          (device.group_name ? " · Group: " + device.group_name + (device.group_profile_id ? " (override: " + savedProfileName(device.group_profile_id) + ")" : "") : "");
+          (device.group_name ? " · Group: " + device.group_name + (device.group_profile_id ? " (override: " + savedProfileName(device.group_profile_id) + ")" : "") : "") +
+          (device.beside_everyone ? " · Runs its own profile while Everyone covers the rest" : "");
         details.append(address, metadata, deviceType, assignmentInfo);
         connectedRowHooks.forEach((hook) => hook(device, details));
         if (device.hostname) {
