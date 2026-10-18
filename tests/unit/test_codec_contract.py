@@ -348,6 +348,28 @@ def test_devices_beside_the_general_profile_are_written_with_exactly_these_field
     assert wire(beside_everyone_plan()) == beside_everyone_payload()
 
 
+def test_a_quota_may_take_mark_2_beside_the_general_profile():
+    # Only mark 1 belongs to Everyone. The decoder checks the range of a quota mark, not who
+    # holds the lower marks, so a quota on mark 2 and a device on mark 3 are both fine.
+    payload = beside_everyone_payload()
+    payload["mark_rules"] = payload["mark_rules"][:1]
+    payload["blocked_device_addresses"] = []
+    payload["service_list_rules"] = []
+    payload["queues"] = [item for item in payload["queues"]
+                         if item["device_id"] in ("general-profile", "alice")]
+    payload["service_quota_rules"] = [{
+        "quota_id": "alice-video", "device_id": "alice", "device_ip": "192.168.50.10",
+        "destination_addresses": ["203.0.113.10"], "mark": 2,
+        "upload_impairment": imp(delay_ms=200), "download_impairment": imp(loss_percent=5),
+        "active": True, "homepage_bounce_percent": 11,
+    }]
+    payload["queues"] += [queue("quota:alice-video", "upload", 2, imp(delay_ms=200)),
+                          queue("quota:alice-video", "download", 2, imp(loss_percent=5))]
+    plan = decode(payload)
+    assert [rule.mark for rule in plan.service_quota_rules] == [2]
+    assert [rule.mark for rule in plan.mark_rules] == [3]
+
+
 def test_devices_beside_the_general_profile_are_read_back_into_the_plan():
     plan = decode(beside_everyone_payload())
     assert plan == beside_everyone_plan()
