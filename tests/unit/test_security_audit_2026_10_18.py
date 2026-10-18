@@ -127,3 +127,31 @@ class ProxyRequestDeadlineTests(unittest.TestCase):
         client_side.sendall(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\nhello")
         host, first = browser_proxy._read_connect_request(server_side)
         self.assertEqual((host, first), ("example.com", b"hello"))
+
+
+class CrossOriginHeaderTests(unittest.TestCase):
+    """A4: every dashboard answer stays with the dashboard's own site."""
+
+    def test_every_answer_carries_the_cross_origin_headers(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        repository = ConfigRepository(Path(directory.name) / "settings.db")
+        self.addCleanup(repository.close)
+        server = ControlServer(("127.0.0.1", 0), repository, admin_token="admin-token")
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.shutdown)
+        import http.client
+
+        for path, token in (("/", None), ("/api/health", None), ("/api/state", None),
+                            ("/api/state", "admin-token")):
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+            headers = {"Authorization": "Bearer " + token} if token else {}
+            connection.request("GET", path, headers=headers)
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+            self.assertEqual(response.getheader("Cross-Origin-Opener-Policy"), "same-origin", path)
+            self.assertEqual(response.getheader("Cross-Origin-Resource-Policy"), "same-origin", path)

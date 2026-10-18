@@ -6492,6 +6492,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        # Another site cannot keep a handle on a dashboard window it opened, nor
+        # embed a dashboard answer in its own page (security audit 2026-10-18, A4).
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         if content_type.startswith("text/html"):
             self.send_header("Content-Security-Policy", DASHBOARD_CONTENT_SECURITY_POLICY)
         for name, value in (headers or {}).items():
