@@ -124,15 +124,17 @@ def access_plan():
     )
 
 
-def general_plan(**rule):
+def general_plan(devices=(), blocked=(), **rule):
+    """Everyone, with the given devices running their own profile beside it (PR 149)."""
+
     general = dict(profile_id="heavy", allowed_addresses=(A("203.0.113.9"), A("203.0.113.3")),
                    outage_active=True)
     general.update(rule)
     return compile_plan(
-        devices=(), profiles=PROFILES, protected_mac_addresses=PROTECTED,
+        devices=devices, profiles=PROFILES, protected_mac_addresses=PROTECTED,
         general_profile=GeneralProfileRule(**general), service_list_rules=LISTS,
         mac_policy=MacPolicy(mode="allowlist", allowlist=("aa:bb:cc:dd:ee:01",)),
-        global_blocked_addresses=(A("203.0.113.8"),),
+        global_blocked_addresses=(A("203.0.113.8"),), blocked_device_addresses=blocked,
     )
 
 
@@ -220,7 +222,10 @@ def live(previous, plan, upload_device=None):
 
 
 def scenarios():
-    """Each scenario is built when its test runs, not when the module is imported."""
+    """Each scenario is a function that renders its text when its test runs.
+
+    The plans the functions use are built once, when the module is imported.
+    """
 
     full = full_plan()
     quota_without_lists = full_plan(service_list_rules=(), everyone_else=None)
@@ -253,6 +258,9 @@ def scenarios():
         "general-with-outage-and-destinations": lambda: dump(render_command_plan(
             plan=general_plan(), topology=TOPOLOGY, service_addresses=ADDRESSES,
             upload_device=UPLOAD_DEVICE)),
+        "general-with-two-devices-on-their-own-profiles": lambda: dump(render_command_plan(
+            plan=general_plan(devices=(DEVICES[1], DEVICES[2]), blocked=(A("192.168.50.12"),)),
+            topology=TOPOLOGY, service_addresses=ADDRESSES, upload_device=UPLOAD_DEVICE)),
         "general-with-an-empty-allowlist": lambda: dump(render_command_plan(
             plan=general_plan(allowed_addresses=(), outage_active=False), topology=TOPOLOGY)),
         "general-open": lambda: dump(render_command_plan(
@@ -327,7 +335,7 @@ SCENARIOS = scenarios()
 def test_the_renderer_writes_exactly_these_commands(name):
     path = FIXTURES / f"{name}.txt"
     text = SCENARIOS[name]()
-    if os.environ.get("JITTERSIM_UPDATE_GOLDEN") == "1":
+    if os.environ.get("JITTERSIM_UPDATE_GOLDEN") == "1" and not os.environ.get("CI"):
         FIXTURES.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     assert path.read_text(encoding="utf-8") == text

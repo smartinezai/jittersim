@@ -221,14 +221,18 @@ def test_the_floor_only_goes_up(tmp_path):
     assert stored_floor(root) == {"sequence": 6}
 
 
-def test_an_equal_or_lower_sequence_does_not_rewrite_the_floor_file(tmp_path):
+def test_an_equal_or_lower_sequence_does_not_rewrite_the_floor_file(tmp_path, monkeypatch):
     root, _ = floor_folders(tmp_path)
     updates._raise_floor(root, 5)
-    before = (root / updates.FLOOR_NAME).stat()
+    writes = []
+    real = updates.atomic_json
+    monkeypatch.setattr(
+        updates, "atomic_json", lambda path, value: writes.append(value) or real(path, value))
     updates._raise_floor(root, 5)
     updates._raise_floor(root, 3)
-    after = (root / updates.FLOOR_NAME).stat()
-    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert writes == []
+    updates._raise_floor(root, 6)
+    assert writes == [{"sequence": 6}]
 
 
 def test_a_floor_record_that_is_not_valid_is_replaced(tmp_path):
@@ -967,4 +971,3 @@ def test_the_fingerprint_of_a_release_changes_with_each_part_of_it():
               updates._parse_release(other_archive)["fingerprint"],
               updates._parse_release(other_signature)["fingerprint"]}
     assert len(prints) == 5
-

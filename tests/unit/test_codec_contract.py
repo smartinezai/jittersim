@@ -299,6 +299,64 @@ def test_a_general_profile_payload_is_read_back_into_the_plan():
     assert decode(GENERAL) == general_plan()
 
 
+OWN = Profile(
+    "own", "Own", upload=Impairment(delay_ms=900), download=Impairment(delay_ms=800),
+)
+
+
+def beside_everyone_plan():
+    """Everyone runs one profile while two devices opt out and run their own (PR 149)."""
+
+    return compile_plan(
+        devices=(
+            Device("alice", "Alice", "192.168.50.10", "own"),
+            Device("bob", "Bob", "192.168.50.11", "own"),
+        ),
+        profiles={"slow": SLOW, "own": OWN},
+        protected_mac_addresses=("02:00:00:00:00:aa",),
+        general_profile=GeneralProfileRule("slow", (A("203.0.113.9"), A("203.0.113.3")), True),
+        service_list_rules=(ServiceListRule(
+            "games", ("games.example.com",), 0, Impairment(delay_ms=220),
+            Impairment(loss_percent=7), homepage_bounce_percent=13,
+        ),),
+        blocked_device_addresses=(A("192.168.50.11"),),
+        access=AccessPlan(),
+    )
+
+
+def beside_everyone_payload():
+    """GENERAL with two devices beside Everyone. The list keeps mark 2, the devices follow it."""
+
+    payload = deepcopy(GENERAL)
+    payload["mark_rules"] = [
+        {"device_id": "alice", "ipv4_address": "192.168.50.10", "mark": 3,
+         "homepage_bounce_percent": 0},
+        {"device_id": "bob", "ipv4_address": "192.168.50.11", "mark": 4,
+         "homepage_bounce_percent": 0},
+    ]
+    payload["queues"][2:2] = [
+        queue("alice", "upload", 3, imp(delay_ms=900)),
+        queue("alice", "download", 3, imp(delay_ms=800)),
+        queue("bob", "upload", 4, imp(delay_ms=900)),
+        queue("bob", "download", 4, imp(delay_ms=800)),
+    ]
+    payload["blocked_device_addresses"] = ["192.168.50.11"]
+    return payload
+
+
+def test_devices_beside_the_general_profile_are_written_with_exactly_these_fields():
+    assert wire(beside_everyone_plan()) == beside_everyone_payload()
+
+
+def test_devices_beside_the_general_profile_are_read_back_into_the_plan():
+    plan = decode(beside_everyone_payload())
+    assert plan == beside_everyone_plan()
+    assert plan.general_profile.profile_id == "slow"
+    assert [(rule.device_id, rule.mark) for rule in plan.mark_rules] == [("alice", 3), ("bob", 4)]
+    assert [rule.mark for rule in plan.service_list_rules] == [2]
+    assert plan.blocked_device_addresses == (A("192.168.50.11"),)
+
+
 def test_writing_a_plan_does_not_change_it():
     plan = individual_plan()
     plan_to_payload(plan)
@@ -1130,15 +1188,15 @@ GENERAL_REFUSALS = [
      "general profile destinations must be IPv4 strings"),
     ("a destination is bad", edit(["general_profile", "allowed_addresses"], ["999.1.1.1"]),
      "general profile destinations are invalid"),
-    ("general profile beside a device", add_to(MARKS, {
+    ("general profile beside a device that takes mark 1", add_to(MARKS, {
         "device_id": "alice", "ipv4_address": "192.168.50.10", "mark": 1}),
-     "a general profile cannot contain individual profile rules"),
+     "mark 1 belongs to the general profile"),
+    ("general profile beside a device with the queue identity of the general profile",
+     add_to(MARKS, {"device_id": "general-profile", "ipv4_address": "192.168.50.10", "mark": 3}),
+     "a device cannot use the general profile's queue identity"),
     ("general profile beside everyone else", edit(EVERYONE, {
         "mark": 3, "upload_impairment": imp(), "download_impairment": imp()}),
      "a profile set for Everyone already covers everyone else"),
-    ("general profile beside blocked devices", edit(["blocked_device_addresses"],
-                                                    ["192.168.50.10"]),
-     "a general profile cannot contain individual profile filters"),
     ("general profile beside a website filter", edit(["website_filters"], [
         {"device_ip": "192.168.50.10"}]),
      "website_filters[0] references an unknown device"),
@@ -1154,10 +1212,11 @@ def test_the_decoder_refuses_a_general_profile_plan(case):
     refused(payload, message)
 
 
-def test_a_general_profile_beside_a_device_and_its_rules_is_refused():
+def test_a_general_profile_beside_devices_that_take_mark_1_is_refused():
+    # INDIVIDUAL gives mark 1 to alice, and mark 1 is the queue of Everyone.
     payload = deepcopy(INDIVIDUAL)
     payload["general_profile"] = deepcopy(GENERAL["general_profile"])
-    refused(payload, "a general profile cannot contain individual profile rules")
+    refused(payload, "mark 1 belongs to the general profile")
 
 
 def test_general_profile_destinations_may_be_empty_or_missing_as_none():
