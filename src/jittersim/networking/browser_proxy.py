@@ -12,7 +12,7 @@ from concurrent.futures import CancelledError, Future
 from concurrent.futures import TimeoutError as FutureTimeout
 from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
-from typing import Callable, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Optional, Sequence, Set, Tuple
 
 from jittersim.diagnostic_privacy import SafeServerErrors, configure_logging
 
@@ -32,6 +32,14 @@ CONNECT_TIMEOUT_SECONDS = 10
 RESOLVE_TIMEOUT_SECONDS = 5
 IDLE_TIMEOUT_SECONDS = 300
 COPY_BYTES = 64 * 1024
+# Every connection holds one slot from accept to close, whatever stage it is in.
+MAX_CONNECTIONS = 32
+# One device may hold at most half of them. Idle tunnels live for minutes, so
+# without a share one device could fill every slot (security audit 2026-10-18,
+# finding A5). A browser normally needs far fewer.
+MAX_CONNECTIONS_PER_CLIENT = 16
+# A device at its limit may retry in a loop. One log line in this time is enough.
+CLIENT_LIMIT_LOG_SECONDS = 30
 
 # Server recreation must not multiply workers whose system lookup is still running.
 _lookup_pool = BoundedLookupPool(workers=8, name="proxy-dns")
@@ -39,6 +47,37 @@ _lookup_pool = BoundedLookupPool(workers=8, name="proxy-dns")
 
 class ProxyError(RuntimeError):
     """Raised when a browser tunnel cannot be accepted safely."""
+
+
+class _ClientSlots:
+    """How many connections each client address holds, with one shared limit."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._lock = threading.Lock()
+        self._held: Dict[str, int] = {}
+
+    def take(self, address: str) -> bool:
+        """Count one more connection for the address, unless it is at the limit."""
+
+        with self._lock:
+            held = self._held.get(address, 0)
+            if held >= self._limit:
+                return False
+            self._held[address] = held + 1
+            return True
+
+    def release(self, address: str) -> None:
+        with self._lock:
+            held = self._held.get(address, 0)
+            if held > 1:
+                self._held[address] = held - 1
+            else:
+                self._held.pop(address, None)
+
+    def held(self, address: str) -> int:
+        with self._lock:
+            return self._held.get(address, 0)
 
 
 def _read_active_plan(path: Path) -> Tuple[Optional[NetworkPlan], Optional[tuple]]:
@@ -414,16 +453,26 @@ class BrowserProxyServer(SafeServerErrors, socketserver.ThreadingMixIn, socketse
         self._lookup_lock = threading.Lock()
         self._lookups: Set[Future] = set()
         self._lookup_closed = False
-        self.connections = threading.BoundedSemaphore(32)
+        self.connections = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self.client_slots = _ClientSlots(MAX_CONNECTIONS_PER_CLIENT)
+        self._client_limit_logged = float("-inf")
         super().__init__(address, _ProxyHandler)
 
     def process_request(self, request, client_address) -> None:
         if not self.connections.acquire(blocking=False):
             request.close()
             return
+        client = client_address[0]
+        if not self.client_slots.take(client):
+            # Refused like a full proxy: the connection closes with no answer.
+            self.connections.release()
+            request.close()
+            self._log_client_limit()
+            return
         try:
             super().process_request(request, client_address)
         except BaseException:
+            self.client_slots.release(client)
             self.connections.release()
             raise
 
@@ -431,7 +480,18 @@ class BrowserProxyServer(SafeServerErrors, socketserver.ThreadingMixIn, socketse
         try:
             super().process_request_thread(request, client_address)
         finally:
+            self.client_slots.release(client_address[0])
             self.connections.release()
+
+    def _log_client_limit(self) -> None:
+        # No address, MAC address or request text: the line only says that it happened.
+        now = time.monotonic()
+        if now - self._client_limit_logged >= CLIENT_LIMIT_LOG_SECONDS:
+            self._client_limit_logged = now
+            LOGGER.warning(
+                "browser tunnel rejected: one device already holds its %d of %d tunnel slots",
+                MAX_CONNECTIONS_PER_CLIENT, MAX_CONNECTIONS,
+            )
 
     def resolve_host(self, host: str) -> list:
         """Admit bounded lookup work and cancel queued work after its request ends."""
