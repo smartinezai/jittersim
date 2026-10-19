@@ -5820,23 +5820,32 @@
       };
     }
 
-    // Checks never overlap: two share the token state and the first one's end locked the dashboard
-    // under the second. A call during a check waits for it, then checks once for every caller.
+    // Checks of one token never overlap: two share the token state and the first one's end locked
+    // the dashboard under the second. A call during a check waits for it, then checks once for every
+    // caller. A check of an older token is already dead (it drops whatever it finds), so the first
+    // call after a token edit does not wait for it, even when it hangs.
     async function checkAdminToken() {
-      if (!adminTokenCheckRunning) return startAdminTokenCheck();
+      if (!adminTokenCheckRunning || adminTokenCheckRevision !== adminTokenRevision) {
+        return startAdminTokenCheck();
+      }
       if (!adminTokenCheckNext) {
-        adminTokenCheckNext = adminTokenCheckRunning.catch(() => {}).then(() => {
-          adminTokenCheckNext = null;
+        const queued = adminTokenCheckRunning.catch(() => {}).then(() => {
+          // A check that started at once for a newer token has taken this one's place.
+          if (adminTokenCheckNext !== queued) return adminTokenCheckRunning;
           return startAdminTokenCheck();
         });
+        adminTokenCheckNext = queued;
       }
       return adminTokenCheckNext;
     }
 
     let adminTokenCheckRunning = null;
+    let adminTokenCheckRevision = -1;
     let adminTokenCheckNext = null;
 
     function startAdminTokenCheck() {
+      adminTokenCheckNext = null;
+      adminTokenCheckRevision = adminTokenRevision;
       const run = runAdminTokenCheck().finally(() => {
         if (adminTokenCheckRunning === run) adminTokenCheckRunning = null;
       });
@@ -6667,7 +6676,8 @@
       try {
         await request("/api/homepage/revoke", "POST", {});
         if (!homepageRequestCurrent(owner)) return;
-        element("homepage-code").textContent = "All homepage pairings revoked.";
+        // Not written into #homepage-code as well: an <output> is a live region of its own, so a
+        // screen reader would hear the result twice. The output speaks the pairing code only.
         showMessage("All homepage pairings revoked.", "success");
       } catch (error) {
         if (homepageRequestCurrent(owner)) showMessage(error.message, "error");
@@ -9854,8 +9864,9 @@
 
     element("copy-measurements").addEventListener("click", async () => {
       const runs = measurementRuns;
-      await copyReport(measurementMarkdown(runs), "Measurement table");
-      keptMeasurementRuns = runs;
+      // Only a copy that worked keeps the runs. When the browser refuses the clipboard the text is
+      // offered to select instead, and nothing says it was copied.
+      if (await copyReport(measurementMarkdown(runs), "Measurement table")) keptMeasurementRuns = runs;
     });
 
     element("clear-measurements").addEventListener("click", async (event) => {

@@ -9,7 +9,9 @@ import pytest
 from jittersim.api.server import DASHBOARD_HTML
 
 
-def test_token_checks_and_edits_release_all_private_loading_states():
+def run_token_case(checks):
+    """Run `checks` in Node against the token check functions that the dashboard serves."""
+
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required to exercise the served dashboard")
@@ -42,6 +44,7 @@ def test_token_checks_and_edits_release_all_private_loading_states():
       let result = {ok: false, message: "rejected fixture token"};
       let failure = null;
       let accessFailure = null;
+      let accessHook = null;  // a case sets it to hold the read of the dashboard access
       function element(id) {
         if (!nodes.has(id)) nodes.set(id, {
           value: "", textContent: "pending", className: "", disabled: false,
@@ -61,7 +64,10 @@ def test_token_checks_and_edits_release_all_private_loading_states():
       function openCredentials() {}
       function stopTrafficSampling() {samplingStops++}
       async function loadAdminTools() {if (failure) throw failure; return result}
-      async function loadDashboardAccess() {if (accessFailure) throw accessFailure; return {allowed: true}}
+      async function loadDashboardAccess() {
+        if (accessFailure) throw accessFailure;
+        return (accessHook && await accessHook()) || {allowed: true};
+      }
       function setDashboardUnlocked() {}
       async function refresh() {
         refreshCalls++;
@@ -70,6 +76,19 @@ def test_token_checks_and_edits_release_all_private_loading_states():
       async function loadTrafficSettings() {}
       async function startTrafficSampling() {}
     """
+    result = subprocess.run(
+        [node, "-"],
+        input=harness + functions + listener + checks,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    # Node exits quietly with code 0 if the case hangs on a promise that never settles.
+    assert "CASE-COMPLETE" in result.stdout, "the case never finished"
+
+
+def test_token_checks_and_edits_release_all_private_loading_states():
     checks = r"""
       function assertLocked() {
         assert.equal(adminTokenVerified, false);
@@ -127,13 +146,59 @@ def test_token_checks_and_edits_release_all_private_loading_states():
         console.log("CASE-COMPLETE");
       })().catch(error => {console.error(error); process.exitCode = 1});
     """
-    result = subprocess.run(
-        [node, "-"],
-        input=harness + functions + listener + checks,
-        text=True,
-        capture_output=True,
-        timeout=10,
-    )
-    assert result.returncode == 0, result.stderr
-    # Node exits quietly with code 0 if the case hangs on a promise that never settles.
-    assert "CASE-COMPLETE" in result.stdout, "the case never finished"
+    run_token_case(checks)
+
+
+def test_a_token_edit_starts_a_new_check_while_an_older_one_hangs():
+    """A check that hangs (the Pi does not answer) must not hold up the check of an edited token.
+    It used to queue the new check behind the hung one, with no word on the page until the old
+    one gave up. The old check is dead once the token changed: what it finds is dropped."""
+
+    checks = r"""
+      const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+      const answers = [];  // the first two reads of the dashboard access, answered by the case
+      let reads = 0;
+      accessHook = () => ++reads <= 2 ? new Promise(resolve => answers.push(resolve)) : null;
+      (async () => {
+        result = {ok: true, message: "accepted fixture token"};
+        element("admin-token").value = "first fixture token";
+        const stale = checkAdminToken();
+        await flush();
+        assert.equal(reads, 1);
+        // A second call for the same token waits for the first one, as before.
+        const queued = checkAdminToken();
+        await flush();
+        assert.equal(reads, 1, "a call for the same token must wait");
+        // The token is edited while the first check still waits for the Pi.
+        element("admin-token").value = "second fixture token";
+        listeners.get("input")();
+        const fresh = checkAdminToken();
+        await flush();
+        assert.equal(reads, 2, "the check of the new token waited for the one that hangs");
+        assert.equal(adminTokenChecking, true);
+        assert.equal(element("token-check-status").textContent,
+                     "Checking the token and loading diagnostics...");
+        // The old check answers late, with an answer that would lock the dashboard. It changes
+        // nothing: the new check is still running and keeps its flags and its words.
+        answers[0]({allowed: false, can_register: true});
+        await stale;
+        assert.equal(adminTokenChecking, true, "the old check ended the new one's checking state");
+        assert.equal(element("check-admin-token").disabled, true);
+        assert.equal(element("check-admin-token").attributes.get("aria-busy"), "true");
+        assert.equal(element("token-check-status").textContent,
+                     "Checking the token and loading diagnostics...");
+        assert.equal(refreshCalls, 0);
+        answers[1]();
+        await fresh;
+        assert.equal(adminTokenVerified, true);
+        assert.equal(adminTokenChecking, false);
+        assert.equal(refreshCalls, 1);
+        assert.equal(element("token-check-status").textContent, "accepted fixture token");
+        // The call that waited behind the old check is covered by the new one: no third check.
+        await queued;
+        assert.equal(reads, 2, "the call that waited started a third check");
+        assert.equal(refreshCalls, 1);
+        console.log("CASE-COMPLETE");
+      })().catch(error => {console.error(error); process.exitCode = 1});
+    """
+    run_token_case(checks)
