@@ -8,6 +8,12 @@ next release takes them over.
 
 ## Unreleased
 
+- The look at the air before a boot rename no longer depends on the Pi's language. Its
+  `nmcli` calls run with untranslated output (`LC_ALL=C.UTF-8`, so names with umlauts and
+  other non-ASCII letters still match). A Pi with a German or other locale still waits
+  for wlan0 at a cold boot and still retries a busy radio, and the look stays within its
+  20 s budget. The start of the test Wi-Fi may now take up to 480 s in the worst case
+  (it was 420 s) before systemd gives up.
 - A helper that restarts after it died during an apply removes the queues and
   tables that apply left. Before, devices could stay shaped while the dashboard
   showed nothing running. If that removal fails, the helper still starts and
@@ -32,6 +38,12 @@ next release takes them over.
   results and compares them with numbers entered from a speed test run on the
   device. Deleting a result asks in the page's own dialog. The start check
   also compares the loss burst length of the queues with the applied profile.
+- **Address changes** on the Devices page: a saved device that comes back with a
+  new private Wi-Fi address is suggested ("This looks like Dad's phone ... Move
+  its settings?") with Yes, No and Not this device. Off, Ask (default) and
+  Automatic. Automatic moves only the profile and the name on strong evidence.
+  Protection moves only after Yes, and a saved dashboard access grant never moves
+  from the card. Every move is in a history with Undo for 7 days.
 - The Pi Wi-Fi follows the router. After a **Copy router Wi-Fi to Pi** that
   worked, the Pi records the router's Wi-Fi name and security (no password).
   Every boot renames a saved Wi-Fi with another name, such as

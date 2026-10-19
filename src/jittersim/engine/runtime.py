@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 from jittersim.diagnostic_records import Operation
+from jittersim.config.address_follow import follow_automatically
 from jittersim.config.device_names import saved_device_title
 from jittersim.config.models import (
     DataLimit,
@@ -965,12 +966,16 @@ class RuntimeScheduler:
                         repository=active_repository, now=current_time, scope_ended=scope_ended,
                     )
                     return False
-            # Moving a saved device to its new DHCP address is a saved change too. When it
-            # was the only one, the plan of this tick, built after it, covers both versions.
+            # Moving a saved device to its new address is a saved change too. When the
+            # moves were the only saves, the plan of this tick, built after them, covers
+            # both versions.
             moved_from = None
-            if self._follow_device_addresses(repository=active_repository, now=current_time):
+            own_saves = self._follow_device_addresses(
+                repository=active_repository, now=current_time, halts_at_start=halts_at_start
+            )
+            if own_saves:
                 moved = active_repository.get_runtime_state().configuration_version
-                if moved == configuration_version + 1:
+                if moved == configuration_version + own_saves:
                     moved_from = configuration_version
                 configuration_version = moved
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
@@ -1171,27 +1176,52 @@ class RuntimeScheduler:
                 "attempt" if failed_tries == 1 else "attempts",
             )
 
-    def _follow_device_addresses(self, *, repository: ConfigRepository, now: float) -> bool:
+    def _follow_device_addresses(
+        self, *, repository: ConfigRepository, now: float, halts_at_start: Optional[int] = None
+    ) -> int:
         """Move saved devices to the addresses their MAC addresses use now.
 
         DHCP can hand a device a new address, and a saved device is matched by
-        its address, so its profile would silently stop applying. Says whether a
-        move was saved.
+        its address, so its profile would silently stop applying. Returns how many
+        saved versions its own moves added, 0 when nothing moved.
         """
 
         if now - self._last_address_check_at < self.address_check_seconds:
-            return False
+            return 0
         self._last_address_check_at = now
         read_clients = getattr(self._helper_client, "connected_device_snapshot", None)
         if read_clients is None:
-            return False
+            return 0
         try:
             snapshot = read_clients()
         except HelperClientError:
             LOGGER.warning("could not check which addresses saved devices use", exc_info=True)
-            return False
+            return 0
         if not snapshot.get("association_status_available"):
-            return False
+            return 0
+        # A saved device that came back with a new private address moves first when the
+        # owner chose Automatic, so the IP follow below moves it in this same check.
+        generation = self.apply_generation if halts_at_start is None else halts_at_start
+        own_saves = 0
+
+        def counted(publish):
+            # Count the saved versions this move adds. Inside one transaction no other
+            # writer can save, so the difference is this move's own.
+            nonlocal own_saves
+            with repository.transaction():
+                before = repository.get_runtime_state().configuration_version
+                result = publish()
+                own_saves += repository.get_runtime_state().configuration_version - before
+            return result
+
+        try:
+            follow_automatically(
+                repository, snapshot, now=int(now),
+                fence=lambda publish: self.publish_if_current(
+                    generation, lambda: None if self._paused else counted(publish)),
+            )
+        except (StorageError, sqlite3.Error):
+            LOGGER.warning("could not check for changed private addresses", exc_info=True)
         # Only a reachable neighbour entry confirms an address. Otherwise the
         # helper falls back to a DHCP lease or an old neighbour entry, which
         # can be stale and would move a device back and forth.
@@ -1234,10 +1264,10 @@ class RuntimeScheduler:
         }
         self._blocked_moves = {**unconfirmed, **blocked}
         if not moves:
-            return False
+            return own_saves
         if not repository.move_device_addresses(moves):
             LOGGER.warning("saved devices changed during the address check; checking again later")
-            return False
+            return own_saves
         for device_id, (old_address, new_address) in moves.items():
             LOGGER.info("device %s moved from %s to %s", device_id, old_address, new_address)
             self._record(
@@ -1249,7 +1279,7 @@ class RuntimeScheduler:
                 now,
                 device_ids=[(device_id,)],
             )
-        return True
+        return own_saves + 1
 
     def _record_activity(
         self, *, repository: ConfigRepository, states: Dict[str, TargetState], now: float
