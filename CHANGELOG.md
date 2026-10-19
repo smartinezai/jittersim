@@ -8,6 +8,20 @@ next release takes them over.
 
 ## Unreleased
 
+- The Pi's firewall drops every packet that a test Wi-Fi device sends from UDP port
+  53 through the Pi. Before, a device could send such a packet to itself or to
+  another device and teach the Pi false addresses for a service list while
+  household website rules were on. Answers to DNS lookups are not affected. A
+  device that runs its own DNS server for the internet through the Pi no longer
+  works. The firewall file is loaded by the update.
+- The browser proxy gives each device at most 16 of its 32 connection slots, so one
+  device can no longer use them all and shut the others out. The 17th connection
+  of a device is closed until it closes another. The log says so at most once in
+  30 seconds and does not name the device.
+- Known limit, now written in the user guide: while no household website rule is
+  on, a device that asks a DNS server of its own choice (such as 8.8.8.8) does not
+  teach the Pi service list addresses. A household website rule sends every lookup
+  through the Pi's resolver, and then the Pi learns from that device again.
 - A helper that restarts after it died during an apply removes the queues and
   tables that apply left. Before, devices could stay shaped while the dashboard
   showed nothing running. If that removal fails, the helper still starts and

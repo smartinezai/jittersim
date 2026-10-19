@@ -2,6 +2,7 @@
 
 import http.client
 import socket
+import socketserver
 import tempfile
 import threading
 import time
@@ -155,3 +156,191 @@ class CrossOriginHeaderTests(unittest.TestCase):
             connection.close()
             for name in ("Cross-Origin-Opener-Policy", "Cross-Origin-Resource-Policy"):
                 self.assertEqual(response.getheader(name), "same-origin", path)
+
+
+class _FakeRequest:
+    """An accepted connection as far as the server looks at it."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def shutdown(self, how) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class ProxyClientShareTests(unittest.TestCase):
+    """A5: one device must not hold every connection slot of the browser proxy."""
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.server = browser_proxy.BrowserProxyServer(
+            ("127.0.0.1", 0), active_plan_path=Path(directory.name) / "plan.json",
+            client_network="127.0.0.0/8", mark_socket=lambda *_: None)
+        self.addCleanup(self.server.server_close)
+        # No worker thread starts: each test decides when a connection ends.
+        self.started = []
+        patcher = patch.object(
+            socketserver.ThreadingMixIn, "process_request",
+            lambda server, request, client_address: self.started.append(client_address))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.server.finish_request = lambda request, client_address: None
+        self.server.handle_error = lambda request, client_address: None
+
+    def accept(self, address, count=1):
+        requests = []
+        for _ in range(count):
+            request = _FakeRequest()
+            self.server.process_request(request, (address, 50000))
+            requests.append(request)
+        return requests
+
+    def finish(self, address, count=1):
+        for _ in range(count):
+            self.server.process_request_thread(_FakeRequest(), (address, 50000))
+
+    def test_one_device_gets_16_slots_and_the_17th_is_closed(self) -> None:
+        accepted = self.accept("127.0.0.2", 16)
+        self.assertEqual(len(self.started), 16)
+        self.assertFalse(any(request.closed for request in accepted))
+        (refused,) = self.accept("127.0.0.2")
+        self.assertTrue(refused.closed)
+        self.assertEqual(len(self.started), 16)
+        self.assertEqual(self.server.client_slots.held("127.0.0.2"), 16)
+
+    def test_two_devices_are_independent_and_the_limit_for_all_stays_32(self) -> None:
+        self.accept("127.0.0.2", 16)
+        second = self.accept("127.0.0.3", 16)
+        self.assertFalse(any(request.closed for request in second))
+        self.assertEqual(len(self.started), 32)
+        # The proxy is full for everyone now, also for a device that holds nothing.
+        (third,) = self.accept("127.0.0.4")
+        self.assertTrue(third.closed)
+        self.assertEqual(self.server.client_slots.held("127.0.0.4"), 0)
+        # The first device ends its connections. The second one still has its own limit,
+        # and a device that held nothing gets slots again.
+        self.finish("127.0.0.2", 16)
+        (again,) = self.accept("127.0.0.3")
+        self.assertTrue(again.closed)
+        self.assertEqual(self.server.client_slots.held("127.0.0.3"), 16)
+        (newcomer,) = self.accept("127.0.0.4")
+        self.assertFalse(newcomer.closed)
+
+    def test_a_refused_connection_gives_back_the_slot_for_all(self) -> None:
+        self.accept("127.0.0.2", 16)
+        refused = self.accept("127.0.0.2", 5)
+        self.assertTrue(all(request.closed for request in refused))
+        # If a refusal kept a slot for all, the second device would not get 16.
+        second = self.accept("127.0.0.3", 16)
+        self.assertFalse(any(request.closed for request in second))
+        self.assertEqual(len(self.started), 32)
+
+    def test_a_slot_is_free_again_when_a_connection_ends(self) -> None:
+        self.accept("127.0.0.2", 16)
+        self.finish("127.0.0.2")
+        self.assertEqual(self.server.client_slots.held("127.0.0.2"), 15)
+        (taken,) = self.accept("127.0.0.2")
+        (refused,) = self.accept("127.0.0.2")
+        self.assertFalse(taken.closed)
+        self.assertTrue(refused.closed)
+
+    def test_a_slot_is_free_again_when_the_worker_fails(self) -> None:
+        def fail(request, client_address):
+            raise RuntimeError("the request failed")
+
+        self.accept("127.0.0.2", 16)
+        self.server.finish_request = fail
+        self.finish("127.0.0.2", 16)
+        self.assertEqual(self.server.client_slots.held("127.0.0.2"), 0)
+        self.server.finish_request = lambda request, client_address: None
+        # Nothing leaked for the device or for all devices.
+        self.assertFalse(any(request.closed for request in self.accept("127.0.0.2", 16)))
+        self.assertFalse(any(request.closed for request in self.accept("127.0.0.3", 16)))
+
+    def test_a_slot_is_free_again_when_the_worker_cannot_start(self) -> None:
+        with patch.object(socketserver.ThreadingMixIn, "process_request",
+                          side_effect=RuntimeError("cannot start a new thread")):
+            for _ in range(40):
+                with self.assertRaises(RuntimeError):
+                    self.accept("127.0.0.2")
+        self.assertEqual(self.server.client_slots.held("127.0.0.2"), 0)
+        self.assertFalse(any(request.closed for request in self.accept("127.0.0.2", 16)))
+        self.assertFalse(any(request.closed for request in self.accept("127.0.0.3", 16)))
+
+    def test_the_refusal_is_logged_without_the_address_and_not_every_time(self) -> None:
+        self.accept("127.0.0.2", 16)
+        with patch.object(browser_proxy, "LOGGER") as logger:
+            self.accept("127.0.0.2", 3)
+        self.assertEqual(logger.warning.call_count, 1)
+        arguments = logger.warning.call_args.args
+        message = arguments[0] % arguments[1:]
+        self.assertIn("browser tunnel rejected", message)
+        self.assertIn("16 of 32", message)
+        for word in ("127.0.0.2", "mac", "token", "bearer"):
+            self.assertNotIn(word, message.lower())
+        with patch.object(browser_proxy, "LOGGER") as logger, \
+                patch.object(browser_proxy, "CLIENT_LIMIT_LOG_SECONDS", 0.0):
+            self.accept("127.0.0.2", 3)
+        self.assertEqual(logger.warning.call_count, 3)
+
+
+class ProxyClientShareSocketTests(unittest.TestCase):
+    """A5 with real connections: a close and a failed request each free a slot."""
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.server = browser_proxy.BrowserProxyServer(
+            ("127.0.0.1", 0), active_plan_path=Path(directory.name) / "plan.json",
+            client_network="127.0.0.0/8", mark_socket=lambda *_: None)
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        self.clients = []
+        # Cleanups run last in, first out: close the clients, stop the server, join.
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.addCleanup(self.close_clients)
+        patcher = patch.object(browser_proxy, "CONNECT_TIMEOUT_SECONDS", 30)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def open_client(self) -> socket.socket:
+        client = socket.create_connection(self.server.server_address, timeout=3)
+        self.clients.append(client)
+        return client
+
+    def close_clients(self) -> None:
+        for client in self.clients:
+            client.close()
+
+    def wait_for_held(self, count) -> None:
+        ends = time.monotonic() + 5
+        while self.server.client_slots.held("127.0.0.1") != count:
+            if time.monotonic() > ends:
+                self.fail(f"the device holds {self.server.client_slots.held('127.0.0.1')} "
+                          f"slots, not {count}")
+            time.sleep(0.01)
+
+    def test_slots_come_back_after_a_close_and_after_a_failed_request(self) -> None:
+        held = [self.open_client() for _ in range(16)]
+        self.wait_for_held(16)
+        # The 17th connection is closed by the proxy without an answer.
+        extra = self.open_client()
+        try:
+            self.assertEqual(extra.recv(4096), b"")
+        except ConnectionResetError:
+            pass
+        self.assertEqual(self.server.client_slots.held("127.0.0.1"), 16)
+        # Closing one connection frees its slot.
+        held.pop().close()
+        self.wait_for_held(15)
+        # A request that is not a CONNECT is answered, and its slot is free again.
+        failing = self.open_client()
+        failing.sendall(b"GET / HTTP/1.1\r\n\r\n")
+        self.assertIn(b"503 Service Unavailable", failing.recv(4096))
+        self.wait_for_held(15)
