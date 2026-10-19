@@ -188,6 +188,8 @@ Goal: run the system headlessly on the Pi while preserving a reliable recovery p
 - [x] Restore the last applied plan or finish a reset after restart.
 - [x] Document DHCP, NAT and the test Wi-Fi network.
 - [x] Add an SSH reset procedure.
+- [x] Announce the dashboard name after boot, keep the journal on disk and quiet the boot logs of
+  the control firewall and AP units (PR 142).
 
 Suggested commits:
 
@@ -308,14 +310,17 @@ See the [household plan](docs/implementation-plan-household-access-point-2026-09
 - [x] Cut, check, sign and publish a release with one command, and update the Pi in one step from
   its terminal or from the Mac (PR 108, 110). An update is reported as done only when its
   install request completed (PR 122).
-- [ ] Cut the first release, v0.2.0. The tooling is merged and no tag or GitHub release exists
-  yet. The open pieces are listed under Current remaining work.
+- [ ] Cut the first release, v0.2.0. The tooling is merged (PR 108, 109, 110, 114, 116, 122, 139)
+  and no tag or GitHub release exists yet. What is left is the owner's: the one-time root install
+  of current `main` on the Pi, the GitHub token, `scripts/release.sh 0.2.0` and the physical
+  acceptance of the exact package (see Current remaining work).
 - [x] Apply a saved profile to one device and start only that device while the network is
-  reset (PR 96, 127, 131). While an Everyone profile runs this is refused before anything is
-  saved.
-- [ ] Let one device run its own profile while an Everyone profile runs. It needs the
-  general-profile renderer to leave the device out of the shared mark and Linux packet checks
-  (see the design addendum, "Not covered").
+  reset (PR 96, 127, 131).
+- [x] Let one device run its own profile while an Everyone profile runs (PR 149). The renderer
+  leaves the device out of the shared mark and Linux packet checks cover it. It is refused while
+  Everyone is saved but not running or while what runs is older than the saved settings.
+- [x] Ask in an accessible in-page dialog before every destructive action (PR 141), speak each
+  result once through one announcer and keep focus when lists refresh (PR 146, 152).
 - [x] Exercise complete browser journeys in CI against an installed package.
 - [ ] Verify radio changes, release installation and recovery on the actual Pi.
 - [ ] Design a separate client measurement page if phone setup needs to be simpler.
@@ -515,49 +520,57 @@ The project is ready for presentation when it can:
 - [x] Detect and preview the router band and personal security type.
 - [x] Copy matching security with bounded recovery on failure.
 - [x] Preserve the mode during name reset and installation upgrades.
+- [x] Return the Pi Wi-Fi from a recovery name to the router name at boot after a copy that worked
+  (PR 140).
 - [ ] Complete physical client acceptance for every claimed supported mode.
 
 ## Current remaining work
 
-Checked against `origin/main` at `2f68772` (PR 140) on 17 October 2026. Every unticked box in the
+Checked against `origin/main` at `f290ea9d` (PR 171) on 19 October 2026. Every unticked box in the
 milestones above is one of these:
 
 - Owner-run physical acceptance on the Pi (Milestones 9 to 15 and the router security section).
 - An open design or decision: the household network design (Milestone 11), the separate client
-  measurement page (Milestone 12) and whether profiles should resume after a Pi restart
-  (Milestone 14).
-- Planned work that has not started: a device profile while Everyone runs (Milestone 12),
-  Milestones 16 to 19 (Deliveries B to F of the erratic connection plan) and the website list modes
-  of the [planned features](docs/planned-features.md).
+  measurement page (Milestone 12), whether profiles should resume after a Pi restart
+  (Milestone 14) and the two decisions about rollbacks in the
+  [carry-forward list](docs/carry-forward-panic-batch-2026-10-10.md).
+- Planned work that has not started: Milestones 16 to 19 (Deliveries B to F of the erratic
+  connection plan) and the website list modes of the [planned features](docs/planned-features.md).
+- Planned work in progress: the draft pull requests listed below (Check connection, security follow-ups, QA follow-ups).
 - The v0.2.0 release itself (Milestone 12), described below.
 
 Hosted CI cannot start jobs (billing limit). Every pull request is gated by
 `scripts/local-ci.sh` run on its exact head commit (see [local CI](docs/local-ci.md)).
 
-Merged on 16 October 2026: PR 136 (the combined Panic batch with one approved bundle, `36e0d2c`),
-which carried PR 92 (protected devices get dashboard access), PR 103 and PR 104, and PR 140 (the Pi's
-test Wi-Fi follows the router copy and returns from Recovery at boot, `2f68772`).
-`PANIC_APPROVED_SOURCES` has a new entry for PR 136 and main's three hash-pinned files match that entry.
+Merged since the last roadmap reconciliation on 17 October 2026: PR 112 (named install button,
+notes and recovery copy), 117 (wheel build lock), 138 (carry-forward fixes of the Panic batch,
+`8c3f8171`), 139 (release tooling fixes), 141 and 146 (in-page questions, one announcer), 142
+(Pi boot robustness), 143 (stability pass), 147 and 148 (removals), 152 (QA sweep), 154 (release
+test image) and 171 (three PR 162 review items). `PANIC_APPROVED_SOURCES` has seven entries. The newest is for PR 138 and main's three
+hash-pinned files match it.
 
-Open pull requests on 17 October 2026, apart from the documentation PR 144 and the guardrails PR 145:
+Merged on 18 and 19 October: PR 111 (signed notes in the update status, check-only manual checks),
+121 (device speed test), 149 (a device runs its own profile beside Everyone), 150 and 157 (router
+safety audit round 2 and follow-ups), 151 (address changes), 155 (read route table), 159 (security
+audit), 160 and 169 (boot Wi-Fi look), 162 (QA leftovers and flaky tests), 164 (soak harness and
+resource fixes), 163 (write route table), 165 (speed test follow-ups), 166 (mutation testing), 167
+(property tests) and 168 (interrupted apply cleanup).
+
+Open pull requests on 19 October 2026 (all drafts, PR 163 and 165 merged during the day):
 
 | PR | What it does | State |
 | --- | --- | --- |
-| 111 | Signed release notes in the update status, check-only manual checks, retry of a development-label build | Ready for review. Gated: needs the combined independent review and a new approved bundle |
-| 112 | Names the version on the Updates install button and shows release notes and the recovery copy | Ready for review. The notes need PR 111 |
-| 117 | Raises the wheel build lock to 0.46.3 | Draft, do not merge. It changes signed release inputs and needs independent review |
-| 121 | Device speed test: compare a device's speed before and after a profile | Ready for review |
-| 138 | Carry-forward fixes of the Panic batch: a rollback bringing back a revoked dashboard grant, a backup lock delaying dashboard Panic, a stalled write of the stop records and the rollback cleanup of the upload intake | Draft. Two owner decisions are open in its description |
-| 139 | Fixes the release tooling bugs that a real dry run of v0.2.0 found | Draft |
-| 141 | Asks in the page, not in the browser, before deleting or changing Wi-Fi (nine of the eleven native confirms) | Ready for review |
-| 142 | Pi boot robustness: the mDNS name, an early SIGHUP, a volatile journal and boot noise | Draft |
-| 143 | Stability pass: a flaky explorer 502, Python 3.9 local CI and a digit limit | Draft |
-| 146 | One announcer, quiet polled lists and focus kept on refresh. Based on PR 141 | Ready for review |
+| 161 | A **Check connection** button that sends probes to a device and compares loss and delay with its profile (replaces PR 153) | Draft |
+| 170 | Finish the follow-ups of the PR 159 security audit | Draft |
 
 The first release, v0.2.0, is being prepared. `pyproject.toml` already says `0.2.0`, but no tag, no
 GitHub release and no reserved version exist yet (`docs/releases/registry.json`). The release tooling
-is merged (PR 108, 109, 110, 114, 116, 122). PR 139, 111, 112 and 117 are the open pieces, and the owner
-approves the release itself.
+is merged. The owner's steps, in order: install current `main` on the Pi once with the root installer
+(a Pi that runs an older development build refuses the signed packages), save the read-only GitHub
+token on the Pi, connect the Mac to the dashboard, run `scripts/release.sh 0.2.0`, install and test
+the exact package on the Pi and approve the release (see the
+[owner runbook](docs/release-runbook-2026-10-16.md) and the
+[draft release notes](docs/release-notes-0.2.0-draft.md)). The owner approves the release itself.
 
 Other places to look:
 

@@ -10,18 +10,21 @@ test. It is for experiments, not a replacement for your home router.
 ## What you can try
 
 - Slow, delay or interrupt a test connection.
-- Save different settings for one device or the whole test Wi-Fi.
+- Save different settings for one device or the whole test Wi-Fi, and start a
+  single device on its own profile.
 - Schedule changes, run a timer or gradually switch between settings.
 - Control device, website and service access, with data and time limits.
 - See connected devices, traffic measurements, the effect of a test and a device's speed before and after a profile.
 - Follow a saved device to its new private Wi-Fi address, with Ask, Automatic and Undo.
 - Choose whether active profiles resume after a router outage.
+- Update the Pi in one step from the dashboard or a terminal with a signed
+  release, a recovery copy and an automatic health check.
 
 ## Screenshots
 
 <div align="center">
-  <img src="docs/screenshots/experience-overview-desktop.png" alt="Desktop dashboard with a test phone connected" width="68%" />
-  <img src="docs/screenshots/experience-overview-phone.png" alt="The dashboard on a phone-sized screen" width="27%" />
+  <img src="docs/screenshots/experience-overview-desktop.png" alt="The Devices page on a desktop screen: the sidebar with Start, Reset network and Panic, and a connected test phone on a slow profile" width="68%" />
+  <img src="docs/screenshots/experience-overview-phone.png" alt="The same page on a phone-sized screen, with Panic, the router Wi-Fi status and a Controls button in a bar at the bottom" width="27%" />
 </div>
 
 *Sample data only; no real phone or home network is shown.*
@@ -40,7 +43,8 @@ before trusting the dashboard certificate. Then open
 generated admin token is on the Pi in `/etc/jittersim/control.env`.
 
 The [feature and operations guide](docs/user-guide.md) explains the dashboard,
-network behavior and local developer setup. See the
+network behavior, [known limits](docs/user-guide.md#known-limits) and local
+developer setup. See the [changelog](CHANGELOG.md) for what changed, the
 [release guide](docs/releases/README.md) for publishing a release, the
-[roadmap](ROADMAP.md) for known limits and future work, and the
+[roadmap](ROADMAP.md) for future work, and the
 [documentation index](docs/README.md) for the rest of the guides.

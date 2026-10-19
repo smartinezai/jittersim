@@ -18,8 +18,8 @@ Stable versions use tested signed packages with owner approval. See the
 ## See it in action
 
 <div align="center">
-  <img src="../docs/screenshots/experience-overview-desktop.png" alt="Dashboard overview with a test phone connected and a slow profile running" width="68%" />
-  <img src="../docs/screenshots/experience-overview-phone.png" alt="The connected test phone and its active slow profile on a phone-sized screen" width="27%" />
+  <img src="../docs/screenshots/experience-overview-desktop.png" alt="The Devices page with the sidebar controls and a connected test phone whose active profile is Slow connection, started by a timer" width="68%" />
+  <img src="../docs/screenshots/experience-overview-phone.png" alt="The Devices page on a phone-sized screen: the status line, the Everyone card, the connected test phone and a bar with Panic, the router Wi-Fi status and Controls" width="27%" />
 </div>
 
 *Screenshots use sample data. No real phone, Pi or home network is shown.*
@@ -30,17 +30,18 @@ schedules and household blocking when you are done.
 
 ### Make some website lookups fail
 
-<img src="../docs/screenshots/dns-failure-controls.png" alt="A 20 percent chance of a quick connection error is saved and active for the test Wi-Fi" width="100%" />
+<img src="../docs/screenshots/dns-failure-controls.png" alt="The Access and rules page with household access rules enabled and a DNS failure chance of 20 percent shown as applied" width="100%" />
 
-Choose a chance from 0% to 100% that a new website name lookup from the test
-Wi-Fi gets a quick connection error. At 0%, this effect is off. This first
-version shows a site-connection error. It does not send you to the site's home
+Under **Access and rules**, choose a chance from 0% to 100% that a new website
+name lookup from the test Wi-Fi gets a quick connection error. At 0%, this
+effect is off. It also stays off while **Enable household access rules** is off.
+This first version shows a site-connection error. It does not send you to the site's home
 page or to a random website. Saved browser and device lookups can delay when
 you see the effect.
 
 ### Choose what happens if the router goes offline
 
-<img src="../docs/screenshots/router-outage-persistence.png" alt="The option to keep active profiles through a router outage is enabled" width="100%" />
+<img src="../docs/screenshots/router-outage-persistence.png" alt="The Router outage behavior card with Keep active profiles through router outages checked and the message that it was saved and applied" width="100%" />
 
 With this option on, active profiles return when the router connection comes
 back. With it off, a confirmed router outage stops active profiles until you
@@ -50,20 +51,27 @@ is unchanged.
 
 ### Update the Pi
 
-<img src="../docs/screenshots/staged-update-check.png" alt="The Updates and recovery page showing a staged release, an install button labeled with its name and automatic backup status" width="100%" />
+<img src="../docs/screenshots/staged-update-check.png" alt="The Updates and recovery page showing the installed and newest release, who signed it, the recovery copy note, an install button named after the staged release and the daily check and install automatically settings, both off" width="100%" />
 
 Open **Updates** and choose **Check for updates**. When a read-only GitHub
 token is saved on the Pi, the Pi downloads the newest release, checks its
 signature and stages it. The page then names the release and who signed it,
 and **Recovery copy** says whether a copy of the previous installation is kept.
-When the Pi reports release notes for the staged release, a **Release notes**
-section shows them. Choose the install button, which names the staged release
-(for example **Install v1.1.0**). It reads **Install update** and stays off
-while nothing can be installed. The confirmation names the signer. The previous
-installation and its settings are backed up first. If the Pi's health check
-fails after installation, it tries to restore that backup by itself. The sidebar
-shows **Update available** while a release is staged. Checking every day and
-installing automatically are both off until you turn them on.
+A **Release notes** section shows the signed notes of the staged release when
+the Pi's update status carries them (`sudo jittersim update` shows them too).
+Choose the install button, which names the staged release (for example
+**Install v1.1.0**). It reads **Install update**
+and stays off while nothing can be installed. The confirmation names the signer.
+The previous installation and its settings are backed up first. If the Pi's
+health check fails after installation, it tries to restore that backup by
+itself, and **Restore previous installation** goes back on purpose. The sidebar
+shows **Update available** while a release is staged.
+
+Under **Settings** on the same page, **Check automatically every day** and
+**Install automatically** are both off until you turn them on. Turning on
+**Install automatically** asks first, because the Pi then installs every new
+signed release without anyone pressing a button. **Look for a release staged on
+this Pi when the dashboard opens** only looks at what is already staged.
 
 On the Pi the same is one command: `sudo jittersim update` (add `--yes` to skip
 the question or `--offline` to skip GitHub). It checks GitHub, shows the new
@@ -76,7 +84,11 @@ trust on it and newer than the one it runs. The admin token can only install
 the release already staged. See
 [Signed releases](../deploy/raspberry-pi/README.md#signed-releases) for the
 one-time setup (trusted key and GitHub token), passwordless deploys and what a
-leaked token or a stolen key can do. To publish a new release see
+leaked token or a stolen key can do. A Pi that runs a development build from
+before the current Panic review refuses the new releases and needs the root
+installer once (`deploy/raspberry-pi/deploy-from-mac.sh --ref origin/main
+--use-installer`, which asks for the Pi's `sudo` password). After that every
+update uses the commands above. To publish a new release see
 [Releasing JitterSim](../docs/releasing.md) and the [changelog](../CHANGELOG.md).
 
 ## What you can try
@@ -119,13 +131,15 @@ sudo jittersim access dns-failure show
 sudo jittersim persistence show
 sudo jittersim update
 sudo jittersim update check
+jittersim version
 sudo jittersim diagnostics
 sudo jittersim logs dns --lines 80
 ```
 
 To change a setting, use `sudo jittersim access dns-failure set 15` or
 `sudo jittersim persistence set on`. The DNS setting is saved separately from
-applying access rules, so run `sudo jittersim access apply` after changing it.
+applying access rules, so run `sudo jittersim access apply` after changing it
+(or add `--apply` to the `set` command).
 Run `sudo jittersim --help` for the command list. More examples are in the
 [Pi installation and recovery guide](../deploy/raspberry-pi/README.md).
 
@@ -181,6 +195,7 @@ control characters.
 | `jittersim traffic` | The names each test device looked up, grouped by app or site like **Traffic discovery**. Add `--scan` to sample first, `--expand` for every name, `--blocked` for blocked names only or `--device NAME_OR_IP`. |
 | `jittersim traffic block DOMAIN` | Adds a name to the global block list. While household access rules are on the names under it are blocked too. `traffic unblock DOMAIN` removes the exact name. Both say so when nothing had to change. |
 | `jittersim wifi show` | The router's own Wi-Fi name, read live from the router. It also asks for the router admin password with a hidden prompt. Add `--password` to show the Wi-Fi password too. |
+| `jittersim remote update now` | Asks the Pi to check GitHub for a newer signed release, shows it, asks, installs it and waits until the Pi runs it (900 seconds by default, `--wait SECONDS` changes that). `--yes` skips the question and `--json` prints one JSON answer, which needs `--yes`. `jittersim remote update status`, `check`, `upload` and `install` run the single steps. |
 | `jittersim impact` | The **Impact** check: two samples of the Pi's queues `--wait` seconds apart (10 by default, at most 50) judged with the dashboard's rules. The verdicts name the time it measured such as "in the last 10 seconds". |
 
 The terminal commands call the profile for **Everyone** the general profile.
@@ -342,6 +357,17 @@ Unknown modes, open networks, WEP and enterprise Wi-Fi are rejected. An
 unsupported Pi mode restores the previous Wi-Fi settings instead of choosing
 another mode. The router itself is not changed by copying.
 
+After a copy that worked, the Pi remembers the router's Wi-Fi name and security
+(never the password). At every boot it renames a saved Wi-Fi that has another
+name, such as the fallback `JitterSim-Recovery`, back to the router name, so the
+test Wi-Fi does not stay on a recovery name after a reboot. The router is not
+contacted. If the router name does not start, the previous name comes back for
+that boot. A manual Wi-Fi change or **Reset Wi-Fi name** stops the following, and
+copying the router again starts it again. The Pi guide has the three commands
+that hold Recovery across reboots, return now and show the state (`recovery`,
+`router` and `status` of `jittersim.networking.wifi_follow`, see
+[The Pi Wi-Fi follows the router](../deploy/raspberry-pi/README.md#the-pi-wi-fi-follows-the-router)).
+
 A device asking for a WPA, WPA2 or WPA3 password needs the Wi-Fi password for
 that network. After copying router Wi-Fi this is the router's Wi-Fi password.
 It is different from the router administration password and dashboard token.
@@ -408,6 +434,17 @@ You can also use an address covered by the certificate, for example
 address, so use the one address on both networks to sign in once. Choose **Admin token** then **Check
 token** and **Allow this device**. This registers the actual requesting
 computer. The dashboard lists saved devices and supports removal.
+
+A device in **Protected devices** needs no **Allow this device** step. It opens
+the dashboard with the admin token alone, because protection is also a grant of
+access. The access list shows each device as `saved grant`, `from protection` or
+both. **Stop protecting** removes only the protection grant, and **Remove saved
+grant** removes only the saved one while the device stays protected. When you
+stop protecting the device you are using, the dashboard asks whether to keep its
+access as a saved grant first. A protected device whose address cannot be
+verified is listed with the reason and does not open the dashboard. If the Pi
+cannot confirm its protected list, a **Retry protected access** button appears.
+The access it grants never includes SSH and never skips the admin token.
 
 The first visit shows a certificate warning. After signing in, **Trust this Pi**
 offers the Pi's local certificate as a `.crt` file and as an Apple profile with
@@ -651,6 +688,23 @@ changes until you press **Apply to all devices**. While that profile is active
 the button reads **Stop**. It works like **Apply to all** and **Stop** on the
 Profiles page and protected devices stay untouched.
 
+### Questions and screen readers
+
+The dashboard asks in a dialog in the page, not in the browser, before it deletes
+a profile, device or group, clears the activity log, imports settings, changes the
+Pi Wi-Fi, restores its name, reverses an address move, copies the router Wi-Fi,
+removes dashboard access or stops protection of the device in use. The heading
+names the action and the confirm button repeats it, in red for a delete (for
+example **Delete profile**). **Cancel** or Escape answers no, and focus goes back
+to the button that asked, also when the list holding it was drawn again while the
+question was open.
+
+A screen reader hears each result once, through one status region and one alert
+region. Lists that refresh every few seconds (devices, schedules, timers, limits,
+observations and the router connection) stay silent, and a refresh keeps focus on
+the button you were on. A **Skip to main content** link is the first thing a
+keyboard reaches on every page.
+
 ### On a phone
 
 Up to a width of 768 pixels the dashboard uses a phone layout. The top of the
@@ -726,7 +780,9 @@ Click **Protect** to protect a connected client from every profile,
 random outage, profile website rule and device or service quota. Its traffic
 also stops consuming shared group quotas. Its saved assignments stay in place
 and resume when protection is removed. Global MAC and website access rules
-still apply. Protection does not grant dashboard or SSH access.
+still apply. Protection does not grant SSH access or any access to the router.
+A protected device does open the dashboard (see
+[Dashboard access from Pi Wi-Fi](#dashboard-access-from-pi-wi-fi)).
 
 The **Protected devices** list keeps protection when a client disconnects
 or changes IP. It supports up to 256 saved Wi-Fi MAC addresses. Use **Add an
@@ -1043,8 +1099,8 @@ and [wireless setup guide](https://www.raspberrypi.com/documentation/computers/c
 Test Wi-Fi clients can use the Pi for public internet access but cannot reach
 private upstream addresses such as the Vodafone router's `192.168.0.1`. They
 reach the dashboard's sign-in page. Private data and controls need the
-administrator token and **Allow this device** (see [Dashboard access from Pi
-Wi-Fi](#dashboard-access-from-pi-wi-fi)).
+administrator token and either **Allow this device** or protection (see
+[Dashboard access from Pi Wi-Fi](#dashboard-access-from-pi-wi-fi)).
 
 Website rules, service quotas and device-data progression are best-effort. VPNs,
 encrypted DNS, direct IP access, cached connections and shared hosting can hide
@@ -1164,6 +1220,45 @@ the new address, and the certificate is renewed by the next update. HTTPS
 protects the browser-to-Pi connection, but the TG3442DE's own local web
 interface still uses HTTP between the Pi and router.
 
+## Known limits
+
+These are the limits that change what you do. The full lists are in the
+[roadmap](../ROADMAP.md), [planned fixes](planned-fixes.md) and
+[planned features](planned-features.md).
+
+- Physical acceptance on a real Pi with real phones is still outstanding. The
+  checks are in the [acceptance checklist](pi-acceptance-checklist.md).
+- JitterSim never turns the router's Wi-Fi on or off. The Pi refuses router
+  Wi-Fi writes. The cause of the router outages of 4 to 9 October is not known.
+- A device runs its own profile beside **Everyone** only while Everyone is
+  running and up to date. While Everyone is saved but not running, or a saved
+  change has not reached the network, **Apply profile** is refused until you
+  choose **Start** or **Reset network**.
+- Upload reordering and duplication are not applied, and the Pi has to offer an
+  `ifb` device for upload corruption.
+- A rollback restores all saved settings. A device that was removed from
+  **Protected devices** after the update comes back with its protection and so
+  with its dashboard access. Remove it again after a rollback.
+- A rollback from the first release with the upload-safe layout to an older
+  release can leave the upload corruption setup in place, because the older
+  Panic and Reset do not know it. When the status says the upload intake could
+  not be removed, press **Panic**, check `tc qdisc show` on the test Wi-Fi
+  interface and reboot the Pi if the intake is still there.
+- A check you ask for (**Check for updates**, `jittersim remote update check`)
+  only checks and stages a release. Only the daily check installs by itself, and
+  only with **Install automatically** on.
+- When the dashboard is busy or the Pi's storage stalls, Panic still removes the
+  rules but may answer that the recovery is not confirmed. Retry Panic before
+  choosing **Start**.
+- A boot with an incomplete household release keeps Panic latched and profiles
+  stay stopped until Panic or **Normal access** works. If a restore hangs, Panic
+  can be unavailable for up to 90 seconds at boot.
+- Every private request from a device on the test Wi-Fi asks the helper whether
+  that device may use the dashboard. When many arrive together some answer
+  "Device verification is busy" and you choose **Check token** again.
+- Names accept control characters and bidirectional overrides through the API
+  and import. Capacity of a loaded Pi 3 Model B+ was never measured.
+
 ## Set up the Pi
 
 Install only a verified signed release. Follow the [Pi deployment guide](../deploy/raspberry-pi/README.md#install-or-update) for release checks, prerequisites and first sign-in steps.
@@ -1226,6 +1321,19 @@ python -m tests.browser.journeys
 
 The workflows in `.github/workflows` list every check that CI runs for a pull
 request: the Python, Linux, browser, homepage reference and GUI baseline jobs.
+Hosted GitHub Actions cannot start jobs while the account's billing limit is
+reached, so every pull request is gated by the same commands run on a Mac:
+
+```sh
+scripts/local-ci.sh lint     # the gating ruff check and advisory checks
+scripts/local-ci.sh unit     # the whole pytest suite
+scripts/local-ci.sh browser  # the journeys and the Pi browser modules
+scripts/local-ci.sh list     # every step and its command
+```
+
+[Local CI](local-ci.md) explains the other steps (`gui`, `homepage`, `kernel`,
+`release-checks`, `all` and `rerun`), what each run writes under
+`test-results/` and what it does not cover.
 
 ## More information
 
