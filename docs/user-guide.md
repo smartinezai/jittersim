@@ -498,7 +498,8 @@ when another client's profile changes. Removing protection or changing global
 access rules can close those tunnels. The proxy serves 32 connections at a time
 for all devices and one device may hold 16 of them, so one device cannot use up
 the proxy for the others. A busy test browser that opens more than 16 tunnels at
-once sees the extra ones closed until it closes some, and the browser retries.
+once sees the extra ones closed until it closes some, so some page loads can fail until
+tunnels close. A Mac that uses the Pi as its system proxy counts as one device.
 
 This strict hostname selection covers HTTPS connections that the managed
 browser sends through the proxy. Native apps, browser traffic that bypasses the
