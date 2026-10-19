@@ -21,6 +21,11 @@ class Command:
     timeout_is_success: bool = False
     sensitive: bool = False
     expected_stdout: Optional[str] = field(default=None, repr=False)
+    # Run with LC_ALL=C.UTF-8 and no LANGUAGE: the output and the error text are not
+    # translated, and names with non-ASCII letters still come out as UTF-8 (plain "C" prints
+    # them as "?"). A program that reads that text does not depend on the system language.
+    # Not for sensitive commands: they run in their own path (see __post_init__).
+    c_locale: bool = False
 
     def __post_init__(self) -> None:
         if not self.executable or "/" in self.executable or " " in self.executable:
@@ -37,6 +42,8 @@ class Command:
             raise CommandError("timeout_is_success requires timeout_seconds")
         if self.sensitive and (self.timeout_is_success or self.ignore_failure):
             raise CommandError("sensitive commands must fail on errors or timeout")
+        if self.sensitive and self.c_locale:
+            raise CommandError("c_locale does not apply to sensitive commands")
         if self.expected_stdout is not None and (
             not self.sensitive or self.stdin is not None
             or not 1 <= len(self.expected_stdout.encode()) <= 4096
