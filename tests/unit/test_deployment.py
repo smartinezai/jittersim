@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from jittersim.networking import wifi_follow
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -284,9 +286,15 @@ class AccessPointStartTests(unittest.TestCase):
         self.assertIn("/usr/bin/nmcli --wait 10 connection up jittersim-ap && return 0", command)
         self.assertIn("did not start after 10 tries", command)
         self.assertTrue(command.rstrip("'").endswith("exit 1"))
-        # Two rounds of ten tries (router copy, then the previous Wi-Fi), the boot look and
-        # both lock waits fit the limit (about 385 s worst case).
-        self.assertIn("TimeoutStartSec=420", self.unit)
+        # Every step at its own limit and added up (the comment in the unit lists them):
+        # nft check, boot step (lock wait, three 3 s reads, password check, look, rename and
+        # rename back), uplink check, two rounds of ten tries (router copy, then the previous
+        # Wi-Fi) with the fallback between them, and the lock wait of boot-done.
+        boot_step = 45 + 3 + 3 + 15 + wifi_follow.SCAN_BUDGET + 9 + 9
+        worst_case = 1 + boot_step + 5 + 2 * 10 * (10 + 3) + (45 + 9) + 45
+        self.assertEqual(worst_case, 469)
+        self.assertIn("TimeoutStartSec=480", self.unit)
+        self.assertLess(worst_case, 480)
 
     def test_boot_returns_to_the_router_copy_and_never_blocks_the_start(self):
         follow = "/opt/jittersim/.venv/bin/python -I -m jittersim.networking.wifi_follow"
