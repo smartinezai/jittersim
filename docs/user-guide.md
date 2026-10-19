@@ -828,6 +828,8 @@ The **Address changes** card on the Devices page finds saved devices that came
 back with a new private address. The setting **Follow private address changes**
 has three choices:
 
+<img src="../docs/screenshots/address-changes.png" alt="The Address changes card with Ask selected and one sample suggestion for Dad's phone at a new private address" width="100%" />
+
 - **Ask** (the default): the card says for example "This looks like Dad's phone
   (new private address ...). Move its settings?" with the evidence in plain
   words. **Yes** moves the profile, the name and, for a protected device, its
@@ -982,6 +984,8 @@ a device saw. An older helper makes the card ask for an update.
 
 **Test speed** on a connected device in **Devices** compares the device's speed
 before and after a profile. The Pi cannot run a speed test as the phone, so:
+
+<img src="../docs/screenshots/device-speed-test-controls.png" alt="The speed-test window for Fixture phone with Cloudflare selected, a 45 second length, the label Before profile and the Start measuring button" width="100%" />
 
 1. Choose the speed test site (Cloudflare by default, or LibreSpeed), a length
    (45 seconds by default, 15 to 90) and an optional label, then **Start measuring**.
