@@ -8,6 +8,15 @@ next release takes them over.
 
 ## Unreleased
 
+- Choosing Check token after you edit the token no longer waits for an earlier
+  check that the Pi never answered. The new check starts at once, and the late
+  answer of the old one changes nothing.
+- Revoke all homepage pairings is read out by a screen reader once instead of
+  twice. The pairing code still appears in its own line, and the result of
+  Revoke now shows in the message at the top instead of in that line.
+- Clear on the Measurements page asks again after Copy table as Markdown failed
+  because the browser refused the clipboard. A table counts as kept only when
+  the copy worked.
 - The look at the air before a boot rename no longer depends on the Pi's language. Its
   `nmcli` calls run with untranslated output (`LC_ALL=C.UTF-8`, so names with umlauts and
   other non-ASCII letters still match). A Pi with a German or other locale still waits
