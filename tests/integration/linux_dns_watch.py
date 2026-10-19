@@ -3,8 +3,8 @@
 Run it only in a disposable container with NET_ADMIN and NET_RAW capabilities.
 A DNS answer leaves the Pi towards a client. The watcher must read it through
 the kernel filter, tell the helper about the address and make later traffic to
-that address follow the list's profile. Answers a client sends to the Pi must
-not teach it anything.
+that address follow the list's profile. With household DNS rules off, answers
+from other DNS servers and answers a client sends to the Pi teach nothing.
 """
 
 import socket
@@ -40,6 +40,7 @@ OFFLINE = Profile(
 )
 LEARNED = "198.18.0.9"
 FORGED = "198.18.0.10"
+UNTRUSTED = "198.18.0.11"
 
 
 def encode_name(value):
@@ -116,7 +117,7 @@ def main():
     run("ip", "link", "set", "client0", "address", AFFECTED)
     run("ip", "addr", "add", "192.168.50.1/24", "dev", "jittersim0")
     run("ip", "addr", "add", "198.18.0.1/24", "dev", "up0")
-    for address in (LISTED, OTHER, LEARNED, FORGED, "198.18.0.53"):
+    for address in (LISTED, OTHER, LEARNED, FORGED, UNTRUSTED, "198.18.0.53"):
         run("ip", "neigh", "replace", address, "lladdr", REMOTE, "nud", "permanent", "dev", "up0")
     run(
         "ip",
@@ -157,6 +158,8 @@ def main():
         )
         client = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
         remote = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+        resolver = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+        resolver.bind(("jittersim0", 0))
         client.bind(("client0", 0))
         remote.bind(("remote0", 0))
         counter = [0]
@@ -173,10 +176,19 @@ def main():
             time.sleep(0.5)
             assert to_server(LEARNED), "unlisted traffic was shaped before any learning"
 
-            # An answer from the Internet side reaches the client through the Pi.
+            # With household DNS rules off, a forwarded remote answer is not trusted.
             remote.send(
                 answer_frame(
-                    REMOTE, up_mac, "198.18.0.53", CLIENT, "cdn.streaming.example", LEARNED
+                    REMOTE, up_mac, "198.18.0.53", CLIENT, "cdn.streaming.example", UNTRUSTED
+                )
+            )
+            time.sleep(1.0)
+            assert to_server(UNTRUSTED), "an untrusted remote DNS answer taught the watcher an address"
+
+            # The Pi resolver sends a real outgoing frame through the watched interface.
+            resolver.send(
+                answer_frame(
+                    test_mac, AFFECTED, "192.168.50.1", CLIENT, "cdn.streaming.example", LEARNED
                 )
             )
             assert wait_until(lambda: not to_server(LEARNED)), (
@@ -184,8 +196,8 @@ def main():
             )
 
             # Unrelated answers and answers a client sends to the Pi teach nothing.
-            remote.send(
-                answer_frame(REMOTE, up_mac, "198.18.0.53", CLIENT, "unrelated.example", OTHER)
+            resolver.send(
+                answer_frame(test_mac, AFFECTED, "192.168.50.1", CLIENT, "unrelated.example", OTHER)
             )
             client.send(
                 answer_frame(
@@ -195,17 +207,19 @@ def main():
             time.sleep(1.0)
             assert to_server(OTHER), "an unlisted name taught the watcher an address"
             assert to_server(FORGED), "a client forged a listed address"
+            assert to_server(UNTRUSTED), "an untrusted remote DNS answer was learned later"
             assert not to_server(LEARNED)
         finally:
             stop.set()
             worker.join(timeout=5)
             client.close()
             remote.close()
+            resolver.close()
             service.handle_payload({"action": "reset"})
             run("ip", "link", "del", "jittersim0")
             run("ip", "link", "del", "up0")
     print(
-        "DNS answers taught the helper listed addresses; unlisted and client-sent answers did not."
+        "Trusted DNS answers taught listed addresses; remote, unlisted and client-sent answers did not."
     )
 
 
