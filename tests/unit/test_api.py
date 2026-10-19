@@ -356,7 +356,7 @@ def local_time_zone(name: str):
 EXPECTED_PAGE_HEADINGS = {
     None: ["Credentials", "Dashboard access"],
     "page-devices": [
-        "Getting started", "Everyone", "Connected clients", "Saved devices",
+        "Getting started", "Everyone", "Address changes", "Connected clients", "Saved devices",
         "Everyone else", "Protected devices",
     ],
     "page-profiles": ["Saved profiles", "Save profile", "Assign a device", "Group devices"],

@@ -42,6 +42,12 @@ next release takes them over.
   under it, a length such as 45.5 is refused with a message, the export uses the
   dashboard's request handling, and one damaged saved result no longer hides the
   others. Labels reject hidden control and format characters (the joiners that emoji and Persian words need are allowed).
+- **Address changes** on the Devices page: a saved device that comes back with a
+  new private Wi-Fi address is suggested ("This looks like Dad's phone ... Move
+  its settings?") with Yes, No and Not this device. Off, Ask (default) and
+  Automatic. Automatic moves only the profile and the name on strong evidence.
+  Protection moves only after Yes, and a saved dashboard access grant never moves
+  from the card. Every move is in a history with Undo for 7 days.
 - The Pi Wi-Fi follows the router. After a **Copy router Wi-Fi to Pi** that
   worked, the Pi records the router's Wi-Fi name and security (no password).
   Every boot renames a saved Wi-Fi with another name, such as
