@@ -977,7 +977,7 @@ What the check cannot do:
 - It checks the **download** side of the profile only. The Pi's probes pass the
   device's download queue, but the device's answers pass no upload queue. Use **Test
   speed** to check the upload and the speed cap. A speed cap is never judged by a
-  burst of pings.
+  burst of pings. A profile that changes only the upload side is not judged.
 - A device with **Same as everyone** or **Everyone else** is not shaped for the Pi's
   own packets, so the result is `Unshaped Wi-Fi round trip, not comparable with the
   profile`. A device with no profile, a reset network or a protected device shows the

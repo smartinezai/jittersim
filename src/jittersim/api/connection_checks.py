@@ -10,7 +10,7 @@ import logging
 import secrets
 import sqlite3
 from dataclasses import asdict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs
 
 from jittersim.api.speed_tests import (
@@ -68,6 +68,16 @@ UNAVAILABLE_MESSAGE = (
     "The dashboard cannot send ping probes to this device just now ({reason}). Use Test speed "
     "instead.")
 NO_ADDRESS_MESSAGE = "This device has no address yet, so the Pi cannot send it probes."
+# The upload values that make a profile shape something. A profile that sets only these is not
+# judged: the Pi's probes and the device's answers pass no upload queue.
+UPLOAD_KEYS = ("loss_percent", "delay_ms", "jitter_ms", "duplicate_percent", "reorder_percent",
+               "corrupt_percent", "bandwidth_kbit")
+# The signature of "no applied plan" (a reset network or a plan that cannot be read). It is a
+# value and not None, so a plan that appears during the check is a change.
+NO_PLAN = ("no-plan",)
+# A request can protect the device between the read of its protection and the transaction that
+# saves the row. The row is then built again with the new value, at most this many times.
+SAVE_ATTEMPTS = 3
 
 
 class ConnectionCheckRun(SpeedTestRun):
@@ -154,6 +164,7 @@ class ConnectionCheckManager:
             raise SpeedTestRequestError(NO_ADDRESS_MESSAGE, 409)
         impairment: Optional[Dict[str, Any]] = None
         identity: Optional[Dict[str, Any]] = None
+        upload_set = False
         if target.source == "device" and not protected:
             entry = target.entries.get("download")
             if entry is None:
@@ -164,6 +175,8 @@ class ConnectionCheckManager:
                     "a moment.", 503)
             impairment = dict(entry.get("impairment") or {})
             identity = _identity(entry)
+            upload = target.entries.get("upload") or {}
+            upload_set = any((upload.get("impairment") or {}).get(key) for key in UPLOAD_KEYS)
         notes = list(target.notes)
         if target.source == "device" and not protected:
             if target.service_rules is True:
@@ -210,6 +223,7 @@ class ConnectionCheckManager:
             protected=protected,
             impairment=impairment,
             burst_packets=(impairment or {}).get("loss_burst_packets"),
+            upload_set=upload_set,
             identity=identity,
             profile=speed._profile_snapshot(
                 target.owner, target.queue_id, "none" if protected else target.source,
@@ -250,11 +264,12 @@ class ConnectionCheckManager:
 
         speed = self.speed
         now = speed.monotonic()
+        # Only a protected device has no signature: no profile can apply to it.
         if run.signature is None or now - run.last_watch < WATCH_SECONDS:
             return False
         run.last_watch = now
         current = _signature(speed, *speed._applied_snapshot(), run.source, run.ipv4_address)
-        if current is not None and current != run.signature:
+        if current != run.signature:
             run.drift_reason = "The profile applied to this device changed during the check."
             return True
         return False
@@ -293,8 +308,24 @@ class ConnectionCheckManager:
         return end
 
     # Ending.
+    #
+    # Lock order. The manager lock (speed.lock) comes first: the caller of `_end` holds it. The
+    # scheduler's runtime lock and the repository lock are each taken after it, one at a time,
+    # and never one inside the other here. The scheduler holds its runtime lock while it writes
+    # the repository (Apply, a schedule or timer publish), so a check that read the applied plan
+    # inside the repository transaction could wait for the scheduler while the scheduler waits
+    # for the repository: the whole dashboard would hang. So the applied plan is read and the
+    # summary built before the transaction, and the transaction holds only the protection read
+    # and the row insert.
 
-    def _changed_reason(self, run: ConnectionCheckRun, end: Dict[str, Any]) -> Optional[str]:
+    def _changed_reason(self, run: ConnectionCheckRun, end: Dict[str, Any], *,
+                        protected_now: bool, final: Optional[tuple]) -> Optional[str]:
+        """Why the check is not a clean measurement, or None. It takes no lock of its own.
+
+        `protected_now` is the device's protection and `final` the signature of the applied plan
+        at the end, both read by the caller.
+        """
+
         if run.drift_reason is not None:
             return run.drift_reason
         if end.get("associated") is False:
@@ -302,16 +333,13 @@ class ConnectionCheckManager:
         if end.get("associated") is True and end.get("address") != run.ipv4_address:
             # A connected device whose address is missing or different is not the one probed.
             return "The device's address changed during the check."
-        if self.speed._protected(run.mac_address) != run.protected:
+        if protected_now != run.protected:
             return "The device's protection changed during the check."
         if run.identity is not None and end.get("identity_known"):
             if end.get("identity") != run.identity:
                 return "The profile applied to this device changed during the check."
-        if run.signature is not None:
-            final = _signature(self.speed, *self.speed._applied_snapshot(), run.source,
-                               run.ipv4_address)
-            if final is not None and final != run.signature:
-                return "The profile applied to this device changed during the check."
+        if run.signature is not None and final != run.signature:
+            return "The profile applied to this device changed during the check."
         return None
 
     def _end(self, run: ConnectionCheckRun, status: str, end: Dict[str, Any],
@@ -323,24 +351,47 @@ class ConnectionCheckManager:
         if status == "cancelled":
             run.ended_reason = "Cancelled. Nothing was saved."
             return
+        speed = self.speed
+        final = None
+        if status == "complete" and run.signature is not None:
+            # The runtime lock, taken and released before the repository lock (see above).
+            final = _signature(speed, *speed._applied_snapshot(), run.source, run.ipv4_address)
         try:
-            # Like the speed test, judge the end state inside the repository transaction that
-            # saves the row. A request that changes the device's protection then happens entirely
-            # before the judgement or after the saved row.
-            with self.repository.transaction():
-                run.result = self._store().save(self._result_row(run, status, end))
+            protected_now = speed._protected(run.mac_address)
+            for _ in range(SAVE_ATTEMPTS):
+                row, ended_reason = self._result_row(
+                    run, status, end, reason=reason, protected_now=protected_now, final=final)
+                # Like the speed test, the protection that judged the row is confirmed inside the
+                # transaction that saves it. A request that changes the device's protection then
+                # happens entirely before the confirmation or after the saved row. Nothing in this
+                # block reads the scheduler.
+                with self.repository.transaction():
+                    confirmed = speed._protected(run.mac_address)
+                    if confirmed == protected_now:
+                        run.result = self._store().save(row)
+                        run.ended_reason = ended_reason
+                        return
+                # The protection changed in between: judge again with the new value.
+                protected_now = confirmed
         except (StorageError, sqlite3.Error):
-            run.ended_reason = "The result could not be saved."
+            pass
+        run.ended_reason = "The result could not be saved."
 
-    def _result_row(self, run: ConnectionCheckRun, status: str, end: Dict[str, Any]
-                    ) -> Dict[str, Any]:
-        """Judge how the check ended and build the row to save. It changes only the run."""
+    def _result_row(self, run: ConnectionCheckRun, status: str, end: Dict[str, Any], *,
+                    reason: Optional[str], protected_now: bool, final: Optional[tuple]
+                    ) -> Tuple[Dict[str, Any], Optional[str]]:
+        """Judge how the check ended. Returns the row to save and the run's ended reason.
+
+        It changes nothing and takes no scheduler lock, so the caller may build it again.
+        """
 
         speed = self.speed
-        changed = self._changed_reason(run, end) if status == "complete" else None
+        ended_reason = reason
+        changed = (self._changed_reason(run, end, protected_now=protected_now, final=final)
+                   if status == "complete" else None)
         if changed is not None:
             status = "changed"
-            run.ended_reason = changed
+            ended_reason = changed
         unchanged: Optional[bool] = None
         if run.identity is not None and end.get("identity_known"):
             unchanged = changed is None
@@ -354,14 +405,15 @@ class ConnectionCheckManager:
         summary = build_summary(
             run.prober.records(), planned=run.probes_total, source=run.source,
             protected=run.protected, impairment=run.impairment, burst_packets=run.burst_packets,
+            upload_set=run.upload_set,
             service_rules=run.service_rules, changed_reason=changed, unverified_reason=unverified,
-            fault_reason=run.ended_reason if status == "fault" else None,
+            fault_reason=reason if status == "fault" else None,
             probe_status=getattr(run.prober, "status", "measured"),
             probe_reason=getattr(run.prober, "reason", None), notes=notes,
             seconds=round(speed.monotonic() - run.started_mono, 1),
             profile_unchanged=unchanged, grace=round(run.grace, 1))
         if status == "fault":
-            summary["ended_reason"] = run.ended_reason
+            summary["ended_reason"] = reason
         return {
             "started_at": run.started_at,
             "finished_at": speed.clock(),
@@ -375,7 +427,7 @@ class ConnectionCheckManager:
             "protected": run.protected,
             "profile": run.profile,
             "summary": summary,
-        }
+        }, ended_reason
 
     def cancel(self, run_id: Any) -> Dict[str, Any]:
         speed = self.speed
@@ -395,13 +447,14 @@ def _signature(speed, plan, states, source, ipv4):
     nothing shapes), the impairment and source (kind, identity, profile) of that queue, whether
     shared profiles exist and the service rules. Two readings that differ mean the profile
     changed in between (a schedule, a timer, a new apply or a reset), also for a device that
-    started without a profile. None when there is no readable plan. A change that went away
-    again between two readings is not seen: the check promises to catch changes it observes, not
-    every transient.
+    started without a profile. NO_PLAN when there is no readable plan (a reset network), so a
+    plan that appears during a check that started without one is a change too. A change that
+    went away again between two readings is not seen: the check promises to catch changes it
+    observes, not every transient.
     """
 
     if plan is None or states is None:
-        return None
+        return NO_PLAN
     owner = _address_owner(plan, ipv4)
     spec = next((queue for queue in getattr(plan, "queues", ())
                  if owner is not None and queue.device_id == owner

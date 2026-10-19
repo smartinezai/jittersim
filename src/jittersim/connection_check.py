@@ -108,6 +108,8 @@ VERDICT_LABELS = {
     "no-answer": "The device did not answer ping",
     "unavailable": "The Pi could not send probes",
     "changed": "Not judged: the profile, the Wi-Fi connection or the protection changed",
+    "upload-only": "Not judged: this profile changes only the upload side, which the probes do "
+                   "not pass",
 }
 NO_ANSWER_NOTE = (
     "Many phones, TVs and PCs ignore ping (Windows blocks it by default), so this is not packet "
@@ -747,8 +749,9 @@ def _reorder_row(burst: _Burst) -> Dict[str, Any]:
 def build_summary(
     records: Sequence[Dict[str, Any]], *, planned: int, source: str, protected: bool = False,
     impairment: Optional[Dict[str, Any]] = None, burst_packets: Optional[int] = None,
-    service_rules: Optional[bool] = False, changed_reason: Optional[str] = None,
-    unverified_reason: Optional[str] = None, fault_reason: Optional[str] = None,
+    upload_set: bool = False, service_rules: Optional[bool] = False,
+    changed_reason: Optional[str] = None, unverified_reason: Optional[str] = None,
+    fault_reason: Optional[str] = None,
     probe_status: str = "measured", probe_reason: Optional[str] = None,
     notes: Iterable[str] = (), seconds: Optional[float] = None,
     profile_unchanged: Optional[bool] = None, grace: Optional[float] = None,
@@ -758,6 +761,8 @@ def build_summary(
     `source` is where the profile lives: `device` (its own queues), `everyone`, `everyone-else` or
     `none`. `impairment` is the applied download impairment of the device's own queue. It is
     only given for a device with its own profile that is not protected: nothing else is shaped.
+    `upload_set` says that the upload side of that queue sets something: a profile that sets
+    nothing on the download side then gets `upload-only`, never `matches`.
     `service_rules` is True or None when a service rule applies or could not be confirmed, which
     withholds the verdict for a shaped device. `changed_reason` and `unverified_reason` say that
     the profile changed during the burst or that the end state could not be read: no verdict.
@@ -809,7 +814,8 @@ def build_summary(
     verdict = _overall(
         statuses, confirmed, received=stats["received"], sent=stats["sent"], source=source,
         shaped=shaped, protected=protected, withheld=withheld, probe_status=probe_status,
-        loss_status=loss_row["status"], only_cap=bool(burst.bandwidth) and not set_ids)
+        loss_status=loss_row["status"], only_cap=bool(burst.bandwidth) and not set_ids,
+        upload_only=upload_set and not set_ids and not burst.bandwidth)
     notes = list(notes) + burst.notes
     if verdict == "no-answer":
         notes.insert(0, NO_ANSWER_NOTE)
@@ -819,6 +825,8 @@ def build_summary(
         notes.insert(0, BASELINE_NOTE)
     elif verdict in ("changed", "fault", "unverified", "out-of-range"):
         notes.insert(0, reason or "")
+    elif verdict == "upload-only":
+        notes.insert(0, UPLOAD_NOTE)
     if verdict == "inconclusive" and burst.bandwidth and not set_ids:
         notes.append("This profile sets only a speed cap, which a burst of probes cannot "
                      "measure. Use Test speed to check it.")
@@ -874,7 +882,8 @@ def _unique(values: Iterable[str]) -> List[str]:
 
 def _overall(statuses: Sequence[str], confirmed: Sequence[str], *, received: int, sent: int,
              source: str, shaped: bool, protected: bool, withheld: Optional[str],
-             probe_status: str, loss_status: str, only_cap: bool) -> str:
+             probe_status: str, loss_status: str, only_cap: bool, upload_only: bool = False
+             ) -> str:
     if withheld in ("changed", "fault", "unverified"):
         return withheld
     if probe_status == "unavailable":
@@ -889,6 +898,10 @@ def _overall(statuses: Sequence[str], confirmed: Sequence[str], *, received: int
         return "baseline"
     if withheld is not None:
         return withheld
+    if upload_only:
+        # The download side sets nothing, so a healthy link would "match" a profile the probes
+        # never pass. Say that it cannot be judged.
+        return "upload-only"
     less, more = "less" in statuses, "more" in statuses
     if less and more:
         return "differs"

@@ -116,7 +116,15 @@ it (O3).
   the address that was probed** (a connected device whose address is missing or different is
   changed), and from the repository its protection. A change that goes away again between two
   readings is not seen (A to B to A within a second). A cancel or a dashboard stop during the
-  final reads starts no further helper read.
+  final reads starts no further helper read. A network with no applied plan (reset) has its own
+  "no plan" reading, so a plan applied during such a check is a change too.
+* **Locks at the end.** The manager lock comes first. The applied plan is read (the scheduler's
+  runtime lock) and the summary is built before the repository transaction that saves the row,
+  never inside it: Apply and the scheduler hold the runtime lock while they write the repository,
+  so reading the plan inside the transaction could make both wait for each other forever. The
+  transaction only confirms the protection that judged the row and inserts it. If the protection
+  changed in between, the row is judged again with the new value (at most three times, then
+  nothing is saved).
 * **Unverified end state.** If the final helper reads fail for a device with its own profile
   (queue read or association status), the settings might have changed in the meantime. The result
   is then saved with the numbers and the verdict `unverified` (no accusation). This is a different
@@ -130,12 +138,13 @@ The overall verdict combines them:
 
 | Overall verdict | When |
 | --- | --- |
-| `matches` | at least one number is `matches` or `extra`, none is `less` or `more`, none is `borderline`. A profile that sets nothing and a healthy link also give `matches` |
+| `matches` | at least one number is `matches` or `extra`, none is `less` or `more`, none is `borderline`. A profile that sets nothing on either side and a healthy link also give `matches` |
 | `less` | one or more numbers are `less` and none is `more` ("less impairment than the profile sets") |
 | `more` | one or more numbers are `more` and none is `less` |
 | `differs` | some `less` and some `more` |
 | `borderline` | no `less` or `more`, but at least one `borderline` (close, run again with more probes) |
 | `inconclusive` | nothing could be judged because the probes cannot tell the set values from a healthy link. Says how many probes are needed |
+| `upload-only` | the profile sets nothing on the download side but sets upload values. The probes pass no upload queue, so a healthy link says nothing about the profile: no verdict, the upload note comes first |
 | `baseline` | no profile applies, the device is protected, or the network is reset. The numbers are the plain Wi-Fi path |
 | `not-comparable` | the device is covered by Same as everyone or Everyone else: the Pi's probes are not shaped. Reads "unshaped Wi-Fi round trip, not comparable with the profile" |
 | `service-rules` | a service rule, service list or active quota applies to the device (or could not be confirmed): verdict withheld like in PR 121 |
@@ -146,7 +155,8 @@ The overall verdict combines them:
 | `unverified` | the final helper reads failed for a device with its own profile, so a change cannot be ruled out |
 
 The order of the checks is: `changed`, `fault`, `unverified`, probes unavailable, `out-of-range`,
-`no-answer`, `not-comparable`, `baseline`, service rules, then the combination above. A change
+`no-answer`, `not-comparable`, `baseline`, service rules, `upload-only`, then the combination
+above. A change
 or a fault comes first for every kind of run, so a baseline is never shown for a device that
 left the Wi-Fi or got a profile during the burst.
 

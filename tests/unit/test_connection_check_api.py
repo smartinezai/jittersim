@@ -60,8 +60,7 @@ class CheckHelper(speed.CountingHelper):
             speed.queue(self.queue_id, "download", 0, generation=self.generation,
                         impairment=impairment),
             speed.queue(self.queue_id, "upload", 0, generation=self.generation,
-                        impairment={key: (None if key == "bandwidth_kbit" else 0)
-                                    for key in impairment}),
+                        impairment=dict(self.owner.upload)),
             speed.queue("someone-else", "download", 5),
         ]
 
@@ -112,6 +111,7 @@ class CheckBase(speed.ManagerBase):
     def setUp(self) -> None:
         super().setUp()
         self.impairment = dict(IMPAIRMENT)
+        self.upload = {key: (None if key == "bandwidth_kbit" else 0) for key in IMPAIRMENT}
         self.script = typical
         self.on_send = None
         self.probers = []
@@ -141,6 +141,17 @@ class CheckBase(speed.ManagerBase):
         queues = tuple(
             replace(queue, impairment=planned)
             if queue.device_id == "lab" and queue.direction == Direction.DOWNLOAD else queue
+            for queue in self.scheduler.plan.queues)
+        self.scheduler.plan = replace(self.scheduler.plan, queues=queues)
+
+    def set_upload(self, **changes):
+        """Change the upload side the helper reports and the plan says, together."""
+
+        self.upload.update(changes)
+        planned = Impairment(**self.upload)
+        queues = tuple(
+            replace(queue, impairment=planned)
+            if queue.device_id == "lab" and queue.direction == Direction.UPLOAD else queue
             for queue in self.scheduler.plan.queues)
         self.scheduler.plan = replace(self.scheduler.plan, queues=queues)
 
@@ -411,6 +422,16 @@ class ResultTests(CheckBase):
         summary = self.finish(run["id"])["result"]["summary"]
         self.assertEqual(summary["verdict"], "out-of-range")
 
+    def test_a_profile_that_sets_only_upload_values_is_not_judged(self) -> None:
+        self.set_impairment(delay_ms=0, loss_percent=0)
+        self.set_upload(loss_percent=20, delay_ms=200)
+        self.script = lambda index: (3.0, 1)
+        _, run = self.start()
+        summary = self.finish(run["id"])["result"]["summary"]
+        self.assertEqual(summary["verdict"], "upload-only")
+        self.assertIn("upload", summary["verdict_text"])
+        self.assertIn("Only the download side", summary["notes"][0])
+
     def test_a_device_that_ignores_ping_is_no_answer(self) -> None:
         self.script = lambda index: (None, 0)
         _, run = self.start()
@@ -494,7 +515,82 @@ class ChangeTests(CheckBase):
         with mock.patch.object(self.manager, "_protected", spy):
             result = self.finish(run["id"])["result"]
         self.assertEqual(result["status"], "complete")
-        self.assertEqual(depths, [1])
+        # One read builds the row before the transaction, one confirms it inside.
+        self.assertEqual(depths, [0, 1])
+
+    def test_protection_that_changes_before_the_save_judges_the_row_again(self) -> None:
+        _, run = self.start()
+        answers = iter([False, True, True])
+        with mock.patch.object(self.manager, "_protected", lambda mac: next(answers)):
+            ended = self.finish(run["id"])
+        result = ended["result"]
+        self.assertEqual((result["status"], result["summary"]["verdict"]), ("changed", "changed"))
+        self.assertIn("protection changed", ended["ended_reason"])
+
+    def test_protection_that_keeps_changing_saves_nothing(self) -> None:
+        _, run = self.start()
+        flips = iter([False, True, False, True, False, True, False])
+        with mock.patch.object(self.manager, "_protected", lambda mac: next(flips)):
+            ended = self.finish(run["id"])
+        self.assertIsNone(ended["result"])
+        self.assertEqual(ended["ended_reason"], "The result could not be saved.")
+        self.assertEqual(ConnectionCheckStore(self.repository).list(None, limit=10), [])
+
+    def test_the_end_of_a_check_does_not_wait_for_the_scheduler_inside_a_transaction(self) -> None:
+        # Apply and the scheduler hold the runtime lock while they write the repository. The end
+        # of a check must therefore never wait for the runtime lock while it holds the
+        # repository lock, or the two wait for each other and the dashboard hangs.
+        runtime_lock = threading.RLock()
+        plan_read = self.scheduler.applied_snapshot
+        at_end = threading.Event()
+        reading_at_end = threading.Event()
+
+        def applied_snapshot():
+            if at_end.is_set():
+                reading_at_end.set()
+            with runtime_lock:
+                return plan_read()
+
+        self.scheduler.applied_snapshot = applied_snapshot
+        take, held, go, outcome = (threading.Event(), threading.Event(), threading.Event(), {})
+
+        def apply_publish():
+            # Like publish_if_current: the runtime lock first, then a repository write.
+            take.wait(5)
+            with runtime_lock:
+                held.set()
+                go.wait(5)
+                got = self.repository._lock.acquire(timeout=2)
+                outcome["got"] = got
+                if got:
+                    self.repository._lock.release()
+
+        read_end_state = self.checks._read_end_state
+
+        def end_state(run_object):
+            # The burst is over: an Apply takes the runtime lock just as the check ends.
+            value = read_end_state(run_object)
+            at_end.set()
+            take.set()
+            held.wait(5)
+            return value
+
+        self.checks._read_end_state = end_state
+        _, run = self.start()
+        run_object = self.manager.runs[run["id"]]
+        publisher = threading.Thread(target=apply_publish, daemon=True)
+        publisher.start()
+        ender = threading.Thread(target=self.checks._loop, args=(run_object,), daemon=True)
+        ender.start()
+        # The check now waits for the runtime lock to read the final plan.
+        self.assertTrue(reading_at_end.wait(5))
+        go.set()
+        publisher.join(5)
+        ender.join(5)
+        self.assertFalse(publisher.is_alive())
+        self.assertFalse(ender.is_alive())
+        self.assertTrue(outcome["got"], "the check held the repository lock while it waited")
+        self.assertEqual(run_object.result["status"], "complete")
 
     def test_a_profile_applied_during_a_baseline_check_is_seen(self) -> None:
         # The device has no profile when the check starts. The scheduler then marks its address.
@@ -512,6 +608,52 @@ class ChangeTests(CheckBase):
         result = ended["result"]
         self.assertEqual((result["status"], result["summary"]["verdict"]), ("changed", "changed"))
         self.assertIn("changed during the check", ended["ended_reason"])
+
+    def test_an_apply_during_a_check_on_a_reset_network_is_seen(self) -> None:
+        # A reset network has no applied plan. A plan that appears during the burst (an Apply)
+        # shapes the rest of the probes, so the result is no baseline.
+        self.repository.update_runtime_state(
+            observed_state="reset", last_action="reset", last_result="success", last_error=None)
+        plan = self.scheduler.plan
+        self.scheduler.plan = None
+
+        def apply(index):
+            if index == 50:
+                self.scheduler.plan = plan
+
+        self.on_send = apply
+        _, run = self.start()
+        self.assertEqual(run["source"], "none")
+        ended = self.finish(run["id"])
+        result = ended["result"]
+        self.assertEqual((result["status"], result["summary"]["verdict"]), ("changed", "changed"))
+        self.assertIn("changed during the check", ended["ended_reason"])
+        self.assertLess(result["summary"]["probes"]["sent"], 100)
+
+    def test_an_apply_at_the_very_end_of_a_check_on_a_reset_network_is_seen(self) -> None:
+        self.repository.update_runtime_state(
+            observed_state="reset", last_action="reset", last_result="success", last_error=None)
+        plan = self.scheduler.plan
+        self.scheduler.plan = None
+        read_end_state = self.checks._read_end_state
+
+        def apply_then_read(run_object):
+            self.scheduler.plan = plan
+            return read_end_state(run_object)
+
+        self.checks._read_end_state = apply_then_read
+        _, run = self.start()
+        result = self.finish(run["id"])["result"]
+        self.assertEqual((result["status"], result["summary"]["verdict"]), ("changed", "changed"))
+
+    def test_a_reset_network_that_stays_reset_is_a_baseline(self) -> None:
+        self.repository.update_runtime_state(
+            observed_state="reset", last_action="reset", last_result="success", last_error=None)
+        self.scheduler.plan = None
+        _, run = self.start()
+        result = self.finish(run["id"])["result"]
+        self.assertEqual((result["status"], result["summary"]["verdict"]),
+                         ("complete", "baseline"))
 
     def test_a_harmless_change_of_a_shared_rule_does_not_mark_a_good_check(self) -> None:
         def tweak(index):

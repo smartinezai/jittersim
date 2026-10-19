@@ -426,6 +426,30 @@ def test_corruption_and_the_speed_cap_get_rows_but_no_status():
         "loss", "delay", "jitter", "duplicate", "reorder"}
 
 
+def test_a_profile_that_sets_only_upload_values_is_not_called_a_match():
+    # The probes pass the download queue only. A healthy link must not "match" a profile that
+    # sets nothing there.
+    result = summary(records(100), upload_set=True)
+    assert result["verdict"] == "upload-only"
+    assert result["verdict_text"].startswith("Not judged")
+    assert result["notes"][0] == check.UPLOAD_NOTE
+    assert result["notes"].count(check.UPLOAD_NOTE) == 1
+    # A profile that sets nothing on either side still describes a healthy link.
+    assert summary(records(100))["verdict"] == "matches"
+    # A download value is judged as usual, whatever the upload side sets.
+    lossy = summary(records(100, lost=range(0, 100, 10)),
+                    impairment=setting(loss_percent=10), upload_set=True)
+    assert lossy["verdict"] == "matches"
+    # A download speed cap keeps its own guidance.
+    capped = summary(records(100), impairment=setting(bandwidth_kbit=250), upload_set=True)
+    assert capped["verdict"] == "inconclusive"
+    # A withheld verdict and a baseline come first.
+    assert summary(records(100), upload_set=True, service_rules=True)["verdict"] == (
+        "service-rules")
+    assert summary(records(100), upload_set=True, source="none", impairment=None)["verdict"] == (
+        "baseline")
+
+
 def test_duplication_with_corruption_does_not_accuse_a_correct_profile():
     # Both copies of a probe must be damaged to lose it: 25 percent at 50 percent corruption.
     result = summary(records(100, lost=range(0, 100, 4)),
@@ -521,7 +545,8 @@ def test_the_summary_is_small_and_has_no_secrets():
 def test_every_verdict_and_status_has_a_label():
     for verdict in ("matches", "less", "more", "differs", "borderline", "inconclusive",
                     "baseline", "not-comparable", "service-rules", "service-rules-unknown",
-                    "out-of-range", "unverified", "no-answer", "unavailable", "changed", "fault"):
+                    "out-of-range", "unverified", "no-answer", "unavailable", "changed", "fault",
+                    "upload-only"):
         assert verdict in check.VERDICT_LABELS
     for status in ("matches", "less", "more", "extra", "borderline", "inconclusive",
                    "not-judged"):

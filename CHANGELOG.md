@@ -36,7 +36,8 @@ next release takes them over.
   burst of ping probes to the device and shows packet loss, round trip, jitter,
   duplicates and reordering. It compares them with the download side of the
   profile the Pi applied and says whether they match, are less than set or are
-  more than set. Results are saved per device and can be exported.
+  more than set. A profile that changes only the upload side is not judged.
+  Results are saved per device and can be exported.
 - The Pi Wi-Fi follows the router. After a **Copy router Wi-Fi to Pi** that
   worked, the Pi records the router's Wi-Fi name and security (no password).
   Every boot renames a saved Wi-Fi with another name, such as
