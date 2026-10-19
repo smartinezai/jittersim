@@ -30,7 +30,7 @@
     "window_confirm_calls": "window.confirm() calls in the scripts"
   },
   "recorded": {
-    "page_bytes": 816372,
+    "page_bytes": 836799,
     "page_gzip6_bytes": 179786,
     "page_lines": 16457,
     "markup_bytes": 111587,
