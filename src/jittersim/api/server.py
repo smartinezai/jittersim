@@ -993,6 +993,22 @@ class _PendingConnection:
 
 _RESET_REQUESTS_LOCK = threading.Lock()
 
+# The GET paths ControlServer.response_for answers itself, each with the method that
+# builds its answer. Paths are exact: a query string never selects a route.
+READ_ROUTES: Dict[str, Callable[..., Tuple[int, str, bytes]]] = {}
+
+
+def _read_route(path: str):
+    """Register a ControlServer method as the answer to one GET path."""
+
+    def register(method):
+        if path in READ_ROUTES:
+            raise ValueError(f"two read routes for {path}")
+        READ_ROUTES[path] = method
+        return method
+
+    return register
+
 
 class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
     """Serve configuration and plan data from one repository.
@@ -1861,654 +1877,747 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         trust = read_trust_api(self, path)
         if trust is not None:
             return trust
-        if path == "/api/wifi-operation/request-id":
-            identifier = issue_request_id()
-            return HTTPStatus.OK, "application/json", _json_bytes({"request_id": identifier})
-        if path == "/api/wifi-operation":
-            self._record_wifi_outcome()
-            identifier = parse_qs(query).get("id", [None])[0]
-            status, data = self.wifi_operations.last(identifier)
-            return status, "application/json", _json_bytes(data)
-        if path == "/":
-            return HTTPStatus.OK, "text/html; charset=utf-8", dashboard_page_bytes(self.dashboard_page_html)
-        if path == "/favicon.ico":
-            return HTTPStatus.OK, "image/x-icon", NEUTRAL_ICON
-        if path == "/api/brand":
-            return HTTPStatus.OK, "application/json", _json_bytes({
-                "name": PRODUCT_NAME,
-                "command": PRODUCT_COMMAND,
-                "default_ssid": DEFAULT_ACCESS_POINT_SSID,
-            })
-        if path == "/api/health":
-            return self.health_response(fresh=True)
-        if path == "/api/system-health":
-            # The public health check carries only the mode like the Pi base. The
-            # version and free disk and temperature and uptime need the admin token.
-            return HTTPStatus.OK, "application/json", _json_bytes({"system": machine_health()})
-        if path == "/api/profiles":
-            profiles = [_profile_payload(profile) for profile in self.repository.list_profiles()]
-            return HTTPStatus.OK, "application/json", _json_bytes({"profiles": profiles})
-        if path == "/api/pattern-history":
-            return HTTPStatus.OK, "application/json", _json_bytes({
-                "events": self.repository.list_pattern_events(now=int(time.time())),
-                "limit": 100, "retention_days": 7,
-            })
-        if path == "/api/general-profile":
-            return HTTPStatus.OK, "application/json", _json_bytes(self._general_profile_status())
-        if path == "/api/devices":
-            labels_by_mac = self.repository.list_connected_device_labels()
-            states = self._device_protection_states()
-            devices = [
-                _device_payload(device, labels_by_mac=labels_by_mac, state=states.get(device.id))
-                for device in self.repository.list_devices()
-            ]
-            return HTTPStatus.OK, "application/json", _json_bytes({"devices": devices})
-        if path == "/api/ad-blocking":
-            return HTTPStatus.OK, "application/json", _json_bytes(self._ad_blocking_payload())
-        if path == "/api/unaffected-devices":
-            blocking = set(self.repository.list_ad_blocking_devices())
-            return HTTPStatus.OK, "application/json", _json_bytes({
-                "devices": [{**asdict(device), "ad_blocking": device.mac_address in blocking}
-                            for device in self.repository.list_unaffected_devices()],
-                "limit": 256,
-                "ad_blocking": self._ad_blocking_payload(),
-            })
-        if path == "/api/groups":
-            labels_by_mac = self.repository.list_connected_device_labels()
-            groups = [
-                _device_group_payload(
-                    group, repository=self.repository, labels_by_mac=labels_by_mac
-                )
-                for group in self.repository.list_device_groups()
-            ]
-            return HTTPStatus.OK, "application/json", _json_bytes({"groups": groups})
-        if path == "/api/schedules":
-            schedules = [_schedule_payload(schedule) for schedule in self.repository.list_schedules()]
-            return HTTPStatus.OK, "application/json", _json_bytes({
-                "schedules": schedules,
-                "local_time": datetime.now().astimezone().isoformat(timespec="seconds"),
-                "time_zone": time.strftime("%Z"),
-            })
-        if path == "/api/activity":
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {"events": list(self.repository.list_activity())}
-            )
-        if path == "/api/activity/latest":
-            # The dashboard polls this and fetches the whole log only when it changed.
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                self.repository.activity_summary()
-            )
-        if path == "/api/scenarios":
-            runs = [
-                _scenario_run_payload(run, scenario, position, repository=self.repository)
-                for run, scenario, position in active_scenario_runs(
-                    self.repository, now=time.time()
-                )
-            ]
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "scenarios": [
-                        _scenario_payload(scenario) for scenario in self.repository.list_scenarios()
-                    ],
-                    "runs": runs,
-                }
-            )
-        if path == "/api/timers":
-            now = int(time.time())
-            timers = []
-            labels_by_mac = self.repository.list_connected_device_labels()
-            for timer in self.repository.list_active_timers(now=now):
-                device = self.repository.get_device(timer.device_id)
-                profile = self.repository.get_profile(timer.profile_id)
-                timers.append(
-                    {
-                        **_timer_payload(timer),
-                        "device_name": _device_title(device, labels_by_mac, timer.device_id),
-                        "profile_name": profile.name if profile is not None else timer.profile_id,
-                        "remaining_seconds": max(0, timer.expires_at - now),
-                    }
-                )
-            return HTTPStatus.OK, "application/json", _json_bytes({"timers": timers})
-        if path == "/api/progressions":
-            now = int(time.time())
-            device_counters = {}
-            scheduler_counters = {}
-            if self.scheduler is not None:
-                scheduler_counters = {
-                    device.id: self.scheduler.device_traffic_bytes(device_id=device.id)
-                    for device in self.repository.list_devices()
-                }
-            elif self.helper_client is not None:
-                try:
-                    device_counters = self.helper_client.traffic_counters().get("devices", {})
-                except (HelperClientError, AttributeError, TypeError):
-                    LOGGER.warning("could not read progression traffic counters")
-            progressions = [
-                _progression_payload(
-                    progression,
-                    repository=self.repository,
-                    now=now,
-                    traffic_bytes=scheduler_counters.get(
-                        progression.device_id,
-                        device_counters.get(progression.device_id, 0),
-                    ),
-                )
-                for progression in self.repository.list_active_progressions(now=now)
-            ]
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {"progressions": progressions}
-            )
-        if path == "/api/data-limits":
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "data_limits": [
-                        _data_limit_payload(data_limit, repository=self.repository)
-                        for data_limit in self.repository.list_data_limits()
-                    ]
-                }
-            )
-        if path == "/api/group-data-limits":
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "group_data_limits": [
-                        _group_data_limit_payload(data_limit, repository=self.repository)
-                        for data_limit in self.repository.list_group_data_limits()
-                    ]
-                }
-            )
-        if path == "/api/service-quotas":
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "service_quotas": [
-                        _service_quota_payload(quota, repository=self.repository)
-                        for quota in self.repository.list_service_quotas()
-                    ]
-                }
-            )
-        if path == "/api/service-assignments":
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "service_assignments": [
-                        _service_assignment_payload(assignment, repository=self.repository)
-                        for assignment in self.repository.list_service_assignments()
-                    ]
-                }
-            )
-        if path == "/api/service-lists":
-            # Only the plan on the network says whether a list is in an outage now.
-            applied = self.scheduler.applied_plan() if self.scheduler is not None else None
-            outages = {
-                rule.list_id: rule.outage_active
-                for rule in (applied.service_list_rules if applied is not None else ())
-            }
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "service_lists": [
-                        _service_list_payload(
-                            service_list,
-                            repository=self.repository,
-                            outage_now=outages.get(service_list.id, False),
-                        )
-                        for service_list in self.repository.list_service_lists()
-                    ],
-                    "catalogue": _service_catalogue_payload(),
-                }
-            )
-        if path == "/api/time-quotas":
-            now = int(time.time())
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "time_quotas": [
-                        _time_quota_payload(quota, repository=self.repository, now=now)
-                        for quota in self.repository.list_time_quotas()
-                    ]
-                }
-            )
-        if path == "/api/policies":
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                _policies_payload(self.repository)
-            )
-        if path == "/api/everyone-else":
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                _everyone_else_payload(self.repository)
-            )
-        if path == "/api/router":
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "model": "Vodafone TG3442DE",
-                    "automatic_wifi_control": True,
-                    "wifi_control": "tg3442de-local-web",
-                    "message": (
-                        "Router admin credentials are used for one authenticated request and are not saved. "
-                        "Keep the Pi connected by Ethernet before changing router Wi-Fi."
-                    ),
-                }
-            )
-        if path == "/api/uplink":
-            if self.helper_client is None:
-                return HTTPStatus.OK, "application/json", _json_bytes(
-                    {
-                        "available": False,
-                        "uplink": None,
-                        "message": "upstream connection information is unavailable in configuration-only mode",
-                    }
-                )
-            try:
-                uplink = self.helper_client.uplink_info()
-            except HelperClientError:
-                LOGGER.exception("could not inspect the upstream connection")
-                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
-                    {"error": "could not inspect the upstream connection"}
-                )
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "available": True,
-                    "uplink": uplink,
-                    "router": {
-                        "model": "Vodafone TG3442DE",
-                        "settings_url": "http://192.168.0.1",
-                        "wifi_control": "tg3442de-local-web",
-                    },
-                }
-            )
-        if path == "/api/connected-device-labels":
-            labels = self.repository.list_connected_device_labels()
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "labels": [
-                        {
-                            "mac_address": mac_address,
-                            "display_name": label["display_name"],
-                            "device_type": label["device_type"],
-                        }
-                        for mac_address, label in labels.items()
-                    ]
-                }
-            )
-        if path == "/api/connected-devices":
-            if self.helper_client is None:
-                return HTTPStatus.OK, "application/json", _json_bytes(
-                    {
-                        "available": False,
-                        "devices": [],
-                        "message": "connected-client information is unavailable in configuration-only mode",
-                    }
-                )
-            try:
-                snapshot = self.helper_client.connected_device_snapshot()
-                devices = snapshot["devices"]
-            except HelperClientError:
-                LOGGER.exception("could not inspect connected clients")
-                return (
-                    HTTPStatus.BAD_GATEWAY,
-                    "application/json",
-                    _json_bytes({"error": "could not inspect connected clients"}),
-                )
-            assignments_by_address = {
-                str(device.ipv4_address): device for device in self.repository.list_devices()
-            }
-            labels_by_mac = self.repository.list_connected_device_labels()
-            protected = {item.mac_address for item in self.repository.list_unaffected_devices()}
-            unaffected_macs = frozenset(protected)
-            general_status = self._general_profile_status()
-            groups_by_device = {
-                device_id: group
-                for group in self.repository.list_device_groups()
-                for device_id in group.device_ids
-            }
-            devices = [
-                _connected_device_payload(
-                    device,
-                    assignments_by_address=assignments_by_address,
-                    labels_by_mac=labels_by_mac,
-                    unaffected_macs=unaffected_macs,
-                )
-                for device in devices
-            ]
-            states = device_protection_states(
-                self.repository, snapshot if protected else None
-            )
-            beside_everyone = self.repository.get_everyone_exceptions()
-            for client in devices:
-                group = groups_by_device.get(client["assigned_device_id"])
-                client["unaffected"] = client["mac_address"] in protected
-                client["assigned_effective_state"] = states.get(
-                    client["assigned_device_id"], {}
-                ).get("effective_state")
-                client["group_id"] = group.id if group else None
-                client["group_name"] = group.name if group else None
-                client["group_profile_id"] = group.profile_id if group else None
-                if general_status["active"] and not client["unaffected"]:
-                    if client["assigned_device_id"] in beside_everyone:
-                        # This device left Everyone and runs the profile saved for it.
-                        client["beside_everyone"] = True
-                    else:
-                        client["general_profile_name"] = general_status["profile"]["name"]
-            return (
-                HTTPStatus.OK,
-                "application/json",
-                _json_bytes(
-                    {
-                        "available": True,
-                        "association_status_available": snapshot["association_status_available"],
-                        "devices": devices,
-                        # The list polls every 5 seconds, so its labels follow schedules.
-                        "everyone_else_profile_id": _everyone_else_now(self.repository)[0],
-                    }
-                ),
-            )
-        if path == "/api/observations":
-            observations = self.repository.list_domain_observations()
-            assignments_by_address = {
-                str(device.ipv4_address): device for device in self.repository.list_devices()
-            }
-            station_devices = self._station_devices()
-            blocked = protected_addresses(self.repository, station_devices)
-            protected = set(protected_macs(self.repository))
-            grouped = {}
-            for observation in observations:
-                address = str(observation.ipv4_address)
-                if observation_is_protected(observation, protected, blocked):
-                    continue
-                grouped.setdefault(address, []).append(observation)
-            stations = self._station_identities(station_devices)
-            labels_by_mac = self.repository.list_connected_device_labels()
-            blocked_names = frozenset(self.repository.get_website_policy().blocked_domains)
-            devices = [
-                {
-                    "ipv4_address": address,
-                    "display_name": _observation_display_name(
-                        stations.get(address, {}),
-                        assignments_by_address.get(address),
-                        labels_by_mac,
-                    ),
-                    "hostname": stations.get(address, {}).get("hostname"),
-                    "assigned_device_id": (
-                        assignments_by_address[address].id
-                        if address in assignments_by_address
-                        else None
-                    ),
-                    "assigned_device_name": (
-                        assignments_by_address[address].name
-                        if address in assignments_by_address
-                        else None
-                    ),
-                    "assigned_profile_id": (
-                        assignments_by_address[address].profile_id
-                        if address in assignments_by_address
-                        else None
-                    ),
-                    "domains": _labelled_domain_payloads(rows, blocked_names),
-                }
-                for address, rows in sorted(grouped.items())
-            ]
-            return (
-                HTTPStatus.OK,
-                "application/json",
-                _json_bytes(
-                    {
-                        "available": self.helper_client is not None,
-                        "devices": devices,
-                        "total_domains": sum(len(rows) for rows in grouped.values()),
-                        "list_cleared": _domain_list_cleared_payload(self.repository),
-                        "message": (
-                            None
-                            if self.helper_client is not None
-                            else "traffic discovery is unavailable in configuration-only mode"
-                        ),
-                    }
-                ),
-            )
-        if path == "/api/plan":
-            plan = (
-                self.scheduler.build_plan(repository=self.repository)
-                if self.scheduler is not None
-                else compile_stored_plan(
-                    repository=self.repository,
-                    connected_snapshot=station_snapshot(self.helper_client)
-                    if self.helper_client
-                    else None,
-                )
-            )
-            return HTTPStatus.OK, "application/json", _json_bytes({"plan": plan_to_payload(plan)})
-        if path == "/api/conditions":
-            # Read the applied plan without the apply lock, so this read never waits for an apply.
-            if self.scheduler is None:
-                plan, sources = None, None
-            elif hasattr(self.scheduler, "applied_snapshot"):
-                plan, sources = self.scheduler.applied_snapshot()
-            else:
-                plan, sources = self.scheduler.applied_plan(), self.scheduler.applied_target_states()
-            applied = plan is not None
+        read = READ_ROUTES.get(path)
+        if read is not None:
+            return read(self, query)
+        return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
-            def described_condition(state, target_id):
-                payload = {"condition": state.condition, "reasons": list(state.reasons)}
-                target = (sources or {}).get(target_id)
-                if applied and target is not None:
-                    payload["source"] = asdict(target.source)
-                    payload["next_change_at"] = (
-                        datetime.fromtimestamp(target.next_change_at).astimezone().isoformat()
-                        if target.next_change_at is not None else None
-                    )
-                return payload
-            if plan is None:
-                # Nothing runs on the network, so describe the saved settings.
-                # The scheduler's runtime plan would advance its rerolls.
-                plan = compile_stored_plan(
-                    repository=self.repository, connected_snapshot=self._protection_snapshot()
-                )
-            everyone_else = everyone_else_condition(plan)
-            return HTTPStatus.OK, "application/json", _json_bytes(
+    @_read_route("/api/wifi-operation/request-id")
+    def _get_wifi_operation_request_id(self, query: str) -> Tuple[int, str, bytes]:
+        identifier = issue_request_id()
+        return HTTPStatus.OK, "application/json", _json_bytes({"request_id": identifier})
+
+    @_read_route("/api/wifi-operation")
+    def _get_wifi_operation(self, query: str) -> Tuple[int, str, bytes]:
+        self._record_wifi_outcome()
+        identifier = parse_qs(query).get("id", [None])[0]
+        status, data = self.wifi_operations.last(identifier)
+        return status, "application/json", _json_bytes(data)
+
+    @_read_route("/")
+    def _get_dashboard_page(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "text/html; charset=utf-8", dashboard_page_bytes(self.dashboard_page_html)
+
+    @_read_route("/favicon.ico")
+    def _get_favicon(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "image/x-icon", NEUTRAL_ICON
+
+    @_read_route("/api/brand")
+    def _get_brand(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes({
+            "name": PRODUCT_NAME,
+            "command": PRODUCT_COMMAND,
+            "default_ssid": DEFAULT_ACCESS_POINT_SSID,
+        })
+
+    @_read_route("/api/health")
+    def _get_health(self, query: str) -> Tuple[int, str, bytes]:
+        return self.health_response(fresh=True)
+
+    @_read_route("/api/system-health")
+    def _get_system_health(self, query: str) -> Tuple[int, str, bytes]:
+        # The public health check carries only the mode like the Pi base. The
+        # version and free disk and temperature and uptime need the admin token.
+        return HTTPStatus.OK, "application/json", _json_bytes({"system": machine_health()})
+
+    @_read_route("/api/profiles")
+    def _get_profiles(self, query: str) -> Tuple[int, str, bytes]:
+        profiles = [_profile_payload(profile) for profile in self.repository.list_profiles()]
+        return HTTPStatus.OK, "application/json", _json_bytes({"profiles": profiles})
+
+    @_read_route("/api/pattern-history")
+    def _get_pattern_history(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes({
+            "events": self.repository.list_pattern_events(now=int(time.time())),
+            "limit": 100, "retention_days": 7,
+        })
+
+    @_read_route("/api/general-profile")
+    def _get_general_profile(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes(self._general_profile_status())
+
+    @_read_route("/api/devices")
+    def _get_devices(self, query: str) -> Tuple[int, str, bytes]:
+        labels_by_mac = self.repository.list_connected_device_labels()
+        states = self._device_protection_states()
+        devices = [
+            _device_payload(device, labels_by_mac=labels_by_mac, state=states.get(device.id))
+            for device in self.repository.list_devices()
+        ]
+        return HTTPStatus.OK, "application/json", _json_bytes({"devices": devices})
+
+    @_read_route("/api/ad-blocking")
+    def _get_ad_blocking(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes(self._ad_blocking_payload())
+
+    @_read_route("/api/unaffected-devices")
+    def _get_unaffected_devices(self, query: str) -> Tuple[int, str, bytes]:
+        blocking = set(self.repository.list_ad_blocking_devices())
+        return HTTPStatus.OK, "application/json", _json_bytes({
+            "devices": [{**asdict(device), "ad_blocking": device.mac_address in blocking}
+                        for device in self.repository.list_unaffected_devices()],
+            "limit": 256,
+            "ad_blocking": self._ad_blocking_payload(),
+        })
+
+    @_read_route("/api/groups")
+    def _get_groups(self, query: str) -> Tuple[int, str, bytes]:
+        labels_by_mac = self.repository.list_connected_device_labels()
+        groups = [
+            _device_group_payload(
+                group, repository=self.repository, labels_by_mac=labels_by_mac
+            )
+            for group in self.repository.list_device_groups()
+        ]
+        return HTTPStatus.OK, "application/json", _json_bytes({"groups": groups})
+
+    @_read_route("/api/schedules")
+    def _get_schedules(self, query: str) -> Tuple[int, str, bytes]:
+        schedules = [_schedule_payload(schedule) for schedule in self.repository.list_schedules()]
+        return HTTPStatus.OK, "application/json", _json_bytes({
+            "schedules": schedules,
+            "local_time": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "time_zone": time.strftime("%Z"),
+        })
+
+    @_read_route("/api/activity")
+    def _get_activity(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {"events": list(self.repository.list_activity())}
+        )
+
+    @_read_route("/api/activity/latest")
+    def _get_activity_latest(self, query: str) -> Tuple[int, str, bytes]:
+        # The dashboard polls this and fetches the whole log only when it changed.
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            self.repository.activity_summary()
+        )
+
+    @_read_route("/api/scenarios")
+    def _get_scenarios(self, query: str) -> Tuple[int, str, bytes]:
+        runs = [
+            _scenario_run_payload(run, scenario, position, repository=self.repository)
+            for run, scenario, position in active_scenario_runs(
+                self.repository, now=time.time()
+            )
+        ]
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "scenarios": [
+                    _scenario_payload(scenario) for scenario in self.repository.list_scenarios()
+                ],
+                "runs": runs,
+            }
+        )
+
+    @_read_route("/api/timers")
+    def _get_timers(self, query: str) -> Tuple[int, str, bytes]:
+        now = int(time.time())
+        timers = []
+        labels_by_mac = self.repository.list_connected_device_labels()
+        for timer in self.repository.list_active_timers(now=now):
+            device = self.repository.get_device(timer.device_id)
+            profile = self.repository.get_profile(timer.profile_id)
+            timers.append(
                 {
-                    "applied": applied,
-                    "everyone_else": (
-                        None
-                        if everyone_else is None
-                        else described_condition(everyone_else, EVERYONE_ELSE_QUEUE_ID)
-                    ),
-                    "devices": {
-                        device_id: described_condition(state, device_id)
-                        for device_id, state in device_conditions(
-                            plan,
-                            mac_addresses={
-                                device.id: device.mac_address
-                                for device in self.repository.list_devices()
-                            },
-                        ).items()
-                    },
+                    **_timer_payload(timer),
+                    "device_name": _device_title(device, labels_by_mac, timer.device_id),
+                    "profile_name": profile.name if profile is not None else timer.profile_id,
+                    "remaining_seconds": max(0, timer.expires_at - now),
                 }
             )
-        if path == "/api/state":
-            return (
-                HTTPStatus.OK,
-                "application/json",
-                _json_bytes({"state": self._runtime_state_with_running()}),
-            )
-        if path == "/api/action-history":
-            return (
-                HTTPStatus.OK,
-                "application/json",
-                _json_bytes({"actions": list(self.repository.list_recent_actions())}),
-            )
-        if path == "/api/random-website-analytics":
-            try:
-                parameters = parse_qs(
-                    query,
-                    keep_blank_values=True,
-                    max_num_fields=4,
-                )
-            except ValueError:
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "too many analytics filters"}
-                )
-            day_values = parameters.get("days", ["30"])
-            device_values = parameters.get("device_id", [""])
-            if len(day_values) != 1 or len(device_values) != 1:
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "provide one date range and one device filter"}
-                )
-            try:
-                days = int(day_values[0])
-            except (TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "days must be between 1 and 30"}
-                )
-            if not 1 <= days <= 30:
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "days must be between 1 and 30"}
-                )
-            device_id = device_values[0] or None
-            if device_id is not None and len(device_id) > 64:
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "device id is too long"}
-                )
-            report = self.repository.list_random_website_analytics(
-                days=days,
-                device_id=device_id,
-            )
-            labels_by_mac = self.repository.list_connected_device_labels()
-            devices_by_id = {device.id: device for device in self.repository.list_devices()}
-            for row in report["rows"]:
-                row["display_name"] = _device_display_name(
-                    devices_by_id.get(row["device_id"]), labels_by_mac
-                )
-            return HTTPStatus.OK, "application/json", _json_bytes(report)
-        if path == "/api/backup":
-            return HTTPStatus.OK, "application/vnd.sqlite3", self.repository.backup_bytes()
-        if path == "/api/export":
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                settings_to_payload(
-                    self.repository.saved_settings(), exported_at=int(time.time())
-                )
-            )
-        if path == "/api/traffic-settings":
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                self.repository.get_traffic_rate_settings()
-            )
-        if path == "/api/gateway-persistence":
-            saved_mode = self.repository.get_persist_profiles_after_gateway_outage()
-            state = {
-                "persistence_enabled": saved_mode,
-                "mode_enabled": saved_mode,
-                "gateway_state": "unknown",
-                "outage_stop_latched": False,
-                "recovery_pending": False,
-                "state_error": False,
-                "helper_available": self.helper_client is not None,
-                "helper_synced": self.helper_client is None,
+        return HTTPStatus.OK, "application/json", _json_bytes({"timers": timers})
+
+    @_read_route("/api/progressions")
+    def _get_progressions(self, query: str) -> Tuple[int, str, bytes]:
+        now = int(time.time())
+        device_counters = {}
+        scheduler_counters = {}
+        if self.scheduler is not None:
+            scheduler_counters = {
+                device.id: self.scheduler.device_traffic_bytes(device_id=device.id)
+                for device in self.repository.list_devices()
             }
-            if self.helper_client is not None:
-                try:
-                    helper_state = self.helper_client.gateway_status()
-                    # Reading must not change network state. Only a restarted
-                    # helper, which has no outage to act on yet, gets the mode.
-                    if (
-                        helper_state.get("mode_initialized") is False
-                        and not helper_state["state_error"]
-                    ):
-                        helper_state = self.helper_client.set_gateway_persistence(
-                            enabled=saved_mode
-                        )
-                    state.update(helper_state)
-                    state["helper_synced"] = (
-                        state["mode_enabled"] == saved_mode
-                        and state["state_error"] is False
-                    )
-                except HelperClientError:
-                    state["state_error"] = True
-                    state["helper_synced"] = False
-            return HTTPStatus.OK, "application/json", _json_bytes(state)
-        if path == "/api/traffic":
-            isp_limits = self.repository.get_traffic_rate_settings()
-            reset = self.repository.get_runtime_state().observed_state == "reset"
-            if self.helper_client is None or reset:
-                return HTTPStatus.OK, "application/json", _json_bytes(
-                    {
-                        "available": False,
-                        "message": (
-                            "Live traffic needs hardware mode."
-                            if self.helper_client is None
-                            else "Network is reset. Choose Start to start traffic measurements."
-                        ),
-                        "devices": {},
-                        "isp_limits": isp_limits,
-                        "profile_limits_available": False,
-                        "profile_limits": {},
-                    }
-                )
+        elif self.helper_client is not None:
             try:
-                counters = self.helper_client.traffic_counters()
-            except HelperClientError:
-                LOGGER.exception("could not read live traffic counters")
-                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
-                    {"error": "live traffic counters are unavailable"}
-                )
-            directions = counters.get("directions")
-            device_counters = directions.get("devices") if isinstance(directions, dict) else None
-            if not isinstance(device_counters, dict):
-                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
-                    {"error": "live traffic directions are unavailable"}
-                )
-            queues = counters.get("queues")
-            device_queues = queues.get("devices") if isinstance(queues, dict) else None
-            everyone_else = counters.get("everyone_else")
-            everyone_else_queue = queues.get("everyone_else") if isinstance(queues, dict) else None
-            profile_limits = (
-                self.scheduler.applied_queue_bandwidth_limits()
-                if self.scheduler is not None
-                else None
+                device_counters = self.helper_client.traffic_counters().get("devices", {})
+            except (HelperClientError, AttributeError, TypeError):
+                LOGGER.warning("could not read progression traffic counters")
+        progressions = [
+            _progression_payload(
+                progression,
+                repository=self.repository,
+                now=now,
+                traffic_bytes=scheduler_counters.get(
+                    progression.device_id,
+                    device_counters.get(progression.device_id, 0),
+                ),
             )
+            for progression in self.repository.list_active_progressions(now=now)
+        ]
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {"progressions": progressions}
+        )
+
+    @_read_route("/api/data-limits")
+    def _get_data_limits(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "data_limits": [
+                    _data_limit_payload(data_limit, repository=self.repository)
+                    for data_limit in self.repository.list_data_limits()
+                ]
+            }
+        )
+
+    @_read_route("/api/group-data-limits")
+    def _get_group_data_limits(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "group_data_limits": [
+                    _group_data_limit_payload(data_limit, repository=self.repository)
+                    for data_limit in self.repository.list_group_data_limits()
+                ]
+            }
+        )
+
+    @_read_route("/api/service-quotas")
+    def _get_service_quotas(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "service_quotas": [
+                    _service_quota_payload(quota, repository=self.repository)
+                    for quota in self.repository.list_service_quotas()
+                ]
+            }
+        )
+
+    @_read_route("/api/service-assignments")
+    def _get_service_assignments(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "service_assignments": [
+                    _service_assignment_payload(assignment, repository=self.repository)
+                    for assignment in self.repository.list_service_assignments()
+                ]
+            }
+        )
+
+    @_read_route("/api/service-lists")
+    def _get_service_lists(self, query: str) -> Tuple[int, str, bytes]:
+        # Only the plan on the network says whether a list is in an outage now.
+        applied = self.scheduler.applied_plan() if self.scheduler is not None else None
+        outages = {
+            rule.list_id: rule.outage_active
+            for rule in (applied.service_list_rules if applied is not None else ())
+        }
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "service_lists": [
+                    _service_list_payload(
+                        service_list,
+                        repository=self.repository,
+                        outage_now=outages.get(service_list.id, False),
+                    )
+                    for service_list in self.repository.list_service_lists()
+                ],
+                "catalogue": _service_catalogue_payload(),
+            }
+        )
+
+    @_read_route("/api/time-quotas")
+    def _get_time_quotas(self, query: str) -> Tuple[int, str, bytes]:
+        now = int(time.time())
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "time_quotas": [
+                    _time_quota_payload(quota, repository=self.repository, now=now)
+                    for quota in self.repository.list_time_quotas()
+                ]
+            }
+        )
+
+    @_read_route("/api/policies")
+    def _get_policies(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            _policies_payload(self.repository)
+        )
+
+    @_read_route("/api/everyone-else")
+    def _get_everyone_else(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            _everyone_else_payload(self.repository)
+        )
+
+    @_read_route("/api/router")
+    def _get_router(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "model": "Vodafone TG3442DE",
+                "automatic_wifi_control": True,
+                "wifi_control": "tg3442de-local-web",
+                "message": (
+                    "Router admin credentials are used for one authenticated request and are not saved. "
+                    "Keep the Pi connected by Ethernet before changing router Wi-Fi."
+                ),
+            }
+        )
+
+    @_read_route("/api/uplink")
+    def _get_uplink(self, query: str) -> Tuple[int, str, bytes]:
+        if self.helper_client is None:
             return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "available": False,
+                    "uplink": None,
+                    "message": "upstream connection information is unavailable in configuration-only mode",
+                }
+            )
+        try:
+            uplink = self.helper_client.uplink_info()
+        except HelperClientError:
+            LOGGER.exception("could not inspect the upstream connection")
+            return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                {"error": "could not inspect the upstream connection"}
+            )
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "available": True,
+                "uplink": uplink,
+                "router": {
+                    "model": "Vodafone TG3442DE",
+                    "settings_url": "http://192.168.0.1",
+                    "wifi_control": "tg3442de-local-web",
+                },
+            }
+        )
+
+    @_read_route("/api/connected-device-labels")
+    def _get_connected_device_labels(self, query: str) -> Tuple[int, str, bytes]:
+        labels = self.repository.list_connected_device_labels()
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "labels": [
+                    {
+                        "mac_address": mac_address,
+                        "display_name": label["display_name"],
+                        "device_type": label["device_type"],
+                    }
+                    for mac_address, label in labels.items()
+                ]
+            }
+        )
+
+    @_read_route("/api/connected-devices")
+    def _get_connected_devices(self, query: str) -> Tuple[int, str, bytes]:
+        if self.helper_client is None:
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "available": False,
+                    "devices": [],
+                    "message": "connected-client information is unavailable in configuration-only mode",
+                }
+            )
+        try:
+            snapshot = self.helper_client.connected_device_snapshot()
+            devices = snapshot["devices"]
+        except HelperClientError:
+            LOGGER.exception("could not inspect connected clients")
+            return (
+                HTTPStatus.BAD_GATEWAY,
+                "application/json",
+                _json_bytes({"error": "could not inspect connected clients"}),
+            )
+        assignments_by_address = {
+            str(device.ipv4_address): device for device in self.repository.list_devices()
+        }
+        labels_by_mac = self.repository.list_connected_device_labels()
+        protected = {item.mac_address for item in self.repository.list_unaffected_devices()}
+        unaffected_macs = frozenset(protected)
+        general_status = self._general_profile_status()
+        groups_by_device = {
+            device_id: group
+            for group in self.repository.list_device_groups()
+            for device_id in group.device_ids
+        }
+        devices = [
+            _connected_device_payload(
+                device,
+                assignments_by_address=assignments_by_address,
+                labels_by_mac=labels_by_mac,
+                unaffected_macs=unaffected_macs,
+            )
+            for device in devices
+        ]
+        states = device_protection_states(
+            self.repository, snapshot if protected else None
+        )
+        beside_everyone = self.repository.get_everyone_exceptions()
+        for client in devices:
+            group = groups_by_device.get(client["assigned_device_id"])
+            client["unaffected"] = client["mac_address"] in protected
+            client["assigned_effective_state"] = states.get(
+                client["assigned_device_id"], {}
+            ).get("effective_state")
+            client["group_id"] = group.id if group else None
+            client["group_name"] = group.name if group else None
+            client["group_profile_id"] = group.profile_id if group else None
+            if general_status["active"] and not client["unaffected"]:
+                if client["assigned_device_id"] in beside_everyone:
+                    # This device left Everyone and runs the profile saved for it.
+                    client["beside_everyone"] = True
+                else:
+                    client["general_profile_name"] = general_status["profile"]["name"]
+        return (
+            HTTPStatus.OK,
+            "application/json",
+            _json_bytes(
                 {
                     "available": True,
-                    "sampled_at": time.time(),
-                    "devices": device_counters,
-                    "queues": device_queues if isinstance(device_queues, dict) else {},
-                    "everyone_else": everyone_else if isinstance(everyone_else, dict) else None,
-                    "everyone_else_queue": (
-                        everyone_else_queue if isinstance(everyone_else_queue, dict) else None
-                    ),
-                    "isp_limits": isp_limits,
-                    "profile_limits_available": profile_limits is not None,
-                    "profile_limits": profile_limits or {},
-                    "general_profile_limits": (
-                        (profile_limits or {}).get(GENERAL_QUEUE_ID)
-                        if self.repository.get_general_profile() is not None else None
-                    ),
+                    "association_status_available": snapshot["association_status_available"],
+                    "devices": devices,
+                    # The list polls every 5 seconds, so its labels follow schedules.
+                    "everyone_else_profile_id": _everyone_else_now(self.repository)[0],
                 }
-            )
-        if path == "/api/impact":
-            return HTTPStatus.OK, "application/json", _json_bytes(self._impact_status())
-        if path == "/api/diagnostics":
-            runtime = self.repository.get_runtime_state()
-            diagnostics = {
-                "checked_at": int(time.time()),
-                "runtime": self._runtime_state_with_running(runtime),
-                "helper_available": self.helper_client is not None,
-                "connected_clients": None,
-                "traffic_counters": None,
-                "traffic_counters_message": (
-                    "Network is reset. Choose Start to start traffic measurements."
-                    if runtime.observed_state == "reset"
+            ),
+        )
+
+    @_read_route("/api/observations")
+    def _get_observations(self, query: str) -> Tuple[int, str, bytes]:
+        observations = self.repository.list_domain_observations()
+        assignments_by_address = {
+            str(device.ipv4_address): device for device in self.repository.list_devices()
+        }
+        station_devices = self._station_devices()
+        blocked = protected_addresses(self.repository, station_devices)
+        protected = set(protected_macs(self.repository))
+        grouped = {}
+        for observation in observations:
+            address = str(observation.ipv4_address)
+            if observation_is_protected(observation, protected, blocked):
+                continue
+            grouped.setdefault(address, []).append(observation)
+        stations = self._station_identities(station_devices)
+        labels_by_mac = self.repository.list_connected_device_labels()
+        blocked_names = frozenset(self.repository.get_website_policy().blocked_domains)
+        devices = [
+            {
+                "ipv4_address": address,
+                "display_name": _observation_display_name(
+                    stations.get(address, {}),
+                    assignments_by_address.get(address),
+                    labels_by_mac,
+                ),
+                "hostname": stations.get(address, {}).get("hostname"),
+                "assigned_device_id": (
+                    assignments_by_address[address].id
+                    if address in assignments_by_address
                     else None
                 ),
-                "warnings": [],
-                "dashboard_name": dashboard_name_report(self),
+                "assigned_device_name": (
+                    assignments_by_address[address].name
+                    if address in assignments_by_address
+                    else None
+                ),
+                "assigned_profile_id": (
+                    assignments_by_address[address].profile_id
+                    if address in assignments_by_address
+                    else None
+                ),
+                "domains": _labelled_domain_payloads(rows, blocked_names),
             }
-            if self.helper_client is not None:
-                try:
-                    diagnostics["connected_clients"] = len(
-                        self.helper_client.connected_devices()
+            for address, rows in sorted(grouped.items())
+        ]
+        return (
+            HTTPStatus.OK,
+            "application/json",
+            _json_bytes(
+                {
+                    "available": self.helper_client is not None,
+                    "devices": devices,
+                    "total_domains": sum(len(rows) for rows in grouped.values()),
+                    "list_cleared": _domain_list_cleared_payload(self.repository),
+                    "message": (
+                        None
+                        if self.helper_client is not None
+                        else "traffic discovery is unavailable in configuration-only mode"
+                    ),
+                }
+            ),
+        )
+
+    @_read_route("/api/plan")
+    def _get_plan(self, query: str) -> Tuple[int, str, bytes]:
+        plan = (
+            self.scheduler.build_plan(repository=self.repository)
+            if self.scheduler is not None
+            else compile_stored_plan(
+                repository=self.repository,
+                connected_snapshot=station_snapshot(self.helper_client)
+                if self.helper_client
+                else None,
+            )
+        )
+        return HTTPStatus.OK, "application/json", _json_bytes({"plan": plan_to_payload(plan)})
+
+    @_read_route("/api/conditions")
+    def _get_conditions(self, query: str) -> Tuple[int, str, bytes]:
+        # Read the applied plan without the apply lock, so this read never waits for an apply.
+        if self.scheduler is None:
+            plan, sources = None, None
+        elif hasattr(self.scheduler, "applied_snapshot"):
+            plan, sources = self.scheduler.applied_snapshot()
+        else:
+            plan, sources = self.scheduler.applied_plan(), self.scheduler.applied_target_states()
+        applied = plan is not None
+
+        def described_condition(state, target_id):
+            payload = {"condition": state.condition, "reasons": list(state.reasons)}
+            target = (sources or {}).get(target_id)
+            if applied and target is not None:
+                payload["source"] = asdict(target.source)
+                payload["next_change_at"] = (
+                    datetime.fromtimestamp(target.next_change_at).astimezone().isoformat()
+                    if target.next_change_at is not None else None
+                )
+            return payload
+        if plan is None:
+            # Nothing runs on the network, so describe the saved settings.
+            # The scheduler's runtime plan would advance its rerolls.
+            plan = compile_stored_plan(
+                repository=self.repository, connected_snapshot=self._protection_snapshot()
+            )
+        everyone_else = everyone_else_condition(plan)
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "applied": applied,
+                "everyone_else": (
+                    None
+                    if everyone_else is None
+                    else described_condition(everyone_else, EVERYONE_ELSE_QUEUE_ID)
+                ),
+                "devices": {
+                    device_id: described_condition(state, device_id)
+                    for device_id, state in device_conditions(
+                        plan,
+                        mac_addresses={
+                            device.id: device.mac_address
+                            for device in self.repository.list_devices()
+                        },
+                    ).items()
+                },
+            }
+        )
+
+    @_read_route("/api/state")
+    def _get_state(self, query: str) -> Tuple[int, str, bytes]:
+        return (
+            HTTPStatus.OK,
+            "application/json",
+            _json_bytes({"state": self._runtime_state_with_running()}),
+        )
+
+    @_read_route("/api/action-history")
+    def _get_action_history(self, query: str) -> Tuple[int, str, bytes]:
+        return (
+            HTTPStatus.OK,
+            "application/json",
+            _json_bytes({"actions": list(self.repository.list_recent_actions())}),
+        )
+
+    @_read_route("/api/random-website-analytics")
+    def _get_random_website_analytics(self, query: str) -> Tuple[int, str, bytes]:
+        try:
+            parameters = parse_qs(
+                query,
+                keep_blank_values=True,
+                max_num_fields=4,
+            )
+        except ValueError:
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "too many analytics filters"}
+            )
+        day_values = parameters.get("days", ["30"])
+        device_values = parameters.get("device_id", [""])
+        if len(day_values) != 1 or len(device_values) != 1:
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "provide one date range and one device filter"}
+            )
+        try:
+            days = int(day_values[0])
+        except (TypeError, ValueError):
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "days must be between 1 and 30"}
+            )
+        if not 1 <= days <= 30:
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "days must be between 1 and 30"}
+            )
+        device_id = device_values[0] or None
+        if device_id is not None and len(device_id) > 64:
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "device id is too long"}
+            )
+        report = self.repository.list_random_website_analytics(
+            days=days,
+            device_id=device_id,
+        )
+        labels_by_mac = self.repository.list_connected_device_labels()
+        devices_by_id = {device.id: device for device in self.repository.list_devices()}
+        for row in report["rows"]:
+            row["display_name"] = _device_display_name(
+                devices_by_id.get(row["device_id"]), labels_by_mac
+            )
+        return HTTPStatus.OK, "application/json", _json_bytes(report)
+
+    @_read_route("/api/backup")
+    def _get_backup(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/vnd.sqlite3", self.repository.backup_bytes()
+
+    @_read_route("/api/export")
+    def _get_export(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            settings_to_payload(
+                self.repository.saved_settings(), exported_at=int(time.time())
+            )
+        )
+
+    @_read_route("/api/traffic-settings")
+    def _get_traffic_settings(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            self.repository.get_traffic_rate_settings()
+        )
+
+    @_read_route("/api/gateway-persistence")
+    def _get_gateway_persistence(self, query: str) -> Tuple[int, str, bytes]:
+        saved_mode = self.repository.get_persist_profiles_after_gateway_outage()
+        state = {
+            "persistence_enabled": saved_mode,
+            "mode_enabled": saved_mode,
+            "gateway_state": "unknown",
+            "outage_stop_latched": False,
+            "recovery_pending": False,
+            "state_error": False,
+            "helper_available": self.helper_client is not None,
+            "helper_synced": self.helper_client is None,
+        }
+        if self.helper_client is not None:
+            try:
+                helper_state = self.helper_client.gateway_status()
+                # Reading must not change network state. Only a restarted
+                # helper, which has no outage to act on yet, gets the mode.
+                if (
+                    helper_state.get("mode_initialized") is False
+                    and not helper_state["state_error"]
+                ):
+                    helper_state = self.helper_client.set_gateway_persistence(
+                        enabled=saved_mode
                     )
+                state.update(helper_state)
+                state["helper_synced"] = (
+                    state["mode_enabled"] == saved_mode
+                    and state["state_error"] is False
+                )
+            except HelperClientError:
+                state["state_error"] = True
+                state["helper_synced"] = False
+        return HTTPStatus.OK, "application/json", _json_bytes(state)
+
+    @_read_route("/api/traffic")
+    def _get_traffic(self, query: str) -> Tuple[int, str, bytes]:
+        isp_limits = self.repository.get_traffic_rate_settings()
+        reset = self.repository.get_runtime_state().observed_state == "reset"
+        if self.helper_client is None or reset:
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "available": False,
+                    "message": (
+                        "Live traffic needs hardware mode."
+                        if self.helper_client is None
+                        else "Network is reset. Choose Start to start traffic measurements."
+                    ),
+                    "devices": {},
+                    "isp_limits": isp_limits,
+                    "profile_limits_available": False,
+                    "profile_limits": {},
+                }
+            )
+        try:
+            counters = self.helper_client.traffic_counters()
+        except HelperClientError:
+            LOGGER.exception("could not read live traffic counters")
+            return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                {"error": "live traffic counters are unavailable"}
+            )
+        directions = counters.get("directions")
+        device_counters = directions.get("devices") if isinstance(directions, dict) else None
+        if not isinstance(device_counters, dict):
+            return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                {"error": "live traffic directions are unavailable"}
+            )
+        queues = counters.get("queues")
+        device_queues = queues.get("devices") if isinstance(queues, dict) else None
+        everyone_else = counters.get("everyone_else")
+        everyone_else_queue = queues.get("everyone_else") if isinstance(queues, dict) else None
+        profile_limits = (
+            self.scheduler.applied_queue_bandwidth_limits()
+            if self.scheduler is not None
+            else None
+        )
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "available": True,
+                "sampled_at": time.time(),
+                "devices": device_counters,
+                "queues": device_queues if isinstance(device_queues, dict) else {},
+                "everyone_else": everyone_else if isinstance(everyone_else, dict) else None,
+                "everyone_else_queue": (
+                    everyone_else_queue if isinstance(everyone_else_queue, dict) else None
+                ),
+                "isp_limits": isp_limits,
+                "profile_limits_available": profile_limits is not None,
+                "profile_limits": profile_limits or {},
+                "general_profile_limits": (
+                    (profile_limits or {}).get(GENERAL_QUEUE_ID)
+                    if self.repository.get_general_profile() is not None else None
+                ),
+            }
+        )
+
+    @_read_route("/api/impact")
+    def _get_impact(self, query: str) -> Tuple[int, str, bytes]:
+        return HTTPStatus.OK, "application/json", _json_bytes(self._impact_status())
+
+    @_read_route("/api/diagnostics")
+    def _get_diagnostics(self, query: str) -> Tuple[int, str, bytes]:
+        runtime = self.repository.get_runtime_state()
+        diagnostics = {
+            "checked_at": int(time.time()),
+            "runtime": self._runtime_state_with_running(runtime),
+            "helper_available": self.helper_client is not None,
+            "connected_clients": None,
+            "traffic_counters": None,
+            "traffic_counters_message": (
+                "Network is reset. Choose Start to start traffic measurements."
+                if runtime.observed_state == "reset"
+                else None
+            ),
+            "warnings": [],
+            "dashboard_name": dashboard_name_report(self),
+        }
+        if self.helper_client is not None:
+            try:
+                diagnostics["connected_clients"] = len(
+                    self.helper_client.connected_devices()
+                )
+            except (HelperClientError, AttributeError, TypeError):
+                diagnostics["warnings"].append("connected-client scan failed")
+            if runtime.observed_state != "reset":
+                try:
+                    diagnostics["traffic_counters"] = self.helper_client.traffic_counters()
                 except (HelperClientError, AttributeError, TypeError):
-                    diagnostics["warnings"].append("connected-client scan failed")
-                if runtime.observed_state != "reset":
-                    try:
-                        diagnostics["traffic_counters"] = self.helper_client.traffic_counters()
-                    except (HelperClientError, AttributeError, TypeError):
-                        diagnostics["warnings"].append("traffic counters are unavailable")
-            return HTTPStatus.OK, "application/json", _json_bytes(diagnostics)
-        return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
+                    diagnostics["warnings"].append("traffic counters are unavailable")
+        return HTTPStatus.OK, "application/json", _json_bytes(diagnostics)
 
     def write_response_for(self, path: str, payload: Dict[str, Any], *,
                            before_replace=None) -> Tuple[int, str, bytes]:
