@@ -6,8 +6,13 @@ which addresses belong to the hostnames of the applied service lists. Matching
 by the answers a client actually got covers content networks that hand
 different addresses to different resolvers.
 
-Only frames the Pi itself sent out of the test interface count. A client
-cannot forge an answer that way because its frames arrive instead of leaving.
+Only frames the Pi sent out of the test interface count, so a client cannot
+send a forged answer itself. Leaving is not enough on its own: the Pi also
+forwards answers that a client asked another DNS server for, and that server
+can say anything (security audit 2026-10-18, finding A1). So an answer counts
+only when it comes from the Pi's own resolver address, or while household DNS
+rules send every test Wi-Fi lookup through the Pi's resolver and drop direct
+DNS. Only then can every answer on its way out come from that resolver.
 """
 
 import argparse
@@ -26,7 +31,9 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from jittersim.diagnostic_privacy import configure_logging
+from jittersim.localname import GATEWAY_ADDRESS
 
+from .access import read_access
 from .helper import HelperClient, HelperClientError
 
 LOGGER = logging.getLogger(__name__)
@@ -46,6 +53,8 @@ RESEND_SECONDS = 10 * 60
 FLUSH_SECONDS = 0.25
 PLAN_CHECK_SECONDS = 1.0
 LOG_ERROR_EVERY_SECONDS = 60.0
+# The Pi's own address on the test Wi-Fi. Its resolver answers from here.
+RESOLVER_ADDRESS = IPv4Address(GATEWAY_ADDRESS)
 _PRIVATE_NETWORKS = (
     IPv4Network("10.0.0.0/8"),
     IPv4Network("172.16.0.0/12"),
@@ -157,6 +166,14 @@ def parse_dns_message(message: bytes) -> Optional[DnsAnswers]:
         return None
 
 
+def frame_source(frame: bytes) -> Optional[IPv4Address]:
+    """The IPv4 source address of an Ethernet frame, or None for anything else."""
+
+    if len(frame) < 14 + 20 or frame[12:14] != b"\x08\x00" or frame[14] >> 4 != 4:
+        return None
+    return IPv4Address(frame[26:30])
+
+
 def parse_dns_frame(frame: bytes) -> Optional[DnsAnswers]:
     """Unwrap an Ethernet frame carrying an unfragmented IPv4 UDP DNS answer."""
 
@@ -221,9 +238,14 @@ class ServiceWatcher:
         helper_client,
         applied_plan: Callable[[], Optional[dict]],
         clock: Callable[[], float] = time.monotonic,
+        dns_redirected: Callable[[], bool] = lambda: False,
+        resolver_address: IPv4Address = RESOLVER_ADDRESS,
     ) -> None:
         self._helper_client = helper_client
         self._applied_plan = applied_plan
+        # Whether every test Wi-Fi lookup goes through the Pi's resolver right now.
+        self._dns_redirected = dns_redirected
+        self._resolver_address = resolver_address
         self._clock = clock
         self._matcher = ServiceMatcher(())
         self._lists: Tuple = ()
@@ -278,6 +300,8 @@ class ServiceWatcher:
             return
         if frame[:6] in self._protected:
             return
+        if not self._trusted_source(frame):
+            return
         parsed = parse_dns_frame(frame)
         if parsed is None or not parsed.addresses:
             return
@@ -295,6 +319,25 @@ class ServiceWatcher:
             pending[address] = None
             while len(pending) > MAX_PENDING_PER_LIST:
                 pending.popitem(last=False)
+
+    def _trusted_source(self, frame: bytes) -> bool:
+        """Whether the Pi's own resolver sent this answer.
+
+        Without household DNS rules a client may ask any DNS server, and the Pi
+        forwards that server's answer out of the test interface like its own. With
+        them, direct DNS is dropped and a redirected answer leaves with the address
+        the client asked, so then every source counts.
+        """
+
+        source = frame_source(frame)
+        if source is None:
+            return False
+        if source == self._resolver_address:
+            return True
+        try:
+            return self._dns_redirected() is True
+        except Exception:  # noqa: BLE001 - an unreadable policy trusts only the resolver
+            return False
 
     def flush(self) -> bool:
         """Send waiting addresses. Return whether the helper took them."""
@@ -387,6 +430,30 @@ def watch(
             sock.close()
 
 
+class _RedirectFile:
+    """Read whether household DNS rules are on, again only when the file changed."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._generation: Optional[tuple] = None
+        self._redirected = False
+
+    def __call__(self) -> bool:
+        try:
+            metadata = self._path.stat()
+            generation = (metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns)
+            if generation != self._generation:
+                self._redirected = False
+                self._generation = generation
+                self._redirected = read_access(self._path).has_dns_rules is True
+        except FileNotFoundError:
+            self._redirected, self._generation = False, None
+        except (OSError, ValueError, TypeError, KeyError):
+            # Not readable: trust only the Pi's own resolver until the file changes.
+            self._redirected = False
+        return self._redirected
+
+
 class _PlanFile:
     """Read the published plan again only when the helper replaced it."""
 
@@ -415,6 +482,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--interface", default="wlan0")
     parser.add_argument("--helper-socket", type=Path, default=Path("/run/jittersim/helper.sock"))
     parser.add_argument("--plan", type=Path, default=Path("/run/jittersim/active-plan.json"))
+    parser.add_argument("--access-policy", type=Path,
+                        default=Path("/run/jittersim/access-policy.json"))
     arguments = parser.parse_args(argv)
     configure_logging(level=logging.INFO)
     stop = threading.Event()
@@ -423,6 +492,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     watcher = ServiceWatcher(
         helper_client=HelperClient(socket_path=arguments.helper_socket, timeout_seconds=3),
         applied_plan=_PlanFile(arguments.plan),
+        dns_redirected=_RedirectFile(arguments.access_policy),
     )
     LOGGER.info("watching DNS answers on %s", arguments.interface)
     watch(watcher, lambda: open_dns_socket(arguments.interface), stop)
