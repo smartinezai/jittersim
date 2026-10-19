@@ -14,7 +14,7 @@ test. It is for experiments, not a replacement for your home router.
   single device on its own profile.
 - Schedule changes, run a timer or gradually switch between settings.
 - Control device, website and service access, with data and time limits.
-- See connected devices, traffic measurements, the effect of a test and a device's speed before and after a profile.
+- Review connected devices and traffic while a test runs. Measure a device's speed before and after a profile.
 - Follow a saved device to its new private Wi-Fi address, with Ask, Automatic and Undo.
 - Choose whether active profiles resume after a router outage.
 - Update the Pi in one step from the dashboard or a terminal with a signed
@@ -27,7 +27,16 @@ test. It is for experiments, not a replacement for your home router.
   <img src="docs/screenshots/experience-overview-phone.png" alt="The same page on a phone-sized screen, with Panic, the router Wi-Fi status and a Controls button in a bar at the bottom" width="27%" />
 </div>
 
-*Sample data only; no real phone or home network is shown.*
+The Address changes card lets you review a saved device's new private Wi-Fi
+address before moving its settings. The speed-test window lets you choose a
+site and test length before starting a test on the device.
+
+<div align="center">
+  <img src="docs/screenshots/address-changes.png" alt="The Address changes card with Ask selected and one sample suggestion for Dad's phone at a new private address" width="100%" />
+  <img src="docs/screenshots/device-speed-test-controls.png" alt="The speed-test window for Fixture phone with Cloudflare selected, a 45 second length, the label Before profile and the Start measuring button" width="100%" />
+</div>
+
+*Sample data only; no real phone, Pi or home network is shown.*
 
 ## Get started on a Raspberry Pi
 
