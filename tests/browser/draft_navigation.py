@@ -97,7 +97,7 @@ def check_draft_navigation(page):
 
         page.locator('[data-page-link="devices"]').click()
         page.locator("#device-table tr", has_text="Test phone").get_by_role(
-            "button", name="Open controls", exact=True
+            "button", name="Open controls for Test phone", exact=True
         ).click()
         page.locator("#workspace-minutes").fill("17")
         device_review = page.get_by_role("button", name="Review Device timer: Test phone", exact=True)

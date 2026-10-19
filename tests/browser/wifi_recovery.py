@@ -26,7 +26,7 @@ def check_wifi_recovery(page):
     requests = []
     page.on("request", lambda request: requests.append(request)
             if request.url.endswith("/api/access-point/reset-name") else None)
-    ask = dict(title="Restore the default Wi-Fi name?", text="The password and security type stay the same.")
+    ask = dict(title="Restore the Wi-Fi name?", text="The password and security type stay the same.")
     button.click()
     cancel_with_escape(page, button, verb="Restore name", **ask)
     expect(field).to_have_value("Copied network")

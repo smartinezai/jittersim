@@ -70,9 +70,25 @@ next release takes them over.
   cancels it and focus returns to the control that opened it.
 - A screen reader hears each result once. The dashboard has one status region
   and one alert region for results and errors, and lists that refresh every few
-  seconds (devices, saved profiles, groups, schedules, timers, limits,
-  observations and the router connection) no longer announce themselves. A
-  refresh keeps keyboard focus on the button you were on.
+  seconds (the devices and their conditions, schedules, timers, scenarios,
+  limits, website observations, activity, test sessions and the router
+  connection) no longer announce themselves. Saved profiles and groups are read
+  when a page opens and after a save, not every few seconds. A refresh keeps
+  keyboard focus on the button you were on.
+- **Revoke all homepage pairings** and **Clear** on the Measurements page ask
+  first, in the same dialog as the other destructive actions, and say the result
+  once. Clear asks only when the table holds runs that exist in the page alone:
+  a table that was copied or attached to a test session clears without a
+  question. The Edit, Open controls and Delete buttons of the device table and
+  of the schedule list now say which row they belong to (**Delete Test phone**).
+  The question about restoring the Wi-Fi name has a short heading and no longer
+  repeats it in the first sentence. If the row that asked a question is gone
+  when it closes (somebody removed it meanwhile), focus goes to its list.
+- Checking the admin token no longer fails by itself. Two checks that overlapped
+  (for example Allow this device followed at once by Remove) locked the dashboard
+  with "Token check failed: undefined", and so did a save that refreshed the page
+  while the check was still loading. A check now waits for the one that is
+  running, and a read that a refresh made stale is read again.
 - A save, an Apply or a delete no longer makes the dashboard read out its
   loading notes and device count again. The ad blocking line speaks only when
   its words change, and the random website line speaks only when you ask for it.

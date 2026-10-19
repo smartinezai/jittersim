@@ -230,7 +230,7 @@
     // the row's controls with that name it is. The same place in the new drawing is the same control.
     function rowAnchor(node) {
       const row = node && node.closest && node.closest("[data-key]");
-      const scope = row && row.parentElement.closest("[id]");
+      const scope = row && row.parentElement && row.parentElement.closest("[id]");
       const name = scope && node.matches(ROW_CONTROLS) && controlName(node);
       return name ? { scope: scope.id, key: row.dataset.key, name, index: sameControls(row, name).indexOf(node) } : null;
     }
@@ -5426,13 +5426,17 @@
         text.append(name, time);
         const actions = document.createElement("div");
         actions.className = "row-actions";
+        // The id is in the name: two schedules can share a target and a profile.
+        const rowName = name.textContent + " (" + schedule.id + ")";
         const editButton = document.createElement("button");
         editButton.type = "button";
         editButton.textContent = "Edit";
+        editButton.setAttribute("aria-label", "Edit " + rowName);
         editButton.addEventListener("click", () => editSchedule(schedule));
         const deleteButton = document.createElement("button");
         deleteButton.type = "button";
         deleteButton.textContent = "Delete";
+        deleteButton.setAttribute("aria-label", "Delete " + rowName);
         deleteButton.addEventListener("click", () => deleteItem(
           "/api/schedules/delete", { id: schedule.id }, "Schedule deleted.", deleteButton
         ));
@@ -5812,7 +5816,31 @@
       };
     }
 
+    // Checks never overlap: two share the token state and the first one's end locked the dashboard
+    // under the second. A call during a check waits for it, then checks once for every caller.
     async function checkAdminToken() {
+      if (!adminTokenCheckRunning) return startAdminTokenCheck();
+      if (!adminTokenCheckNext) {
+        adminTokenCheckNext = adminTokenCheckRunning.catch(() => {}).then(() => {
+          adminTokenCheckNext = null;
+          return startAdminTokenCheck();
+        });
+      }
+      return adminTokenCheckNext;
+    }
+
+    let adminTokenCheckRunning = null;
+    let adminTokenCheckNext = null;
+
+    function startAdminTokenCheck() {
+      const run = runAdminTokenCheck().finally(() => {
+        if (adminTokenCheckRunning === run) adminTokenCheckRunning = null;
+      });
+      adminTokenCheckRunning = run;
+      return run;
+    }
+
+    async function runAdminTokenCheck() {
       const button = element("check-admin-token");
       const status = element("token-check-status");
       const tokenRevision = adminTokenRevision;
@@ -5853,8 +5881,16 @@
           showMessage(status.textContent, "info");
           return;
         }
-        const result = await loadAdminTools();
+        let result = await loadAdminTools();
+        // A refresh during the read (a save) makes it answer stale. The token is fine: read again.
+        for (let again = 0; result.stale && again < 3 && tokenRevision === adminTokenRevision; again += 1) {
+          result = await loadAdminTools();
+        }
         if (tokenRevision !== adminTokenRevision) return;
+        if (result.stale) {
+          result = {ok: false, interrupted: true,
+            message: "Another refresh kept interrupting the check. Choose Check token to try again."};
+        }
         if (result.connectionLost) throw lostConnectionError(new Error(result.message));
         if (result.ok) {
           adminTokenVerified = true;
@@ -5883,7 +5919,7 @@
           if (typeof scheduleProfileRangePreview === "function") scheduleProfileRangePreview();
         } else {
           adminTokenVerified = false;
-          adminTokenRejected = true;
+          adminTokenRejected = !result.interrupted;
           adminTokenRefused = result.status === 401;
           setPrivateDataPanels("Token check failed: " + result.message);
         }
@@ -6615,13 +6651,20 @@
       } finally { finishHomepageRequest(owner); }
     });
 
-    element("homepage-revoke").addEventListener("click", async () => {
+    element("homepage-revoke").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      if (homepageRequestPending || !adminTokenVerified || element("private-dashboard").hidden) return;
+      if (!await confirmFromButton(button, "Every paired test extension stops working until it is paired again with a new code.",
+          {title: "Revoke all homepage pairings?", confirmLabel: "Revoke all pairings", danger: true})) return;
+      // After a yes the busy state is ours. The request disables the button the usual way.
+      setButtonBusy(button, false);
       const owner = beginHomepageRequest();
       if (!owner) return;
       try {
         await request("/api/homepage/revoke", "POST", {});
         if (!homepageRequestCurrent(owner)) return;
         element("homepage-code").textContent = "All homepage pairings revoked.";
+        showMessage("All homepage pairings revoked.", "success");
       } catch (error) {
         if (homepageRequestCurrent(owner)) showMessage(error.message, "error");
       } finally { finishHomepageRequest(owner); }
@@ -7377,8 +7420,8 @@
       const status = element("wifi-reset-status");
       // Held while the question is open so a second click or a Wi-Fi save cannot start beside it.
       wifiResetPending = true;
-      if (!await confirmFromButton(button, "Restore the default Wi-Fi name? The password and security type stay the same. " + WIFI_RESTART_NOTICE,
-          {title: "Restore the default Wi-Fi name?", confirmLabel: "Restore name"}) || !helperConfigured) {
+      if (!await confirmFromButton(button, "The Pi Wi-Fi goes back to its default name. The password and security type stay the same. " + WIFI_RESTART_NOTICE,
+          {title: "Restore the Wi-Fi name?", confirmLabel: "Restore name"}) || !helperConfigured) {
         wifiResetPending = false;
         setButtonBusy(button, false);
         button.disabled = !helperConfigured;
@@ -7733,6 +7776,8 @@
       // A later choice says its own answer, and the line may be showing its loading note.
       if (version !== randomWebsiteAnalyticsRequestVersion) return;
       const status = element("random-website-status");
+      // A stale answer leaves the loading note in the line.
+      if (status.textContent.startsWith("Loading")) return;
       announce(status.textContent, status.classList.contains("error"));
     }
 
@@ -7921,10 +7966,12 @@
         const actionCell = document.createElement("td");
         const actionGroup = document.createElement("div");
         actionGroup.className = "row-actions";
-        actions.forEach(([label, onClick]) => {
+        // A third item is the name a screen reader says: the visible words plus the row.
+        actions.forEach(([label, onClick, accessibleName]) => {
           const button = document.createElement("button");
           button.type = "button";
           button.textContent = label;
+          if (accessibleName) button.setAttribute("aria-label", accessibleName);
           button.addEventListener("click", () => onClick(button));
           actionGroup.appendChild(button);
         });
@@ -8162,13 +8209,14 @@
           deviceStateCell(device)
         ],
         actions: [
-          ["Open controls", () => openDevice(device.id)],
-          ["Edit", () => fillDeviceForm(device)],
+          ["Open controls", () => openDevice(device.id), "Open controls for " + deviceTitle(device)],
+          ["Edit", () => fillDeviceForm(device), "Edit " + deviceTitle(device)],
           ...(device.protected_match
             ? [["Save MAC " + device.protected_match.mac_address,
-                (button) => saveObservedMac(device, button)]]
+                (button) => saveObservedMac(device, button),
+                "Save MAC " + device.protected_match.mac_address + " for " + deviceTitle(device)]]
             : []),
-          ["Delete", (button) => deleteDevice(device, button)]
+          ["Delete", (button) => deleteDevice(device, button), "Delete " + deviceTitle(device)]
         ]
       }));
       const others = everyoneElseRow();
@@ -8465,6 +8513,9 @@
     }
 
     let measurementRuns = [];
+    // The runs kept by copying the table or attaching them to a test session. Adding or clearing
+    // puts a new array in measurementRuns, so a different array means runs only this page holds.
+    let keptMeasurementRuns = measurementRuns;
 
     const MEASUREMENT_COLUMNS = [
       "Run", "Target", "Sent", "Loss", "RTT avg", "RTT p95", "Jitter", "Reordered", "Download"
@@ -9797,13 +9848,27 @@
       if (files.length) await loadMeasurementFiles(files);
     });
 
-    element("copy-measurements").addEventListener("click", () => {
-      copyReport(measurementMarkdown(measurementRuns), "Measurement table");
+    element("copy-measurements").addEventListener("click", async () => {
+      const runs = measurementRuns;
+      await copyReport(measurementMarkdown(runs), "Measurement table");
+      keptMeasurementRuns = runs;
     });
 
-    element("clear-measurements").addEventListener("click", () => {
+    element("clear-measurements").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      if (!measurementRuns.length) return;
+      // Runs that were copied or attached are kept elsewhere.
+      if (measurementRuns !== keptMeasurementRuns) {
+        const count = measurementRuns.length;
+        if (!await confirmFromButton(button, "The table shows " + count + (count === 1 ? " run" : " runs") +
+            " that exist only in this page. The files you added stay on your computer. " +
+            "Copy the table or attach the runs to a test session first to keep them.",
+            {title: "Clear the measurement table?", confirmLabel: "Clear table", danger: true})) return;
+        setButtonBusy(button, false);
+      }
       measurementRuns = [];
       renderMeasurements();
+      showMessage("Measurement table cleared.", "success");
     });
 
     window.addEventListener("resize", drawMeasurementChart);
