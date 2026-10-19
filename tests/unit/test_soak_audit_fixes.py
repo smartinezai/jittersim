@@ -65,7 +65,7 @@ def test_a_tick_that_leaves_a_write_open_gives_up_its_connection(tmp_path, count
     scheduler.tick(now=1000)
     first = counted[0]
 
-    def half_written(*, repository, now):
+    def half_written(*, repository, now, **_ignored):
         repository._connection.execute("DELETE FROM activity_log")
         raise RuntimeError("the tick failed after a write")
 
