@@ -128,7 +128,7 @@ new tickets. The archived list retains all details and proposed fixes.
 
 ## Open fixes
 
-Open on 19 October 2026. The open pull requests (161, 163, 165, 170 and 171, all drafts) and their
+Open on 19 October 2026. The open pull requests (161, 170 and 171, all drafts) and their
 states are in the [roadmap](../ROADMAP.md).
 
 - Two owner decisions from the review of PR 138 ([review results](review-results-carry-forward-2026-10-16.md)).

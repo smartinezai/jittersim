@@ -536,7 +536,7 @@ milestones above is one of these:
   [carry-forward list](docs/carry-forward-panic-batch-2026-10-10.md).
 - Planned work that has not started: Milestones 16 to 19 (Deliveries B to F of the erratic
   connection plan) and the website list modes of the [planned features](docs/planned-features.md).
-- Planned work in progress: the draft pull requests listed below (Check connection, write route table, speed test and security follow-ups, QA follow-ups).
+- Planned work in progress: the draft pull requests listed below (Check connection, security follow-ups, QA follow-ups).
 - The v0.2.0 release itself (Milestone 12), described below.
 
 Hosted CI cannot start jobs (billing limit). Every pull request is gated by
@@ -553,15 +553,14 @@ Merged on 18 and 19 October: PR 111 (signed notes in the update status, check-on
 121 (device speed test), 149 (a device runs its own profile beside Everyone), 150 and 157 (router
 safety audit round 2 and follow-ups), 151 (address changes), 155 (read route table), 159 (security
 audit), 160 and 169 (boot Wi-Fi look), 162 (QA leftovers and flaky tests), 164 (soak harness and
-resource fixes), 166 (mutation testing), 167 (property tests) and 168 (interrupted apply cleanup).
+resource fixes), 163 (write route table), 165 (speed test follow-ups), 166 (mutation testing), 167
+(property tests) and 168 (interrupted apply cleanup).
 
-Open pull requests on 19 October 2026 (all drafts):
+Open pull requests on 19 October 2026 (all drafts, PR 163 and 165 merged during the day):
 
 | PR | What it does | State |
 | --- | --- | --- |
 | 161 | A **Check connection** button that sends probes to a device and compares loss and delay with its profile (replaces PR 153) | Draft |
-| 163 | Handle dashboard writes from a route table instead of an if-chain | Draft |
-| 165 | Fix the small findings left by the device speed test review | Draft |
 | 170 | Finish the follow-ups of the PR 159 security audit | Draft |
 | 171 | Fix three PR 162 review items: token edit, Revoke, failed copy | Draft |
 

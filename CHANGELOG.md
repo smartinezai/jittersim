@@ -40,6 +40,11 @@ the hand-written Unreleased part short.
   and compares them with numbers entered from a speed test run on the device.
   The start check also compares the loss burst length of the queues with the
   profile.
+- Speed test follow-ups: errors show in the open speed test window instead of
+  under it, a length such as 45.5 is refused with a message, the export uses the
+  dashboard's request handling, and one damaged saved result no longer hides the
+  others. Labels reject hidden control and format characters (the joiners that
+  emoji and Persian words need are allowed).
 - **Address changes** on the Devices page: a saved device that comes back with a
   new private Wi-Fi address is suggested ("This looks like Dad's phone ... Move
   its settings?") with Yes, No and Not this device. Off, Ask (default) and
@@ -109,8 +114,8 @@ the hand-written Unreleased part short.
   remote update check` and `now`, `sudo jittersim update check --online`) only
   checks and stages a release. Only the daily check installs by itself, and only
   when Install automatically is on.
-- Internal: the dashboard answers read requests from a route table instead of one
-  long chain of checks. No answer changes.
+- Internal: the dashboard answers read and write requests from route tables
+  instead of one long chain of checks each. No answer changes.
 - Router Wi-Fi is read only. The Pi refuses every router Wi-Fi write and the
   switch is disabled. Read-only checks and **Copy router Wi-Fi to Pi** still
   work. Turn the router Wi-Fi on or off with the router's own button or page.

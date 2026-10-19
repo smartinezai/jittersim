@@ -850,8 +850,10 @@ def _read(server, path, query):
     store = SpeedTestStore(server.repository)
     if path == "/api/speed-tests":
         mac_address = _query_mac(query)
-        runs = [run.payload(manager.monotonic()) for run in manager.active()
-                if mac_address is None or run.mac_address == mac_address]
+        # The sampler trims a run's samples under this lock, so the payloads are built under it.
+        with manager.lock:
+            runs = [run.payload(manager.monotonic()) for run in manager.active()
+                    if mac_address is None or run.mac_address == mac_address]
         return response({
             "providers": provider_payload(),
             "default_provider": "cloudflare",
