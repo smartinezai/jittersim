@@ -1,0 +1,137 @@
+$ nft -f -  # replace project-owned traffic rules atomically
+| add table inet jittersim
+| delete table inet jittersim
+| add table netdev jittersim_download
+| delete table netdev jittersim_download
+| add table netdev jittersim_download
+| add chain netdev jittersim_download download { type filter hook egress device "wlan0" priority 0; policy accept; }
+| add table inet jittersim
+| add chain inet jittersim forward { type filter hook forward priority -150; policy accept; }
+| add chain inet jittersim input { type filter hook input priority -150; policy accept; }
+| add chain inet jittersim output { type filter hook output priority -150; policy accept; }
+| add rule inet jittersim forward iifname "wlan0" meta mark set 0
+| add chain inet jittersim upload_class { type filter hook forward priority 100; policy accept; }
+| add rule inet jittersim upload_class iifname "wlan0" oifname "eth0" ct state invalid drop comment "never forward untracked test traffic to the router"
+| add rule inet jittersim upload_class iifname "wlan0" ct mark set meta mark and 0xff
+| add set inet jittersim svc_8 { type ipv4_addr; size 2048; }
+| add set inet jittersim svc_9 { type ipv4_addr; size 2048; }
+| add rule inet jittersim input iifname "wlan0" tcp dport 8080 return comment "keep dashboard sign-in reachable"
+| add rule inet jittersim output oifname "wlan0" tcp sport 8080 meta mark set 2147483648
+| add rule netdev jittersim_download download meta mark 2147483648 meta mark set 0 return comment "keep local dashboard replies usable"
+| add rule inet jittersim output oifname "wlan0" meta mark and 0xff != 0 ct mark set meta mark and 0xff
+| add rule inet jittersim forward iifname "wlan0" ip daddr { 203.0.113.7, 203.0.113.8 } drop comment "block global website destinations"
+| add rule inet jittersim forward iifname "wlan0" meta nfproto ipv4 drop comment "enforce global website allowlist"
+| add rule inet jittersim input iifname "wlan0" ether saddr { 02:00:00:00:00:01, 02:00:00:00:00:02, 02:00:00:00:00:aa, 02:00:00:00:00:bb } meta mark set 0 return comment "unaffected by profiles"
+| add rule inet jittersim forward iifname "wlan0" ether saddr { 02:00:00:00:00:01, 02:00:00:00:00:02, 02:00:00:00:00:aa, 02:00:00:00:00:bb } meta mark set 0 return comment "unaffected by profiles"
+| add rule netdev jittersim_download download ether daddr { 02:00:00:00:00:01, 02:00:00:00:00:02, 02:00:00:00:00:aa, 02:00:00:00:00:bb } meta mark set 0 return comment "unaffected by profiles"
+| add rule inet jittersim forward iifname "wlan0" ip saddr 192.168.50.10 ip daddr != @svc_8 ip daddr != @svc_9 drop comment "profile website allowlist has no resolved addresses"
+| add rule inet jittersim input iifname "wlan0" ip saddr { 192.168.50.13 } drop comment "temporarily disconnect randomized clients"
+| add rule inet jittersim forward iifname "wlan0" ip saddr { 192.168.50.13 } ip daddr != @svc_8 ip daddr != @svc_9 drop comment "temporarily disconnect randomized clients"
+| add rule inet jittersim forward iifname "wlan0" meta nfproto ipv4 ip saddr != { 192.168.50.10, 192.168.50.11, 192.168.50.12, 192.168.50.13 } ip daddr != @svc_8 ip daddr != @svc_9 meta mark set 7 counter comment "everyone else upload"
+| add rule inet jittersim forward oifname "wlan0" meta nfproto ipv4 ip daddr != { 192.168.50.10, 192.168.50.11, 192.168.50.12, 192.168.50.13 } meta mark set 268435456 comment "identify everyone else downloads"
+| add rule netdev jittersim_download download meta mark 268435456 meta mark set 7 counter comment "everyone else download"
+| add rule inet jittersim forward iifname "wlan0" ip saddr 192.168.50.10 meta mark set 1 counter comment "usage-device alice upload"
+| add rule netdev jittersim_download download ip daddr 192.168.50.10 counter comment "usage-device alice download"
+| add rule netdev jittersim_download download ip daddr 192.168.50.10 meta mark 0 meta mark set 1
+| add rule inet jittersim forward iifname "wlan0" ip saddr 192.168.50.11 meta mark set 2 counter comment "usage-device bob upload"
+| add rule netdev jittersim_download download ip daddr 192.168.50.11 counter comment "usage-device bob download"
+| add rule netdev jittersim_download download ip daddr 192.168.50.11 meta mark 0 meta mark set 2
+| add rule inet jittersim forward iifname "wlan0" ip saddr 192.168.50.12 meta mark set 3 counter comment "usage-device carol upload"
+| add rule netdev jittersim_download download ip daddr 192.168.50.12 counter comment "usage-device carol download"
+| add rule netdev jittersim_download download ip daddr 192.168.50.12 meta mark 0 meta mark set 3
+| add rule inet jittersim forward iifname "wlan0" ip saddr 192.168.50.13 meta mark set 4 counter comment "usage-device dave upload"
+| add rule netdev jittersim_download download ip daddr 192.168.50.13 counter comment "usage-device dave download"
+| add rule netdev jittersim_download download ip daddr 192.168.50.13 meta mark 0 meta mark set 4
+| add rule inet jittersim output oifname "eth0" meta mark 1 counter comment "usage-device alice upload"
+| add rule inet jittersim output oifname "eth0" meta mark 2 counter comment "usage-device bob upload"
+| add rule inet jittersim output oifname "eth0" meta mark 3 counter comment "usage-device carol upload"
+| add rule inet jittersim output oifname "eth0" meta mark 4 counter comment "usage-device dave upload"
+| add rule inet jittersim output oifname "eth0" meta mark 6 counter comment "usage-device bob upload"
+| add rule inet jittersim forward iifname "wlan0" ip saddr 192.168.50.10 ip daddr { 203.0.113.10, 203.0.113.5 } counter comment "usage-service alice-video upload"
+| add rule netdev jittersim_download download ip daddr 192.168.50.10 ip saddr { 203.0.113.10, 203.0.113.5 } counter comment "usage-service alice-video download"
+| add rule inet jittersim forward iifname "wlan0" ip saddr 192.168.50.10 ip daddr { 203.0.113.10, 203.0.113.5 } meta mark set 5 comment "apply-service-quota alice-video upload"
+| add rule netdev jittersim_download download ip daddr 192.168.50.10 ip saddr { 203.0.113.10, 203.0.113.5 } meta mark and 536870912 == 0 meta mark set 5 comment "apply-service-quota alice-video download"
+| add rule inet jittersim forward iifname "wlan0" ip daddr @svc_8 drop comment "service list outage"
+| add rule netdev jittersim_download download meta mark 536870920 drop comment "service list outage"
+| add rule inet jittersim output oifname "eth0" meta mark 8 drop comment "service list outage"
+| add rule inet jittersim forward iifname "wlan0" ip daddr @svc_8 meta mark set 8 counter comment "service-list games upload"
+| add rule inet jittersim forward oifname "wlan0" ip saddr @svc_8 meta mark set 536870920 counter comment "service-list games download"
+| add rule netdev jittersim_download download meta mark 536870920 meta mark set 8
+| add rule inet jittersim forward iifname "wlan0" ip daddr @svc_9 meta mark set 9 counter comment "service-list video upload"
+| add rule inet jittersim forward oifname "wlan0" ip saddr @svc_9 meta mark set 536870921 counter comment "service-list video download"
+| add rule netdev jittersim_download download meta mark 536870921 meta mark set 9
+$ tc qdisc replace dev eth0 root handle 10: prio bands 10 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0  # create project queue root on eth0
+$ tc qdisc replace dev eth0 parent 10:1 handle 100: fq_codel  # preserve fair queuing for ordinary traffic on eth0
+$ tc qdisc del dev eth0 parent 10:3 handle 52:  # remove the duplicate queue of device bob on eth0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev eth0 parent 10:4 handle 53:  # remove the duplicate queue of device carol on eth0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev eth0 parent 10:5 handle 54:  # remove the duplicate queue of device dave on eth0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev eth0 parent 10:6 handle 55:  # remove the duplicate queue of device quota:alice-video on eth0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev eth0 parent 10:7 handle 56:  # remove the duplicate queue of device assignment:bob-news on eth0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev eth0 parent 10:8 handle 57:  # remove the duplicate queue of device rule:everyone-else on eth0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev eth0 parent 10:9 handle 58:  # remove the duplicate queue of device servicelist:games on eth0 before its queue changes kind  [ignore_failure]
+$ tc qdisc replace dev eth0 parent 10:a handle 69: fq_codel  # preserve fair queuing for device servicelist:video on eth0
+$ tc filter replace dev eth0 protocol ip parent 10: pref 9 handle 9 fw flowid 10:a  # route ip mark 9 on eth0
+$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 109 handle 9 fw flowid 10:a  # route ipv6 mark 9 on eth0
+$ tc qdisc replace dev eth0 parent 10:3 handle 42: netem loss gemodel 100.0000% 25.0000% corrupt 0% rate 0bit  # apply upload impairment for device bob on eth0
+$ tc filter replace dev eth0 protocol ip parent 10: pref 2 handle 2 fw flowid 10:3  # route ip mark 2 on eth0
+$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 102 handle 2 fw flowid 10:3  # route ipv6 mark 2 on eth0
+$ tc qdisc replace dev eth0 parent 10:4 handle 43: netem delay 3ms corrupt 0% rate 0bit  # apply upload impairment for device carol on eth0
+$ tc filter replace dev eth0 protocol ip parent 10: pref 3 handle 3 fw flowid 10:4  # route ip mark 3 on eth0
+$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 103 handle 3 fw flowid 10:4  # route ipv6 mark 3 on eth0
+$ tc qdisc replace dev eth0 parent 10:5 handle 44: netem loss random 100% corrupt 0% rate 0bit  # apply upload impairment for device dave on eth0
+$ tc filter replace dev eth0 protocol ip parent 10: pref 4 handle 4 fw flowid 10:5  # route ip mark 4 on eth0
+$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 104 handle 4 fw flowid 10:5  # route ipv6 mark 4 on eth0
+$ tc qdisc replace dev eth0 parent 10:6 handle 45: netem delay 200ms corrupt 0% rate 0bit  # apply upload impairment for device quota:alice-video on eth0
+$ tc filter replace dev eth0 protocol ip parent 10: pref 5 handle 5 fw flowid 10:6  # route ip mark 5 on eth0
+$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 105 handle 5 fw flowid 10:6  # route ipv6 mark 5 on eth0
+$ tc qdisc replace dev eth0 parent 10:7 handle 46: netem delay 210ms corrupt 0% rate 0bit  # apply upload impairment for device assignment:bob-news on eth0
+$ tc filter replace dev eth0 protocol ip parent 10: pref 6 handle 6 fw flowid 10:7  # route ip mark 6 on eth0
+$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 106 handle 6 fw flowid 10:7  # route ipv6 mark 6 on eth0
+$ tc qdisc replace dev eth0 parent 10:8 handle 47: netem delay 230ms corrupt 0% rate 0bit  # apply upload impairment for device rule:everyone-else on eth0
+$ tc filter replace dev eth0 protocol ip parent 10: pref 7 handle 7 fw flowid 10:8  # route ip mark 7 on eth0
+$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 107 handle 7 fw flowid 10:8  # route ipv6 mark 7 on eth0
+$ tc qdisc replace dev eth0 parent 10:9 handle 48: netem delay 220ms corrupt 0% rate 0bit  # apply upload impairment for device servicelist:games on eth0
+$ tc filter replace dev eth0 protocol ip parent 10: pref 8 handle 8 fw flowid 10:9  # route ip mark 8 on eth0
+$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 108 handle 8 fw flowid 10:9  # route ipv6 mark 8 on eth0
+$ tc qdisc del dev eth0 parent 10:2 handle 41:  # remove the netem queue of device alice on eth0 before its queue changes kind  [ignore_failure]
+$ tc qdisc replace dev eth0 parent 10:2 handle 51: netem delay 100ms 20ms loss gemodel 0.7732% 25.0000% corrupt 0% rate 1500kbit  # apply upload impairment for device alice on eth0
+$ tc filter replace dev eth0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2  # route ip mark 1 on eth0
+$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2  # route ipv6 mark 1 on eth0
+$ tc qdisc replace dev wlan0 root handle 10: prio bands 10 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0  # create project queue root on wlan0
+$ tc qdisc replace dev wlan0 parent 10:1 handle 100: fq_codel  # preserve fair queuing for ordinary traffic on wlan0
+$ tc qdisc del dev wlan0 parent 10:3 handle 52:  # remove the duplicate queue of device bob on wlan0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev wlan0 parent 10:4 handle 53:  # remove the duplicate queue of device carol on wlan0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev wlan0 parent 10:5 handle 54:  # remove the duplicate queue of device dave on wlan0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev wlan0 parent 10:6 handle 55:  # remove the duplicate queue of device quota:alice-video on wlan0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev wlan0 parent 10:7 handle 56:  # remove the duplicate queue of device assignment:bob-news on wlan0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev wlan0 parent 10:8 handle 57:  # remove the duplicate queue of device rule:everyone-else on wlan0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev wlan0 parent 10:9 handle 58:  # remove the duplicate queue of device servicelist:games on wlan0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev wlan0 parent 10:a handle 59:  # remove the duplicate queue of device servicelist:video on wlan0 before its queue changes kind  [ignore_failure]
+$ tc qdisc replace dev wlan0 parent 10:3 handle 42: netem delay 0ms 5ms loss gemodel 2.2222% 20.0000% corrupt 0% rate 10gbit  # apply download impairment for device bob on wlan0
+$ tc filter replace dev wlan0 protocol ip parent 10: pref 2 handle 2 fw flowid 10:3  # route ip mark 2 on wlan0
+$ tc filter replace dev wlan0 protocol ipv6 parent 10: pref 102 handle 2 fw flowid 10:3  # route ipv6 mark 2 on wlan0
+$ tc qdisc replace dev wlan0 parent 10:4 handle 43: netem corrupt 0% rate 800kbit  # apply download impairment for device carol on wlan0
+$ tc filter replace dev wlan0 protocol ip parent 10: pref 3 handle 3 fw flowid 10:4  # route ip mark 3 on wlan0
+$ tc filter replace dev wlan0 protocol ipv6 parent 10: pref 103 handle 3 fw flowid 10:4  # route ipv6 mark 3 on wlan0
+$ tc qdisc replace dev wlan0 parent 10:5 handle 44: netem loss random 100% corrupt 0% rate 0bit  # apply download impairment for device dave on wlan0
+$ tc filter replace dev wlan0 protocol ip parent 10: pref 4 handle 4 fw flowid 10:5  # route ip mark 4 on wlan0
+$ tc filter replace dev wlan0 protocol ipv6 parent 10: pref 104 handle 4 fw flowid 10:5  # route ipv6 mark 4 on wlan0
+$ tc qdisc replace dev wlan0 parent 10:6 handle 45: netem loss random 5% corrupt 0% rate 0bit  # apply download impairment for device quota:alice-video on wlan0
+$ tc filter replace dev wlan0 protocol ip parent 10: pref 5 handle 5 fw flowid 10:6  # route ip mark 5 on wlan0
+$ tc filter replace dev wlan0 protocol ipv6 parent 10: pref 105 handle 5 fw flowid 10:6  # route ipv6 mark 5 on wlan0
+$ tc qdisc replace dev wlan0 parent 10:7 handle 46: netem loss random 6% corrupt 0% rate 0bit  # apply download impairment for device assignment:bob-news on wlan0
+$ tc filter replace dev wlan0 protocol ip parent 10: pref 6 handle 6 fw flowid 10:7  # route ip mark 6 on wlan0
+$ tc filter replace dev wlan0 protocol ipv6 parent 10: pref 106 handle 6 fw flowid 10:7  # route ipv6 mark 6 on wlan0
+$ tc qdisc replace dev wlan0 parent 10:8 handle 47: netem loss random 8% corrupt 0% rate 0bit  # apply download impairment for device rule:everyone-else on wlan0
+$ tc filter replace dev wlan0 protocol ip parent 10: pref 7 handle 7 fw flowid 10:8  # route ip mark 7 on wlan0
+$ tc filter replace dev wlan0 protocol ipv6 parent 10: pref 107 handle 7 fw flowid 10:8  # route ipv6 mark 7 on wlan0
+$ tc qdisc replace dev wlan0 parent 10:9 handle 48: netem loss random 7% corrupt 0% rate 0bit  # apply download impairment for device servicelist:games on wlan0
+$ tc filter replace dev wlan0 protocol ip parent 10: pref 8 handle 8 fw flowid 10:9  # route ip mark 8 on wlan0
+$ tc filter replace dev wlan0 protocol ipv6 parent 10: pref 108 handle 8 fw flowid 10:9  # route ipv6 mark 8 on wlan0
+$ tc qdisc replace dev wlan0 parent 10:a handle 49: netem delay 9ms corrupt 0% rate 0bit  # apply download impairment for device servicelist:video on wlan0
+$ tc filter replace dev wlan0 protocol ip parent 10: pref 9 handle 9 fw flowid 10:a  # route ip mark 9 on wlan0
+$ tc filter replace dev wlan0 protocol ipv6 parent 10: pref 109 handle 9 fw flowid 10:a  # route ipv6 mark 9 on wlan0
+$ tc qdisc del dev wlan0 parent 10:2 handle 41:  # remove the netem queue of device alice on wlan0 before its queue changes kind  [ignore_failure]
+$ tc qdisc replace dev wlan0 parent 10:2 handle 51: netem delay 50ms loss random 1% reorder 5% duplicate 4% corrupt 3% rate 0bit  # apply download impairment for device alice on wlan0
+$ tc filter replace dev wlan0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2  # route ip mark 1 on wlan0
+$ tc filter replace dev wlan0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2  # route ipv6 mark 1 on wlan0

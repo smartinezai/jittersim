@@ -9,13 +9,14 @@ README says which links in them point to the old folder.
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 TOP_LEVEL = tuple(sorted(ROOT.glob("*.md")))
-FOLDERS = ("docs", "deploy", "extensions", "experiments", "scripts", "tests")
+FOLDERS = ("docs", "deploy", "extensions", "experiments", "scripts", "tests", ".github")
 SKIPPED = ("docs/history/",)
 # Folders that a checkout may hold without tracking them.
 IGNORED_PARTS = {"node_modules", ".venv", "test-results", "build", ".git"}
@@ -25,11 +26,30 @@ REFERENCE_LINK = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*<?(\S+?)>?(?:\s+.*)?$")
 HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
 
 
+def tracked_markdown():
+    """Every Markdown file that Git tracks, or None where Git is not there to ask."""
+
+    try:
+        listing = subprocess.run(
+            ["git", "ls-files", "-z", "--", "*.md"], cwd=ROOT, capture_output=True, check=True, timeout=30
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    names = [name for name in listing.decode("utf-8").split("\0") if name]
+    return [ROOT / name for name in names if (ROOT / name).is_file()] or None
+
+
 def markdown_files():
-    found = list(TOP_LEVEL)
-    for folder in FOLDERS:
-        found.extend(path for path in sorted((ROOT / folder).rglob("*.md")) if not IGNORED_PARTS & set(path.parts))
-    return [path for path in found if not any(path.relative_to(ROOT).as_posix().startswith(part) for part in SKIPPED)]
+    # Git knows every page, so a page in a new folder or in .github is checked without a list to
+    # keep. Where Git is missing (a container without it) the known folders are searched instead.
+    found = tracked_markdown()
+    if found is None:
+        found = list(TOP_LEVEL)
+        for folder in FOLDERS:
+            found.extend(path for path in sorted((ROOT / folder).rglob("*.md")) if path.is_file())
+    found = [path for path in found if not IGNORED_PARTS & set(path.parts)]
+    return [path for path in sorted(set(found))
+            if not any(path.relative_to(ROOT).as_posix().startswith(part) for part in SKIPPED)]
 
 
 def prose_lines(text, keep_code=False):
@@ -45,9 +65,14 @@ def prose_lines(text, keep_code=False):
 
 
 def github_slug(heading):
+    """The anchor GitHub makes from a heading: emphasis marks go, the text of code stays as it is
+    and an underscore inside a word stays (a heading about `snake_case` links to snake_case)."""
+
     heading = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", heading)
-    heading = re.sub(r"[`*_]", "", heading).strip().lower()
-    return re.sub(r"[^\w\- ]", "", heading).replace(" ", "-")
+    emphasis = re.compile(r"\*|(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])")
+    parts = re.split(r"(`[^`]*`)", heading)
+    text = "".join(part[1:-1] if part.startswith("`") else emphasis.sub("", part) for part in parts)
+    return re.sub(r"[^\w\- ]", "", text.strip().lower()).replace(" ", "-")
 
 
 _anchors = {}
@@ -93,7 +118,8 @@ def broken_links(path, root=ROOT):
 
 def test_the_checker_sees_the_pages_and_their_links():
     pages = {path.relative_to(ROOT).as_posix() for path in markdown_files()}
-    assert {"README.md", "docs/user-guide.md", "docs/README.md", "deploy/raspberry-pi/README.md"} <= pages
+    assert {"README.md", "docs/user-guide.md", "docs/README.md", "deploy/raspberry-pi/README.md",
+            ".github/pull_request_template.md"} <= pages
     assert not [page for page in pages if page.startswith("docs/history/")]
     assert sum(1 for _ in links_of(ROOT / "docs" / "user-guide.md")) > 10
 
@@ -115,6 +141,23 @@ def test_the_checker_finds_a_missing_file_and_a_missing_heading(tmp_path):
         "other.md#nothing points at a heading that does not exist",
         "#nope points at a heading that does not exist",
     ]
+
+
+def test_a_slug_keeps_underscores_inside_words_and_drops_emphasis():
+    assert github_slug("The `snake_case` name") == "the-snake_case-name"
+    assert github_slug("a_b_c") == "a_b_c"
+    assert github_slug("Use _italic_, **bold** and __init__") == "use-italic-bold-and-init"
+    assert github_slug("`_private` helper") == "_private-helper"
+    assert github_slug("[Link_text](other.md) here") == "link_text-here"
+
+
+def test_every_tracked_page_is_checked_and_the_folders_are_the_fallback(tmp_path, monkeypatch):
+    tracked = {path.relative_to(ROOT).as_posix() for path in markdown_files()}
+    assert ".github/pull_request_template.md" in tracked
+    # Without Git the folders are searched, and .github is one of them.
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
+    fallback = {path.relative_to(ROOT).as_posix() for path in markdown_files()}
+    assert ".github/pull_request_template.md" in fallback and "README.md" in fallback
 
 
 @pytest.mark.parametrize("path", markdown_files(), ids=lambda path: path.relative_to(ROOT).as_posix())
