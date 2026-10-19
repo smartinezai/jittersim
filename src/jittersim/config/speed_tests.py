@@ -6,10 +6,14 @@ own speed test page. They never hold a token, a password or the dashboard's addr
 """
 
 import json
+import logging
 import sqlite3
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 from .storage import StorageError
+
+LOGGER = logging.getLogger(__name__)
 
 MAX_RESULTS_PER_DEVICE = 50
 MAX_RESULTS_TOTAL = 500
@@ -54,15 +58,25 @@ def ensure_speed_test_schema(connection: sqlite3.Connection) -> None:
         connection.executescript(TABLE_SCHEMA.format(table=table))
 
 
+JOINERS = frozenset("\u200c\u200d")
+
+
 def clean_label(value: Any) -> str:
-    """A short label without control characters, or ValueError."""
+    """A short label without control or format characters, or ValueError.
+
+    Unicode categories Cc (including the C1 controls) and Cf (bidirectional overrides, zero
+    width characters and the byte order mark) can hide or reorder text in a table or a CSV file.
+    The zero width joiner and non-joiner are the exception: emoji sequences and Persian or
+    Indic words need them, and they cannot reorder text.
+    """
 
     if value is None:
         return ""
     if not isinstance(value, str):
         raise ValueError("Label must be text")
     cleaned = " ".join(value.split())
-    if any(ord(character) < 32 or ord(character) == 127 for character in cleaned):
+    if any(unicodedata.category(character) in ("Cc", "Cf") and character not in JOINERS
+           for character in cleaned):
         raise ValueError("Label contains a control character")
     if len(cleaned) > MAX_LABEL_LENGTH:
         raise ValueError(f"Label must be at most {MAX_LABEL_LENGTH} characters")
@@ -151,25 +165,39 @@ class SpeedTestStore:
         return self.get(identifier)
 
     def get(self, identifier: int) -> Optional[Dict[str, Any]]:
-        with self.repository._lock:
-            row = self.db.execute(
-                f"SELECT * FROM {self.table} WHERE id = ?", (identifier,)
-            ).fetchone()
+        try:
+            with self.repository._lock:
+                row = self.db.execute(
+                    f"SELECT * FROM {self.table} WHERE id = ?", (identifier,)
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise StorageError("could not read the speed test result") from error
         return None if row is None else _result(row)
 
     def list(self, mac_address: Optional[str] = None, *, limit: int = 50) -> List[Dict[str, Any]]:
-        with self.repository._lock:
-            if mac_address is None:
-                rows = self.db.execute(
-                    f"SELECT * FROM {self.table} ORDER BY id DESC LIMIT ?", (limit,)
-                ).fetchall()
-            else:
-                rows = self.db.execute(
-                    f"SELECT * FROM {self.table} WHERE mac_address = ? "
-                    "ORDER BY id DESC LIMIT ?",
-                    (mac_address, limit),
-                ).fetchall()
-        return [_result(row) for row in rows]
+        try:
+            with self.repository._lock:
+                if mac_address is None:
+                    rows = self.db.execute(
+                        f"SELECT * FROM {self.table} ORDER BY id DESC LIMIT ?", (limit,)
+                    ).fetchall()
+                else:
+                    rows = self.db.execute(
+                        f"SELECT * FROM {self.table} WHERE mac_address = ? "
+                        "ORDER BY id DESC LIMIT ?",
+                        (mac_address, limit),
+                    ).fetchall()
+        except sqlite3.Error as error:
+            raise StorageError("could not read the speed test results") from error
+        results = []
+        for row in rows:
+            try:
+                results.append(_result(row))
+            except StorageError:
+                # One damaged row must not hide the others. The keep-newest limits remove it
+                # in the end.
+                LOGGER.warning("skipping a malformed speed test result (id %s)", row["id"])
+        return results
 
     def update(self, identifier: int, *, label=None, reported=None) -> Optional[Dict[str, Any]]:
         changes = []
@@ -208,6 +236,13 @@ class SpeedTestStore:
         return cursor.rowcount > 0
 
 
+def _object(text: str) -> Dict[str, Any]:
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise ValueError("expected a JSON object")
+    return value
+
+
 class ConnectionCheckStore(SpeedTestStore):
     """The rows of the connection check: the same columns and bounds, another table."""
 
@@ -228,9 +263,9 @@ def _result(row: sqlite3.Row) -> Dict[str, Any]:
             "provider": row["provider"],
             "source": row["source"],
             "protected": bool(row["protected"]),
-            "profile": json.loads(row["profile_json"]),
-            "summary": json.loads(row["summary_json"]),
-            "reported": json.loads(row["reported_json"]),
+            "profile": _object(row["profile_json"]),
+            "summary": _object(row["summary_json"]),
+            "reported": _object(row["reported_json"]),
         }
-    except (KeyError, TypeError, ValueError) as error:
+    except (IndexError, KeyError, TypeError, ValueError) as error:
         raise StorageError("stored speed test result is malformed") from error

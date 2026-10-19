@@ -984,6 +984,24 @@ def _json_bytes(payload: Dict[str, Any]) -> bytes:
     return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
 
 
+# The write paths ControlServer._write_response_for answers itself, each with the method
+# that handles it. Paths are exact. The /api/router/ paths are matched by prefix there.
+WRITE_ROUTES: Dict[str, Any] = {}
+
+
+def _write_route(*paths: str):
+    """Register a ControlServer method as the handler of one or more write paths."""
+
+    def register(method):
+        for path in paths:
+            if path in WRITE_ROUTES:
+                raise ValueError(f"two write routes for {path}")
+            WRITE_ROUTES[path] = method
+        return method
+
+    return register
+
+
 @dataclass
 class _PendingConnection:
     address: Any
@@ -2723,121 +2741,142 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                             before_replace=None) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
 
-        if path == "/api/profiles/ranges":
-            try:
-                ranges = {
-                    direction: impairment_range_preview(_impairment_from_payload(payload.get(direction)))
-                    for direction in ("upload", "download")
-                }
-            except (TypeError, ValueError) as error:
-                return _bad_request("invalid value range", error)
-            return HTTPStatus.OK, "application/json", _json_bytes({"ranges": ranges})
+        write = WRITE_ROUTES.get(path)
+        if write is not None:
+            return write(self, path, payload, control_intent, before_replace)
+        if path.startswith("/api/router/"):
+            return self._handle_router_request(path, payload)
+        return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
-        if path == "/api/gateway-persistence":
-            enabled = payload.get("persistence_enabled")
-            if not isinstance(enabled, bool):
-                return _bad_request(
-                    "invalid gateway persistence setting",
-                    ValueError("persistence_enabled must be true or false"),
-                )
-            try:
-                version = self.repository.set_persist_profiles_after_gateway_outage(
-                    enabled,
-                    expected_version=payload.get("version"),
-                )
-            except DeviceConflictError as error:
-                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
-            except StorageError as error:
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": str(error)})
-            helper_status = None
-            helper_synced = self.helper_client is None
-            if self.helper_client is not None:
-                try:
-                    helper_status = self.helper_client.set_gateway_persistence(enabled=enabled)
-                    helper_synced = helper_status.get("state_error") is False
-                except HelperClientError:
-                    LOGGER.exception("saved gateway persistence setting did not reach the helper")
-            response = {
-                "persistence_enabled": enabled,
-                "version": version,
-                "saved": True,
-                "helper_synced": helper_synced,
-                "message": (
-                    "Saved for use when hardware mode runs."
-                    if self.helper_client is None
-                    else (
-                        "Saved and applied to the networking helper."
-                        if helper_synced
-                        else "Saved, but the networking helper could not confirm its outage state. Check its service logs."
-                    )
-                ),
-                "helper_available": self.helper_client is not None,
+    @_write_route("/api/profiles/ranges")
+    def _post_profiles_ranges(self, path, payload, control_intent, before_replace):
+        try:
+            ranges = {
+                direction: impairment_range_preview(_impairment_from_payload(payload.get(direction)))
+                for direction in ("upload", "download")
             }
-            if helper_status is not None:
-                response.update(helper_status)
-            else:
-                response.update(
-                    {
-                        "gateway_state": "unknown",
-                        "outage_stop_latched": False,
-                        "recovery_pending": False,
-                        "state_error": self.helper_client is not None,
-                    }
-                )
-            return HTTPStatus.OK, "application/json", _json_bytes(response)
+        except (TypeError, ValueError) as error:
+            return _bad_request("invalid value range", error)
+        return HTTPStatus.OK, "application/json", _json_bytes({"ranges": ranges})
 
-        if path == "/api/import":
-            try:
-                settings = keep_sections_missing_from(
-                    payload, _settings_from_payload(payload), self.repository.saved_settings()
-                )
-                check_settings(
-                    settings,
-                    max_traffic_classes=MAX_SHAPED_MARKS_PER_PLAN,
-                    max_service_domains=MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
-                )
-            except (KeyError, TypeError, ValueError) as error:
-                return _bad_request("invalid settings import", error)
-            refused = before_replace(settings) if before_replace is not None else None
-            if refused is not None:
-                return refused
-            self.repository.replace_settings(
-                self._with_counter_baselines(settings),
-                observation_addresses=self.newly_protected_station_addresses(settings),
+    @_write_route("/api/gateway-persistence")
+    def _post_gateway_persistence(self, path, payload, control_intent, before_replace):
+        enabled = payload.get("persistence_enabled")
+        if not isinstance(enabled, bool):
+            return _bad_request(
+                "invalid gateway persistence setting",
+                ValueError("persistence_enabled must be true or false"),
             )
-            self._sync_gateway_persistence()
-            return self._apply_saved_change(
-                "imported",
+        try:
+            version = self.repository.set_persist_profiles_after_gateway_outage(
+                enabled,
+                expected_version=payload.get("version"),
+            )
+        except DeviceConflictError as error:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+        except StorageError as error:
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": str(error)})
+        helper_status = None
+        helper_synced = self.helper_client is None
+        if self.helper_client is not None:
+            try:
+                helper_status = self.helper_client.set_gateway_persistence(enabled=enabled)
+                helper_synced = helper_status.get("state_error") is False
+            except HelperClientError:
+                LOGGER.exception("saved gateway persistence setting did not reach the helper")
+        response = {
+            "persistence_enabled": enabled,
+            "version": version,
+            "saved": True,
+            "helper_synced": helper_synced,
+            "message": (
+                "Saved for use when hardware mode runs."
+                if self.helper_client is None
+                else (
+                    "Saved and applied to the networking helper."
+                    if helper_synced
+                    else "Saved, but the networking helper could not confirm its outage state. Check its service logs."
+                )
+            ),
+            "helper_available": self.helper_client is not None,
+        }
+        if helper_status is not None:
+            response.update(helper_status)
+        else:
+            response.update(
                 {
-                    "profiles": len(settings.profiles),
-                    "devices": len(settings.devices),
-                    "schedules": len(settings.schedules),
-                },
+                    "gateway_state": "unknown",
+                    "outage_stop_latched": False,
+                    "recovery_pending": False,
+                    "state_error": self.helper_client is not None,
+                }
             )
+        return HTTPStatus.OK, "application/json", _json_bytes(response)
 
-        if path == "/api/profiles/delete":
-            try:
-                profile_id = _required_text(payload, "id")
-            except (KeyError, TypeError, ValueError) as error:
-                return _bad_request("invalid profile delete request", error)
-            if self.repository.get_profile(profile_id) is None:
-                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                    {"error": "profile does not exist"}
-                )
-            references = self.repository.profile_references(profile_id, now=int(time.time()))
-            if references:
-                # Deleting would silently remove the rules that use the profile.
-                return HTTPStatus.CONFLICT, "application/json", _json_bytes(
-                    {
-                        "error": "profile is in use by " + ", ".join(references),
-                        "references": list(references),
-                    }
-                )
-            self.repository.delete_profile(profile_id)
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {"profile": {"id": profile_id, "deleted": True}}
+    @_write_route("/api/import")
+    def _post_import(self, path, payload, control_intent, before_replace):
+        try:
+            settings = keep_sections_missing_from(
+                payload, _settings_from_payload(payload), self.repository.saved_settings()
             )
+            check_settings(
+                settings,
+                max_traffic_classes=MAX_SHAPED_MARKS_PER_PLAN,
+                max_service_domains=MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid settings import", error)
+        refused = before_replace(settings) if before_replace is not None else None
+        if refused is not None:
+            return refused
+        self.repository.replace_settings(
+            self._with_counter_baselines(settings),
+            observation_addresses=self.newly_protected_station_addresses(settings),
+        )
+        self._sync_gateway_persistence()
+        return self._apply_saved_change(
+            "imported",
+            {
+                "profiles": len(settings.profiles),
+                "devices": len(settings.devices),
+                "schedules": len(settings.schedules),
+            },
+        )
 
+    @_write_route("/api/profiles/delete")
+    def _post_profiles_delete(self, path, payload, control_intent, before_replace):
+        try:
+            profile_id = _required_text(payload, "id")
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid profile delete request", error)
+        if self.repository.get_profile(profile_id) is None:
+            return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                {"error": "profile does not exist"}
+            )
+        references = self.repository.profile_references(profile_id, now=int(time.time()))
+        if references:
+            # Deleting would silently remove the rules that use the profile.
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                {
+                    "error": "profile is in use by " + ", ".join(references),
+                    "references": list(references),
+                }
+            )
+        self.repository.delete_profile(profile_id)
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {"profile": {"id": profile_id, "deleted": True}}
+        )
+
+    @_write_route(
+        "/api/devices/delete",
+        "/api/schedules/delete",
+        "/api/scenarios/delete",
+        "/api/data-limits/delete",
+        "/api/group-data-limits/delete",
+        "/api/service-quotas/delete",
+        "/api/time-quotas/delete",
+    )
+    def _post_saved_item_delete(self, path, payload, control_intent, before_replace):
         deletes = {
             "/api/devices/delete": ("id", "device", self.repository.delete_device),
             "/api/schedules/delete": ("id", "schedule", self.repository.delete_schedule),
@@ -2859,713 +2898,755 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             ),
             "/api/time-quotas/delete": ("id", "time_quota", self.repository.delete_time_quota),
         }
-        if path in deletes:
-            key, kind, delete = deletes[path]
-            label = kind.replace("_", " ")
-            try:
-                identifier = _required_text(payload, key)
-            except (KeyError, TypeError, ValueError) as error:
-                return _bad_request(f"invalid {label} delete request", error)
-            if not delete(identifier):
+        key, kind, delete = deletes[path]
+        label = kind.replace("_", " ")
+        try:
+            identifier = _required_text(payload, key)
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request(f"invalid {label} delete request", error)
+        if not delete(identifier):
+            return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                {"error": f"{label} does not exist"}
+            )
+        return self._apply_saved_change(kind, {key: identifier, "deleted": True})
+
+    @_write_route("/api/traffic-settings")
+    def _post_traffic_settings(self, path, payload, control_intent, before_replace):
+        try:
+            if "upload_kbit" not in payload or "download_kbit" not in payload:
+                raise TrafficRateSettingsError("both rate fields are required")
+            settings = self.repository.save_traffic_rate_settings(
+                upload_kbit=payload["upload_kbit"],
+                download_kbit=payload["download_kbit"],
+            )
+        except TrafficRateSettingsError:
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "invalid ISP rate references"}
+            )
+        return HTTPStatus.OK, "application/json", _json_bytes(settings)
+
+    @_write_route("/api/connected-device-labels")
+    def _post_connected_device_labels(self, path, payload, control_intent, before_replace):
+        try:
+            mac_address = normalize_device_mac(payload.get("mac_address"))
+            display_name = normalize_device_display_name(payload.get("display_name"))
+            device_type = normalize_device_type(payload.get("device_type"))
+        except DeviceLabelError:
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "connected-device details are invalid"}
+            )
+        self.repository.save_connected_device_label(
+            mac_address=mac_address,
+            display_name=display_name,
+            device_type=device_type,
+        )
+        return HTTPStatus.OK, "application/json", _json_bytes({"saved": True})
+
+    @_write_route("/api/connected-device-labels/delete")
+    def _post_connected_device_labels_delete(self, path, payload, control_intent, before_replace):
+        try:
+            mac_address = normalize_device_mac(payload.get("mac_address"))
+        except DeviceLabelError:
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "connected-device address is invalid"}
+            )
+        self.repository.delete_connected_device_label(mac_address=mac_address)
+        return HTTPStatus.OK, "application/json", _json_bytes({"deleted": True})
+
+    @_write_route("/api/homepage/pairing-code", "/api/homepage/revoke")
+    def _post_homepage_pairing_code(self, path, payload, control_intent, before_replace):
+        if self.homepage_store is None:
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes({"error": "Trusted homepage pairing is not enabled"})
+        try:
+            if path.endswith("revoke") and payload == {}:
+                self.homepage_store.revoke()
+                result = {"revoked": True}
+            elif path.endswith("pairing-code") and set(payload) == {"extension_id", "pages"}:
+                result = self.homepage_store.create(payload["extension_id"], payload["pages"])
+            else:
+                raise ValueError("invalid pairing request")
+            return HTTPStatus.OK, "application/json", _json_bytes(result)
+        except (ValueError, RuntimeError):
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": "Pairing unavailable. Check the extension ID and controlled HTTPS pages."})
+
+    @_write_route("/api/profiles")
+    def _post_profiles(self, path, payload, control_intent, before_replace):
+        try:
+            profile = _profile_from_payload(payload)
+        except ValidationError as error:
+            if str(error) == "Clear the saved seed before choosing a fresh pattern":
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": str(error)})
+            return _bad_request("invalid profile configuration", error)
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid profile configuration", error)
+        self.repository.save_profile(profile)
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {"profile": _profile_payload(profile)}
+        )
+
+    @_write_route("/api/devices")
+    def _post_devices(self, path, payload, control_intent, before_replace):
+        try:
+            device = _device_from_payload(payload)
+            expected = (
+                _device_from_payload(payload["expected"])
+                if "expected" in payload else None
+            )
+            if expected is not None and expected.id != device.id:
+                raise ValueError("the original device ID must match")
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid device configuration", error)
+        # A protected saved device stays editable. Its assignment is dormant while
+        # the protection lasts and comes back when the protection is removed.
+        if self.repository.get_device(device.id) is None:
+            capacity_error = self._capacity_error(adding=1)
+            if capacity_error is not None:
+                return capacity_error
+        try:
+            self.repository.save_device(device, expected=expected)
+        except DeviceConflictError as error:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+        labels_by_mac = self.repository.list_connected_device_labels()
+        state = self._device_protection_states().get(device.id)
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {"device": _device_payload(device, labels_by_mac=labels_by_mac, state=state)}
+        )
+
+    @_write_route("/api/general-profile", "/api/general-profile/stop")
+    def _post_general_profile(self, path, payload, control_intent, before_replace):
+        return self._change_general_profile(
+            payload, stop=path.endswith("/stop"), control_intent=control_intent)
+
+    @_write_route("/api/ad-blocking")
+    def _post_ad_blocking(self, path, payload, control_intent, before_replace):
+        return self._change_ad_blocking(payload, control_intent=control_intent)
+
+    @_write_route("/api/unaffected-devices", "/api/unaffected-devices/delete")
+    def _post_unaffected_devices(self, path, payload, control_intent, before_replace):
+        return self._change_unaffected_device(payload, remove=path.endswith("/delete"))
+
+    @_write_route("/api/groups", "/api/connected-devices/group")
+    def _post_groups(self, path, payload, control_intent, before_replace):
+        return self._save_connected_group(payload, existing=path.endswith("/group"))
+
+    @_write_route("/api/groups/delete")
+    def _post_groups_delete(self, path, payload, control_intent, before_replace):
+        try:
+            group_id = payload["id"]
+            if not isinstance(group_id, str) or not group_id:
+                raise ValueError("group id is invalid")
+            if not self.repository.delete_device_group(group_id):
                 return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                    {"error": f"{label} does not exist"}
+                    {"error": "device group does not exist"}
                 )
-            return self._apply_saved_change(kind, {key: identifier, "deleted": True})
-        if path == "/api/traffic-settings":
-            try:
-                if "upload_kbit" not in payload or "download_kbit" not in payload:
-                    raise TrafficRateSettingsError("both rate fields are required")
-                settings = self.repository.save_traffic_rate_settings(
-                    upload_kbit=payload["upload_kbit"],
-                    download_kbit=payload["download_kbit"],
-                )
-            except TrafficRateSettingsError:
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid ISP rate references"}
-                )
-            return HTTPStatus.OK, "application/json", _json_bytes(settings)
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid device group delete request", error)
+        return self._apply_saved_change("group", {"id": group_id, "deleted": True})
 
-        if path == "/api/connected-device-labels":
-            try:
-                mac_address = normalize_device_mac(payload.get("mac_address"))
-                display_name = normalize_device_display_name(payload.get("display_name"))
-                device_type = normalize_device_type(payload.get("device_type"))
-            except DeviceLabelError:
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "connected-device details are invalid"}
-                )
-            self.repository.save_connected_device_label(
-                mac_address=mac_address,
-                display_name=display_name,
-                device_type=device_type,
-            )
-            return HTTPStatus.OK, "application/json", _json_bytes({"saved": True})
+    @_write_route("/api/schedules/preview")
+    def _post_schedules_preview(self, path, payload, control_intent, before_replace):
+        try:
+            schedule = _schedule_from_payload(payload)
+            return HTTPStatus.OK, "application/json", _json_bytes({
+                "overlaps": overlapping_schedules(schedule, self.repository.list_schedules()),
+                "message": "For the same target, the active schedule with the first ID alphabetically wins.",
+            })
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid schedule configuration", error)
 
-        if path == "/api/connected-device-labels/delete":
-            try:
-                mac_address = normalize_device_mac(payload.get("mac_address"))
-            except DeviceLabelError:
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "connected-device address is invalid"}
-                )
-            self.repository.delete_connected_device_label(mac_address=mac_address)
-            return HTTPStatus.OK, "application/json", _json_bytes({"deleted": True})
-
-        if path in ("/api/homepage/pairing-code", "/api/homepage/revoke"):
-            if self.homepage_store is None:
-                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes({"error": "Trusted homepage pairing is not enabled"})
-            try:
-                if path.endswith("revoke") and payload == {}:
-                    self.homepage_store.revoke()
-                    result = {"revoked": True}
-                elif path.endswith("pairing-code") and set(payload) == {"extension_id", "pages"}:
-                    result = self.homepage_store.create(payload["extension_id"], payload["pages"])
-                else:
-                    raise ValueError("invalid pairing request")
-                return HTTPStatus.OK, "application/json", _json_bytes(result)
-            except (ValueError, RuntimeError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": "Pairing unavailable. Check the extension ID and controlled HTTPS pages."})
-
-        if path == "/api/profiles":
-            try:
-                profile = _profile_from_payload(payload)
-            except ValidationError as error:
-                if str(error) == "Clear the saved seed before choosing a fresh pattern":
-                    return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": str(error)})
-                return _bad_request("invalid profile configuration", error)
-            except (KeyError, TypeError, ValueError) as error:
-                return _bad_request("invalid profile configuration", error)
-            self.repository.save_profile(profile)
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {"profile": _profile_payload(profile)}
-            )
-
-        if path == "/api/devices":
-            try:
-                device = _device_from_payload(payload)
-                expected = (
-                    _device_from_payload(payload["expected"])
-                    if "expected" in payload else None
-                )
-                if expected is not None and expected.id != device.id:
-                    raise ValueError("the original device ID must match")
-            except (KeyError, TypeError, ValueError) as error:
-                return _bad_request("invalid device configuration", error)
-            # A protected saved device stays editable. Its assignment is dormant while
-            # the protection lasts and comes back when the protection is removed.
-            if self.repository.get_device(device.id) is None:
-                capacity_error = self._capacity_error(adding=1)
-                if capacity_error is not None:
-                    return capacity_error
-            try:
-                self.repository.save_device(device, expected=expected)
-            except DeviceConflictError as error:
-                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
-            labels_by_mac = self.repository.list_connected_device_labels()
-            state = self._device_protection_states().get(device.id)
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {"device": _device_payload(device, labels_by_mac=labels_by_mac, state=state)}
-            )
-
-        if path in ("/api/general-profile", "/api/general-profile/stop"):
-            return self._change_general_profile(
-                payload, stop=path.endswith("/stop"), control_intent=control_intent)
-
-        if path == "/api/ad-blocking":
-            return self._change_ad_blocking(payload, control_intent=control_intent)
-        if path in ("/api/unaffected-devices", "/api/unaffected-devices/delete"):
-            return self._change_unaffected_device(payload, remove=path.endswith("/delete"))
-
-        if path in ("/api/groups", "/api/connected-devices/group"):
-            return self._save_connected_group(payload, existing=path.endswith("/group"))
-
-        if path == "/api/groups/delete":
-            try:
-                group_id = payload["id"]
-                if not isinstance(group_id, str) or not group_id:
-                    raise ValueError("group id is invalid")
-                if not self.repository.delete_device_group(group_id):
-                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                        {"error": "device group does not exist"}
-                    )
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid device group delete request", error)
-            return self._apply_saved_change("group", {"id": group_id, "deleted": True})
-
-        if path == "/api/schedules/preview":
-            try:
-                schedule = _schedule_from_payload(payload)
-                return HTTPStatus.OK, "application/json", _json_bytes({
-                    "overlaps": overlapping_schedules(schedule, self.repository.list_schedules()),
-                    "message": "For the same target, the active schedule with the first ID alphabetically wins.",
-                })
-            except (KeyError, TypeError, ValueError) as error:
-                return _bad_request("invalid schedule configuration", error)
-
-        if path == "/api/schedules":
-            try:
-                schedule = _schedule_from_payload(payload)
-                if (
-                    schedule.device_id is not None
-                    and self.repository.get_device(schedule.device_id) is None
-                ):
-                    raise ValueError("device does not exist")
-                if (
-                    schedule.group_id is not None
-                    and self.repository.get_device_group(schedule.group_id) is None
-                ):
-                    raise ValueError("group does not exist")
-                if self.repository.get_profile(schedule.profile_id) is None:
-                    raise ValueError("profile does not exist")
-            except (KeyError, TypeError, ValueError) as error:
-                return _bad_request("invalid schedule configuration", error)
-            if schedule.everyone_else and schedule.enabled and not self._everyone_else_counted():
-                capacity_error = self._capacity_error(adding=1)
-                if capacity_error is not None:
-                    return capacity_error
-            self.repository.save_schedule(schedule)
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {"schedule": _schedule_payload(schedule)}
-            )
-
-        if path == "/api/timers":
-            try:
-                timer = _timer_from_payload(payload)
-                if self.repository.get_device(timer.device_id) is None:
-                    raise ValueError("device does not exist")
-                if self.repository.get_profile(timer.profile_id) is None:
-                    raise ValueError("profile does not exist")
-                self.repository.save_timer(timer)
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid timer configuration", error)
-            if self.helper_client is None:
-                return HTTPStatus.OK, "application/json", _json_bytes(
-                    {
-                        "timer": _timer_payload(timer),
-                        "live_applied": False,
-                        "message": "timer saved; choose Start in hardware mode to start it",
-                    }
-                )
-            status, content_type, body = self._apply_after_change()
-            response = json.loads(body.decode("utf-8"))
-            response["timer"] = _timer_payload(timer)
-            response.setdefault("live_applied", status == HTTPStatus.OK)
-            return status, content_type, _json_bytes(response)
-
-        if path == "/api/scenarios":
-            try:
-                scenario = _scenario_from_payload(payload)
-                for step in scenario.steps:
-                    if self.repository.get_profile(step.profile_id) is None:
-                        raise ValueError(f"profile {step.profile_id} does not exist")
-            except (KeyError, TypeError, ValueError) as error:
-                return _bad_request("invalid scenario", error)
-            self.repository.save_scenario(scenario)
-            return self._apply_saved_change("scenario", _scenario_payload(scenario))
-
-        if path == "/api/scenarios/start":
-            operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
-            with operation:
-                return self._start_scenario(payload)
-
-        if path == "/api/scenarios/stop":
-            try:
-                run_id = _required_text(payload, "id")
-            except (KeyError, TypeError, ValueError) as error:
-                return _bad_request("invalid scenario stop", error)
-            if not self.repository.stop_scenario_run(run_id):
-                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                    {"error": "scenario run does not exist or has already stopped"}
-                )
-            return self._apply_saved_change("run_id", run_id)
-
-        if path == "/api/timers/cancel":
-            try:
-                timer_id = payload["id"]
-                if not isinstance(timer_id, str) or not timer_id:
-                    raise ValueError("timer id is invalid")
-                if not self.repository.delete_timer(timer_id):
-                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                        {"error": "timer does not exist or is already inactive"}
-                    )
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid timer cancellation", error)
-            if self.helper_client is None:
-                return HTTPStatus.OK, "application/json", _json_bytes(
-                    {"timer_id": timer_id, "live_applied": False}
-                )
-            status, content_type, body = self._apply_after_change()
-            response = json.loads(body.decode("utf-8"))
-            response["timer_id"] = timer_id
-            response.setdefault("live_applied", status == HTTPStatus.OK)
-            return status, content_type, _json_bytes(response)
-
-        if path == "/api/progressions":
-            try:
-                progression = _progression_from_payload(payload, repository=self.repository)
-                if self.repository.get_device(progression.device_id) is None:
-                    raise ValueError("device does not exist")
-                if self.repository.get_profile(progression.start_profile_id) is None:
-                    raise ValueError("start profile does not exist")
-                if self.repository.get_profile(progression.end_profile_id) is None:
-                    raise ValueError("end profile does not exist")
-                self.repository.save_progression(progression)
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid progression configuration", error)
-            if self.helper_client is None:
-                return HTTPStatus.OK, "application/json", _json_bytes(
-                    {
-                        "progression": _progression_payload(
-                            progression,
-                            repository=self.repository,
-                            now=int(time.time()),
-                        ),
-                        "live_applied": False,
-                        "message": "progression saved; choose Start in hardware mode to start it",
-                    }
-                )
-            status, content_type, body = self._apply_after_change()
-            response = json.loads(body.decode("utf-8"))
-            response["progression"] = _progression_payload(
-                progression,
-                repository=self.repository,
-                now=int(time.time()),
-            )
-            response.setdefault("live_applied", status == HTTPStatus.OK)
-            return status, content_type, _json_bytes(response)
-
-        if path == "/api/progressions/stop":
-            try:
-                progression_id = payload["id"]
-                if not isinstance(progression_id, str) or not progression_id:
-                    raise ValueError("progression id is invalid")
-                if not self.repository.delete_progression(progression_id):
-                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                        {"error": "progression does not exist or is already inactive"}
-                    )
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid progression stop request", error)
-            if self.helper_client is None:
-                return HTTPStatus.OK, "application/json", _json_bytes(
-                    {"progression_id": progression_id, "live_applied": False}
-                )
-            status, content_type, body = self._apply_after_change()
-            response = json.loads(body.decode("utf-8"))
-            response["progression_id"] = progression_id
-            response.setdefault("live_applied", status == HTTPStatus.OK)
-            return status, content_type, _json_bytes(response)
-
-        if path == "/api/data-limits":
-            try:
-                data_limit = _data_limit_from_payload(payload, repository=self.repository)
-                if self.repository.get_device(data_limit.device_id) is None:
-                    raise ValueError("device does not exist")
-                if self.repository.get_profile(data_limit.profile_id) is None:
-                    raise ValueError("profile does not exist")
-                existing = self.repository.get_data_limit(data_limit.device_id)
-                if data_limit.enabled and not (existing is not None and existing.enabled):
-                    # The device counter already holds traffic from before the limit.
-                    data_limit = replace(
-                        data_limit,
-                        counter_bytes=self._quota_counter("devices", data_limit.device_id) or 0,
-                    )
-                self.repository.save_data_limit(data_limit)
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid data limit configuration", error)
-            return self._apply_saved_change(
-                "data_limit",
-                _data_limit_payload(data_limit, repository=self.repository),
-            )
-
-        if path == "/api/data-limits/reset":
-            try:
-                device_id = payload["device_id"]
-                if not isinstance(device_id, str) or not device_id:
-                    raise ValueError("device_id is invalid")
-                data_limit = self.repository.get_data_limit(device_id)
-                if data_limit is None:
-                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                        {"error": "data limit does not exist"}
-                    )
-                self.repository.reset_data_limit_usage(
-                    device_id,
-                    counter_bytes=self._quota_counter("devices", device_id),
-                    reset_at=int(time.time()),
-                )
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid data limit reset request", error)
-            refreshed = self.repository.get_data_limit(device_id)
-            return self._apply_saved_change(
-                "data_limit",
-                _data_limit_payload(refreshed, repository=self.repository),
-            )
-
-        if path == "/api/group-data-limits":
-            try:
-                data_limit = _group_data_limit_from_payload(
-                    payload,
-                    repository=self.repository,
-                )
-                if self.repository.get_device_group(data_limit.group_id) is None:
-                    raise ValueError("device group does not exist")
-                if self.repository.get_profile(data_limit.profile_id) is None:
-                    raise ValueError("profile does not exist")
-                existing = self.repository.get_group_data_limit(data_limit.group_id)
-                if data_limit.enabled and not (existing is not None and existing.enabled):
-                    # The device counters already hold traffic from before the limit.
-                    data_limit = replace(
-                        data_limit,
-                        counter_bytes=self._group_quota_counter(data_limit.group_id) or 0,
-                    )
-                self.repository.save_group_data_limit(data_limit)
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid group data limit configuration", error)
-            return self._apply_saved_change(
-                "group_data_limit",
-                _group_data_limit_payload(data_limit, repository=self.repository),
-            )
-
-        if path == "/api/group-data-limits/reset":
-            try:
-                group_id = payload["group_id"]
-                if not isinstance(group_id, str) or not group_id:
-                    raise ValueError("group_id is invalid")
-                data_limit = self.repository.get_group_data_limit(group_id)
-                if data_limit is None:
-                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                        {"error": "group data limit does not exist"}
-                    )
-                self.repository.reset_group_data_limit_usage(
-                    group_id,
-                    counter_bytes=self._group_quota_counter(group_id),
-                    reset_at=int(time.time()),
-                )
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid group data limit reset request", error)
-            refreshed = self.repository.get_group_data_limit(group_id)
-            return self._apply_saved_change(
-                "group_data_limit",
-                _group_data_limit_payload(refreshed, repository=self.repository),
-            )
-
-        if path == "/api/service-quotas":
-            try:
-                quota = _service_quota_from_payload(payload, repository=self.repository)
-                if self.repository.get_device(quota.device_id) is None:
-                    raise ValueError("device does not exist")
-                if self.repository.get_profile(quota.profile_id) is None:
-                    raise ValueError("profile does not exist")
-                existing = self.repository.get_service_quota(quota.id)
-                if quota.enabled and not (existing is not None and existing.enabled):
-                    capacity_error = self._capacity_error(adding=1)
-                    if capacity_error is not None:
-                        return capacity_error
-                self.repository.save_service_quota(quota)
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid service quota configuration", error)
-            return self._apply_saved_change(
-                "service_quota",
-                _service_quota_payload(quota, repository=self.repository),
-            )
-
-        if path == "/api/service-assignments":
-            try:
-                assignment = ServiceAssignment(
-                    id=payload["id"],
-                    device_id=payload["device_id"],
-                    name=payload["name"],
-                    domains=payload["domains"],
-                    profile_id=payload["profile_id"],
-                    enabled=payload.get("enabled", True),
-                )
-                device = self.repository.get_device(assignment.device_id)
-                if device is None or device.ipv4_address not in IPv4Network("192.168.50.0/24"):
-                    raise ValueError("device must be on the test Wi-Fi")
-                if self.repository.get_profile(assignment.profile_id) is None:
-                    raise ValueError("profile does not exist")
-                if assignment.enabled:
-                    other_assignments = tuple(
-                        current for current in self.repository.list_service_assignments()
-                        if current.enabled and current.id != assignment.id
-                    )
-                    if (
-                        len(assignment.domains)
-                        + sum(len(current.domains) for current in other_assignments)
-                        > MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN
-                    ):
-                        raise ValueError("too many browser service domains")
-                    already_enabled = any(
-                        current.id == assignment.id and current.enabled
-                        for current in self.repository.list_service_assignments()
-                    )
-                    if not already_enabled:
-                        capacity_error = self._capacity_error(adding=1)
-                        if capacity_error is not None:
-                            return capacity_error
-                    existing = (
-                        current for current in other_assignments
-                        if current.device_id == assignment.device_id
-                    )
-                    if any(
-                        domain == previous or domain.endswith("." + previous)
-                        or previous.endswith("." + domain)
-                        for current in existing
-                        for domain in assignment.domains
-                        for previous in current.domains
-                    ):
-                        raise ValueError("service assignment domains overlap")
-                self.repository.save_service_assignment(assignment)
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid service assignment configuration", error)
-            return self._apply_saved_change(
-                "service_assignment",
-                _service_assignment_payload(assignment, repository=self.repository),
-            )
-
-        if path == "/api/service-assignments/delete":
-            assignment_id = payload.get("id")
-            if not isinstance(assignment_id, str):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid service assignment id"}
-                )
-            if not self.repository.delete_service_assignment(assignment_id):
-                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                    {"error": "service assignment does not exist"}
-                )
-            return self._apply_saved_change("deleted_id", assignment_id)
-
-        if path == "/api/service-lists":
-            return self._save_service_list(payload)
-
-        if path == "/api/service-lists/delete":
-            return self._delete_service_list(payload)
-
-        if path == "/api/service-quotas/reset":
-            try:
-                quota_id = payload["id"]
-                if not isinstance(quota_id, str) or not quota_id:
-                    raise ValueError("quota id is invalid")
-                quota = self.repository.get_service_quota(quota_id)
-                if quota is None:
-                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                        {"error": "service quota does not exist"}
-                    )
-                self.repository.reset_service_quota_usage(
-                    quota_id,
-                    counter_bytes=self._quota_counter("services", quota_id),
-                    reset_at=int(time.time()),
-                )
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid service quota reset request", error)
-            refreshed = self.repository.get_service_quota(quota_id)
-            return self._apply_saved_change(
-                "service_quota",
-                _service_quota_payload(refreshed, repository=self.repository),
-            )
-
-        if path == "/api/time-quotas":
-            try:
-                quota = _time_quota_from_payload(payload, repository=self.repository)
-                if self.repository.get_device(quota.device_id) is None:
-                    raise ValueError("device does not exist")
-                if self.repository.get_profile(quota.profile_id) is None:
-                    raise ValueError("profile does not exist")
-                existing = self.repository.get_time_quota(quota.id)
-                if quota.enabled and not (existing is not None and existing.enabled):
-                    capacity_error = self._capacity_error(adding=1)
-                    if capacity_error is not None:
-                        return capacity_error
-                self.repository.save_time_quota(quota)
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid time quota configuration", error)
-            return self._apply_saved_change(
-                "time_quota",
-                _time_quota_payload(quota, repository=self.repository),
-            )
-
-        if path == "/api/time-quotas/start":
-            try:
-                quota_id = payload["id"]
-                if not isinstance(quota_id, str) or not quota_id:
-                    raise ValueError("quota id is invalid")
-                quota = self.repository.get_time_quota(quota_id)
-                if quota is None:
-                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                        {"error": "time quota does not exist"}
-                    )
-                started_at = int(time.time())
-                refreshed = self.repository.start_time_quota(
-                    quota_id,
-                    started_at=started_at,
-                    expires_at=started_at + quota.window_duration_seconds,
-                    counter_bytes=self._quota_counter(
-                        "services", time_quota_counter_id(quota_id)
-                    ),
-                )
-                if refreshed is None:
-                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                        {"error": "time quota does not exist"}
-                    )
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid time quota start request", error)
-            return self._apply_saved_change(
-                "time_quota",
-                _time_quota_payload(refreshed, repository=self.repository),
-            )
-
-        if path == "/api/time-quotas/stop":
-            try:
-                quota_id = payload["id"]
-                if not isinstance(quota_id, str) or not quota_id:
-                    raise ValueError("quota id is invalid")
-                if not self.repository.stop_time_quota(quota_id):
-                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                        {"error": "time quota does not exist"}
-                    )
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid time quota stop request", error)
-            refreshed = self.repository.get_time_quota(quota_id)
-            return self._apply_saved_change(
-                "time_quota",
-                _time_quota_payload(refreshed, repository=self.repository),
-            )
-
-        if path == "/api/time-quotas/reset":
-            try:
-                quota_id = payload["id"]
-                if not isinstance(quota_id, str) or not quota_id:
-                    raise ValueError("quota id is invalid")
-                quota = self.repository.get_time_quota(quota_id)
-                if quota is None:
-                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                        {"error": "time quota does not exist"}
-                    )
-                self.repository.reset_time_quota_usage(
-                    quota_id,
-                    counter_bytes=self._quota_counter(
-                        "services", time_quota_counter_id(quota_id)
-                    ),
-                    reset_at=int(time.time()),
-                )
-            except (KeyError, TypeError, ValueError, StorageError) as error:
-                return _bad_request("invalid time quota reset request", error)
-            refreshed = self.repository.get_time_quota(quota_id)
-            return self._apply_saved_change(
-                "time_quota",
-                _time_quota_payload(refreshed, repository=self.repository),
-            )
-
-        if path == "/api/everyone-else":
-            if "profile_id" not in payload:
-                return _bad_request(
-                    "invalid everyone-else profile", KeyError("profile_id is required")
-                )
-            profile_id = payload["profile_id"]
-            if profile_id is not None and (
-                not isinstance(profile_id, str) or self.repository.get_profile(profile_id) is None
+    @_write_route("/api/schedules")
+    def _post_schedules(self, path, payload, control_intent, before_replace):
+        try:
+            schedule = _schedule_from_payload(payload)
+            if (
+                schedule.device_id is not None
+                and self.repository.get_device(schedule.device_id) is None
             ):
-                return _bad_request(
-                    "invalid everyone-else profile", ValueError("profile does not exist")
+                raise ValueError("device does not exist")
+            if (
+                schedule.group_id is not None
+                and self.repository.get_device_group(schedule.group_id) is None
+            ):
+                raise ValueError("group does not exist")
+            if self.repository.get_profile(schedule.profile_id) is None:
+                raise ValueError("profile does not exist")
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid schedule configuration", error)
+        if schedule.everyone_else and schedule.enabled and not self._everyone_else_counted():
+            capacity_error = self._capacity_error(adding=1)
+            if capacity_error is not None:
+                return capacity_error
+        self.repository.save_schedule(schedule)
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {"schedule": _schedule_payload(schedule)}
+        )
+
+    @_write_route("/api/timers")
+    def _post_timers(self, path, payload, control_intent, before_replace):
+        try:
+            timer = _timer_from_payload(payload)
+            if self.repository.get_device(timer.device_id) is None:
+                raise ValueError("device does not exist")
+            if self.repository.get_profile(timer.profile_id) is None:
+                raise ValueError("profile does not exist")
+            self.repository.save_timer(timer)
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid timer configuration", error)
+        if self.helper_client is None:
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "timer": _timer_payload(timer),
+                    "live_applied": False,
+                    "message": "timer saved; choose Start in hardware mode to start it",
+                }
+            )
+        status, content_type, body = self._apply_after_change()
+        response = json.loads(body.decode("utf-8"))
+        response["timer"] = _timer_payload(timer)
+        response.setdefault("live_applied", status == HTTPStatus.OK)
+        return status, content_type, _json_bytes(response)
+
+    @_write_route("/api/scenarios")
+    def _post_scenarios(self, path, payload, control_intent, before_replace):
+        try:
+            scenario = _scenario_from_payload(payload)
+            for step in scenario.steps:
+                if self.repository.get_profile(step.profile_id) is None:
+                    raise ValueError(f"profile {step.profile_id} does not exist")
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid scenario", error)
+        self.repository.save_scenario(scenario)
+        return self._apply_saved_change("scenario", _scenario_payload(scenario))
+
+    @_write_route("/api/scenarios/start")
+    def _post_scenarios_start(self, path, payload, control_intent, before_replace):
+        operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
+        with operation:
+            return self._start_scenario(payload)
+
+    @_write_route("/api/scenarios/stop")
+    def _post_scenarios_stop(self, path, payload, control_intent, before_replace):
+        try:
+            run_id = _required_text(payload, "id")
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid scenario stop", error)
+        if not self.repository.stop_scenario_run(run_id):
+            return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                {"error": "scenario run does not exist or has already stopped"}
+            )
+        return self._apply_saved_change("run_id", run_id)
+
+    @_write_route("/api/timers/cancel")
+    def _post_timers_cancel(self, path, payload, control_intent, before_replace):
+        try:
+            timer_id = payload["id"]
+            if not isinstance(timer_id, str) or not timer_id:
+                raise ValueError("timer id is invalid")
+            if not self.repository.delete_timer(timer_id):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "timer does not exist or is already inactive"}
                 )
-            if profile_id is not None and not self._everyone_else_counted():
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid timer cancellation", error)
+        if self.helper_client is None:
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"timer_id": timer_id, "live_applied": False}
+            )
+        status, content_type, body = self._apply_after_change()
+        response = json.loads(body.decode("utf-8"))
+        response["timer_id"] = timer_id
+        response.setdefault("live_applied", status == HTTPStatus.OK)
+        return status, content_type, _json_bytes(response)
+
+    @_write_route("/api/progressions")
+    def _post_progressions(self, path, payload, control_intent, before_replace):
+        try:
+            progression = _progression_from_payload(payload, repository=self.repository)
+            if self.repository.get_device(progression.device_id) is None:
+                raise ValueError("device does not exist")
+            if self.repository.get_profile(progression.start_profile_id) is None:
+                raise ValueError("start profile does not exist")
+            if self.repository.get_profile(progression.end_profile_id) is None:
+                raise ValueError("end profile does not exist")
+            self.repository.save_progression(progression)
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid progression configuration", error)
+        if self.helper_client is None:
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "progression": _progression_payload(
+                        progression,
+                        repository=self.repository,
+                        now=int(time.time()),
+                    ),
+                    "live_applied": False,
+                    "message": "progression saved; choose Start in hardware mode to start it",
+                }
+            )
+        status, content_type, body = self._apply_after_change()
+        response = json.loads(body.decode("utf-8"))
+        response["progression"] = _progression_payload(
+            progression,
+            repository=self.repository,
+            now=int(time.time()),
+        )
+        response.setdefault("live_applied", status == HTTPStatus.OK)
+        return status, content_type, _json_bytes(response)
+
+    @_write_route("/api/progressions/stop")
+    def _post_progressions_stop(self, path, payload, control_intent, before_replace):
+        try:
+            progression_id = payload["id"]
+            if not isinstance(progression_id, str) or not progression_id:
+                raise ValueError("progression id is invalid")
+            if not self.repository.delete_progression(progression_id):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "progression does not exist or is already inactive"}
+                )
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid progression stop request", error)
+        if self.helper_client is None:
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"progression_id": progression_id, "live_applied": False}
+            )
+        status, content_type, body = self._apply_after_change()
+        response = json.loads(body.decode("utf-8"))
+        response["progression_id"] = progression_id
+        response.setdefault("live_applied", status == HTTPStatus.OK)
+        return status, content_type, _json_bytes(response)
+
+    @_write_route("/api/data-limits")
+    def _post_data_limits(self, path, payload, control_intent, before_replace):
+        try:
+            data_limit = _data_limit_from_payload(payload, repository=self.repository)
+            if self.repository.get_device(data_limit.device_id) is None:
+                raise ValueError("device does not exist")
+            if self.repository.get_profile(data_limit.profile_id) is None:
+                raise ValueError("profile does not exist")
+            existing = self.repository.get_data_limit(data_limit.device_id)
+            if data_limit.enabled and not (existing is not None and existing.enabled):
+                # The device counter already holds traffic from before the limit.
+                data_limit = replace(
+                    data_limit,
+                    counter_bytes=self._quota_counter("devices", data_limit.device_id) or 0,
+                )
+            self.repository.save_data_limit(data_limit)
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid data limit configuration", error)
+        return self._apply_saved_change(
+            "data_limit",
+            _data_limit_payload(data_limit, repository=self.repository),
+        )
+
+    @_write_route("/api/data-limits/reset")
+    def _post_data_limits_reset(self, path, payload, control_intent, before_replace):
+        try:
+            device_id = payload["device_id"]
+            if not isinstance(device_id, str) or not device_id:
+                raise ValueError("device_id is invalid")
+            data_limit = self.repository.get_data_limit(device_id)
+            if data_limit is None:
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "data limit does not exist"}
+                )
+            self.repository.reset_data_limit_usage(
+                device_id,
+                counter_bytes=self._quota_counter("devices", device_id),
+                reset_at=int(time.time()),
+            )
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid data limit reset request", error)
+        refreshed = self.repository.get_data_limit(device_id)
+        return self._apply_saved_change(
+            "data_limit",
+            _data_limit_payload(refreshed, repository=self.repository),
+        )
+
+    @_write_route("/api/group-data-limits")
+    def _post_group_data_limits(self, path, payload, control_intent, before_replace):
+        try:
+            data_limit = _group_data_limit_from_payload(
+                payload,
+                repository=self.repository,
+            )
+            if self.repository.get_device_group(data_limit.group_id) is None:
+                raise ValueError("device group does not exist")
+            if self.repository.get_profile(data_limit.profile_id) is None:
+                raise ValueError("profile does not exist")
+            existing = self.repository.get_group_data_limit(data_limit.group_id)
+            if data_limit.enabled and not (existing is not None and existing.enabled):
+                # The device counters already hold traffic from before the limit.
+                data_limit = replace(
+                    data_limit,
+                    counter_bytes=self._group_quota_counter(data_limit.group_id) or 0,
+                )
+            self.repository.save_group_data_limit(data_limit)
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid group data limit configuration", error)
+        return self._apply_saved_change(
+            "group_data_limit",
+            _group_data_limit_payload(data_limit, repository=self.repository),
+        )
+
+    @_write_route("/api/group-data-limits/reset")
+    def _post_group_data_limits_reset(self, path, payload, control_intent, before_replace):
+        try:
+            group_id = payload["group_id"]
+            if not isinstance(group_id, str) or not group_id:
+                raise ValueError("group_id is invalid")
+            data_limit = self.repository.get_group_data_limit(group_id)
+            if data_limit is None:
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "group data limit does not exist"}
+                )
+            self.repository.reset_group_data_limit_usage(
+                group_id,
+                counter_bytes=self._group_quota_counter(group_id),
+                reset_at=int(time.time()),
+            )
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid group data limit reset request", error)
+        refreshed = self.repository.get_group_data_limit(group_id)
+        return self._apply_saved_change(
+            "group_data_limit",
+            _group_data_limit_payload(refreshed, repository=self.repository),
+        )
+
+    @_write_route("/api/service-quotas")
+    def _post_service_quotas(self, path, payload, control_intent, before_replace):
+        try:
+            quota = _service_quota_from_payload(payload, repository=self.repository)
+            if self.repository.get_device(quota.device_id) is None:
+                raise ValueError("device does not exist")
+            if self.repository.get_profile(quota.profile_id) is None:
+                raise ValueError("profile does not exist")
+            existing = self.repository.get_service_quota(quota.id)
+            if quota.enabled and not (existing is not None and existing.enabled):
                 capacity_error = self._capacity_error(adding=1)
                 if capacity_error is not None:
                     return capacity_error
-            self.repository.save_everyone_else_profile_id(profile_id)
-            return self._apply_saved_change(
-                "everyone_else", _everyone_else_payload(self.repository)
+            self.repository.save_service_quota(quota)
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid service quota configuration", error)
+        return self._apply_saved_change(
+            "service_quota",
+            _service_quota_payload(quota, repository=self.repository),
+        )
+
+    @_write_route("/api/service-assignments")
+    def _post_service_assignments(self, path, payload, control_intent, before_replace):
+        try:
+            assignment = ServiceAssignment(
+                id=payload["id"],
+                device_id=payload["device_id"],
+                name=payload["name"],
+                domains=payload["domains"],
+                profile_id=payload["profile_id"],
+                enabled=payload.get("enabled", True),
             )
-
-        if path == "/api/policies":
-            try:
-                mac_policy, website_policy = _policies_from_payload(payload)
-                blocks = payload.get("site_blocks")
-                if blocks is not None:
-                    if not isinstance(blocks, list) or len(blocks) > 32:
-                        raise ValueError("site_blocks must be a list of at most 32 rules")
-                    blocks = tuple(
-                        _from_known_fields(SiteBlock, rule, f"site_blocks[{index}]")
-                        for index, rule in enumerate(blocks))
-                options = (_from_known_fields(AccessOptions, payload["options"], "options")
-                           if "options" in payload else None)
-                # Check every supplied section above, then write only the sections the
-                # request carried. An omitted section keeps its stored value, while an
-                # explicit empty section resets just that section.
-                self.repository.save_access_policies(
-                    mac_policy if "mac" in payload else None,
-                    website_policy if "websites" in payload else None,
-                    blocks=blocks, options=options,
-                    expected_version=payload.get("version"),
+            device = self.repository.get_device(assignment.device_id)
+            if device is None or device.ipv4_address not in IPv4Network("192.168.50.0/24"):
+                raise ValueError("device must be on the test Wi-Fi")
+            if self.repository.get_profile(assignment.profile_id) is None:
+                raise ValueError("profile does not exist")
+            if assignment.enabled:
+                other_assignments = tuple(
+                    current for current in self.repository.list_service_assignments()
+                    if current.enabled and current.id != assignment.id
                 )
-            except DeviceConflictError as error:
-                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
-            except (KeyError, TypeError, ValueError) as error:
-                return _bad_request("invalid network policy configuration", error)
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                _policies_payload(self.repository)
+                if (
+                    len(assignment.domains)
+                    + sum(len(current.domains) for current in other_assignments)
+                    > MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN
+                ):
+                    raise ValueError("too many browser service domains")
+                already_enabled = any(
+                    current.id == assignment.id and current.enabled
+                    for current in self.repository.list_service_assignments()
+                )
+                if not already_enabled:
+                    capacity_error = self._capacity_error(adding=1)
+                    if capacity_error is not None:
+                        return capacity_error
+                existing = (
+                    current for current in other_assignments
+                    if current.device_id == assignment.device_id
+                )
+                if any(
+                    domain == previous or domain.endswith("." + previous)
+                    or previous.endswith("." + domain)
+                    for current in existing
+                    for domain in assignment.domains
+                    for previous in current.domains
+                ):
+                    raise ValueError("service assignment domains overlap")
+            self.repository.save_service_assignment(assignment)
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid service assignment configuration", error)
+        return self._apply_saved_change(
+            "service_assignment",
+            _service_assignment_payload(assignment, repository=self.repository),
+        )
+
+    @_write_route("/api/service-assignments/delete")
+    def _post_service_assignments_delete(self, path, payload, control_intent, before_replace):
+        assignment_id = payload.get("id")
+        if not isinstance(assignment_id, str):
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "invalid service assignment id"}
             )
+        if not self.repository.delete_service_assignment(assignment_id):
+            return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                {"error": "service assignment does not exist"}
+            )
+        return self._apply_saved_change("deleted_id", assignment_id)
 
-        if path == "/api/access-point/reset-name":
-            if self.helper_client is None:
-                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
-                    {"error": "network helper is not configured"}
+    @_write_route("/api/service-lists")
+    def _post_service_lists(self, path, payload, control_intent, before_replace):
+        return self._save_service_list(payload)
+
+    @_write_route("/api/service-lists/delete")
+    def _post_service_lists_delete(self, path, payload, control_intent, before_replace):
+        return self._delete_service_list(payload)
+
+    @_write_route("/api/service-quotas/reset")
+    def _post_service_quotas_reset(self, path, payload, control_intent, before_replace):
+        try:
+            quota_id = payload["id"]
+            if not isinstance(quota_id, str) or not quota_id:
+                raise ValueError("quota id is invalid")
+            quota = self.repository.get_service_quota(quota_id)
+            if quota is None:
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "service quota does not exist"}
                 )
-            return self._start_wifi_change("reset-name", self._reset_wifi_name, payload)
+            self.repository.reset_service_quota_usage(
+                quota_id,
+                counter_bytes=self._quota_counter("services", quota_id),
+                reset_at=int(time.time()),
+            )
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid service quota reset request", error)
+        refreshed = self.repository.get_service_quota(quota_id)
+        return self._apply_saved_change(
+            "service_quota",
+            _service_quota_payload(refreshed, repository=self.repository),
+        )
 
-        if path == "/api/access-point":
-            if self.helper_client is None:
-                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
-                    {"error": "network helper is not configured"}
+    @_write_route("/api/time-quotas")
+    def _post_time_quotas(self, path, payload, control_intent, before_replace):
+        try:
+            quota = _time_quota_from_payload(payload, repository=self.repository)
+            if self.repository.get_device(quota.device_id) is None:
+                raise ValueError("device does not exist")
+            if self.repository.get_profile(quota.profile_id) is None:
+                raise ValueError("profile does not exist")
+            existing = self.repository.get_time_quota(quota.id)
+            if quota.enabled and not (existing is not None and existing.enabled):
+                capacity_error = self._capacity_error(adding=1)
+                if capacity_error is not None:
+                    return capacity_error
+            self.repository.save_time_quota(quota)
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid time quota configuration", error)
+        return self._apply_saved_change(
+            "time_quota",
+            _time_quota_payload(quota, repository=self.repository),
+        )
+
+    @_write_route("/api/time-quotas/start")
+    def _post_time_quotas_start(self, path, payload, control_intent, before_replace):
+        try:
+            quota_id = payload["id"]
+            if not isinstance(quota_id, str) or not quota_id:
+                raise ValueError("quota id is invalid")
+            quota = self.repository.get_time_quota(quota_id)
+            if quota is None:
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "time quota does not exist"}
                 )
-            try:
-                ssid, password = payload["ssid"], payload["password"]
-                # A refusal can only reach the browser now, not after the Wi-Fi restarted.
-                _validate_access_point_settings(ssid=ssid, password=password)
-            except (KeyError, TypeError, ValueError) as error:
-                return _bad_request("invalid access point settings", error)
-            return self._start_wifi_change(
-                "access-point", lambda: self._configure_access_point(ssid, password), payload)
+            started_at = int(time.time())
+            refreshed = self.repository.start_time_quota(
+                quota_id,
+                started_at=started_at,
+                expires_at=started_at + quota.window_duration_seconds,
+                counter_bytes=self._quota_counter(
+                    "services", time_quota_counter_id(quota_id)
+                ),
+            )
+            if refreshed is None:
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "time quota does not exist"}
+                )
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid time quota start request", error)
+        return self._apply_saved_change(
+            "time_quota",
+            _time_quota_payload(refreshed, repository=self.repository),
+        )
 
-        if path.startswith("/api/router/"):
-            return self._handle_router_request(path, payload)
+    @_write_route("/api/time-quotas/stop")
+    def _post_time_quotas_stop(self, path, payload, control_intent, before_replace):
+        try:
+            quota_id = payload["id"]
+            if not isinstance(quota_id, str) or not quota_id:
+                raise ValueError("quota id is invalid")
+            if not self.repository.stop_time_quota(quota_id):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "time quota does not exist"}
+                )
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid time quota stop request", error)
+        refreshed = self.repository.get_time_quota(quota_id)
+        return self._apply_saved_change(
+            "time_quota",
+            _time_quota_payload(refreshed, repository=self.repository),
+        )
 
-        if path == "/api/connected-devices/apply-profile":
-            return self._apply_profile_to_connected_device(payload)
+    @_write_route("/api/time-quotas/reset")
+    def _post_time_quotas_reset(self, path, payload, control_intent, before_replace):
+        try:
+            quota_id = payload["id"]
+            if not isinstance(quota_id, str) or not quota_id:
+                raise ValueError("quota id is invalid")
+            quota = self.repository.get_time_quota(quota_id)
+            if quota is None:
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "time quota does not exist"}
+                )
+            self.repository.reset_time_quota_usage(
+                quota_id,
+                counter_bytes=self._quota_counter(
+                    "services", time_quota_counter_id(quota_id)
+                ),
+                reset_at=int(time.time()),
+            )
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("invalid time quota reset request", error)
+        refreshed = self.repository.get_time_quota(quota_id)
+        return self._apply_saved_change(
+            "time_quota",
+            _time_quota_payload(refreshed, repository=self.repository),
+        )
 
-        if path == "/api/observations/scan":
-            return self._scan_dns_observations()
+    @_write_route("/api/everyone-else")
+    def _post_everyone_else(self, path, payload, control_intent, before_replace):
+        if "profile_id" not in payload:
+            return _bad_request(
+                "invalid everyone-else profile", KeyError("profile_id is required")
+            )
+        profile_id = payload["profile_id"]
+        if profile_id is not None and (
+            not isinstance(profile_id, str) or self.repository.get_profile(profile_id) is None
+        ):
+            return _bad_request(
+                "invalid everyone-else profile", ValueError("profile does not exist")
+            )
+        if profile_id is not None and not self._everyone_else_counted():
+            capacity_error = self._capacity_error(adding=1)
+            if capacity_error is not None:
+                return capacity_error
+        self.repository.save_everyone_else_profile_id(profile_id)
+        return self._apply_saved_change(
+            "everyone_else", _everyone_else_payload(self.repository)
+        )
 
-        if path == "/api/observations/add-to-profile":
-            return self._add_observation_to_profile(payload)
+    @_write_route("/api/policies")
+    def _post_policies(self, path, payload, control_intent, before_replace):
+        try:
+            mac_policy, website_policy = _policies_from_payload(payload)
+            blocks = payload.get("site_blocks")
+            if blocks is not None:
+                if not isinstance(blocks, list) or len(blocks) > 32:
+                    raise ValueError("site_blocks must be a list of at most 32 rules")
+                blocks = tuple(
+                    _from_known_fields(SiteBlock, rule, f"site_blocks[{index}]")
+                    for index, rule in enumerate(blocks))
+            options = (_from_known_fields(AccessOptions, payload["options"], "options")
+                       if "options" in payload else None)
+            # Check every supplied section above, then write only the sections the
+            # request carried. An omitted section keeps its stored value, while an
+            # explicit empty section resets just that section.
+            self.repository.save_access_policies(
+                mac_policy if "mac" in payload else None,
+                website_policy if "websites" in payload else None,
+                blocks=blocks, options=options,
+                expected_version=payload.get("version"),
+            )
+        except DeviceConflictError as error:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid network policy configuration", error)
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            _policies_payload(self.repository)
+        )
 
-        if path == "/api/observations/add-global-block":
-            arguments = {"control_intent": control_intent} if control_intent is not None else {}
-            return self._add_observation_to_global_block(payload, **arguments)
+    @_write_route("/api/access-point/reset-name")
+    def _post_access_point_reset_name(self, path, payload, control_intent, before_replace):
+        if self.helper_client is None:
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {"error": "network helper is not configured"}
+            )
+        return self._start_wifi_change("reset-name", self._reset_wifi_name, payload)
 
-        if path == "/api/observations/remove-global-block":
-            arguments = {"control_intent": control_intent} if control_intent is not None else {}
-            return self._remove_observation_from_global_block(payload, **arguments)
+    @_write_route("/api/access-point")
+    def _post_access_point(self, path, payload, control_intent, before_replace):
+        if self.helper_client is None:
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {"error": "network helper is not configured"}
+            )
+        try:
+            ssid, password = payload["ssid"], payload["password"]
+            # A refusal can only reach the browser now, not after the Wi-Fi restarted.
+            _validate_access_point_settings(ssid=ssid, password=password)
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid access point settings", error)
+        return self._start_wifi_change(
+            "access-point", lambda: self._configure_access_point(ssid, password), payload)
 
-        if path == "/api/activity/clear":
-            self.repository.clear_activity()
-            return HTTPStatus.OK, "application/json", _json_bytes({"cleared": True})
+    @_write_route("/api/connected-devices/apply-profile")
+    def _post_connected_devices_apply_profile(self, path, payload, control_intent, before_replace):
+        return self._apply_profile_to_connected_device(payload)
 
-        # Saved changes apply the plan too, but only these buttons count as
-        # an Apply or a Reset in the activity log.
-        if path == "/api/apply":
-            arguments = {"control_intent": control_intent} if control_intent is not None else {}
-            status, content_type, body = self._apply_configuration(explicit_apply=True, **arguments)
-            if status == HTTPStatus.OK:
-                self._record_activity("apply", "Configuration applied")
-            return status, content_type, body
+    @_write_route("/api/observations/scan")
+    def _post_observations_scan(self, path, payload, control_intent, before_replace):
+        return self._scan_dns_observations()
 
-        if path == "/api/reset":
-            status, content_type, body = self._reset_network()
-            if status == HTTPStatus.OK:
-                self._record_activity("reset", "Network reset")
-            return status, content_type, body
+    @_write_route("/api/observations/add-to-profile")
+    def _post_observations_add_to_profile(self, path, payload, control_intent, before_replace):
+        return self._add_observation_to_profile(payload)
 
-        return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
+    @_write_route("/api/observations/add-global-block")
+    def _post_observations_add_global_block(self, path, payload, control_intent, before_replace):
+        arguments = {"control_intent": control_intent} if control_intent is not None else {}
+        return self._add_observation_to_global_block(payload, **arguments)
+
+    @_write_route("/api/observations/remove-global-block")
+    def _post_observations_remove_global_block(self, path, payload, control_intent, before_replace):
+        arguments = {"control_intent": control_intent} if control_intent is not None else {}
+        return self._remove_observation_from_global_block(payload, **arguments)
+
+    @_write_route("/api/activity/clear")
+    def _post_activity_clear(self, path, payload, control_intent, before_replace):
+        self.repository.clear_activity()
+        return HTTPStatus.OK, "application/json", _json_bytes({"cleared": True})
+
+    # Saved changes apply the plan too, but only these buttons count as
+    # an Apply or a Reset in the activity log.
+    @_write_route("/api/apply")
+    def _post_apply(self, path, payload, control_intent, before_replace):
+        arguments = {"control_intent": control_intent} if control_intent is not None else {}
+        status, content_type, body = self._apply_configuration(explicit_apply=True, **arguments)
+        if status == HTTPStatus.OK:
+            self._record_activity("apply", "Configuration applied")
+        return status, content_type, body
+
+    @_write_route("/api/reset")
+    def _post_reset(self, path, payload, control_intent, before_replace):
+        status, content_type, body = self._reset_network()
+        if status == HTTPStatus.OK:
+            self._record_activity("reset", "Network reset")
+        return status, content_type, body
 
     def server_close(self) -> None:
         deadline = time.monotonic() + self.shutdown_timeout_seconds
