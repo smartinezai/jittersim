@@ -38,6 +38,12 @@ next release takes them over.
   results and compares them with numbers entered from a speed test run on the
   device. Deleting a result asks in the page's own dialog. The start check
   also compares the loss burst length of the queues with the applied profile.
+- **Address changes** on the Devices page: a saved device that comes back with a
+  new private Wi-Fi address is suggested ("This looks like Dad's phone ... Move
+  its settings?") with Yes, No and Not this device. Off, Ask (default) and
+  Automatic. Automatic moves only the profile and the name on strong evidence.
+  Protection moves only after Yes, and a saved dashboard access grant never moves
+  from the card. Every move is in a history with Undo for 7 days.
 - The Pi Wi-Fi follows the router. After a **Copy router Wi-Fi to Pi** that
   worked, the Pi records the router's Wi-Fi name and security (no password).
   Every boot renames a saved Wi-Fi with another name, such as

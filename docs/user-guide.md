@@ -760,7 +760,57 @@ disabled. **Stop protecting** and the name and type editor stay active.
 - If protected devices exist and the helper cannot skip them (an older helper)
   the scan refuses to run and asks you to restart the services or reinstall.
 - Protection follows the MAC address. A device that randomises its Wi-Fi address
-  looks like a new unprotected device until you add its new address.
+  looks like a new unprotected device until you move it to its new address
+  (see Address changes below).
+
+### Address changes
+
+Phones and laptops can use a private Wi-Fi address that changes, for example
+after you forget the network or turn private addresses on. The Pi then sees a
+new device and the saved device's profile, name or protection stop applying.
+The **Address changes** card on the Devices page finds saved devices that came
+back with a new private address. The setting **Follow private address changes**
+has three choices:
+
+- **Ask** (the default): the card says for example "This looks like Dad's phone
+  (new private address ...). Move its settings?" with the evidence in plain
+  words. **Yes** moves the profile, the name and, for a protected device, its
+  protection after a confirmation. **No** hides it for a day. **Not this
+  device** hides it for 90 days. The sidebar shows a line while a suggestion
+  waits.
+- **Automatic**: moves only the profile and the name, and only on strong
+  evidence (the same distinctive device name plus the same IP address or a
+  join right after the old address left). A protected device is never moved
+  automatically. At most one automatic move per device in 10 minutes and three
+  a day. Nothing moves automatically while the network is stopped.
+- **Off**: looks for nothing and deletes the stored device names. Your No and
+  Not this device answers and the pairs seen together stay, so turning it on
+  again does not bring back a suggestion you already refused.
+
+The Pi compares the DHCP device name, a confirmed IP address, the time the old
+address was last seen and the saved name. It suggests a move only when exactly
+one saved device fits one new address. Two addresses that the Pi saw online at
+the same time are not matched for 30 days. The Pi only sees this while it
+looks (the scheduler runs or the dashboard is open), so it is a safeguard, not a
+guarantee. A saved dashboard access grant never moves from
+this card: open the dashboard on that device and use the move under Dashboard
+access. Every move is listed under **Address change history** with **Undo** for
+7 days, and in the activity log. Data limits, groups, website rules and
+schedules belong to the saved device, so they follow it.
+
+Privacy, what is stored where:
+
+- Sightings: the last DHCP device name, IP address and time seen, only for
+  addresses of saved devices, for at most 30 days after they were last seen.
+  Off deletes them.
+- Pairs seen together and your dismissals: addresses only, 30 and 90 days.
+- Address change history: the addresses, the saved name and which rules
+  matched, never the device name the phone sent, for 90 days.
+- Activity log and test session reports: one line per move with the saved name
+  only, no address and no device name from the phone. None of this is in the settings export, import or version
+history. The database backup is a copy of the whole database and includes it.
+Keeping a fixed address on the device (Private Wi-Fi address set to Fixed, or
+Use device MAC on Android) avoids the problem altogether.
 
 ### Optional ad blocking
 
