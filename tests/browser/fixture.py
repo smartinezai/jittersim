@@ -11,6 +11,7 @@ from pathlib import Path
 
 import jittersim.api.server as server_module
 from jittersim.api.server import ControlServer
+from jittersim.config.address_follow import AddressFollowStore
 from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import Device, DomainObservation, Impairment, Profile, Scenario, ScenarioStep
 from tests.adblocking_support import provision_guard
@@ -193,6 +194,28 @@ def seed_demo_data(repository):
 
 
 OLD_ADDRESS = "02:00:00:00:00:99"
+# JITTERSIM_BROWSER_TEST_ADDRESS_FOLLOW=1: a saved phone left with this fixed address and the
+# fixture's only station (02:00:00:00:00:01) now sends the same DHCP host name.
+FOLLOW_OLD_ADDRESS = "aa:bb:cc:00:00:01"
+FOLLOW_HOSTNAME = "Dads-iPhone"
+
+
+def address_follow():
+    return os.environ.get("JITTERSIM_BROWSER_TEST_ADDRESS_FOLLOW") == "1"
+
+
+def seed_address_follow(repository, lease_directory):
+    if not address_follow():
+        return
+    (lease_directory / "dnsmasq-wlan0.leases").write_text(
+        f"0 02:00:00:00:00:01 192.168.50.184 {FOLLOW_HOSTNAME} *\n")
+    repository.save_profile(Profile("normal", "Normal connection"))
+    repository.save_device(Device("dad", "Dad's phone", "192.168.50.150", "normal",
+                                  FOLLOW_OLD_ADDRESS))
+    AddressFollowStore(repository).observe(
+        [{"mac_address": FOLLOW_OLD_ADDRESS, "hostname": FOLLOW_HOSTNAME.lower(),
+          "ipv4_address": "192.168.50.150", "connected_seconds": 10, "ipv4_verified": True}],
+        saved={FOLLOW_OLD_ADDRESS}, now=int(time.time()) - 300)
 BUSY_ATTEMPTS = 100
 BUSY_WAIT_SECONDS = 0.05
 
@@ -377,7 +400,8 @@ def main():
         if os.environ.get("JITTERSIM_BROWSER_TEST_OLD_ADDRESS") == "1":
             # A device the owner saved earlier under an address it no longer uses.
             access_store.add(OLD_ADDRESS, "Old Mac")
-        service = DashboardHelperService(NetworkApplier(executor=executor, topology=topology),
+        service = DashboardHelperService(NetworkApplier(executor=executor, topology=topology,
+                                                        lease_directory=root),
                                          router_factory=lambda *_: DashboardRouter(),
                                          access_store=access_store,
                                          ad_blocking_store=ad_blocking,
@@ -389,6 +413,7 @@ def main():
                 with ConfigRepository(root / "config.db") as repository:
                     seed_observations(repository)
                     seed_demo_data(repository)
+                    seed_address_follow(repository, root)
                     if os.environ.get("JITTERSIM_BROWSER_TEST_OLD_ADDRESS") == "1":
                         repository.save_unaffected_device(UnaffectedDevice(OLD_ADDRESS, "Old Mac", 1))
                     if os.environ.get("JITTERSIM_BROWSER_TEST_PROTECTED_PEER") == "1":

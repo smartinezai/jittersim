@@ -7,11 +7,14 @@ that was chosen for it. Nothing else resumes and nothing is cleared silently.
 
 import json
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
+from jittersim.config.address_follow import AddressFollowStore
 from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import Device, Impairment, Profile, ServiceList, ServiceQuota
+from jittersim.engine import runtime as runtime_module
 from jittersim.engine.codec import plan_from_payload, plan_to_payload
 from jittersim.engine.plan import GENERAL_QUEUE_ID, Direction
 from jittersim.engine.service import compile_stored_plan
@@ -23,6 +26,9 @@ from tests.unit.test_device_apply_start import (
     TIMER,
     DeviceApplyFixture,
 )
+
+# A private Wi-Fi address: the locally administered bit is set.
+NEW_AIR_MAC = "02:11:22:33:44:55"
 
 
 class EveryoneRunningFixture(DeviceApplyFixture):
@@ -428,6 +434,68 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
 
         self.assertEqual(status, 200, result)
         self.assertEqual(self.exceptions(), {AIR_ID, PHONE_ID})
+
+    def follow_the_air_to_a_new_private_address(self):
+        """The Air comes back with a new private Wi-Fi address and a new IPv4 address.
+
+        Address changes is on Automatic, so the tick moves its saved settings to the
+        new MAC address and then to the new IPv4 address.
+        """
+
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        now = int(time.time())
+        store = AddressFollowStore(self.repository)
+        store.set_mode("automatic")
+        # A generic name such as MacBook-Pro is weak evidence, so the Air has its own.
+        store.observe([{"mac_address": AIR["mac_address"], "hostname": "kitchen-air",
+                        "ipv4_address": AIR["ipv4_address"], "connected_seconds": 10,
+                        "ipv4_verified": True}],
+                      saved={AIR["mac_address"]}, now=now - 300)
+        air, phone = self.helper.connected_devices()
+        moved = {**air, "mac_address": NEW_AIR_MAC, "ipv4_address": "192.168.50.190",
+                 "hostname": "Kitchen-Air", "connected_seconds": 120}
+        scheduler._last_address_check_at = 0.0
+        return scheduler, store, now, [moved, phone]
+
+    def test_an_automatic_address_follow_in_a_tick_keeps_the_device_apply_open(self) -> None:
+        scheduler, store, now, clients = self.follow_the_air_to_a_new_private_address()
+        before = self.version()
+
+        with patch.object(self.helper, "connected_devices", return_value=clients):
+            self.assertTrue(scheduler.tick(repository=self.repository, now=now))
+            device = self.repository.get_device(AIR_ID)
+            self.assertEqual((device.mac_address, str(device.ipv4_address)),
+                             (NEW_AIR_MAC, "192.168.50.190"))
+            self.assertEqual(store.history()[0]["mode"], "automatic")
+            # The MAC move and the IPv4 move are two saves, both the tick's own.
+            self.assertGreaterEqual(self.version(), before + 2)
+            self.assertEqual(scheduler.running_plan()[0].configuration_version, self.version())
+            status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 200, result)
+        self.assertEqual(self.exceptions(), {AIR_ID, PHONE_ID})
+
+    def test_an_automatic_address_follow_beside_another_save_stays_refused(self) -> None:
+        scheduler, _, now, clients = self.follow_the_air_to_a_new_private_address()
+        original = runtime_module.follow_automatically
+
+        def move_then_another_save(*args, **kwargs):
+            done = original(*args, **kwargs)
+            self.repository.save_profile(Profile(
+                id="slow-test", name="Slow test", upload=Impairment(delay_ms=2_000)))
+            return done
+
+        with patch.object(self.helper, "connected_devices", return_value=clients), \
+                patch.object(runtime_module, "follow_automatically",
+                             side_effect=move_then_another_save):
+            self.assertTrue(scheduler.tick(repository=self.repository, now=now))
+            self.assertEqual(self.repository.get_device(AIR_ID).mac_address, NEW_AIR_MAC)
+            self.assertIsNone(scheduler.running_plan()[0].configuration_version)
+            status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 409, result)
+        self.assertEqual(self.exceptions(), {AIR_ID})
 
     def test_a_save_by_another_process_during_the_apply_is_never_installed(self) -> None:
         for moment in ("before saving", "while building"):
