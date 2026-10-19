@@ -136,6 +136,10 @@ async function runCase(browser, base, item, width) {
       const endpoint = "/api/homepage/" + item.action;
       await page.route("**" + endpoint, route => { held = route; });
       await page.locator(item.action === "pairing-code" ? "#homepage-create-code" : "#homepage-revoke").click();
+      // Revoking asks first. The request starts when the question is answered.
+      if (item.action === "revoke") {
+        await page.getByRole("dialog").getByRole("button", { name: "Revoke all pairings", exact: true }).click();
+      }
       await expect.poll(() => Boolean(held)).toBe(true);
       if (item.action === "pairing-code") assert.deepEqual(held.request().postDataJSON().pages, PAGES);
       await lose();

@@ -6,6 +6,16 @@ normal `pytest` run on a Mac skips them.
 
 - `run-in-docker.sh`: the datapath and access tests (`test_datapath.py`,
   `test_access.py`) plus the smoke check, in one privileged container.
+- `test_panic_crash_matrix.py` (part of `run-in-docker.sh`, about six
+  minutes): Panic and Reset after a crash, a failed command or a stalled `tc`
+  at every step of a heavy apply, judged from the kernel state and a router
+  capture. See `docs/panic-crash-matrix-2026-10-18.md`.
+- `test_router_wire_guard.py` (part of `run-in-docker.sh`): a capture on the
+  router's port that fails on any frame the Pi must never send toward the
+  router (foreign MACs, damaged headers, test Wi-Fi source addresses, DHCP or
+  IPv6 router answers, reflected mDNS/SSDP/NetBIOS, ARP for the Wi-Fi address,
+  redirects, bursts), across every profile type, Panic, Reset and a Wi-Fi
+  restart. See `docs/router-safety-audit-round2-2026-10-17.md`.
 - `run-outage-lab.sh [output-dir] [unittest selection]`: the Pi-only cutover lab
   (`test_outage_lab.py`, built on `outage_lab.py`). About 15 minutes. It also
   needs `JITTERSIM_OUTAGE_LAB=1`, which only its image (`Dockerfile.outage-lab`,

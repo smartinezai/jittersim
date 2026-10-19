@@ -1,19 +1,36 @@
 [Unit]
 Description=JitterSim management-interface firewall
 After=network-pre.target
-Before=jittersim-dashboard.service
+# Loaded before NetworkManager starts any connection, so the test Wi-Fi never
+# forwards without these rules at boot.
+Before=NetworkManager.service jittersim-dashboard.service
 Wants=network-pre.target
 
 [Service]
 Type=oneshot
-# Clear a table left by an earlier run. `add table` first: it is a no-op when the
-# table exists, so `delete table` always finds one and never logs a harmless
-# "No such file or directory" error on the first start after a boot.
-ExecStartPre=-/usr/sbin/nft add table inet jittersim_control
-ExecStartPre=-/usr/sbin/nft delete table inet jittersim_control
+# The Pi answers ARP on an interface only for that interface's own address and
+# uses the uplink address in its ARP requests there: it never claims its test
+# Wi-Fi address 192.168.50.1 on the household LAN (a router that also uses
+# 192.168.50.1 would lose every device's gateway). It never sends ICMP
+# redirects. See docs/router-safety-audit-round2-2026-10-17.md.
+ExecStartPre=-/bin/sh -c 'echo 1 > /proc/sys/net/ipv4/conf/all/arp_ignore && echo 2 > /proc/sys/net/ipv4/conf/all/arp_announce && for setting in /proc/sys/net/ipv4/conf/*/send_redirects; do echo 0 > "$$setting"; done'
+# The rules file replaces any older table in one transaction. There is no
+# ExecStop: a restart during an install or update must never remove the rules
+# while the test Wi-Fi keeps running, and the table goes with the next boot.
 ExecStart=/usr/sbin/nft -f /etc/jittersim/jittersim-control-firewall.nft
-ExecStop=/usr/sbin/nft delete table inet jittersim_control
 RemainAfterExit=yes
+# NetworkManager waits for this unit (Before=). Never let a stuck nft hold the
+# network. After 30 s systemd sends nft SIGTERM, waits TimeoutStopSec, then
+# sends SIGKILL (and waits that long once more if nft cannot be killed yet), so
+# the unit fails within under a minute. The default TimeoutStopSec is 90 s
+# and would hold NetworkManager for about 3.5 minutes. NetworkManager then
+# brings up Ethernet and the test Wi-Fi stays off, because jittersim-ap.service
+# refuses to start without this table. If nft is killed after the kernel
+# already committed the rules, the table is loaded but this unit is failed: the
+# test Wi-Fi may then start (safe, the rules exist) but the dashboard, browser
+# proxy and service watcher do not (they require this unit).
+TimeoutStartSec=30
+TimeoutStopSec=5
 
 [Install]
 WantedBy=multi-user.target

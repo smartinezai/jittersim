@@ -106,7 +106,7 @@ def test_the_page_tells_the_card_when_it_may_poll():
         r"function showPage\(.*?\n    }\n", SECOND_SCRIPT, re.DOTALL
     ).group(0)
     assert re.search(r'document.addEventListener\("visibilitychange", syncImpact\)', SCRIPT)
-    token_check = re.search(r"async function checkAdminToken\(\).*?\n    }\n", SCRIPT, re.DOTALL)
+    token_check = re.search(r"async function runAdminTokenCheck\(\).*?\n    }\n", SCRIPT, re.DOTALL)
     assert re.search(
         r"await startTrafficSampling\(\);\n\s+if \(tokenRevision[^\n]*\n\s+"
         + re.escape(GUARDED_SYNC),

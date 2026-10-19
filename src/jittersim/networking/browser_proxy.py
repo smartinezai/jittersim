@@ -7,6 +7,7 @@ import os
 import socket
 import socketserver
 import threading
+import time
 from concurrent.futures import CancelledError, Future
 from concurrent.futures import TimeoutError as FutureTimeout
 from ipaddress import IPv4Address, ip_address, ip_network
@@ -75,6 +76,12 @@ def _check_mac_access(policy: MacPolicy, client_mac: Optional[str]) -> None:
         raise ProxyError("client is blocked by global access rules")
 
 
+def _runs_beside_everyone(plan: NetworkPlan, client_ip: IPv4Address) -> bool:
+    """A device that opted out of Everyone has its own rules in the same plan."""
+
+    return any(rule.ipv4_address == client_ip for rule in plan.mark_rules)
+
+
 def select_mark(
     plan: Optional[NetworkPlan],
     *,
@@ -101,7 +108,7 @@ def select_mark(
             if service_list.outage_active:
                 raise ProxyError("this service is in a random outage of its service list")
             return service_list.mark, f"service-list:{service_list.list_id}"
-    if plan.general_profile is not None:
+    if plan.general_profile is not None and not _runs_beside_everyone(plan, client_ip):
         if plan.general_profile.outage_active:
             raise ProxyError("the general profile is temporarily disconnected")
         return 1, "general-profile"
@@ -143,7 +150,7 @@ def destination_allowed(
         return False
     if service_list or client_mac in plan.protected_mac_addresses:
         return True
-    if plan.general_profile is not None:
+    if plan.general_profile is not None and not _runs_beside_everyone(plan, client_ip):
         general = plan.general_profile
         return not general.outage_active and (
             general.allowed_addresses is None or destination in general.allowed_addresses
@@ -165,9 +172,16 @@ def destination_allowed(
 
 
 def _read_connect_request(client: socket.socket) -> Tuple[str, bytes]:
-    client.settimeout(CONNECT_TIMEOUT_SECONDS)
+    # One deadline for the whole request. A timeout per read let a client that sends
+    # one byte every few seconds hold a tunnel slot for good (security audit
+    # 2026-10-18, finding A3).
+    deadline = time.monotonic() + CONNECT_TIMEOUT_SECONDS
     received = bytearray()
     while b"\r\n\r\n" not in received:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProxyError("browser request took too long")
+        client.settimeout(remaining)
         chunk = client.recv(4096)
         if not chunk:
             raise ProxyError("browser closed before sending a request")

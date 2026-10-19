@@ -3,14 +3,18 @@
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 from ipaddress import IPv4Interface, IPv4Network
+from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
 AP_NETWORK = IPv4Network("192.168.50.0/24")
 MINIMUM_NETWORK_MANAGER_VERSION = (1, 50)
 INTERFACE_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
+# The release's own rules, next to this file in the source or the staged update.
+FIREWALL_TEMPLATE = Path(__file__).with_name("jittersim-control-firewall.nft")
 
 
 class PreflightError(ValueError):
@@ -100,13 +104,52 @@ def check_gateway(*, uplink: str, test_interface: str) -> None:
     )
 
 
+def check_firewall(*, uplink: str, test_interface: str, template: Path = FIREWALL_TEMPLATE,
+                   nft: Optional[str] = None) -> bool:
+    """Ask this kernel whether it can load the release's management firewall.
+
+    `nft --check` sends the rules as a test transaction and changes no rules (it
+    may load the kernel modules the rules need). It fails when the kernel lacks
+    a module the rules need (such as nft_fib_inet), so an install or update stops
+    before it stops a service or replaces the running rules. Returns False when
+    nft is not installed yet (a first install adds nftables later and checks
+    again with --firewall-only).
+    """
+    for interface in (uplink, test_interface):
+        if not INTERFACE_PATTERN.fullmatch(interface):
+            raise PreflightError("runtime.env contains an unsafe interface name")
+    nft = nft or shutil.which("nft") or shutil.which("nft", path="/usr/sbin:/sbin")
+    if nft is None:
+        return False
+    rules = template.read_text().replace("@UPLINK_INTERFACE@", uplink).replace(
+        "@TEST_INTERFACE@", test_interface)
+    try:
+        result = subprocess.run([nft, "--check", "-f", "-"], input=rules, capture_output=True,
+                                text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise PreflightError("could not check the management firewall rules with nft") from error
+    if result.returncode != 0:
+        raise PreflightError(
+            "this kernel cannot load the management firewall rules (nft --check failed). "
+            "No existing service was stopped and no existing file or rule was replaced "
+            "(an install in progress may already have added packages). Check that the "
+            "nft_fib_inet and nft_fib_ipv4 kernel modules are available")
+    return True
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Check a JitterSim Pi gateway before installation.")
     parser.add_argument("--uplink", required=True)
     parser.add_argument("--test-interface", required=True)
+    parser.add_argument("--firewall-only", action="store_true",
+                        help="only check that the kernel can load the management firewall")
     arguments = parser.parse_args(argv)
     try:
-        check_gateway(uplink=arguments.uplink, test_interface=arguments.test_interface)
+        if not arguments.firewall_only:
+            check_gateway(uplink=arguments.uplink, test_interface=arguments.test_interface)
+        checked = check_firewall(uplink=arguments.uplink, test_interface=arguments.test_interface)
+        if arguments.firewall_only and not checked:
+            raise PreflightError("nft is not installed, so the firewall rules cannot be checked")
     except PreflightError as error:
         print(f"JitterSim network preflight failed: {error}", file=sys.stderr)
         return 1

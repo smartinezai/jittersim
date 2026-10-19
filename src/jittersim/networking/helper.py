@@ -1458,6 +1458,17 @@ class HelperService:
                 # household devices still cannot join.
                 return {"ok": False, "error": incomplete + " Retry before choosing Start.",
                         "reason": "release-incomplete"}
+        mark = None
+        if self._active_plan_path is not None:
+            # A helper that dies during the apply leaves part of the plan in the
+            # kernel and no published plan. The mark tells the next start to
+            # remove it (release_interrupted_apply_at_start).
+            mark = interrupted_apply_mark(self._active_plan_path)
+            try:
+                mark.touch(mode=0o600)
+            except OSError:
+                LOGGER.exception("could not mark the apply as in progress")
+                return {"ok": False, "error": "network plan state could not be published"}
         try:
             self._forget_changed_lists(plan)
             self._service_addresses.expire()
@@ -1479,6 +1490,11 @@ class HelperService:
                     LOGGER.exception("could not clear the active plan after apply failure")
             if error.cleanup_attempted:
                 self._active_plan = None
+            if (mark is not None and error.cleanup_attempted and reset_error is None
+                    and not state_cleanup_failed):
+                # Rolled back: nothing is left for a restart. Without a rollback the
+                # kernel may no longer match the published plan, so the mark stays.
+                _forget_mark(mark)
             cleanup_result = "completed" if error.cleanup_attempted else "not started"
             if reset_error is not None:
                 cleanup_result = (
@@ -1512,6 +1528,8 @@ class HelperService:
                     LOGGER.exception("network cleanup failed after plan publication error")
                 self._active_plan = None
                 return {"ok": False, "error": "network plan state could not be published"}
+            # The published plan owns the kernel state from here on.
+            _forget_mark(mark)
         self._active_plan = plan
         if not report.counters_preserved:
             self._plan_count += 1
@@ -1799,6 +1817,9 @@ class HelperService:
         except (CommandExecutionError, OSError):
             LOGGER.exception("network reset failed")
             return {"ok": False, "error": "network reset failed"}
+        if self._active_plan_path is not None:
+            # Reset and Panic removed what an interrupted apply left, too.
+            _forget_mark(interrupted_apply_mark(self._active_plan_path))
         self._recovery_pending = False
         self._outage_observed = False
         if record_state:
@@ -3136,6 +3157,54 @@ def release_incomplete_error(access) -> Optional[str]:
     return incomplete
 
 
+def interrupted_apply_mark(active_plan_path: Path) -> Path:
+    """The file that exists while an apply runs, next to the published plan."""
+
+    return active_plan_path.with_name("apply-in-progress")
+
+
+def _forget_mark(mark: Path) -> None:
+    # A mark that cannot be removed only makes the next start reset the network.
+    try:
+        mark.unlink(missing_ok=True)
+    except OSError:
+        LOGGER.exception("could not remove the apply-in-progress mark")
+
+
+def release_interrupted_apply_at_start(service: "HelperService") -> bool:
+    """Remove what an apply left in the kernel when the helper died during it.
+
+    The published plan is written only after a complete apply, so nothing owns
+    that state: the dashboard shows no running plan while devices stay shaped.
+    The mark stays until the network reset and the plan removal both succeed, so
+    a crash here or during a later Panic leaves it for the next start.
+
+    Returns False only when a release was needed and failed. Then the helper
+    still starts, but holds the unconfirmed Panic stop, so profiles do not start
+    until Panic is retried. Runs before the helper accepts requests.
+    """
+
+    path = service._active_plan_path
+    if path is None:
+        return True
+    mark = interrupted_apply_mark(path)
+    if not mark.exists() and not mark.is_symlink():
+        return True
+    with service._network_lock:
+        try:
+            service._applier.reset()
+            path.unlink(missing_ok=True)
+            mark.unlink()
+        except Exception:  # noqa: BLE001 - a failed release must never stop the helper
+            LOGGER.exception("the state of an interrupted apply could not be removed at start. "
+                             "Retry Panic to remove it.")
+            service._block_unconfirmed_intent()
+            return False
+        service._active_plan = None
+    LOGGER.warning("removed the queues and tables of an apply the helper did not finish")
+    return True
+
+
 def restore_access_at_start(access: AccessManager, *, panic_stopped=False) -> bool:
     """Restore the saved access rules and keep the helper alive when that fails.
 
@@ -3199,8 +3268,10 @@ def run_helper(
         panic_guard=PanicGuard(),
         homepage_database=homepage_database,
     )
+    # After the saved stop is read (HelperService) and before any request is served.
+    released = release_interrupted_apply_at_start(service)
     restored = restore_access_at_start(access, panic_stopped=service._household_stop_latched)
-    if not restored:
+    if not restored or not released:
         service._block_unconfirmed_intent()
         service._write_panic_guard()
         service._write_gateway_state(durable=True)
