@@ -174,7 +174,9 @@ JITTERSIM_RELEASE_LOCAL_CI=none caffeinate -i scripts/release.sh 0.2.0
   `scripts/release.sh --notes-file docs/release-notes-0.2.0-draft.md 0.2.0`
   (Put it on the same command line as the variable and `caffeinate` above.) The hand-written
   `## Unreleased` entries of CHANGELOG.md are added above either text, so the two together have to
-  stay under 16 KB: the draft is about 3 KB and the Unreleased part about 7.5 KB.
+  stay under 16 KB: the draft is about 3 KB and the Unreleased part was about 14 KB on 19 October 2026,
+  so it is over by a little. Run `wc -c` on both texts together and shorten the Unreleased entries before
+  the release (`build-release.sh` cuts the end at 16384 bytes).
 
 What happens, in order (about 30 to 60 minutes until the first question, longer when other
 agents load the Mac; do not close the tab):
