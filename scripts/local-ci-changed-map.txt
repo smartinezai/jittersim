@@ -34,10 +34,11 @@ tests/browser/GUI_BASELINE.md             none
 tests/browser/vendor/*                    none
 
 # Shared test helpers: the modules that import them.
-tests/browser/confirm_dialogs.py          journeys address_move group_devices router_copy wifi_recovery wifi_restart_reconnect dashboard_access protected_dashboard_access
+tests/browser/confirm_dialogs.py          journeys address_move address_follow group_devices router_copy wifi_recovery wifi_restart_reconnect dashboard_access protected_dashboard_access
 tests/browser/diagnostics_keyboard.py     dashboard_navigation
 tests/browser/draft_navigation.py         dashboard_navigation
 tests/browser/forms_support.py            schedules_timers limits_quotas
+tests/browser/route_support.py            saved_profiles live_regions protected_dashboard_access schedules_timers limits_quotas
 tests/browser/service_list_focus.py       journeys
 tests/browser/journeys.py                 journeys dns_failure
 tests/browser/router_copy.py              router_copy trust_access
@@ -48,6 +49,8 @@ tests/browser/page_polling.py             page_polling update_status_recovery
 # Source files that only one area of the dashboard uses. Shared files (dashboard.html, dashboard.js,
 # server.py, the engine, the models) are deliberately not listed, so they run every module.
 src/jittersim/api/trust.js                trust_access
+src/jittersim/api/address-follow.js       address_follow
+src/jittersim/api/address_follow.py       address_follow
 src/jittersim/api/trust.py                trust_access
 src/jittersim/localca.py                  trust_access
 src/jittersim/networking/adblocking.py    ad_blocking

@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from jittersim.networking import wifi_follow
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -32,6 +34,49 @@ class DeploymentFirewallTests(unittest.TestCase):
         for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
                         "169.254.0.0/16", "100.64.0.0/10"):
             self.assertIn(network, private)
+
+    def test_nothing_with_a_test_wifi_address_or_for_another_lan_host_leaves_the_uplink(self) -> None:
+        # The behaviour is checked by capture in tests/kernel/test_router_wire_guard.py.
+        firewall = (
+            REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-control-firewall.nft"
+        ).read_text()
+        postrouting = firewall[firewall.index("chain postrouting"):]
+        self.assertIn("type filter hook postrouting priority 300;", postrouting)
+        self.assertIn('oifname "@UPLINK_INTERFACE@" ip saddr 192.168.50.0/24 '
+                      "fib saddr . oif type != local counter drop", postrouting)
+        # One transaction replaces the table, so a reload never leaves a gap.
+        self.assertIn("delete table inet jittersim_control",
+                      firewall.split("table inet jittersim_control {")[0])
+        forward = firewall[firewall.index("chain forward"):firewall.index("chain postrouting")]
+        self.assertIn('iifname "@UPLINK_INTERFACE@" oifname "@UPLINK_INTERFACE@" counter drop',
+                      forward)
+
+    def test_the_firewall_unit_sets_arp_and_redirects_and_starts_before_networkmanager(self) -> None:
+        unit = (
+            REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-control-firewall.service"
+        ).read_text()
+        for setting in ("conf/all/arp_ignore", "conf/all/arp_announce", "conf/*/send_redirects"):
+            self.assertIn(setting, unit)
+        before = [line for line in unit.splitlines() if line.startswith("Before=")]
+        self.assertIn("NetworkManager.service", before[0].split("=", 1)[1].split())
+
+    def test_a_stuck_nft_cannot_hold_networkmanager_for_minutes(self) -> None:
+        # The unit is ordered Before=NetworkManager. A timed-out nft gets SIGTERM and then waits
+        # TimeoutStopSec (90 s by default) before SIGKILL, once more if it cannot be killed yet.
+        pi = REPOSITORY_ROOT / "deploy" / "raspberry-pi"
+        unit = (pi / "jittersim-control-firewall.service").read_text()
+        start = [line.split("=", 1)[1] for line in unit.splitlines()
+                 if line.startswith("TimeoutStartSec=")]
+        stop = [line.split("=", 1)[1] for line in unit.splitlines()
+                if line.startswith("TimeoutStopSec=")]
+        self.assertEqual(start, ["30"])
+        self.assertEqual(len(stop), 1)
+        self.assertTrue(stop[0].isdigit() and 0 < int(stop[0]) <= 10, stop)
+        # The documented failure mode: only SSH stays reachable because these units need it.
+        for name in ("jittersim-dashboard", "jittersim-browser-proxy", "jittersim-service-watch"):
+            service = (pi / f"{name}.service").read_text()
+            requires = [line for line in service.splitlines() if line.startswith("Requires=")]
+            self.assertIn("jittersim-control-firewall.service", requires[0].split("=", 1)[1].split())
 
     def test_pi_service_uses_tls_and_installer_protects_the_private_key(self) -> None:
         service = (
@@ -241,14 +286,24 @@ class AccessPointStartTests(unittest.TestCase):
         self.assertIn("/usr/bin/nmcli --wait 10 connection up jittersim-ap && return 0", command)
         self.assertIn("did not start after 10 tries", command)
         self.assertTrue(command.rstrip("'").endswith("exit 1"))
-        # Two rounds of ten tries (router copy, then the previous Wi-Fi) fit the limit.
-        self.assertIn("TimeoutStartSec=360", self.unit)
+        # Every step at its own limit and added up (the comment in the unit lists them):
+        # nft check, boot step (lock wait, three 3 s reads, password check, look, rename and
+        # rename back), uplink check, two rounds of ten tries (router copy, then the previous
+        # Wi-Fi) with the fallback between them, and the lock wait of boot-done.
+        boot_step = 45 + 3 + 3 + 15 + wifi_follow.SCAN_BUDGET + 9 + 9
+        worst_case = 1 + boot_step + 5 + 2 * 10 * (10 + 3) + (45 + 9) + 45
+        self.assertEqual(worst_case, 469)
+        self.assertIn("TimeoutStartSec=480", self.unit)
+        self.assertLess(worst_case, 480)
 
     def test_boot_returns_to_the_router_copy_and_never_blocks_the_start(self):
         follow = "/opt/jittersim/.venv/bin/python -I -m jittersim.networking.wifi_follow"
         # A failing step is ignored ("-"), so the Wi-Fi always starts with some profile.
+        # After it, the read-only uplink check (only its exit status 3 fails the unit).
         self.assertEqual(self.directives(self.unit, "ExecStartPre")[1:], [
-            ["-" + follow.split()[0], *follow.split()[1:], "boot"]])
+            ["-" + follow.split()[0], *follow.split()[1:], "boot"],
+            ["/bin/sh", "-c", "'%s" % follow.split()[0], *follow.split()[1:], "uplink-check;",
+             "[", '"$$?"', "-ne", "3", "]'"]])
         self.assertEqual(self.directives(self.unit, "ExecStartPost"), [
             ["-" + follow.split()[0], *follow.split()[1:], "boot-done"]])
         self.assertIn("EnvironmentFile=-/etc/jittersim/runtime.env", self.unit)

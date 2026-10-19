@@ -3,13 +3,13 @@
 The exact October2 fix list is preserved in [the historical archive](history/2026-10-02-backlog-and-ux/planned-fixes.md).
 New feature ideas are in [feature proposals](feature-proposals-2026-10-09.md).
 
-Baseline: `origin/main` at `8c3f8171` (the merge of PR 138 on 18 October 2026), checked on
-18 October 2026. Statuses come from the source and the merged pull requests on that commit. Nothing
+Baseline: `origin/main` at `00c2cc8f` (the merge of PR 164 on 19 October 2026), checked on
+19 October 2026. Statuses come from the source and the merged pull requests on that commit. Nothing
 here was run on a Pi. The 4 October accepted main `5e0fed2` matched tested candidate 6fb864f. Hosted
 jobs cannot start (billing limit), so every pull request is gated by `scripts/local-ci.sh` on its head
 commit ([local CI](local-ci.md)).
 
-## Changes after that candidate (9 to 18 October 2026)
+## Changes after that candidate (9 to 19 October 2026)
 
 - Router Wi-Fi writes are permanently refused by the Pi helper and the dashboard
   switch is read only (PR 87, merge `3903581`). Read-only router status checks and
@@ -35,6 +35,20 @@ commit ([local CI](local-ci.md)).
   (no password), and every boot renames a saved Wi-Fi with another name back to it (PR 140,
   `wifi_follow.py`). The router is not contacted and a manual Wi-Fi change or a name reset stops
   the following.
+- Two Wi-Fis with one name (PR 160 and 169, merged): since PR 140 the boot gave the Pi the router
+  name even when the router's own Wi-Fi was on. The boot step now looks once at the air and keeps
+  `JitterSim-Recovery` for that boot when the router name is on the air from another BSSID
+  (router safety audit round 2, owner decision D1). The look does not depend on the Pi's language.
+  The test Wi-Fi also refuses to start when the Ethernet uplink is inside `192.168.50.0/24` (D3).
+  Open: a physical check on the Pi that includes a cold boot with the router Wi-Fi on and shows
+  `boot_scan: seen`, not `failed`.
+- Merged on 18 and 19 October (details in the [changelog](../CHANGELOG.md)): the update status
+  carries the signed release notes and a manual check only checks (PR 111), a device runs its own
+  profile beside Everyone (PR 149), the management firewall keeps test Wi-Fi addresses and foreign
+  ARP answers off the router cable (PR 150 and 157), saved devices follow a new private Wi-Fi
+  address (PR 151), four gaps of the security audit are closed (PR 159), the helper removes what an
+  interrupted apply left (PR 168), the scheduler keeps one database connection and unchanged quota
+  counters are not written again (PR 164), and the QA leftovers of PR 152 are fixed (PR 162).
 - Panic and capacity: Panic stays reachable when silent connections fill the dashboard
   queue (PR 95). The Panic reserve and the waiting queue are kept for real Panic requests
   (PR 123). Reliability tests for Panic and capacity were added (PR 93).
@@ -114,8 +128,8 @@ new tickets. The archived list retains all details and proposed fixes.
 
 ## Open fixes
 
-Open on 18 October 2026. The open pull requests (111, 121, 149, 150, 151 and 153) and their states
-are in the [roadmap](../ROADMAP.md).
+Open on 19 October 2026. The open pull requests (161, 163, 165, 170 and 171, all drafts) and their
+states are in the [roadmap](../ROADMAP.md).
 
 - Two owner decisions from the review of PR 138 ([review results](review-results-carry-forward-2026-10-16.md)).
   The recommended default applies until the owner decides.
@@ -136,23 +150,16 @@ are in the [roadmap](../ROADMAP.md).
   only ([design note](design-helper-action-authorization-2026-10-09.md), a proposal). A boot with an
   incomplete household release latches a Panic stop, and Panic can be unavailable for up to 90
   seconds at boot if a restore hangs.
-- PR 111 (gated, needs the combined independent review and a new approved bundle) adds the signed
-  notes to the update status, makes manual checks check only and retries a development-label build.
-  Until it merges the dashboard's **Release notes** box stays empty and a manual check can install
-  when **Install automatically** is on.
 - Every private request from a test-network peer still asks the helper for its own dashboard
   access status (`_check_device_access`). PR 86 bounded the wait and kept the token and PR 136
   added a bounded busy retry, but simultaneous requests do not share one answer and the sign-in
   retry after "Device verification is busy" is manual. The probe with four simultaneous checks has
   not been repeated on an installed Pi. The backlog audit proposes one shared answer per peer
   ([backlog audit](backlog-audit-2026-10-16.md), item 1).
-- Small dashboard defects the QA sweep of 17 October found and left (PR 152). **Revoke all homepage
-  pairings** asks nothing and says nothing to a screen reader. **Clear** on the Measurements page
-  drops the unsaved table without asking. The **Delete** and **Edit** buttons of the device table
-  and the schedule list have no row name, so with several rows a screen reader cannot tell them
-  apart (the profile list says "Delete Normal connection"). The Restore Wi-Fi name question repeats
-  its first sentence under the heading. The note under **Router outage behavior** says "until you
-  choose Apply" but the button is **Start**.
+- Small dashboard defect left by the QA sweep of 17 October (PR 152). The note under **Router outage
+  behavior** says "until you choose Apply" but the button is **Start**. The other findings of that
+  sweep (Revoke all homepage pairings, Clear on the Measurements page, row names on the **Delete**
+  and **Edit** buttons and the repeated Restore Wi-Fi name sentence) were fixed in PR 162.
 - Names accept control characters and bidirectional overrides through the API and import.
   This is a log and display hygiene question ([QA report](qa-report-2026-10-09.md)). An
   HTTP/0.9 request still gets an answer with no status line. The browser fixture is not

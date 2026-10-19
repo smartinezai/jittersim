@@ -14,20 +14,38 @@ the hand-written Unreleased part short.
 - Update the Pi in one step. `sudo jittersim update` on the Pi (add `--yes` to
   skip the question or `--offline` to skip GitHub) and `jittersim remote update
   now` from a Mac check GitHub for a newer signed release, show its notes,
-  install it and report success only when the install request reached
-  `complete` and the Pi runs the new version. A rollback is reported only when
-  the Pi confirmed it. An update that is already running is followed instead of
-  started again, and under `--yes` a release that just failed is not installed
-  again. `jittersim remote update now --json` prints one JSON answer (it cannot
-  ask, so it needs `--yes`). `jittersim version` prints the version the Pi runs.
+  install it and report success only when the install reached `complete` and the
+  Pi runs the new version. A rollback is reported only when the Pi confirmed it.
+  A running update is followed instead of started again, and under `--yes` a
+  release that just failed is not installed again. `jittersim remote update now
+  --json` prints one JSON answer (it needs `--yes`). `jittersim version` prints
+  the version the Pi runs.
 - The Updates page names the staged release on its install button (**Install
   v1.1.0**), shows whether a recovery copy is kept and who signed the release,
-  and the install confirmation names the signer and the automatic restore. The
-  page can show release notes once the Pi's update status carries them. Until
-  then `sudo jittersim update` shows the notes.
+  and shows the release notes when the Pi reports them. The install
+  confirmation names the signer and the automatic restore.
+- The Pi's update status carries the signed release notes of a release that can
+  be installed now, and a development build (`X.Y.Z.dev+COMMIT`) that stopped
+  can be retried.
 - Apply a saved profile to one device. After **Reset network**, **Apply profile**
-  starts only that device and everything else stays paused. While Everyone runs
-  it is refused before anything is saved.
+  starts only that device and everything else stays paused.
+- Applying a profile to one connected device while a profile for Everyone runs
+  now starts it for that device. The device leaves Everyone and runs its own
+  profile, and Everyone keeps running for every other device. It is refused
+  while Everyone is saved but not running, or while what runs is older than the
+  saved settings. A failed start changes nothing. Start, Apply to all, Stop for
+  everyone, Reset network and Panic end it for every device. The update adds a
+  table to the settings database and needs the Pi helper restarted.
+- A device speed test records traffic through the applied profile, saves results
+  and compares them with numbers entered from a speed test run on the device.
+  The start check also compares the loss burst length of the queues with the
+  profile.
+- **Address changes** on the Devices page: a saved device that comes back with a
+  new private Wi-Fi address is suggested ("This looks like Dad's phone ... Move
+  its settings?") with Yes, No and Not this device. Off, Ask (default) and
+  Automatic. Automatic moves only the profile and the name on strong evidence.
+  Protection moves only after Yes, and a saved dashboard access grant never moves
+  from the card. Every move is in a history with Undo for 7 days.
 - A protected device opens the dashboard with the admin token and no separate
   **Allow this device** step. The access list says whether access comes from
   protection, a saved grant or both. Stopping protection of the device in use
@@ -36,21 +54,32 @@ the hand-written Unreleased part short.
   worked, the Pi records the router's Wi-Fi name and security (no password).
   Every boot renames a saved Wi-Fi with another name, such as
   `JitterSim-Recovery`, back to the router name. The router is not contacted.
-  If the router name does not start, the previous name comes back for that
-  boot. A manual Wi-Fi change or a name reset stops the following.
-  `sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow`
-  `recovery` holds Recovery across reboots, `router` returns now and `status`
-  names the state.
-- A router health check. Once a minute the Pi reads the router's ARP entry,
-  sends one ping and asks its DNS for one name. It never logs in. After two
-  failures in a row the journal gets one record. After an install or update the
-  journal stays on disk (up to 64 MB for 7 days), so an outage leaves evidence
-  after a reboot.
+  If the router name does not start, the previous name comes back for that boot.
+  A manual Wi-Fi change or a name reset stops the following. `sudo
+  /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow` with
+  `recovery`, `router` or `status` holds Recovery, returns now or names the state.
+- The boot step looks once at the Wi-Fi names on the air before it renames the
+  Pi Wi-Fi to the router name. When the router's own Wi-Fi already sends that
+  name (or a neighbour, guest network or mesh repeater does), the Pi keeps or
+  takes `JitterSim-Recovery` for that boot, so one name never runs on two
+  subnets. A failed, busy or empty look changes nothing. `wifi_follow status`
+  shows the decision. The test Wi-Fi also does not start when the Ethernet
+  address is inside `192.168.50.0/24`.
+- A router health check. Once a minute the Pi reads the router's ARP entry, sends
+  one ping and asks its DNS for one name. It never logs in. After two failures
+  in a row the journal gets one record. The journal stays on disk after an
+  install or update (up to 64 MB for 7 days), so an outage leaves evidence after
+  a reboot.
 - A skip link to the main content, unique names for the page regions and a name
   for the actions column of the device table.
 - One command cuts, checks, signs and publishes a release: `scripts/release.sh
   X.Y.Z`. `scripts/local-ci.sh` runs the workflow checks on a Mac while hosted
   CI cannot start.
+- Mutation testing (`scripts/mutation-test.py`) shows which small changes to the
+  plan, update and display code no test notices, and the tests it asked for are
+  added. Property-based round trips check the plan codec. A soak harness
+  (`tests/soak/`) watches memory, open files and disk writes over time. Nothing
+  changes for users.
 
 ### Changed
 
@@ -64,9 +93,24 @@ the hand-written Unreleased part short.
   of the browser's. The dialog names the action on its button, Escape cancels it
   and focus returns to the control that opened it.
 - A screen reader hears each result once. The dashboard has one status region
-  and one alert region, and lists that refresh every few seconds (devices,
-  schedules, timers, limits, observations and the router connection) no longer
-  announce themselves. A refresh keeps keyboard focus on the button you were on.
+  and one alert region for results and errors, and lists that refresh every few
+  seconds (the devices and their conditions, schedules, timers, scenarios,
+  limits, website observations, activity, test sessions and the router
+  connection) no longer announce themselves. Saved profiles and groups are read
+  when a page opens and after a save, not every few seconds. A refresh keeps
+  keyboard focus on the button you were on.
+- **Revoke all homepage pairings** and **Clear** on the Measurements page ask
+  first, in the same dialog as the other destructive actions, and say the result
+  once. Clear asks only when the table holds runs that exist in the page alone.
+  The Edit, Open controls and Delete buttons of the device table and the
+  schedule list say which row they belong to (**Delete Test phone**). If the row
+  that asked a question is gone when it closes, focus goes to its list.
+- A check that a person asks for (the dashboard's Check for updates, `jittersim
+  remote update check` and `now`, `sudo jittersim update check --online`) only
+  checks and stages a release. Only the daily check installs by itself, and only
+  when Install automatically is on.
+- Internal: the dashboard answers read requests from a route table instead of one
+  long chain of checks. No answer changes.
 - Router Wi-Fi is read only. The Pi refuses every router Wi-Fi write and the
   switch is disabled. Read-only checks and **Copy router Wi-Fi to Pi** still
   work. Turn the router Wi-Fi on or off with the router's own button or page.
@@ -82,11 +126,10 @@ the hand-written Unreleased part short.
   A device that joins the copied router name gets internet instead of staying on
   an address that does not work.
 - Panic stays reachable and bounded. The dashboard keeps two workers and the
-  helper one slot for Panic, an idle connection cannot starve it, a stop
-  survives a helper restart, the household release opens the firewall first and
-  never goes back to the restrictive rules, and one total deadline bounds the
-  stop. A stalled disk write no longer holds Panic back: it removes the rules,
-  releases the household and says the result is not confirmed.
+  helper one slot for Panic, an idle connection cannot starve it, a stop survives
+  a helper restart, the household release opens the firewall first, and one total
+  deadline bounds the stop. A stalled disk write no longer holds Panic back: it
+  removes the rules, releases the household and says the result is not confirmed.
 - A rollback keeps the current `dashboard-access.json`, so a revoked dashboard
   grant does not come back. A rollback still restores all saved settings,
   including the protected device list.
@@ -97,12 +140,21 @@ the hand-written Unreleased part short.
   `disable-user-service-publishing` was `yes`, which made Avahi refuse the name
   service's records, so nothing was ever announced. An install or update sets it
   to `no` and restarts Avahi. The name service also survives a hangup signal in
-  the first second of boot and restarts after any exit.
+  the first second of boot and restarts after any exit. The journal is kept on
+  disk (up to 64 MB) because its drop-in now sorts after Raspberry Pi OS's own
+  volatile setting.
 - A failed check on GitHub is an error instead of "Up to date".
 - A save, an Apply or a delete no longer makes the dashboard read out its
-  loading notes and device count again. Cancelling a question gives focus back to
-  the button that asked, also when its list was drawn again while the question
-  was open. Escape in a question no longer clears a highlighted traffic line.
+  loading notes and device count again. The ad blocking line speaks only when
+  its words change, and the random website line speaks only when you ask for it.
+  Cancelling a question gives focus back to the button that asked, also when the
+  list holding it was drawn again while the question was open. Escape in a
+  question no longer clears a highlighted line of the traffic chart.
+- Checking the admin token no longer fails by itself. Two checks that overlapped
+  (for example Allow this device followed at once by Remove) locked the dashboard
+  with "Token check failed: undefined", and so did a save that refreshed the page
+  while the check was still loading. A check now waits for the one that is
+  running, and a read that a refresh made stale is read again.
 - The schedule, timer, progression and limit forms are fixed where tests found
   defects: shared group limits are listed, a hidden field with a bad value no
   longer blocks a save in silence, **Discard unfinished edits** resets every
@@ -115,8 +167,34 @@ the hand-written Unreleased part short.
 - **Reset network** works when the Wi-Fi interface is missing.
 - Protected devices stay out of the upload corruption path, also on connections
   that were already open.
-- A failed device-only cleanup stays owed until it works. If the installer
-  cannot remove the upload corruption setup it starts the unchanged installation
-  again and stops with an error. A rollback from the first release that has the
-  upload-safe layout to an older release can leave that setup in place. The final
-  status then warns. Reboot the Pi after such a warning.
+- A failed device-only cleanup stays owed until it works. If the installer cannot
+  remove the upload corruption setup it starts the unchanged installation again
+  and stops with an error. A rollback to a release older than the upload-safe
+  layout can leave that setup in place, and the final status then warns. Reboot
+  the Pi after such a warning.
+- A helper that restarts after it died during an apply removes the queues and
+  tables that apply left. Before, devices could stay shaped while the dashboard
+  showed nothing running. If that removal fails, the helper still starts and asks
+  for Panic before profiles can start again.
+- The look at the air before a boot rename no longer depends on the Pi's
+  language (`nmcli` runs with `LC_ALL=C.UTF-8`), and it stays within its 20 s
+  budget. The start of the test Wi-Fi may take up to 480 s in the worst case (it
+  was 420 s) before systemd gives up.
+- The installer checks the management firewall after it turns off a newly
+  installed Unbound and hostapd, so a failed check no longer leaves them running.
+  The firewall unit stops a stuck `nft` within under a minute.
+- The Pi no longer puts test Wi-Fi addresses or foreign ARP answers on the router
+  cable. The management firewall drops any packet that leaves Ethernet with a
+  `192.168.50.0/24` source after NAT and any forward from Ethernet back to
+  Ethernet, and its unit sets `arp_ignore`, `arp_announce` and `send_redirects`.
+  Before, TCP resets and similar packets could reach the router with a test
+  address. An install or update checks the rules with `nft --check` first.
+- A security audit closed four gaps. The DNS watcher learns service list
+  addresses only from the Pi's own resolver (unless household DNS rules send every
+  lookup there), the public health check reuses one helper answer per second, the
+  browser proxy reads a CONNECT request under one deadline, and dashboard answers
+  carry `Cross-Origin-Opener-Policy` and `Cross-Origin-Resource-Policy`.
+- The scheduler keeps one database connection instead of opening one every
+  second, unchanged quota counters are not written again, and the browser proxy
+  and ad blocking processes no longer load the HTTPS library they never use. This
+  saves CPU, SD card writes and about 5 MB of memory per process.

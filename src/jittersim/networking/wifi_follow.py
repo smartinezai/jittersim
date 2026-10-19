@@ -7,8 +7,16 @@ update and rollback copy, so a rollback never brings back an older record. Recov
 password and security of the router copy stay in the Pi Wi-Fi and going back is a rename:
 
 * ``boot`` (jittersim-ap.service, before the start): renames the saved Wi-Fi back to the
-  router name unless an operator holds Recovery. ``boot-fallback`` puts the previous name
-  back when the router name does not start, ``boot-done`` ends the boot step.
+  router name unless an operator holds Recovery. First it looks once at the Wi-Fi names on
+  the air. When the router's own radio already sends the router name, the Pi keeps (or
+  takes) JitterSim-Recovery for this boot, so two Wi-Fis never carry one name on two
+  subnets. When the look fails or finds nothing, the boot behaves as before. A running
+  access point is not looked at and keeps its name. ``boot-fallback`` puts the previous
+  name back when the new name does not start (never the router name after a rename to
+  Recovery), ``boot-done`` ends the boot step.
+* ``uplink-check`` (jittersim-ap.service, before the start): refuses the start when the
+  Ethernet uplink has an address in the Pi Wi-Fi's own 192.168.50.0/24 (exit status 3).
+  Any error passes.
 * ``recovery``: renames the running Wi-Fi to JitterSim-Recovery and holds it there across
   reboots. Use it instead of editing the profile by hand.
 * ``router``: ends the hold and renames the running Wi-Fi back to the router name now.
@@ -32,9 +40,11 @@ import secrets
 import subprocess
 import sys
 import time
+from ipaddress import IPv4Interface, IPv4Network
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from .commands import Command
 from .executor import CommandExecutionError, CommandExecutor, SubprocessExecutor
 from .wifi import AP_CONNECTION, RECOVERY_WIFI_NAME, WifiController, WifiError
 from .wifi_security import SECURITY_MODES
@@ -46,8 +56,13 @@ HOLD_PATH = STATE_DIR / "recovery-hold"
 LOCK_PATH = Path("/run/jittersim-wifi.lock")
 # Lives for one boot only: /run is emptied at every boot.
 PREVIOUS_PATH = Path("/run/jittersim-wifi-boot-previous.json")
+# What the boot step saw on the air and why it chose the name. For `status`. One boot only.
+BOOT_CHECK_PATH = Path("/run/jittersim-wifi-boot-check.json")
 MAX_RECORD_BYTES = 1024
 NOTHING_TO_RESTORE = 2
+# `uplink-check` found the uplink inside the Pi Wi-Fi subnet. Only this code stops the start,
+# so a crash or an older module without the action (exit 1 or 2) never keeps the Wi-Fi off.
+UPLINK_CONFLICT_EXIT = 3
 HEX = re.compile(r"[0-9a-f]{64}")
 
 Fingerprint = Callable[[str], Optional[str]]
@@ -219,38 +234,315 @@ def _refuse_while_changing(controller: WifiController) -> None:
                           "Wait for it or restart jittersim-helper.service.", reason="busy")
 
 
+# The look at the air before a boot rename. It never logs in to or changes the router.
+
+# Results of `scan_air`. Only "seen" changes what the boot does. Every other result keeps
+# the behaviour from before the look (fail open), so a radio problem never costs the Wi-Fi.
+SCAN_SEEN = "seen"            # The router name is on the air from a BSSID that is not the Pi's.
+SCAN_NOT_SEEN = "not-seen"    # Other Wi-Fis are on the air, but not the router name.
+SCAN_EMPTY = "empty"          # The list was empty.
+SCAN_ONLY_OWN = "only-own"    # Only the Pi's own BSSID sends the router name.
+SCAN_BUSY = "busy"            # NetworkManager refused because the radio was busy.
+SCAN_TIMEOUT = "timeout"      # nmcli did not answer in time.
+SCAN_FAILED = "failed"        # Any other error, for example wlan0 not ready yet.
+SCAN_SKIPPED = "skipped"      # The Pi Wi-Fi already runs. A running access point is never scanned.
+
+# Seconds. The whole look stays below SCAN_BUDGET, so the boot waits at most about 20 s.
+CACHED_TIMEOUT = 4
+RESCAN_TIMEOUT = 12
+BUSY_WAIT = 2
+SCAN_BUDGET = 20
+# At a cold boot wlan0 can still be "unavailable" (driver or firmware not ready) and every
+# scan is refused. Wait for it in 1 s steps, but at most READY_WAIT of the budget.
+READY_WAIT = 10
+READY_STEP = 1
+MAX_SCAN_BYTES = 65536
+MAX_SCAN_LINES = 256
+MAC = re.compile(r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}")
+
+Sleep = Callable[[float], None]
+
+
+def _split_terse(line: str) -> List[str]:
+    """Split one `nmcli --terse --escape yes` line at its unescaped colons."""
+    fields, current, escaped = [], [], False
+    for char in line:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == ":":
+            fields.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    fields.append("".join(current))
+    return fields
+
+
+def parse_scan(output: str) -> List[Dict[str, str]]:
+    """The (SSID, BSSID) pairs of `nmcli -t -f SSID,BSSID device wifi list`."""
+    if len(output.encode("utf-8", "replace")) > MAX_SCAN_BYTES:
+        raise ValueError("the Wi-Fi list is too long")
+    networks = []
+    for line in output.splitlines()[:MAX_SCAN_LINES]:
+        fields = _split_terse(line)
+        if len(fields) == 2 and MAC.fullmatch(fields[1]):
+            networks.append({"ssid": fields[0], "bssid": fields[1].upper()})
+    return networks
+
+
+def _scan_error(error: CommandExecutionError) -> str:
+    if error.timed_out:
+        return SCAN_TIMEOUT
+    text = (error.stderr or "").lower()
+    # NetworkManager: "Device or resource busy", "Scanning not allowed immediately following
+    # previous scan", or a scan that is still in progress. These are English words, so every
+    # nmcli call of the look runs untranslated (see _nmcli).
+    if "busy" in text or "not allowed immediately" in text or "in progress" in text:
+        return SCAN_BUSY
+    return SCAN_FAILED
+
+
+def _nmcli(controller: WifiController, arguments, timeout: float) -> str:
+    controller.commands_run += 1
+    return controller.executor.run(Command(
+        executable="nmcli", arguments=tuple(arguments),
+        purpose="read the Wi-Fi names on the air (read only)",
+        timeout_seconds=max(1, timeout),
+        # The Pi may run in another language. The busy and not-ready texts here are English,
+        # and the names must stay UTF-8, so this is C.UTF-8 and not plain C.
+        c_locale=True,
+    )).stdout
+
+
+def _time_left(clock: Callable[[], float], start: float, limit: float = SCAN_BUDGET) -> float:
+    return limit - (clock() - start)
+
+
+def _own_bssids(controller: WifiController, timeout: float = CACHED_TIMEOUT) -> List[str]:
+    """The MAC of the Pi's own Wi-Fi device. It is the Pi's BSSID while it sends."""
+    try:
+        output = _nmcli(controller, ("-g", "GENERAL.HWADDR", "device", "show",
+                                     controller.interface), timeout)
+    except CommandExecutionError:
+        return []
+    value = output.strip().replace("\\", "").upper()
+    return [value] if MAC.fullmatch(value) else []
+
+
+def scan_air(controller: WifiController, ssid: str, *, sleep: Sleep = time.sleep,
+             clock: Callable[[], float] = time.monotonic) -> Dict[str, str]:
+    """Look once whether ``ssid`` is on the air from another radio. Never raises.
+
+    First the list NetworkManager already has (no radio work). When that does not show the
+    name, one rescan. A rescan is an active scan: the Pi sends Wi-Fi probe requests and
+    nearby access points, the router's too, answer them. Nothing logs in anywhere. When the
+    radio is busy the Pi waits briefly and reads the list once more instead of a second scan.
+    """
+    try:
+        return _scan_air(controller, ssid, sleep, clock)
+    except Exception:  # noqa: BLE001 - any surprise must keep the boot as it was.
+        return {"result": SCAN_FAILED, "detail": "the Wi-Fi list could not be read"}
+
+
+def _device_state(controller: WifiController, timeout: float = CACHED_TIMEOUT) -> str:
+    """Like "30 (disconnected)". Empty when nmcli does not know the device yet."""
+    try:
+        return _nmcli(controller, ("-g", "GENERAL.STATE", "device", "show",
+                                   controller.interface), timeout).strip()
+    except CommandExecutionError:
+        return ""
+
+
+def _not_ready(state: str) -> bool:
+    """Unknown to NetworkManager or "unavailable" (driver or firmware not ready yet).
+
+    The number is the NetworkManager state code (20 is "unavailable"). The words after it
+    can be translated, so only the number counts.
+    """
+    return not state or state.split(None, 1)[0] == "20"
+
+
+def _wait_until_available(controller, sleep, clock, start) -> str:
+    # Every read gets at most the time that is left of READY_WAIT, and the loop sleeps only
+    # when at least 1 s is left for the read after it. So the wait ends within READY_WAIT.
+    state = _device_state(controller, min(CACHED_TIMEOUT, _time_left(clock, start, READY_WAIT)))
+    while _not_ready(state) and _time_left(clock, start, READY_WAIT) >= READY_STEP + 1:
+        sleep(READY_STEP)
+        state = _device_state(controller,
+                              min(CACHED_TIMEOUT, _time_left(clock, start, READY_WAIT)))
+    return state
+
+
+def _scan_air(controller, ssid, sleep, clock) -> Dict[str, str]:
+    start = clock()
+    state = _wait_until_available(controller, sleep, clock, start)
+    # The two reads below count against the budget too. Without a second left for one, the
+    # look goes on (a read that cannot be made is "unknown") and look() then reports "timeout".
+    active = ""
+    left = _time_left(clock, start)
+    if left >= 1:
+        try:
+            active = _nmcli(controller, ("-g", "GENERAL.CONNECTION", "device", "show",
+                                         controller.interface), min(CACHED_TIMEOUT, left)).strip()
+        except CommandExecutionError:
+            active = ""
+    if active == AP_CONNECTION:
+        # A scan would take the running access point off its channel for a moment.
+        return {"result": SCAN_SKIPPED, "detail": "the Pi Wi-Fi already runs"}
+    left = _time_left(clock, start)
+    own = _own_bssids(controller, min(CACHED_TIMEOUT, left)) if left >= 1 else []
+
+    def look(rescan: str, timeout: float) -> Dict[str, str]:
+        left = _time_left(clock, start)
+        if left < 1:
+            return {"result": SCAN_TIMEOUT, "detail": "no time was left for the look"}
+        try:
+            output = _nmcli(controller, ("--terse", "--escape", "yes", "--fields", "SSID,BSSID",
+                                         "device", "wifi", "list", "--rescan", rescan,
+                                         "ifname", controller.interface), min(timeout, left))
+        except CommandExecutionError as error:
+            detail = "nmcli %s" % ("timed out" if error.timed_out else "refused the Wi-Fi list")
+            if _not_ready(state):
+                detail += " (wlan0 was still %s)" % (state or "not known to NetworkManager")
+            return {"result": _scan_error(error), "detail": detail}
+        networks = parse_scan(output)
+        named = [network["bssid"] for network in networks if network["ssid"] == ssid]
+        others = [bssid for bssid in named if bssid not in own]
+        if others:
+            return {"result": SCAN_SEEN, "bssid": others[0], "count": str(len(networks)),
+                    "detail": "the router name is on the air from %s" % others[0]}
+        if named:
+            return {"result": SCAN_ONLY_OWN, "count": str(len(networks)),
+                    "detail": "only the Pi's own radio sends the router name"}
+        if not networks:
+            return {"result": SCAN_EMPTY, "count": "0", "detail": "no Wi-Fi was on the air"}
+        return {"result": SCAN_NOT_SEEN, "count": str(len(networks)),
+                "detail": "the router name was not on the air"}
+
+    cached = look("no", CACHED_TIMEOUT)
+    if cached["result"] == SCAN_SEEN:
+        cached["source"] = "cached list"
+        return cached
+    fresh = look("yes", RESCAN_TIMEOUT)
+    fresh["source"] = "rescan"
+    if fresh["result"] == SCAN_BUSY and _time_left(clock, start) > BUSY_WAIT + 1:
+        # Another scan runs. Its results land in the list NetworkManager keeps.
+        sleep(BUSY_WAIT)
+        fresh = look("no", CACHED_TIMEOUT)
+        fresh["source"] = "list after a busy radio"
+    return fresh
+
+
+def _write_boot_check(path: Path, decision: str, scan: Optional[Dict[str, str]],
+                      reason: str) -> None:
+    data = {"decision": decision, "reason": reason,
+            "at": time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime())}
+    if scan is not None:
+        data.update({"scan_" + key: value for key, value in scan.items()})
+    try:
+        _write_json(path, data)
+    except OSError:
+        pass  # The record only explains the choice. It never stops the boot.
+
+
+def read_boot_check(path: Path = BOOT_CHECK_PATH) -> Optional[Dict[str, str]]:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(descriptor, "rb") as source:
+            data = json.loads(source.read(MAX_RECORD_BYTES + 1).decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {key: value for key, value in data.items()
+            if isinstance(key, str) and isinstance(value, str)}
+
+
 # Boot. Only the saved name changes. jittersim-ap.service starts the radio afterwards.
 
-def prepare_boot(controller: WifiController, record_path: Path = RECORD_PATH,
-                 hold_path: Path = HOLD_PATH, previous_path: Path = PREVIOUS_PATH,
-                 fingerprint: Fingerprint = password_fingerprint) -> str:
-    if controller._backup_exists():
-        return "pending-change"  # The helper restores the interrupted change first.
-    record = read_record(record_path)
-    if record is None:
-        return "not-remembered"
-    if held(hold_path):
-        return "recovery-hold"
-    live = controller.identity()
-    if live["security"] != record["security"]:
-        # The password may not be the router's any more. Leave the Wi-Fi as it is.
-        return "security-differs"
-    if live["ssid"] == record["ssid"]:
-        return "router"
-    if not same_password(record, fingerprint):
-        # Another password: an older release or a hand edit changed the Wi-Fi.
-        return "password-differs"
-    _write_json(previous_path, {"ssid": live["ssid"]})
+def _rename_for_boot(controller: WifiController, current: str, target: str,
+                     previous_path: Path, message: str, *, fallback: bool = True) -> None:
+    """Rename the saved Wi-Fi. ``fallback``: boot-fallback may put ``current`` back.
+
+    Without it no previous name is kept, so when ``target`` does not start, boot-fallback
+    reports nothing to restore and the unit does not start ``current`` either.
+    """
+    if fallback:
+        _write_json(previous_path, {"ssid": current})
+    else:
+        previous_path.unlink(missing_ok=True)
     try:
-        controller.rename_saved(record["ssid"])
+        controller.rename_saved(target)
     except (CommandExecutionError, WifiError):
         try:
-            controller.rename_saved(live["ssid"])
+            controller.rename_saved(current)
             previous_path.unlink(missing_ok=True)
         except (CommandExecutionError, WifiError):
             pass  # boot-fallback tries again after the start failed.
-        raise WifiError("The boot rename to the router name failed.") from None
-    return "switched"
+        raise WifiError(message) from None
+
+
+def prepare_boot(controller: WifiController, record_path: Path = RECORD_PATH,
+                 hold_path: Path = HOLD_PATH, previous_path: Path = PREVIOUS_PATH,
+                 fingerprint: Fingerprint = password_fingerprint,
+                 check_path: Optional[Path] = None,
+                 scan: Optional[Callable[[str], Dict[str, str]]] = None) -> str:
+    try:
+        decision, result, reason = _prepare_boot(controller, record_path, hold_path,
+                                                 previous_path, fingerprint, scan)
+    except WifiError as error:
+        if check_path is not None:
+            _write_boot_check(check_path, "rename-failed", None, str(error).rstrip("."))
+        raise
+    if check_path is not None:
+        _write_boot_check(check_path, decision, result, reason)
+    return decision
+
+
+def _prepare_boot(controller, record_path, hold_path, previous_path, fingerprint, scan):
+    """(decision, scan result or None, reason)."""
+    if controller._backup_exists():
+        # The helper restores the interrupted change first.
+        return "pending-change", None, "an unfinished Wi-Fi change is restored first"
+    record = read_record(record_path)
+    if record is None:
+        return "not-remembered", None, "no router copy is remembered"
+    if held(hold_path):
+        return "recovery-hold", None, "an operator holds Recovery"
+    live = controller.identity()
+    if live["security"] != record["security"]:
+        # The password may not be the router's any more. Leave the Wi-Fi as it is.
+        return "security-differs", None, "the Pi Wi-Fi security changed since the copy"
+    if live["ssid"] != record["ssid"] and not same_password(record, fingerprint):
+        # Another password: an older release or a hand edit changed the Wi-Fi.
+        return "password-differs", None, "the Pi Wi-Fi password changed since the copy"
+    result = (scan or (lambda ssid: scan_air(controller, ssid)))(record["ssid"])
+    if result.get("result") == SCAN_SKIPPED:
+        # The radio sends a name now (it may be Recovery for a router that is on the air).
+        # A saved name that differs from it would come up at the next start unchecked.
+        return "ap-running", result, "the Pi Wi-Fi already runs, so its name stays as it is"
+    if result.get("result") == SCAN_SEEN:
+        reason = ("%s, so the Pi does not send the same name on a second subnet"
+                  % result.get("detail", "the router name is on the air"))
+        if live["ssid"] != record["ssid"]:
+            return "router-on-air", result, reason  # Keep the Pi's own name.
+        # No fallback to the router name: while the router sends it, a second round of
+        # starts with that name would bring back the two Wi-Fis with one name.
+        _rename_for_boot(controller, live["ssid"], RECOVERY_WIFI_NAME, previous_path,
+                         "The boot rename to %s failed." % RECOVERY_WIFI_NAME, fallback=False)
+        return "router-on-air", result, reason
+    reason = "%s, the boot uses the router name" % result.get("detail", "the look found nothing")
+    if live["ssid"] == record["ssid"]:
+        return "router", result, reason
+    _rename_for_boot(controller, live["ssid"], record["ssid"], previous_path,
+                     "The boot rename to the router name failed.")
+    return "switched", result, reason
 
 
 def boot_fallback(controller: WifiController, previous_path: Path = PREVIOUS_PATH) -> bool:
@@ -299,10 +591,45 @@ def use_router_copy(controller: WifiController, record_path: Path = RECORD_PATH,
     return controller.rename(record["ssid"])
 
 
+# The Ethernet uplink must not use the Pi Wi-Fi's own subnet. Two connected routes for one
+# subnet break the Pi's own routing, so the Wi-Fi does not start then (install refuses it too).
+AP_NETWORK = IPv4Network("192.168.50.0/24")
+INTERFACE = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_.-]{0,14}")
+UPLINK_OK, UPLINK_CONFLICT, UPLINK_UNKNOWN = "ok", "conflict", "unknown"
+
+
+def check_uplink(executor: CommandExecutor, uplink: str,
+                 test_interface: Optional[str] = None) -> Dict[str, str]:
+    """{"result": ok, conflict or unknown, "detail": ...}. Never raises: unknown passes."""
+    if not INTERFACE.fullmatch(uplink) or uplink == "lo" or uplink == test_interface:
+        return {"result": UPLINK_UNKNOWN, "detail": "the uplink name is not usable"}
+    try:
+        output = executor.run(Command(
+            executable="ip", arguments=("-j", "-4", "address", "show", "dev", uplink),
+            purpose="read the Ethernet uplink address (read only)", timeout_seconds=5,
+        )).stdout
+        conflicts = []
+        for link in json.loads(output or "[]"):
+            for address in link.get("addr_info", []) if isinstance(link, dict) else []:
+                if isinstance(address, dict) and address.get("family") == "inet":
+                    network = IPv4Interface("%s/%s" % (address["local"], address["prefixlen"]))
+                    if network.network.overlaps(AP_NETWORK):
+                        conflicts.append(str(network))
+    except Exception:  # noqa: BLE001 - a failed check must never keep the Wi-Fi off.
+        return {"result": UPLINK_UNKNOWN, "detail": "the %s address could not be read" % uplink}
+    if conflicts:
+        return {"result": UPLINK_CONFLICT,
+                "detail": "%s has %s, inside the Pi Wi-Fi's own %s" % (
+                    uplink, conflicts[0], AP_NETWORK)}
+    return {"result": UPLINK_OK, "detail": "%s does not use %s" % (uplink, AP_NETWORK)}
+
+
 def status(controller: WifiController, record_path: Path = RECORD_PATH,
            hold_path: Path = HOLD_PATH,
-           fingerprint: Fingerprint = password_fingerprint) -> Dict[str, str]:
+           fingerprint: Fingerprint = password_fingerprint,
+           check_path: Optional[Path] = None, uplink: Optional[str] = None) -> Dict[str, str]:
     live = controller.identity()
+    check = read_boot_check(check_path) if check_path is not None else None
     try:
         record = read_record(record_path)
     except (OSError, ValueError):
@@ -318,20 +645,41 @@ def status(controller: WifiController, record_path: Path = RECORD_PATH,
             state = "router"
         elif held(hold_path):
             state = "recovery-hold"
+        elif check is not None and check.get("decision") in ("router-on-air", "ap-running"):
+            state = check["decision"]
         else:
             state = "returns-at-boot"
-    return {
+    result = {
         "state": state,
         "wifi": "%s (%s)" % (live["ssid"], live["security"]),
         "router_copy": "%s (%s)" % (record["ssid"], record["security"]) if record else "-",
         "hold": "yes" if held(hold_path) else "no",
     }
+    if check is not None:
+        result["boot_decision"] = "%s (%s, %s)" % (
+            check.get("decision", "-"), check.get("reason", "-"), check.get("at", "-"))
+        if "scan_result" in check:
+            result["boot_scan"] = "%s from the %s, %s Wi-Fis listed" % (
+                check["scan_result"], check.get("scan_source", "-"), check.get("scan_count", "-"))
+    else:
+        result["boot_decision"] = "- (no boot step ran since the Pi started)"
+    if uplink is not None:
+        check_result = check_uplink(controller.executor, uplink, controller.interface)
+        result["uplink"] = "%s (%s)" % (check_result["result"], check_result["detail"])
+    return result
 
 
 EXPLANATIONS = {
     "router": "The Pi Wi-Fi uses the router's name and security.",
     "recovery-hold": "Recovery is held by an operator. `router` or Copy router Wi-Fi to Pi ends it.",
-    "returns-at-boot": "The Pi Wi-Fi has another name. The next boot or `router` returns to the router name.",
+    "returns-at-boot": ("The Pi Wi-Fi has another name. The next boot returns to the router name "
+                        "unless the router's own Wi-Fi is on the air then. `router` returns now."),
+    "router-on-air": ("At this boot the router's own Wi-Fi was on the air with the router name, so "
+                      "the Pi kept its own name: two Wi-Fis with one name on two subnets make "
+                      "devices switch between them. Switch the router Wi-Fi off and reboot to use "
+                      "the router name, or run `router` to use it now anyway."),
+    "ap-running": ("The boot step ran while the Pi Wi-Fi was already running, so it left the "
+                   "name alone. The next boot looks at the air again. `router` returns now."),
     "not-remembered": "No router copy is remembered. Use Copy router Wi-Fi to Pi in the dashboard once.",
     "security-differs": "The Pi Wi-Fi security changed since the copy. Use Copy router Wi-Fi to Pi again.",
     "record-damaged": "The router copy record is damaged. Use Copy router Wi-Fi to Pi again.",
@@ -342,27 +690,44 @@ EXPLANATIONS = {
 def main(argv: Optional[List[str]] = None, *, executor: Optional[CommandExecutor] = None,
          record_path: Path = RECORD_PATH, hold_path: Path = HOLD_PATH,
          previous_path: Path = PREVIOUS_PATH, lock_path: Path = LOCK_PATH,
-         fingerprint: Fingerprint = password_fingerprint) -> int:
+         fingerprint: Fingerprint = password_fingerprint,
+         check_path: Path = BOOT_CHECK_PATH,
+         scan: Optional[Callable[[str], Dict[str, str]]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("action", choices=("status", "recovery", "router",
-                                           "boot", "boot-fallback", "boot-done"))
+    parser.add_argument("action", choices=("status", "recovery", "router", "boot",
+                                           "boot-fallback", "boot-done", "uplink-check"))
     parser.add_argument("--test-interface",
                         default=os.environ.get("JITTERSIM_TEST_INTERFACE") or "wlan0")
+    parser.add_argument("--uplink", default=os.environ.get("JITTERSIM_UPLINK") or "eth0")
     arguments = parser.parse_args(argv)
+    if arguments.action == "uplink-check":
+        # Read only and without the Wi-Fi lock: it never changes the Wi-Fi.
+        result = check_uplink(executor or SubprocessExecutor(timeout_seconds=5), arguments.uplink,
+                              arguments.test_interface)
+        if result["result"] == UPLINK_CONFLICT:
+            print("The test Wi-Fi does not start: %s. Change the router LAN to another subnet "
+                  "(for example 192.168.0.0/24), then reboot the Pi." % result["detail"],
+                  file=sys.stderr)
+            return UPLINK_CONFLICT_EXIT
+        print("Uplink check: %s (%s)." % (result["result"], result["detail"]))
+        return 0
     try:
         with wifi_lock(lock_path, wait=45.0):
-            return _run(arguments, executor, record_path, hold_path, previous_path, fingerprint)
+            return _run(arguments, executor, record_path, hold_path, previous_path, fingerprint,
+                        check_path, scan)
     except FollowError as error:
         print("Wi-Fi %s: %s" % (arguments.action, error), file=sys.stderr)
         return 1
 
 
-def _run(arguments, executor, record_path, hold_path, previous_path, fingerprint) -> int:
+def _run(arguments, executor, record_path, hold_path, previous_path, fingerprint,
+         check_path, scan) -> int:
     controller = WifiController(executor or SubprocessExecutor(timeout_seconds=15),
                                 arguments.test_interface)
     try:
         if arguments.action == "status":
-            result = status(controller, record_path, hold_path, fingerprint)
+            result = status(controller, record_path, hold_path, fingerprint, check_path,
+                            arguments.uplink)
             for key, value in result.items():
                 print("%s: %s" % (key, value))
             print(EXPLANATIONS[result["state"]])
@@ -374,12 +739,17 @@ def _run(arguments, executor, record_path, hold_path, previous_path, fingerprint
             result = use_router_copy(controller, record_path, hold_path, fingerprint)
             print("Pi Wi-Fi is back on the router name %s (%s)." % (result["ssid"], result["security"]))
         elif arguments.action == "boot":
-            print("Wi-Fi at boot: %s" % prepare_boot(controller, record_path, hold_path, previous_path,
-                                                         fingerprint))
+            decision = prepare_boot(controller, record_path, hold_path, previous_path, fingerprint,
+                                    check_path, scan)
+            print("Wi-Fi at boot: %s" % decision)
+            check = read_boot_check(check_path)
+            if check is not None:
+                print("Why: %s." % check.get("reason", "-"))
         elif arguments.action == "boot-fallback":
             if not boot_fallback(controller, previous_path):
                 return NOTHING_TO_RESTORE
-            print("The router name did not start. The previous Pi Wi-Fi name is back.", file=sys.stderr)
+            print("The new Pi Wi-Fi name did not start. The previous name is back.",
+                  file=sys.stderr)
         else:
             finish_boot(previous_path)
         return 0

@@ -10,7 +10,14 @@ _INLINE_ASSETS = (
 )
 # The scripts that join dashboard.js inside its closure, right before this call.
 _START_CALL = "    startDashboard();"
-_EXTRA_SCRIPTS = ("workflows.js", "access.js", "reconnect.js", "trust.js")
+_EXTRA_SCRIPTS = (
+    "workflows.js",
+    "access.js",
+    "reconnect.js",
+    "trust.js",
+    "speed-test.js",
+    "address-follow.js",
+)
 
 
 def assemble_dashboard() -> str:
@@ -22,7 +29,7 @@ def assemble_dashboard() -> str:
             raise ValueError(f"Dashboard template must contain {marker} exactly once")
     for marker, filename in _INLINE_ASSETS:
         page = page.replace(marker, (_ASSET_DIRECTORY / filename).read_text(encoding="utf-8"))
-    for filename in ("workflows.css", "access.css", "phone.css", "refresh.css"):
+    for filename in ("workflows.css", "access.css", "speed-test.css", "phone.css", "refresh.css"):
         page = page.replace(
             "</style>",
             (_ASSET_DIRECTORY / filename).read_text(encoding="utf-8") + "</style>",

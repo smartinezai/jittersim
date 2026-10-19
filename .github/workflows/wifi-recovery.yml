@@ -69,6 +69,7 @@ jobs:
       - run: python -m tests.browser.trust_access
       - run: python -m tests.browser.address_move
       - run: python -m tests.browser.address_move_privacy
+      - run: python -m tests.browser.address_follow
       - run: python -m tests.browser.general_profile
       - run: python -m tests.browser.device_apply_start
       - run: python -m tests.browser.saved_profiles
@@ -81,6 +82,7 @@ jobs:
       - run: python -m tests.browser.ad_blocking
       - run: python -m tests.browser.group_devices
       - run: python -m tests.browser.impact_check
+      - run: python -m tests.browser.speed_test_window
       - run: python -m tests.browser.sidebar_status
       - run: python -m tests.browser.apply_clarity
       - run: python -m tests.browser.router_copy

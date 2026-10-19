@@ -1,0 +1,1 @@
+$ tc qdisc change dev wlan0 parent 10:7 handle 46: netem loss random 11% corrupt 0% rate 0bit  # update download settings for assignment:bob-news

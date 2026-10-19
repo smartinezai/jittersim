@@ -356,7 +356,7 @@ def local_time_zone(name: str):
 EXPECTED_PAGE_HEADINGS = {
     None: ["Credentials", "Dashboard access"],
     "page-devices": [
-        "Getting started", "Everyone", "Connected clients", "Saved devices",
+        "Getting started", "Everyone", "Address changes", "Connected clients", "Saved devices",
         "Everyone else", "Protected devices",
     ],
     "page-profiles": ["Saved profiles", "Save profile", "Assign a device", "Group devices"],
@@ -4636,6 +4636,7 @@ class ControlServerTests(unittest.TestCase):
             {
                 "configuration_version": 2,
                 "device_only": [],
+                "everyone_exceptions": [],
                 "last_action": None,
                 "last_error": None,
                 "last_result": None,

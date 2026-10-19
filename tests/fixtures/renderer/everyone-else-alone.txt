@@ -1,0 +1,33 @@
+$ nft -f -  # replace project-owned traffic rules atomically
+| add table inet jittersim
+| delete table inet jittersim
+| add table netdev jittersim_download
+| delete table netdev jittersim_download
+| add table netdev jittersim_download
+| add chain netdev jittersim_download download { type filter hook egress device "ap0" priority 0; policy accept; }
+| add table inet jittersim
+| add chain inet jittersim forward { type filter hook forward priority -150; policy accept; }
+| add chain inet jittersim input { type filter hook input priority -150; policy accept; }
+| add chain inet jittersim output { type filter hook output priority -150; policy accept; }
+| add rule inet jittersim forward iifname "ap0" meta mark set 0
+| add chain inet jittersim upload_class { type filter hook forward priority 100; policy accept; }
+| add rule inet jittersim upload_class iifname "ap0" oifname "uplink0" ct state invalid drop comment "never forward untracked test traffic to the router"
+| add rule inet jittersim upload_class iifname "ap0" ct mark set meta mark and 0xff
+| add rule inet jittersim input iifname "ap0" tcp dport 8080 return comment "keep dashboard sign-in reachable"
+| add rule inet jittersim output oifname "ap0" tcp sport 8080 meta mark set 2147483648
+| add rule netdev jittersim_download download meta mark 2147483648 meta mark set 0 return comment "keep local dashboard replies usable"
+| add rule inet jittersim output oifname "ap0" meta mark and 0xff != 0 ct mark set meta mark and 0xff
+| add rule inet jittersim forward iifname "ap0" meta nfproto ipv4 meta mark set 1 counter comment "everyone else upload"
+| add rule inet jittersim forward oifname "ap0" meta nfproto ipv4 meta mark set 268435456 comment "identify everyone else downloads"
+| add rule netdev jittersim_download download meta mark 268435456 meta mark set 1 counter comment "everyone else download"
+$ tc qdisc replace dev uplink0 root handle 10: prio bands 2 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0  # create project queue root on uplink0
+$ tc qdisc replace dev uplink0 parent 10:1 handle 100: fq_codel  # preserve fair queuing for ordinary traffic on uplink0
+$ tc qdisc del dev uplink0 parent 10:2 handle 51:  # remove the duplicate queue of device rule:everyone-else on uplink0 before its queue changes kind  [ignore_failure]
+$ tc qdisc replace dev uplink0 parent 10:2 handle 41: netem delay 5ms corrupt 0% rate 0bit  # apply upload impairment for device rule:everyone-else on uplink0
+$ tc filter replace dev uplink0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2  # route ip mark 1 on uplink0
+$ tc filter replace dev uplink0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2  # route ipv6 mark 1 on uplink0
+$ tc qdisc replace dev ap0 root handle 10: prio bands 2 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0  # create project queue root on ap0
+$ tc qdisc replace dev ap0 parent 10:1 handle 100: fq_codel  # preserve fair queuing for ordinary traffic on ap0
+$ tc qdisc replace dev ap0 parent 10:2 handle 61: fq_codel  # preserve fair queuing for device rule:everyone-else on ap0
+$ tc filter replace dev ap0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2  # route ip mark 1 on ap0
+$ tc filter replace dev ap0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2  # route ipv6 mark 1 on ap0

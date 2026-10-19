@@ -11,6 +11,7 @@ from pathlib import Path
 
 import jittersim.api.server as server_module
 from jittersim.api.server import ControlServer
+from jittersim.config.address_follow import AddressFollowStore
 from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import Device, DomainObservation, Impairment, Profile, Scenario, ScenarioStep
 from tests.adblocking_support import provision_guard
@@ -44,6 +45,9 @@ class DashboardWifiExecutor(WifiExecutor):
         super().__init__()
         self.queue_reads = {}
         self.queue_started = {}
+        # The child queue an apply put under each band: {interface: {parent: (kind, handle)}}.
+        # A band whose profile direction sets nothing gets a fair queue, not a netem.
+        self.queue_children = {}
         # The server stamps each sample with time.time(), so the byte counter uses the same clock.
         self.clock = clock
 
@@ -89,9 +93,12 @@ class DashboardWifiExecutor(WifiExecutor):
             reads = self.queue_reads[interface] = self.queue_reads.get(interface, 0) + 1
             now = self.clock()
             queue_bytes = int(QUEUE_KBIT_PER_SECOND * 125 * (now - self.queue_started.setdefault(interface, now)))
+            children = self.queue_children.get(interface, {})
             queues = [
                 {
-                    "kind": "netem", "handle": queue_handle(mark), "parent": queue_parent(mark),
+                    "kind": children.get(queue_parent(mark), ("netem",))[0],
+                    "handle": children.get(queue_parent(mark), (None, queue_handle(mark)))[1],
+                    "parent": queue_parent(mark),
                     "bytes": queue_bytes, "packets": 100 * reads, "drops": 11 * reads,
                     "overlimits": 0, "requeues": 0, "backlog": 0, "qlen": 0,
                 }
@@ -104,6 +111,11 @@ class DashboardWifiExecutor(WifiExecutor):
             if "root" in command.arguments:
                 self.queue_reads.pop(command.arguments[3], None)
                 self.queue_started.pop(command.arguments[3], None)
+                self.queue_children.pop(command.arguments[3], None)
+            elif command.arguments[1] == "replace" and command.arguments[4:5] == ("parent",) \
+                    and command.arguments[6:7] == ("handle",) and len(command.arguments) > 8:
+                self.queue_children.setdefault(command.arguments[3], {})[command.arguments[5]] = (
+                    command.arguments[8], command.arguments[7])
         return super().run(command)
 
 
@@ -182,6 +194,28 @@ def seed_demo_data(repository):
 
 
 OLD_ADDRESS = "02:00:00:00:00:99"
+# JITTERSIM_BROWSER_TEST_ADDRESS_FOLLOW=1: a saved phone left with this fixed address and the
+# fixture's only station (02:00:00:00:00:01) now sends the same DHCP host name.
+FOLLOW_OLD_ADDRESS = "aa:bb:cc:00:00:01"
+FOLLOW_HOSTNAME = "Dads-iPhone"
+
+
+def address_follow():
+    return os.environ.get("JITTERSIM_BROWSER_TEST_ADDRESS_FOLLOW") == "1"
+
+
+def seed_address_follow(repository, lease_directory):
+    if not address_follow():
+        return
+    (lease_directory / "dnsmasq-wlan0.leases").write_text(
+        f"0 02:00:00:00:00:01 192.168.50.184 {FOLLOW_HOSTNAME} *\n")
+    repository.save_profile(Profile("normal", "Normal connection"))
+    repository.save_device(Device("dad", "Dad's phone", "192.168.50.150", "normal",
+                                  FOLLOW_OLD_ADDRESS))
+    AddressFollowStore(repository).observe(
+        [{"mac_address": FOLLOW_OLD_ADDRESS, "hostname": FOLLOW_HOSTNAME.lower(),
+          "ipv4_address": "192.168.50.150", "connected_seconds": 10, "ipv4_verified": True}],
+        saved={FOLLOW_OLD_ADDRESS}, now=int(time.time()) - 300)
 BUSY_ATTEMPTS = 100
 BUSY_WAIT_SECONDS = 0.05
 
@@ -229,7 +263,57 @@ def allow_wide_fonts_style():
     )
 
 
+class FixtureProber:
+    """Answers the speed test's echo probes without sending any packet.
+
+    The developer's machine may itself sit on a 192.168.50.0/24 network, so the fixture must
+    never let the real prober reach a real device.
+    """
+
+    def __init__(self, target):
+        self.sent = 0
+
+    def send(self):
+        self.sent += 1
+
+    def collect(self, until):
+        pass
+
+    def summary(self):
+        return {"status": "measured", "sent": self.sent, "received": self.sent,
+                "loss_percent": 0.0 if self.sent else None, "rtt_min_ms": 11.0,
+                "rtt_median_ms": 12.0, "rtt_p90_ms": 14.0, "rtt_max_ms": 15.0}
+
+    def close(self):
+        pass
+
+
 class FixtureServer(ControlServer):
+    speed_test_prober_factory = FixtureProber
+
+    def write_response_for(self, path, payload):
+        response = super().write_response_for(path, payload)
+        if path != "/api/speed-tests/start" or payload.get("label") != "Fixture fault":
+            return response
+        status, _, body = response
+        if status != 201:
+            return response
+
+        run_id = json.loads(body)["id"]
+        manager = self._speed_test_manager
+        run = manager.runs[run_id]
+        read_queues = manager._read_queues
+
+        def fail_this_run():
+            current = manager.runs.get(run_id)
+            if current is not None and current.state == "running":
+                raise HelperClientError("fixture queue read failed")
+            return read_queues()
+
+        manager._read_queues = fail_this_run
+        run.deadline = time.monotonic() + 2.5
+        return response
+
     def response_for(self, path, query=""):
         status, content_type, body = super().response_for(path, query)
         if path == "/" and os.environ.get("JITTERSIM_BROWSER_TEST_WIDE_FONTS") == "1":
@@ -316,7 +400,8 @@ def main():
         if os.environ.get("JITTERSIM_BROWSER_TEST_OLD_ADDRESS") == "1":
             # A device the owner saved earlier under an address it no longer uses.
             access_store.add(OLD_ADDRESS, "Old Mac")
-        service = DashboardHelperService(NetworkApplier(executor=executor, topology=topology),
+        service = DashboardHelperService(NetworkApplier(executor=executor, topology=topology,
+                                                        lease_directory=root),
                                          router_factory=lambda *_: DashboardRouter(),
                                          access_store=access_store,
                                          ad_blocking_store=ad_blocking,
@@ -328,6 +413,7 @@ def main():
                 with ConfigRepository(root / "config.db") as repository:
                     seed_observations(repository)
                     seed_demo_data(repository)
+                    seed_address_follow(repository, root)
                     if os.environ.get("JITTERSIM_BROWSER_TEST_OLD_ADDRESS") == "1":
                         repository.save_unaffected_device(UnaffectedDevice(OLD_ADDRESS, "Old Mac", 1))
                     if os.environ.get("JITTERSIM_BROWSER_TEST_PROTECTED_PEER") == "1":

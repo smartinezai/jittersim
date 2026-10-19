@@ -58,7 +58,7 @@ def check_reset_name(page):
 
     button.click()
     # Said plainly before anything is sent.
-    answer_confirm(page, "Restore name", title="Restore the default Wi-Fi name?",
+    answer_confirm(page, "Restore name", title="Restore the Wi-Fi name?",
                    text=["Wi-Fi will restart", "Wi-Fi menu"])
     banner = page.locator("#wifi-change-banner")
     expect(banner).to_contain_text("Reconnecting to the Pi", timeout=10000)

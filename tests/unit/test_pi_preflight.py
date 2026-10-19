@@ -1,4 +1,7 @@
 import importlib.util
+import os
+import stat
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -50,3 +53,84 @@ class PiPreflightTests(unittest.TestCase):
         ), patch.object(preflight, "_json_output", return_value=[{}]):
             with self.assertRaisesRegex(preflight.PreflightError, "WLAN country"):
                 preflight.check_gateway(uplink="eth0", test_interface="wlan0")
+
+
+FAKE_NFT = """#!/bin/sh
+cat > "$FAKE_NFT_INPUT"
+printf '%s\\n' "$@" > "$FAKE_NFT_ARGS"
+exit "$FAKE_NFT_EXIT"
+"""
+
+
+class FirewallPreflightTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.nft = self.root / "nft"
+        self.nft.write_text(FAKE_NFT)
+        self.nft.chmod(self.nft.stat().st_mode | stat.S_IXUSR)
+        patcher = patch.dict(os.environ, {"FAKE_NFT_INPUT": str(self.root / "input"),
+                                          "FAKE_NFT_ARGS": str(self.root / "args"),
+                                          "FAKE_NFT_EXIT": "0"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_rendered_rules_are_checked_without_loading_them(self) -> None:
+        self.assertTrue(preflight.check_firewall(uplink="eth0", test_interface="wlan0",
+                                                 nft=str(self.nft)))
+        self.assertEqual((self.root / "args").read_text().split(), ["--check", "-f", "-"])
+        rules = (self.root / "input").read_text()
+        self.assertIn('oifname "eth0"', rules)
+        self.assertIn('iifname "wlan0"', rules)
+        self.assertNotIn("@", rules.replace("@clients", ""))
+
+    def test_a_kernel_that_cannot_load_the_rules_stops_the_install(self) -> None:
+        os.environ["FAKE_NFT_EXIT"] = "1"
+        with self.assertRaisesRegex(preflight.PreflightError, "nft_fib_inet"):
+            preflight.check_firewall(uplink="eth0", test_interface="wlan0", nft=str(self.nft))
+
+    def test_firewall_only_needs_nft_and_skips_the_gateway_checks(self) -> None:
+        with patch.object(preflight, "check_gateway") as gateway, \
+                patch.object(preflight, "check_firewall", return_value=False):
+            self.assertEqual(preflight.main(["--uplink", "eth0", "--test-interface", "wlan0",
+                                             "--firewall-only"]), 1)
+        gateway.assert_not_called()
+        with patch.object(preflight, "check_gateway") as gateway, \
+                patch.object(preflight, "check_firewall", return_value=True) as firewall:
+            self.assertEqual(preflight.main(["--uplink", "eth0", "--test-interface", "wlan0"]), 0)
+        gateway.assert_called_once()
+        firewall.assert_called_once()
+
+    def test_the_installer_checks_the_firewall_after_installing_nftables(self) -> None:
+        installer = (PREFLIGHT_PATH.parent / "install.sh").read_text()
+        packages = installer.index("apt-get install -y dnsmasq-base")
+        check = installer.index("preflight.py\" --firewall-only")
+        restart = installer.index("systemctl restart jittersim-control-firewall.service")
+        self.assertLess(packages, check)
+        self.assertLess(check, restart)
+
+    def test_a_failed_firewall_check_cannot_leave_new_unbound_and_hostapd_running(self) -> None:
+        # set -eu ends the script at a failed check. The packages just installed start their
+        # services in their own postinst, so the guards that turn them off must already have
+        # run, and nothing is replaced before the check.
+        installer = (PREFLIGHT_PATH.parent / "install.sh").read_text()
+        check = installer.index("preflight.py\" --firewall-only")
+        unbound_guard = installer.index(
+            'if [ "$existing_unbound" = no ]; then systemctl disable --now unbound.service; fi')
+        hostapd_guard = installer.index(
+            'if [ "$existing_hostapd" = no ]; then systemctl disable --now hostapd.service; fi')
+        self.assertLess(installer.index("apt-get install -y dnsmasq-base"), unbound_guard)
+        self.assertLess(unbound_guard, check)
+        self.assertLess(hostapd_guard, check)
+        for step in ("check-egress-hook.py", 'install -d -m 0750 -o root -g jittersim "$CONFIG_DIR"',
+                     "replace-source.py", "systemctl restart"):
+            self.assertLess(check, installer.index(step), step)
+
+    def test_the_failure_message_does_not_claim_that_nothing_was_changed(self) -> None:
+        os.environ["FAKE_NFT_EXIT"] = "1"
+        with self.assertRaises(preflight.PreflightError) as caught:
+            preflight.check_firewall(uplink="eth0", test_interface="wlan0", nft=str(self.nft))
+        message = str(caught.exception)
+        self.assertNotIn("Nothing was changed", message)
+        self.assertIn("may already have added packages", message)

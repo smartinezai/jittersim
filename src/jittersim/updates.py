@@ -9,6 +9,7 @@ requests can name only the single release already staged on this Pi.
 import argparse
 import ast
 import base64
+import codecs
 import fcntl
 import contextvars
 import functools
@@ -1016,6 +1017,13 @@ PANIC_APPROVED_SOURCES = ({
     # reads are read-only, and the helper client passes the burst-loss length through.
     "src/jittersim/panic_guard.py": "041cf171875d7b85d1c0664c2acff262542a3ac3c2b2e8fe51f80d2d59d6d639",
     "src/jittersim/networking/helper.py": "a955a1517abd11013f37712b27750e1515614d4555b76170e8679ebbb6fe9f80",
+    "src/jittersim/networking/access.py": "41a0f6f96cf2a20616d7ac613dd95acf2cd31085a13018ce14667dea2e11e1f3",
+}, {
+    # See docs/panic-crash-matrix-2026-10-18.md (D1) and PR 168. The helper marks an apply in
+    # progress and releases what an interrupted apply left when it starts. Independent Opus
+    # review of the helper.py diff: no blocker. panic_guard.py and access.py are unchanged.
+    "src/jittersim/panic_guard.py": "041cf171875d7b85d1c0664c2acff262542a3ac3c2b2e8fe51f80d2d59d6d639",
+    "src/jittersim/networking/helper.py": "f1d0e704b8ad61b4ef677e25d4b1c3f40ea1e16dfceb67246568f8ca35366587",
     "src/jittersim/networking/access.py": "41a0f6f96cf2a20616d7ac613dd95acf2cd31085a13018ce14667dea2e11e1f3",
 },)
 
@@ -2028,9 +2036,36 @@ def stage_upload(upload_id=None, *, spool=UPLOAD_SPOOL, lock=None, root=UPDATE_R
         return stage_release(archive, signature=signature, root=root, code=code, config=config)
 
 
+MAX_NOTES = 16 * 1024
+
+
+def staged_notes(root=UPDATE_ROOT):
+    """The release notes inside the staged archive (deploy/RELEASE-NOTES.md), which the same
+    signature as the code covers, as text cut at 16 KB. None when there are none. The file is
+    opened without following links and must be a regular file."""
+
+    path = root / "staged" / "deploy" / "RELEASE-NOTES.md"
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            raw = handle.read(MAX_NOTES)
+    except OSError:
+        return None
+    # A character cut in two by the limit is dropped, not shown as a replacement mark.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    text = decoder.decode(raw, final=len(raw) < MAX_NOTES).strip()
+    return text or None
+
+
 def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, query=None, retry_probe=True):
     installed = read_json(code / ".jittersim-release.json")
-    staged = _record(root / "staged" / ".jittersim-release.json")
+    staged_file = root / "staged" / ".jittersim-release.json"
+    staged = _record(staged_file)
     status = read_json(root / "status.json")
     try:
         signers = trusted_keys(config)
@@ -2052,6 +2087,16 @@ def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, query
         recovery_problem = str(error)
     retry, retry_reason = _retry_info(root, status, query or read_command) if retry_probe else (None, None)
     orphaned = retry is not None and status.get("phase") != "failed"
+    notes = None
+    if staged and reason is None:
+        notes = staged_notes(root)
+        # A check can stage another release between the two reads above and the notes read.
+        # Notes are shown only when the staged record is still the one that was judged.
+        try:
+            if notes is not None and _record(staged_file) != staged:
+                notes = None
+        except UpdateError:
+            notes = None
     return {
         "installed": installed.get("version", "Unversioned installation"),
         "available": staged.get("version"),
@@ -2071,6 +2116,9 @@ def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, query
         **_operation_fields(status),
         "retry": retry,
         "retry_unavailable_reason": retry_reason,
+        # Only for a staged release a trusted key signed and that is newer than the installed
+        # one (the same test as installable). The Panic source check still happens at install.
+        "notes": notes,
     }
 
 
@@ -2463,7 +2511,7 @@ def _inspect_retry(root, status, query, budget, admission):
                 or fields["request_kind"] != status.get("request_kind")
                 or type(request.get("rollback")) is not bool
                 or (request.get("version") not in (None, "") and
-                    (not isinstance(request["version"], str) or not LABEL.fullmatch(request["version"])))
+                    (not isinstance(request["version"], str) or not VERSION.fullmatch(request["version"])))
                 or (fields["request_kind"] == "install" and not request.get("version"))
                 or ("attempt" in request and (not isinstance(request["attempt"], str)
                     or not PUBLIC_REQUEST.fullmatch(request["attempt"])))
@@ -2631,6 +2679,8 @@ ONLINE_FILE = "online.json"
 ONLINE_REQUEST = "online-request.json"
 ONLINE_SETTINGS = "online-settings.json"
 ONLINE_SEEN = "online-seen.json"
+# When the schedule's own check last ended. A check someone asked for does not change it.
+ONLINE_DAILY = "online-daily.json"
 ONLINE_LOCK = "online.lock"
 # The dashboard asks GitHub at most this often unless the owner presses Check now.
 CACHE_SECONDS = 10 * 60
@@ -3101,7 +3151,7 @@ def new_job():
 
 
 def request_online_check(*, force=False, root=UPDATE_ROOT, config=CONFIG_ROOT, run=run_command,
-                         now=time.time, job_id=new_job):
+                         now=time.time, job_id=new_job, check_only=True):
     """Start one online check in the root fetch unit and return its job at once. Unless FORCE
     is set a check that ended less than ten minutes ago answers instead of a new one."""
     current = now()
@@ -3123,7 +3173,10 @@ def request_online_check(*, force=False, root=UPDATE_ROOT, config=CONFIG_ROOT, r
             return _view(record, current)
         record = {"job": job, "state": "running", "requested_at": int(current),
                   "checked_at": None, "result": None, "message": "Checking GitHub for a release."}
-        atomic_json(root / ONLINE_REQUEST, {"job": job, "requested_at": int(current)})
+        # A check someone asked for only checks. Only the daily check may install by itself
+        # (when Install automatically is on), so a manual check never interrupts the Pi.
+        atomic_json(root / ONLINE_REQUEST, {"job": job, "requested_at": int(current),
+                                            "check_only": check_only is not False})
         atomic_json(root / ONLINE_FILE, record)
         try:
             run(["systemctl", "start", "--no-block", FETCH_UNIT], 10)
@@ -3131,6 +3184,8 @@ def request_online_check(*, force=False, root=UPDATE_ROOT, config=CONFIG_ROOT, r
             (root / ONLINE_REQUEST).unlink(missing_ok=True)
             record.update(state="done", result="failed", checked_at=int(current), contacted=False,
                           message="The online check service could not start.")
+            if check_only is False:
+                atomic_json(root / ONLINE_DAILY, {"checked_at": int(current)})
             atomic_json(root / ONLINE_FILE, record)
         return _view(record, current)
 
@@ -3142,20 +3197,25 @@ def scheduled_online_check(*, root=UPDATE_ROOT, config=CONFIG_ROOT, run=run_comm
     if not online_settings(root)["daily_check"] or not token_is_set(config):
         return False
     record = _record(root / ONLINE_FILE)
-    last = record.get("checked_at") if record.get("state") == "done" else None
     current = now()
     if record.get("state") == "running" and current - record.get("requested_at", 0) <= STALE_SECONDS:
         return False
+    try:
+        last = _record(root / ONLINE_DAILY).get("checked_at")
+    except UpdateError:
+        last = None  # An unreadable marker must not stop the daily check for good.
     if isinstance(last, (int, float)) and 0 <= current - last < DAILY_SECONDS:
         return False
-    started = request_online_check(force=True, root=root, config=config, run=run, now=now)
+    started = request_online_check(force=True, root=root, config=config, run=run, now=now,
+                                   check_only=False)
     return started.get("state") == "running"
 
 
 def perform_online_check(job, *, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, source=None,
-                         run=run_command, now=time.time, auto_install=True):
+                         run=run_command, now=time.time, auto_install=True, daily=False):
     """Run one check, record the answer under JOB and, when the owner turned Install
-    automatically on, queue the install of a release that is staged and installable."""
+    automatically on, queue the install of a release that is staged and installable. DAILY
+    says the schedule asked for it: only then does the daily timer start again from its end."""
     result = check_online(root=root, code=code, config=config, source=source)
     if result.get("busy"):
         return result
@@ -3179,6 +3239,11 @@ def perform_online_check(job, *, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG
                 except UpdateError as error:
                     message += " It was not installed automatically: " + str(error)
     finished = int(now())
+    if daily:
+        # The daily timer follows the schedule's own checks and nothing else, so checking by
+        # hand every day cannot keep the one check that may install waiting. A schedule check
+        # that never ended leaves it alone, so the next tick after STALE_SECONDS tries again.
+        atomic_json(root / ONLINE_DAILY, {"checked_at": finished})
     record = {"job": job, "state": "done", "requested_at": finished, "checked_at": finished,
               "result": result["result"], "message": message, "available": result["available"],
               "tag": result["tag"], "contacted": result["contacted"], "install_queued": queued}
@@ -3198,8 +3263,9 @@ def run_fetch_job(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, sourc
     if not isinstance(job, str) or not JOB.fullmatch(job):
         return None
     (root / ONLINE_REQUEST).unlink(missing_ok=True)
+    scheduled = request.get("check_only") is False
     return perform_online_check(job, root=root, code=code, config=config, source=source, run=run,
-                                now=now)
+                                now=now, auto_install=scheduled, daily=scheduled)
 
 
 # A copied recovery manager must understand these records before they are published.

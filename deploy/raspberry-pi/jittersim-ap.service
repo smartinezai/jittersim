@@ -17,11 +17,21 @@ EnvironmentFile=-/etc/jittersim/runtime.env
 ExecStartPre=/bin/sh -c '/usr/sbin/nft list table inet jittersim_control >/dev/null && echo "Management firewall table inet jittersim_control is loaded."'
 # The Pi Wi-Fi follows the router. After a Copy router Wi-Fi to Pi that worked, a saved
 # Wi-Fi with another name (such as JitterSim-Recovery, which keeps the copy's password
-# and security) is renamed back to the router name before the start. Only the saved
-# name changes and the router is never contacted. An operator hold (wifi_follow
-# recovery), a manual Wi-Fi change and a changed security type are left alone. "-": a
-# failure here never stops the start, the Wi-Fi then starts with the name it has.
+# and security) is renamed back to the router name before the start. First it reads
+# the Wi-Fi names on the air once (the cached list, then at most one active rescan,
+# about 20 s at most). When the router's own radio already sends the router name, the
+# Pi keeps or takes JitterSim-Recovery for this boot, so one name never runs on two
+# subnets. A failed or empty look changes nothing. Only the saved name changes and
+# the router is never contacted. An operator hold (wifi_follow recovery), a manual
+# Wi-Fi change and a changed security type are left alone. "-": a failure here never
+# stops the start, the Wi-Fi then starts with the name it has.
 ExecStartPre=-/opt/jittersim/.venv/bin/python -I -m jittersim.networking.wifi_follow boot
+# No test Wi-Fi when the Ethernet uplink has an address in 192.168.50.0/24, the Pi
+# Wi-Fi's own subnet: two routes for one subnet break the Pi's own routing. Read only and
+# last before the start, so a DHCP address on eth0 has had the most time to arrive. Only
+# exit status 3 (a found conflict) fails the unit. A crash, an unreadable address or an
+# older module without this action (status 1 or 2) lets the Wi-Fi start as before.
+ExecStartPre=/bin/sh -c '/opt/jittersim/.venv/bin/python -I -m jittersim.networking.wifi_follow uplink-check; [ "$$?" -ne 3 ]'
 # NetworkManager counts as started before wlan0 may be ready and autoconnect is off,
 # so the start tries up to ten times 3 s apart. A connection that is already active
 # counts as success and is never brought up again or taken down. When the router name
@@ -31,7 +41,17 @@ ExecStartPre=-/opt/jittersim/.venv/bin/python -I -m jittersim.networking.wifi_fo
 ExecStart=/bin/sh -c 'start_wifi() { for try in 1 2 3 4 5 6 7 8 9 10; do [ "$$(/usr/bin/nmcli -g GENERAL.STATE connection show jittersim-ap 2>/dev/null)" = activated ] && return 0; /usr/bin/nmcli --wait 10 connection up jittersim-ap && return 0; sleep 3; done; return 1; }; start_wifi && exit 0; /opt/jittersim/.venv/bin/python -I -m jittersim.networking.wifi_follow boot-fallback; [ "$$?" -ne 2 ] && start_wifi && exit 0; echo "The test Wi-Fi did not start after 10 tries. Check nmcli device status." >&2; exit 1'
 # The replaced name is no longer needed once the Wi-Fi runs.
 ExecStartPost=-/opt/jittersim/.venv/bin/python -I -m jittersim.networking.wifi_follow boot-done
-TimeoutStartSec=360
+# Worst case 469 s, every step at its own limit and all of them added up:
+# - nft check 1 s
+# - boot step 104 s: lock wait 45 s, unfinished-change check 3 s, identity 3 s, password
+#   check 15 s, look 20 s, rename 9 s (three 3 s calls), rename back after a failure 9 s
+# - uplink check 5 s
+# - two rounds of ten starts (10 s wait and 3 s pause each, 260 s) with the fallback
+#   between them (lock wait 45 s, rename 9 s)
+# - boot-done lock wait 45 s
+# The state read before each start has no limit of its own and is not counted. 11 s are
+# left for it, and a hung read ends with the unit's timeout like any other step.
+TimeoutStartSec=480
 RemainAfterExit=yes
 
 [Install]

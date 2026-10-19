@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 from jittersim.diagnostic_records import Operation
+from jittersim.config.address_follow import follow_automatically
 from jittersim.config.device_names import saved_device_title
 from jittersim.config.models import (
     DataLimit,
@@ -52,6 +53,7 @@ from .plan import (
     GENERAL_QUEUE_ID,
     SERVICE_LIST_QUEUE_PREFIX,
     EveryoneElseRule,
+    GeneralProfileRule,
     NetworkPlan,
     ServiceAssignmentRule,
     ServiceQuotaRule,
@@ -157,6 +159,8 @@ class PreparedRuntimePlan:
     states: Dict[str, TargetState]
     # Website names whose lookup missed the deadline, so the plan leaves them out.
     unresolved_names: Tuple[str, ...] = ()
+    # The saved configuration version read before the plan was built. None when unknown.
+    configuration_version: Optional[int] = None
 
 
 @dataclass
@@ -186,6 +190,12 @@ def _general_profile_runs(repository: ConfigRepository) -> bool:
             and repository.get_device_start_scope() is None)
 
 
+def _only_everyone_runs(repository: ConfigRepository) -> bool:
+    """Everyone covers every client and no device runs its own profile beside it."""
+
+    return _general_profile_runs(repository) and not repository.get_everyone_exceptions()
+
+
 class RuntimeScheduler:
     """Apply only changed scheduled plans while the dashboard is running."""
 
@@ -208,11 +218,18 @@ class RuntimeScheduler:
         self._database_path = database_path
         self._helper_client = helper_client
         self._poll_seconds = poll_seconds
+        # The scheduler's own database connection, kept from one tick to the next. Opening a
+        # repository runs the whole schema check and the history pruning, and a tick comes
+        # every second: a new one per tick cost the Pi that work 3600 times an hour.
+        self._tick_repository: Optional[ConfigRepository] = None
         self._rolls: Dict[str, _DeviceRollState] = {}
         self._preview = False
         self._pending_events: List[dict] = []
         self._last_pattern_cleanup_at = 0.0
         self._current_payload = None
+        # The saved configuration version the applied plan was built from. It counts only
+        # while `_current_payload` is set.
+        self._applied_version: Optional[int] = None
         self._paused = True
         # Counts Panic requests so an apply that was running meanwhile can tell.
         self._halt_count = 0
@@ -350,14 +367,17 @@ class RuntimeScheduler:
             self._router_canary.stop(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
         if unresolved:
             raise WorkersStillRunning("Scheduler workers did not stop. Their state remains owned.")
+        self._close_tick_repository(timeout=max(0.0, deadline - time.monotonic()))
 
-    def activate(self, *, applied_payload: object, counters_preserved: bool = False) -> None:
+    def activate(self, *, applied_payload: object, counters_preserved: bool = False,
+                 configuration_version: Optional[int] = None) -> None:
         """Resume scheduled work after a successful manual apply."""
 
         with self._lock:
             if not self.can_apply(self.apply_generation):
                 return
             self._current_payload = applied_payload
+            self._applied_version = configuration_version
             self._paused = False
             # A replacement restarts the counters. Keep totals and count on from zero.
             if not counters_preserved:
@@ -381,7 +401,9 @@ class RuntimeScheduler:
         with self._apply_lock:
             self._record_activity(repository=repository, states=prepared.states, now=time.time())
             self._save_patterns(repository, time.time())
-            self.activate(applied_payload=plan_to_payload(prepared.plan), counters_preserved=counters_preserved)
+            self.activate(applied_payload=plan_to_payload(prepared.plan),
+                          counters_preserved=counters_preserved,
+                          configuration_version=prepared.configuration_version)
 
     def build_plan(
         self,
@@ -390,6 +412,7 @@ class RuntimeScheduler:
         now: Optional[float] = None,
         connected_snapshot: Optional[dict] = None,
         device_scope: Optional[frozenset] = None,
+        everyone_exceptions: Optional[frozenset] = None,
     ) -> NetworkPlan:
         """Preview the current runtime plan without advancing rerolls or outages.
 
@@ -406,7 +429,7 @@ class RuntimeScheduler:
             try:
                 plan, _ = self._build_plan(
                     repository=repository, now=current_time, connected_snapshot=connected_snapshot,
-                    device_scope=device_scope,
+                    device_scope=device_scope, everyone_exceptions=everyone_exceptions,
                 )
                 return plan
             finally:
@@ -420,21 +443,28 @@ class RuntimeScheduler:
         now: Optional[float] = None,
         connected_snapshot: Optional[dict] = None,
         device_scope: Optional[frozenset] = None,
+        everyone_exceptions: Optional[frozenset] = None,
     ) -> PreparedRuntimePlan:
         """Keep source descriptions paired with the exact plan being applied.
 
         `device_scope` limits the plan to a device-only start. Without it the
-        whole saved configuration runs.
+        whole saved configuration runs. While Everyone runs, `everyone_exceptions`
+        names the devices that run their own profile beside it: None reads the saved
+        ones and an empty set is the whole-scope plan.
         """
 
         current_time = time.time() if now is None else now
         with self._apply_lock:
+            # Read before building: a write that lands meanwhile makes the version look older
+            # than the plan, never newer.
+            version = repository.get_runtime_state().configuration_version
             plan, states = self._build_plan(
                 repository=repository, now=current_time, connected_snapshot=connected_snapshot,
-                device_scope=device_scope,
+                device_scope=device_scope, everyone_exceptions=everyone_exceptions,
             )
             return PreparedRuntimePlan(
-                plan=plan, states=states, unresolved_names=self._unresolved_names
+                plan=plan, states=states, unresolved_names=self._unresolved_names,
+                configuration_version=version,
             )
 
     @contextmanager
@@ -709,6 +739,48 @@ class RuntimeScheduler:
         with self._lock:
             return self._generation()
 
+    def _keep_applied_version(self, configuration_version: int,
+                              moved_from: Optional[int] = None) -> None:
+        """Keep the saved version of the running plan only while nothing was saved since.
+
+        A scheduled apply changes timed and random effects only: it leaves access rule and
+        ad-blocking edits pending. So it never makes newer saved settings count as running.
+        Only a full apply from the dashboard does. The one exception is `moved_from`: the
+        version right before this tick moved saved devices to their new addresses, which the
+        plan of this tick includes.
+        """
+
+        if self._applied_version is not None and self._applied_version in (
+                configuration_version, moved_from):
+            self._applied_version = configuration_version
+        else:
+            self._applied_version = None
+
+    def running_plan(self):
+        """Return the plan that runs and a copy of its randomization state, or None.
+
+        The plan carries its source descriptions and the saved configuration version it
+        was built from, so a caller can tell whether the saved settings are what runs and
+        can apply exactly this plan again.
+        """
+
+        with self._apply_lock, self._lock:
+            version = self._applied_version
+            plan, states = self.applied_snapshot()
+            if plan is None:
+                return None
+            return (
+                PreparedRuntimePlan(plan=plan, states=dict(states or {}),
+                                    configuration_version=version),
+                {key: replace(roll) for key, roll in self._rolls.items()},
+            )
+
+    def restore_rolls(self, snapshot) -> None:
+        """Put back the randomization state of a plan that is applied again."""
+
+        with self._apply_lock:
+            self._rolls = {key: replace(roll) for key, roll in snapshot.items()}
+
     def applied_snapshot(self):
         """Return the applied plan and its source descriptions without the apply lock."""
 
@@ -842,7 +914,7 @@ class RuntimeScheduler:
         if halts_at_start is None:
             halts_at_start = self.halt_count
         owned_repository = repository is None
-        active_repository = repository or ConfigRepository(self._database_path)
+        active_repository = repository or self._open_tick_repository()
         configuration_version: Optional[int] = None
         helper_attempted = False
         diagnostic_operation = None
@@ -894,7 +966,18 @@ class RuntimeScheduler:
                         repository=active_repository, now=current_time, scope_ended=scope_ended,
                     )
                     return False
-            self._follow_device_addresses(repository=active_repository, now=current_time)
+            # Moving a saved device to its new address is a saved change too. When the
+            # moves were the only saves, the plan of this tick, built after them, covers
+            # both versions.
+            moved_from = None
+            own_saves = self._follow_device_addresses(
+                repository=active_repository, now=current_time, halts_at_start=halts_at_start
+            )
+            if own_saves:
+                moved = active_repository.get_runtime_state().configuration_version
+                if moved == configuration_version + own_saves:
+                    moved_from = configuration_version
+                configuration_version = moved
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
             if current_time - self._last_analytics_cleanup_at >= 24 * 60 * 60:
@@ -944,6 +1027,7 @@ class RuntimeScheduler:
                 # The network already runs this plan, for example one the
                 # dashboard applied after a saved change.
                 def publish_unchanged():
+                    self._keep_applied_version(configuration_version, moved_from)
                     self._log_plan_recovery(self._clear_plan_failure())
                     self._record_activity(repository=active_repository, states=states, now=current_time)
                     self._save_patterns(active_repository, current_time)
@@ -969,6 +1053,7 @@ class RuntimeScheduler:
                     active_repository.rebase_quota_counters(now=int(current_time))
                     self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
                 self._current_payload = payload
+                self._keep_applied_version(configuration_version, moved_from)
                 self._log_plan_recovery(self._clear_plan_failure())
                 if not active_repository.record_schedule_result(success=True):
                     self.pause()
@@ -1022,7 +1107,36 @@ class RuntimeScheduler:
                 self._rolls = previous_rolls
             self._pending_events = []
             if owned_repository:
-                active_repository.close()
+                self._finish_tick_repository(active_repository)
+
+    def _open_tick_repository(self) -> ConfigRepository:
+        if self._tick_repository is None:
+            self._tick_repository = ConfigRepository(self._database_path)
+        return self._tick_repository
+
+    def _finish_tick_repository(self, repository: ConfigRepository) -> None:
+        """Keep the connection for the next tick unless this tick left a transaction open.
+
+        A failed write can leave SQLite's implicit transaction open, and with it the write
+        lock that the dashboard needs. Such a connection is closed, so the next tick starts
+        from a fresh one, as every tick did before the connection was kept.
+        """
+
+        if repository.in_transaction:
+            self._tick_repository = None
+            repository.close()
+
+    def _close_tick_repository(self, timeout: float) -> None:
+        # A manual apply in another thread may still tick with this connection. Stop must
+        # not wait for it without bound: then the connection stays open until the process ends.
+        if not self._apply_lock.acquire(timeout=max(0.0, timeout)):
+            return
+        try:
+            repository, self._tick_repository = self._tick_repository, None
+        finally:
+            self._apply_lock.release()
+        if repository is not None:
+            repository.close()
 
     def _undo_overtaken_apply(self, repository: ConfigRepository) -> None:
         ticket = self.begin_recovery(cancel=False)
@@ -1062,26 +1176,52 @@ class RuntimeScheduler:
                 "attempt" if failed_tries == 1 else "attempts",
             )
 
-    def _follow_device_addresses(self, *, repository: ConfigRepository, now: float) -> None:
+    def _follow_device_addresses(
+        self, *, repository: ConfigRepository, now: float, halts_at_start: Optional[int] = None
+    ) -> int:
         """Move saved devices to the addresses their MAC addresses use now.
 
         DHCP can hand a device a new address, and a saved device is matched by
-        its address, so its profile would silently stop applying.
+        its address, so its profile would silently stop applying. Returns how many
+        saved versions its own moves added, 0 when nothing moved.
         """
 
         if now - self._last_address_check_at < self.address_check_seconds:
-            return
+            return 0
         self._last_address_check_at = now
         read_clients = getattr(self._helper_client, "connected_device_snapshot", None)
         if read_clients is None:
-            return
+            return 0
         try:
             snapshot = read_clients()
         except HelperClientError:
             LOGGER.warning("could not check which addresses saved devices use", exc_info=True)
-            return
+            return 0
         if not snapshot.get("association_status_available"):
-            return
+            return 0
+        # A saved device that came back with a new private address moves first when the
+        # owner chose Automatic, so the IP follow below moves it in this same check.
+        generation = self.apply_generation if halts_at_start is None else halts_at_start
+        own_saves = 0
+
+        def counted(publish):
+            # Count the saved versions this move adds. Inside one transaction no other
+            # writer can save, so the difference is this move's own.
+            nonlocal own_saves
+            with repository.transaction():
+                before = repository.get_runtime_state().configuration_version
+                result = publish()
+                own_saves += repository.get_runtime_state().configuration_version - before
+            return result
+
+        try:
+            follow_automatically(
+                repository, snapshot, now=int(now),
+                fence=lambda publish: self.publish_if_current(
+                    generation, lambda: None if self._paused else counted(publish)),
+            )
+        except (StorageError, sqlite3.Error):
+            LOGGER.warning("could not check for changed private addresses", exc_info=True)
         # Only a reachable neighbour entry confirms an address. Otherwise the
         # helper falls back to a DHCP lease or an old neighbour entry, which
         # can be stale and would move a device back and forth.
@@ -1124,10 +1264,10 @@ class RuntimeScheduler:
         }
         self._blocked_moves = {**unconfirmed, **blocked}
         if not moves:
-            return
+            return own_saves
         if not repository.move_device_addresses(moves):
             LOGGER.warning("saved devices changed during the address check; checking again later")
-            return
+            return own_saves
         for device_id, (old_address, new_address) in moves.items():
             LOGGER.info("device %s moved from %s to %s", device_id, old_address, new_address)
             self._record(
@@ -1139,6 +1279,7 @@ class RuntimeScheduler:
                 now,
                 device_ids=[(device_id,)],
             )
+        return own_saves + 1
 
     def _record_activity(
         self, *, repository: ConfigRepository, states: Dict[str, TargetState], now: float
@@ -1234,6 +1375,7 @@ class RuntimeScheduler:
         random_website_outcomes: Optional[List[RandomWebsiteOutcome]] = None,
         connected_snapshot: Optional[dict] = None,
         device_scope: Optional[frozenset] = None,
+        everyone_exceptions: Optional[frozenset] = None,
     ) -> Tuple[NetworkPlan, Dict[str, TargetState]]:
         """Build the runtime plan and what applies to each target, for the activity log.
 
@@ -1249,6 +1391,7 @@ class RuntimeScheduler:
                     random_website_outcomes=random_website_outcomes,
                     connected_snapshot=connected_snapshot,
                     device_scope=device_scope,
+                    everyone_exceptions=everyone_exceptions,
                 )
             finally:
                 self._unresolved_names = tuple(lookups.timed_out)
@@ -1261,11 +1404,21 @@ class RuntimeScheduler:
         random_website_outcomes: Optional[List[RandomWebsiteOutcome]] = None,
         connected_snapshot: Optional[dict] = None,
         device_scope: Optional[frozenset] = None,
+        everyone_exceptions: Optional[frozenset] = None,
     ) -> Tuple[NetworkPlan, Dict[str, TargetState]]:
         scoped = device_scope is not None
         general_profile = None if scoped else repository.get_general_profile()
+        beside_everyone = None
         if general_profile is not None:
-            return self._build_general_plan(repository=repository, profile=general_profile, now=now)
+            if everyone_exceptions is None:
+                everyone_exceptions = repository.get_everyone_exceptions()
+            if not everyone_exceptions:
+                return self._build_general_plan(
+                    repository=repository, profile=general_profile, now=now)
+            # Everyone runs and these devices opt out of it. Only they get device rules.
+            beside_everyone = general_profile
+            device_scope = frozenset(everyone_exceptions)
+            scoped = True
         snapshot = connected_snapshot
         if snapshot is None and repository.list_unaffected_devices():
             snapshot = station_snapshot(self._helper_client)
@@ -1466,6 +1619,8 @@ class RuntimeScheduler:
             # Device ids may already use the full identifier length, so number
             # the runtime profiles instead of prefixing the device id.
             runtime_profile_id = f"runtime-{len(runtime_devices) + 1}"
+            while beside_everyone is not None and runtime_profile_id == beside_everyone.id:
+                runtime_profile_id += "-device"
             runtime_profiles[runtime_profile_id] = roll.runtime_profile
             runtime_devices.append(replace(device, profile_id=runtime_profile_id))
 
@@ -1539,7 +1694,27 @@ class RuntimeScheduler:
                 next_change_at=self._next_schedule_change(schedules, now, everyone_else=True),
             )
 
-        service_list_rules = () if scoped else self._build_service_list_rules(
+        general_rule = None
+        if beside_everyone is not None:
+            # Everyone keeps its own roll, outage and website choices, as when it runs alone.
+            general_roll = self._roll(
+                key="@general",
+                selected_profile=beside_everyone,
+                source_key=beside_everyone.id,
+                source_profiles=beside_everyone,
+                now=now,
+                generator_key=GENERAL_QUEUE_ID,
+            )
+            active_device_ids.add("@general")
+            runtime_profiles[beside_everyone.id] = general_roll.runtime_profile
+            general_rule = GeneralProfileRule(
+                profile_id=beside_everyone.id,
+                allowed_addresses=resolve_domains(
+                    domains=general_roll.runtime_profile.website_domains)
+                if general_roll.runtime_profile.website_mode == "allow_only" else None,
+                outage_active=general_roll.outage_until > now,
+            )
+        service_list_rules = () if scoped and general_rule is None else self._build_service_list_rules(
             repository=repository,
             profiles=profiles,
             now=now,
@@ -1618,6 +1793,7 @@ class RuntimeScheduler:
             service_assignment_rules=service_assignment_rules,
             service_list_rules=service_list_rules,
             everyone_else=everyone_else,
+            general_profile=general_rule,
         )
         return plan, states
 
@@ -1960,9 +2136,15 @@ class RuntimeScheduler:
     def _sample_traffic_if_needed(self, *, repository: ConfigRepository, now: float) -> None:
         """Persist a bounded DNS sample when a traffic progression is active."""
 
-        if _general_profile_runs(repository) or now - self._last_traffic_sample_at < 5:
+        if _only_everyone_runs(repository) or now - self._last_traffic_sample_at < 5:
             return
         progressions = repository.list_active_progressions(now=int(now))
+        # Beside Everyone only the devices that run their own profile run progressions.
+        # The others are paused, so their progressions neither sample nor advance.
+        running_ids = repository.get_everyone_exceptions() if _general_profile_runs(
+            repository) else None
+        if running_ids is not None:
+            progressions = tuple(item for item in progressions if item.device_id in running_ids)
         if not any(progression.mode == "traffic" for progression in progressions):
             return
         observe_dns_queries = getattr(self._helper_client, "observe_dns_queries", None)
@@ -1980,6 +2162,15 @@ class RuntimeScheduler:
             blocked = protected_addresses(repository, stations)
             macs_by_address = station_macs_by_address(stations)
             observed_at = int(now)
+            if running_ids is not None:
+                running_addresses = {
+                    str(device.ipv4_address)
+                    for device in repository.list_devices() if device.id in running_ids
+                }
+                observations = [
+                    observation for observation in observations
+                    if str(observation["ipv4_address"]) in running_addresses
+                ]
             sampled = tuple(
                 DomainObservation(
                     ipv4_address=observation["ipv4_address"],
@@ -2014,17 +2205,23 @@ class RuntimeScheduler:
     def counter_device_ids(self, *, repository: ConfigRepository) -> set:
         """Use the installed rule membership when adding shared counters."""
 
-        if _general_profile_runs(repository):
+        if _only_everyone_runs(repository):
             return set()
         protected = {item.mac_address for item in repository.list_unaffected_devices()}
         allowed = {
             device.id for device in repository.list_devices() if device.mac_address not in protected
         }
+        if _general_profile_runs(repository):
+            # Beside Everyone only the devices that run their own profile have counters.
+            allowed &= repository.get_everyone_exceptions()
         payload = self._current_payload
         if isinstance(payload, dict) and isinstance(payload.get("mark_rules"), list):
             return allowed & {rule["device_id"] for rule in payload["mark_rules"]}
         snapshot = station_snapshot(self._helper_client) if protected else None
-        return {device.id for device in eligible_clients(repository, snapshot).devices}
+        return {
+            device.id for device in eligible_clients(repository, snapshot).devices
+            if device.id in allowed
+        }
 
     def _sample_quota_usage_if_needed(
         self,

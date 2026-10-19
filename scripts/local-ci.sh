@@ -53,6 +53,7 @@ PI_BROWSER_MODULES=(
   trust_access
   address_move
   address_move_privacy
+  address_follow
   general_profile
   device_apply_start
   saved_profiles
@@ -65,6 +66,7 @@ PI_BROWSER_MODULES=(
   ad_blocking
   group_devices
   impact_check
+  speed_test_window
   sidebar_status
   apply_clarity
   router_copy

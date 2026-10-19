@@ -315,11 +315,10 @@ See the [household plan](docs/implementation-plan-household-access-point-2026-09
   of current `main` on the Pi, the GitHub token, `scripts/release.sh 0.2.0` and the physical
   acceptance of the exact package (see Current remaining work).
 - [x] Apply a saved profile to one device and start only that device while the network is
-  reset (PR 96, 127, 131). While an Everyone profile runs this is refused before anything is
-  saved.
-- [ ] Let one device run its own profile while an Everyone profile runs. It needs the
-  general-profile renderer to leave the device out of the shared mark and Linux packet checks
-  (see the design addendum, "Not covered"). PR 149 (draft) builds it.
+  reset (PR 96, 127, 131).
+- [x] Let one device run its own profile while an Everyone profile runs (PR 149). The renderer
+  leaves the device out of the shared mark and Linux packet checks cover it. It is refused while
+  Everyone is saved but not running or while what runs is older than the saved settings.
 - [x] Ask in an accessible in-page dialog before every destructive action (PR 141), speak each
   result once through one announcer and keep focus when lists refresh (PR 146, 152).
 - [x] Exercise complete browser journeys in CI against an installed package.
@@ -527,7 +526,7 @@ The project is ready for presentation when it can:
 
 ## Current remaining work
 
-Checked against `origin/main` at `8c3f8171` (PR 138) on 18 October 2026. Every unticked box in the
+Checked against `origin/main` at `00c2cc8f` (PR 164) on 19 October 2026. Every unticked box in the
 milestones above is one of these:
 
 - Owner-run physical acceptance on the Pi (Milestones 9 to 15 and the router security section).
@@ -537,7 +536,7 @@ milestones above is one of these:
   [carry-forward list](docs/carry-forward-panic-batch-2026-10-10.md).
 - Planned work that has not started: Milestones 16 to 19 (Deliveries B to F of the erratic
   connection plan) and the website list modes of the [planned features](docs/planned-features.md).
-- Planned work in progress: a device profile while Everyone runs (PR 149, Milestone 12).
+- Planned work in progress: the draft pull requests listed below (Check connection, write route table, speed test and security follow-ups, QA follow-ups).
 - The v0.2.0 release itself (Milestone 12), described below.
 
 Hosted CI cannot start jobs (billing limit). Every pull request is gated by
@@ -550,16 +549,21 @@ notes and recovery copy), 117 (wheel build lock), 138 (carry-forward fixes of th
 test image). `PANIC_APPROVED_SOURCES` has seven entries. The newest is for PR 138 and main's three
 hash-pinned files match it.
 
-Open pull requests on 18 October 2026:
+Merged on 18 and 19 October: PR 111 (signed notes in the update status, check-only manual checks),
+121 (device speed test), 149 (a device runs its own profile beside Everyone), 150 and 157 (router
+safety audit round 2 and follow-ups), 151 (address changes), 155 (read route table), 159 (security
+audit), 160 and 169 (boot Wi-Fi look), 162 (QA leftovers and flaky tests), 164 (soak harness and
+resource fixes), 166 (mutation testing), 167 (property tests) and 168 (interrupted apply cleanup).
+
+Open pull requests on 19 October 2026 (all drafts):
 
 | PR | What it does | State |
 | --- | --- | --- |
-| 111 | Signed release notes in the update status, check-only manual checks, retry of a development-label build | Ready for review. Gated: needs the combined independent review and a new approved bundle |
-| 121 | Device speed test: compare a device's speed before and after a profile | Ready for review |
-| 149 | Start a device with its own profile while Everyone runs | Draft |
-| 150 | Router safety audit round 2: keep un-NATed packets, ARP replies and redirects off the household LAN | Ready for review |
-| 151 | Follow saved devices to their new private Wi-Fi address | Draft |
-| 153 | A **Check connection** button that sends probes to a device. Stacked on PR 121 | Draft |
+| 161 | A **Check connection** button that sends probes to a device and compares loss and delay with its profile (replaces PR 153) | Draft |
+| 163 | Handle dashboard writes from a route table instead of an if-chain | Draft |
+| 165 | Fix the small findings left by the device speed test review | Draft |
+| 170 | Finish the follow-ups of the PR 159 security audit | Draft |
+| 171 | Fix three PR 162 review items: token edit, Revoke, failed copy | Draft |
 
 The first release, v0.2.0, is being prepared. `pyproject.toml` already says `0.2.0`, but no tag, no
 GitHub release and no reserved version exist yet (`docs/releases/registry.json`). The release tooling

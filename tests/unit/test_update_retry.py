@@ -342,3 +342,16 @@ def test_rollback_confirmation_explains_later_settings_replacement():
         assert jittersim(["update", "rollback"]) == 0
     assert "Changes after that backup will be replaced" in confirm.call_args.args[0]
     helper.return_value.install_release.assert_not_called()
+
+
+def test_a_retained_development_build_can_be_retried(failed):
+    # Development builds are labelled X.Y.Z.dev+COMMIT. The retry check uses the same version
+    # matcher as staging, so the '+' does not refuse valid retained work.
+    root, code, config, request = failed
+    request["version"] = "0.3.1.dev+abc1234"
+    updates.atomic_json(root / "request.json", request)
+    view = status(failed)
+    assert view["retry"] is not None and view["retry"]["version"] == "0.3.1.dev+abc1234"
+    request["version"] = "0.3.1 dev;rm"
+    updates.atomic_json(root / "request.json", request)
+    assert status(failed)["retry"] is None
