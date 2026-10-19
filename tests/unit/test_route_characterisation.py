@@ -61,6 +61,12 @@ READ_PATHS = (
     "/api/updates/online-settings", "/api/history", "/api/test-sessions",
     "/api/test-sessions/unknown",
     "/api/dashboard-access", "/api/dashboard-access/status", "/api/dashboard-access/moves",
+    # Added on main after the first recording. Recorded from main's if-chain code.
+    "/api/speed-tests", "/api/speed-tests?mac=bad", "/api/speed-tests/status",
+    "/api/speed-tests/status?run=unknown", "/api/speed-tests/compare",
+    "/api/speed-tests/compare?baseline=1&result=2", "/api/speed-tests/export",
+    "/api/speed-tests/export?format=csv", "/api/speed-tests/export?format=xml",
+    "/api/speed-tests?a=1&b=2&c=3&d=4&e=5&f=6&g=7&h=8&i=9",
     # Paths that do not exist.
     "/api", "/api/", "/api/nope", "/api/profiles/", "/API/health", "/nope", "/index.html",
     "/api/apply", "/api/reset",

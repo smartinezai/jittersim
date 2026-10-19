@@ -640,6 +640,28 @@ class ConfigRepository:
                 CHECK (device_id IS NULL OR group_id IS NULL)
             )
         """)
+        # Devices that run their own profile while Everyone runs. Runtime state, not a
+        # setting: never exported. A runtime_state write keeps them only when it sets
+        # `exceptions_kept` for its own statement. Any writer that does not know about
+        # the column, such as an older dashboard after a rollback, ends them here.
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS everyone_exceptions (
+                device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE
+            )
+            """
+        )
+        self._add_column_if_missing("runtime_state", "exceptions_kept", "INTEGER NOT NULL DEFAULT 0")
+        self._connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS end_everyone_exceptions
+            AFTER UPDATE OF observed_state, last_action, last_result, last_error ON runtime_state
+            WHEN NEW.exceptions_kept = 0
+            BEGIN
+                DELETE FROM everyone_exceptions;
+            END
+            """
+        )
         if scope_before_trigger:
             # Nothing tells a live scope from a stale one here, so none starts again. The
             # network stays a Reset and restart recovery resets it before anything else.
@@ -675,6 +697,10 @@ class ConfigRepository:
             )
         self._prune_run_history()
         self._commit()
+        # Device speed test results (config/speed_tests.py) get their table on every open.
+        from .speed_tests import ensure_speed_test_schema
+
+        ensure_speed_test_schema(self._connection)
         self._migrate_domain_observations()
         self._commit()
         self._prune_random_website_analytics(now=int(time.time()))
@@ -970,15 +996,21 @@ class ConfigRepository:
         last_result: Optional[str],
         last_error: Optional[str],
         keep_device_scope: bool = False,
+        keep_everyone_exceptions: bool = False,
     ) -> RuntimeState:
         """Persist one observed helper state without changing desired configuration.
 
-        Every state change ends a device-only start unless it belongs to one, so
-        Reset, Panic, Start and Apply to everyone never leave a scope behind.
+        Every state change ends a device-only start and every device that runs its own
+        profile beside Everyone unless it belongs to one, so Reset, Panic, Start and
+        Apply to everyone never leave either behind.
         """
 
         if keep_device_scope and last_action != "reset":
             raise ValueError("a device-only start keeps the network reset")
+        if keep_everyone_exceptions and last_action not in ("apply", "schedule"):
+            raise ValueError("devices beside Everyone need a running network")
+        if keep_device_scope and keep_everyone_exceptions:
+            raise ValueError("a device-only start has no Everyone to run beside")
         current = self.get_runtime_state()
         updated = RuntimeState(
             configuration_version=current.configuration_version,
@@ -990,7 +1022,8 @@ class ConfigRepository:
         self._connection.execute(
             """
             UPDATE runtime_state
-            SET observed_state = ?, last_action = ?, last_result = ?, last_error = ?
+            SET observed_state = ?, last_action = ?, last_result = ?, last_error = ?,
+                exceptions_kept = ?
             WHERE id = 1
             """,
             (
@@ -998,12 +1031,67 @@ class ConfigRepository:
                 updated.last_action,
                 updated.last_result,
                 updated.last_error,
+                int(keep_everyone_exceptions),
             ),
         )
+        self._end_exceptions_keep()
         if not keep_device_scope:
             self._connection.execute("DELETE FROM device_start_scope")
         self._commit()
         return updated
+
+    def _end_exceptions_keep(self) -> None:
+        """Clear the one-statement flag that let a write keep Everyone's exceptions."""
+
+        # This statement names no column the trigger watches, so it never fires it.
+        self._connection.execute(
+            "UPDATE runtime_state SET exceptions_kept = 0 WHERE id = 1 AND exceptions_kept = 1"
+        )
+
+    def get_everyone_exceptions(self) -> frozenset:
+        """Return the devices that run their own profile while Everyone runs.
+
+        They count only while an Everyone profile is saved and the network is not
+        reset. Otherwise there are none, whatever rows were left behind.
+        """
+
+        if self.get_runtime_state().last_action not in ("apply", "schedule"):
+            return frozenset()
+        if self.get_general_profile() is None:
+            return frozenset()
+        rows = self._connection.execute(
+            "SELECT device_id FROM everyone_exceptions ORDER BY device_id"
+        ).fetchall()
+        return frozenset(row["device_id"] for row in rows)
+
+    def everyone_exception_rows(self) -> frozenset:
+        """Return every recorded exception, whether or not it counts right now."""
+
+        rows = self._connection.execute("SELECT device_id FROM everyone_exceptions").fetchall()
+        return frozenset(row["device_id"] for row in rows)
+
+    def add_everyone_exception(self, device_id: str) -> None:
+        """Let one saved device run its own profile while Everyone runs for the rest."""
+
+        self._connection.execute(
+            "INSERT OR IGNORE INTO everyone_exceptions (device_id) VALUES (?)", (device_id,)
+        )
+        self._commit()
+
+    def restore_everyone_exceptions(self, device_ids) -> None:
+        """Put back the exceptions a refused or failed start found, without the new one."""
+
+        with self.transaction():
+            self._connection.execute("DELETE FROM everyone_exceptions")
+            self._connection.executemany(
+                "INSERT OR IGNORE INTO everyone_exceptions (device_id) "
+                "SELECT id FROM devices WHERE id = ?",
+                [(device_id,) for device_id in sorted(device_ids)],
+            )
+
+    def clear_everyone_exceptions(self) -> None:
+        self._connection.execute("DELETE FROM everyone_exceptions")
+        self._commit()
 
     def get_device_start_scope(self) -> Optional[frozenset]:
         """Return the devices of a device-only start, or None when there is none.
@@ -1218,7 +1306,15 @@ class ConfigRepository:
             UPDATE runtime_state
             SET observed_state = ?,
                 last_action = CASE WHEN last_action = 'reset' THEN 'reset' ELSE 'schedule' END,
-                last_result = ?, last_error = ?
+                last_result = ?, last_error = ?,
+                exceptions_kept = CASE
+                    WHEN last_action = 'reset' THEN 0
+                    WHEN ? = 0 THEN 1
+                    WHEN EXISTS (
+                        SELECT 1 FROM general_profile_setting WHERE profile_id IS NOT NULL
+                    ) THEN 1
+                    ELSE 0
+                END
             WHERE id = 1 AND (
                 last_action IS NULL OR last_action != 'reset'
                 OR EXISTS (SELECT 1 FROM device_start_scope)
@@ -1228,8 +1324,12 @@ class ConfigRepository:
                 "applied" if success else "error",
                 "success" if success else "failure",
                 None if success else "scheduled network plan failed",
+                # Only an accepted plan without Everyone ends the record. A failed one
+                # replaced nothing, so the record still says what runs.
+                int(success),
             ),
         )
+        self._end_exceptions_keep()
         self._commit()
         return bool(cursor.rowcount)
     def get_traffic_rate_settings(self) -> dict:
@@ -1291,10 +1391,13 @@ class ConfigRepository:
             """
             UPDATE runtime_state
             SET configuration_version = configuration_version + 1,
-                observed_state = 'unknown'
+                observed_state = 'unknown',
+                exceptions_kept = 1
             WHERE id = 1
             """
         )
+        # A saved change keeps the devices that run their own profile beside Everyone.
+        self._end_exceptions_keep()
 
     def get_profile(self, profile_id: str) -> Optional[Profile]:
         """Return one profile or `None` when it is not stored."""

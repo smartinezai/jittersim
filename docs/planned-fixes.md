@@ -35,6 +35,12 @@ commit ([local CI](local-ci.md)).
   (no password), and every boot renames a saved Wi-Fi with another name back to it (PR 140,
   `wifi_follow.py`). The router is not contacted and a manual Wi-Fi change or a name reset stops
   the following.
+- Two Wi-Fis with one name (open pull request from `fix/wifi-follow-boot-scan`): since PR 140 the boot gave the Pi the router name even when the
+  router's own Wi-Fi was on. The boot step now looks once at the air and keeps
+  `JitterSim-Recovery` for that boot when the router name is on the air from another BSSID
+  (router safety audit round 2, owner decision D1). The test Wi-Fi also refuses to start when
+  the Ethernet uplink is inside `192.168.50.0/24` (D3). Open: a physical check on the Pi that
+  includes a cold boot with the router Wi-Fi on and shows `boot_scan: seen`, not `failed`.
 - Panic and capacity: Panic stays reachable when silent connections fill the dashboard
   queue (PR 95). The Panic reserve and the waiting queue are kept for real Panic requests
   (PR 123). Reliability tests for Panic and capacity were added (PR 93).

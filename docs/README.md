@@ -37,6 +37,7 @@ a month (for example `2026-09`) was written in that month.
 | [architecture.md](architecture.md) | Which file owns which part of the dashboard source |
 | [../DESIGN.md](../DESIGN.md) | The dark visual baseline of the dashboard |
 | [local-ci.md](local-ci.md) | Running the workflow commands on a Mac with `scripts/local-ci.sh`. Hosted CI cannot start jobs, so this is the gate of every pull request |
+| [mutation-testing-2026-10-18.md](mutation-testing-2026-10-18.md) | The mutation-testing run on the plan logic: method, kill rates before and after per module, what was added, and how to run `scripts/mutation-test.py` again |
 | [releasing.md](releasing.md) | Cutting a release with `scripts/release.sh`, installing it and what the local verification record is |
 | [releases/README.md](releases/README.md) | The rules and manual commands behind a release: reserve, build, approve and publish |
 | [../CHANGELOG.md](../CHANGELOG.md) | The notes of every published release |
@@ -60,15 +61,19 @@ a month (for example `2026-09`) was written in that month.
 | [upstream-safe-impairments-2026-10-09.md](upstream-safe-impairments-2026-10-09.md) | Where each impairment runs, why the router never receives damaged, copied or reordered uploads, and the hardware experiment |
 | [router-incident-findings-2026-10-04.md](router-incident-findings-2026-10-04.md) | The Vodafone router outage of 4 October. The cause is unproven |
 | [pi-only-datapath-audit-2026-10-09.md](pi-only-datapath-audit-2026-10-09.md) | Every way a device can end up on the Pi without working internet, and what was fixed |
+| [router-safety-audit-round2-2026-10-17.md](router-safety-audit-round2-2026-10-17.md) | Everything the Pi can put on the router cable, mode by mode, with the router-side capture test, the fixes and the read-only checks for the real hardware |
 | [update-path-audit-2026-10-09.md](update-path-audit-2026-10-09.md) | The update and release path mapped step by step |
 | [research-router-pi-wifi-troubleshooting-2026-10-09.md](research-router-pi-wifi-troubleshooting-2026-10-09.md) | Ranked hypotheses and a safe experiment ladder for the outage |
 | [open-source-gap-review-2026-10-09.md](open-source-gap-review-2026-10-09.md) | Which hand-built parts a free tool would do better |
 | [open-source-adoption-2026-10-09.md](open-source-adoption-2026-10-09.md) | Free tools JitterSim could adopt (research) |
+| [review-results-device-speed-test-2026-10-10.md](review-results-device-speed-test-2026-10-10.md) | Review rounds of the device speed test (PR 121) and what is still open |
 | [dependency-audit-2026-10-09.md](dependency-audit-2026-10-09.md) | The 22 pip-audit findings in the release locks: reachability, fixes and what was left |
 | [outage-lab-results-2026-10-09.md](outage-lab-results-2026-10-09.md) | The Pi-only cutover rebuilt in network namespaces: 16 scenarios, one per failure mode of the outage dossier (PR 120) |
 | [carry-forward-panic-batch-2026-10-10.md](carry-forward-panic-batch-2026-10-10.md) | What the reviews of the combined Panic batch (PR 136) found and left open, and the owner action after a rollback from the first upload-safe release |
+| [panic-crash-matrix-2026-10-18.md](panic-crash-matrix-2026-10-18.md) | Panic and Reset in the kernel lab after a crash, a failure or a stall at every step of a heavy apply: results and one defect in a Panic-pinned file |
 | [upstream-safe-gated-notes-2026-10-10.md](upstream-safe-gated-notes-2026-10-10.md) | The Panic-gated part of the upstream-safe impairments: the helper apply report (merged) and the rollback cleanup (not merged) |
 | [design-helper-action-authorization-2026-10-09.md](design-helper-action-authorization-2026-10-09.md) | A proposal for per-caller authorization on the helper socket. Nothing is implemented |
+| [security-audit-2026-10-18.md](security-audit-2026-10-18.md) | Adversarial security audit of main: threat model, verdicts per area, four fixes, the open findings and a proposed helper patch |
 | [qa-report-2026-10-09.md](qa-report-2026-10-09.md) | Exploratory QA of 9 October: seven findings, which PR 126 fixed and what was left as it was (PR 107) |
 
 ### Release records
@@ -194,6 +199,8 @@ are grouped by theme.
 | [Choose a saved profile when assigning a device](implementation-plan-device-profile-picker-2026-10-04.md) | 2026-10-04 |
 | [Device names, traffic clarity, profile list, sidebar status and impact check](implementation-plan-device-visibility-2026-10-01.md) | 2026-10-01 |
 | [Device workflows and repeatable tests](implementation-plan-device-workflows-2026-09.md) | 2026-09 |
+| [Device speed test](implementation-plan-device-speed-test-2026-10-09.md) | 2026-10-09 |
+| [Device speed test review fixes](implementation-plan-device-speed-test-review-fixes-2026-10-14.md) | 2026-10-14 |
 | [Make raw diagnostics reachable from the keyboard](implementation-plan-diagnostics-keyboard-access-2026-10-03.md) | 2026-10-03 |
 | [Diagnostics keyboard request check](implementation-plan-diagnostics-preview-check-2026-10-04.md) | 2026-10-04 |
 | [Finish the coordinated dashboard changes](implementation-plan-final-dashboard-composition-2026-10-04.md) | 2026-10-04 |

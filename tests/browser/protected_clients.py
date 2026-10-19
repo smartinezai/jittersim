@@ -59,6 +59,22 @@ def expect_ordinary(row):
     expect(found["add"]).not_to_have_attribute("aria-disabled", re.compile(".*"))
 
 
+def token_colour(page, name):
+    """A colour variable of the page as the browser writes a computed colour (rgb(...))."""
+
+    return page.evaluate(
+        """(name) => {
+            const probe = document.createElement('span');
+            probe.style.color = 'var(' + name + ')';
+            document.body.append(probe);
+            const colour = getComputedStyle(probe).color;
+            probe.remove();
+            return colour;
+        }""",
+        name,
+    )
+
+
 def look(row):
     return row.evaluate(
         """(node) => ({
@@ -111,10 +127,12 @@ def check_saved_device_rows(page, post, width):
     expect(row).not_to_contain_text("delay")
     if width > 600:
         expect(row).to_have_class(re.compile(r"\bprotected\b"))
-        assert row.evaluate("(node) => getComputedStyle(node.cells[0]).color") != \
-            page.locator("#device-table tbody tr").first.evaluate(
-                "(node) => getComputedStyle(node.cells[0].querySelector('strong')).color"
-            )
+        # The table is drawn again a few times while the page loads. A locator that is resolved
+        # first and read in a second step can reach a row that is already gone, and the computed
+        # colour of a row that is out of the page is an empty string. to_have_css reads again until
+        # the greyed-out colours show, so it needs no luck with the timing.
+        expect(row.locator("td").first).to_have_css("color", token_colour(page, "--tx-disabled"))
+        expect(row.locator("td strong").first).to_have_css("color", token_colour(page, "--tx-protected"))
     # The sidebar does not count a paused device as affected.
     expect(page.locator("#apply-summary")).not_to_contain_text("1 device")
 

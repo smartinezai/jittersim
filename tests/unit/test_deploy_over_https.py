@@ -29,12 +29,21 @@ pytestmark = pytest.mark.skipif(
     reason="ssh-keygen, openssl and curl are required")
 
 SHIM = '''#!/bin/sh
-printf '%s\\n' "$(basename "$0") $*" >> "$FAKE_LOG"
-case $(basename "$0") in
+name=$(basename "$0")
+# FAKE_SSH_START_DELAY makes the fake ssh slow to start, like a busy machine does.
+[ "$name" = ssh ] && [ -n "${FAKE_SSH_START_DELAY:-}" ] && "$REAL_SLEEP" "$FAKE_SSH_START_DELAY"
+printf '%s\\n' "$name $*" >> "$FAKE_LOG"
+case $name in
     curl) exec "$REAL_CURL" "$@" ;;
     ssh) exit "${FAKE_SSH_EXIT:-255}" ;;
     scp) exit 1 ;;
-    sleep) exit 0 ;;
+    sleep)
+        # A short wait returns at once so a poll loop does not slow the test. A long one is the
+        # deadline watchdog of with_deadline in deploy-from-mac.sh. It has to really wait: when it
+        # returns at once it stops the command it guards before that command has done anything,
+        # and the fake ssh sometimes did not get to write its line to the log.
+        [ "${1%%.*}" -le 5 ] 2>/dev/null && exit 0
+        exec "$REAL_SLEEP" "$@" ;;
     ifconfig) printf "en0: flags=8863<UP>\\n\\tinet %s netmask 0xffffff00\\n" "${FAKE_MAC_ADDRESS:-192.168.0.5}" ;;
     route) printf 'gateway: 192.168.0.1\\n' ;;
     security)
@@ -166,7 +175,8 @@ def lab(tmp_path):
     home.mkdir()
     env = {"PATH": f"{bin_directory}:{os.environ['PATH']}", "HOME": str(home),
            "TMPDIR": str(tmp_path), "FAKE_LOG": str(tmp_path / "calls.log"),
-           "REAL_CURL": shutil.which("curl"), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "REAL_CURL": shutil.which("curl"), "REAL_SLEEP": shutil.which("sleep"),
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
     for command in (["init", "-q"], ["add", "."], ["commit", "-q", "-m", "one"]):
         subprocess.run(["git", "-C", str(repo), *command], check=True, env=env)
@@ -357,6 +367,37 @@ def test_when_ssh_does_not_answer_it_falls_back_to_https(lab):
     assert "SSH to the Pi did not answer. Using the HTTPS upload instead." in result.stdout
     assert "ssh" in tools(lab)
     assert "staged release" in result.stdout
+
+
+def test_a_slow_ssh_is_still_asked_before_the_https_fallback(lab):
+    """The wrapper stops an ssh that does not answer after CHECK_SECONDS, not before it starts.
+
+    The fake sleep used to return at once, so the deadline watchdog killed the fake ssh whenever
+    the watchdog ran before the ssh wrote its line, and the test saw no ssh call. A slow start
+    makes that certain: with an instant watchdog this fails every time.
+    """
+
+    result = mac(lab, *base_arguments(lab)[2:], "--stage-only", FAKE_SSH_EXIT="255",
+                 FAKE_SSH_START_DELAY="0.4")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SSH to the Pi did not answer. Using the HTTPS upload instead." in result.stdout
+    assert "ssh" in tools(lab)
+    assert (lab["pi"].root / "staged" / ".jittersim-release.json").is_file()
+
+
+def test_the_fake_sleep_waits_for_a_deadline_but_not_for_a_poll(lab):
+    """Guards the shim itself: 60 seconds must not return at once and 3 seconds must."""
+
+    shim = lab["tmp"] / "bin" / "sleep"
+    quick = subprocess.run([str(shim), "3"], env=lab["env"], timeout=5)
+    assert quick.returncode == 0
+    patient = subprocess.Popen([str(shim), "60"], env=lab["env"])
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            patient.wait(timeout=0.5)
+    finally:
+        patient.kill()
+        patient.wait()
 
 
 @pytest.mark.parametrize("explicit_https", [True, False])

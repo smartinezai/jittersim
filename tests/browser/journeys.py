@@ -15,6 +15,7 @@ from tests.browser.confirm_dialogs import (
     cancel_with_button,
     cancel_with_escape,
     check_destructive_confirms,
+    check_revoke_and_clear_confirms,
 )
 from tests.browser.phone import close_controls, sidebar_control
 from tests.browser.service_list_focus import check_service_list_contexts
@@ -57,7 +58,7 @@ def check_wifi_recovery(page):
     requests = []
     page.on("request", lambda request: requests.append(request)
             if request.url.endswith("/api/access-point/reset-name") else None)
-    ask = dict(title="Restore the default Wi-Fi name?", text="The password and security type stay the same.")
+    ask = dict(title="Restore the Wi-Fi name?", text="The password and security type stay the same.")
     button.click()
     cancel_with_escape(page, button, verb="Restore name", **ask)
     expect(field).to_have_value("Copied network")
@@ -467,6 +468,10 @@ def run():
                 expect(page.locator("#test-session-running")).to_contain_text("Recording:")
                 page.get_by_role("button", name="Attach displayed measurements", exact=True).click()
                 expect(page.locator("#test-session-summary")).to_contain_text("1 measurements")
+                # The runs are kept in the session now, so Clear needs no question.
+                page.locator("#clear-measurements").click()
+                expect(page.get_by_role("dialog")).to_have_count(0)
+                expect(page.locator("#measurement-table")).to_have_text("Add result files to compare runs.")
                 page.get_by_label("Test notes", exact=True).fill(
                     "The phone recovered after the timer ended."
                 )
@@ -663,6 +668,7 @@ def run():
                 check_service_list_contexts(browser, f"http://127.0.0.1:{port}/")
                 check_wifi_recovery(page)
                 check_destructive_confirms(page)
+                check_revoke_and_clear_confirms(page)
                 page.set_viewport_size({"width": 1440, "height": 1000})
                 page.screenshot(path="test-results/wifi-recovery-desktop.png", full_page=True)
                 page.set_viewport_size({"width": 430, "height": 1000})
