@@ -76,6 +76,7 @@ a month (for example `2026-09`) was written in that month.
 | [design-helper-action-authorization-2026-10-09.md](design-helper-action-authorization-2026-10-09.md) | A proposal for per-caller authorization on the helper socket. Nothing is implemented |
 | [security-audit-2026-10-18.md](security-audit-2026-10-18.md) | Adversarial security audit of main: threat model, verdicts per area, four fixes, the open findings and a proposed helper patch |
 | [qa-report-2026-10-09.md](qa-report-2026-10-09.md) | Exploratory QA of 9 October: seven findings, which PR 126 fixed and what was left as it was (PR 107) |
+| [soak-and-resource-audit-2026-10-18.md](soak-and-resource-audit-2026-10-18.md) | The soak harness (`tests/soak/`), leaks and SD-card writes over time, the memory and CPU budget of each service on a Pi 3B+, three fixes and the proposals left |
 
 ### Release records
 
