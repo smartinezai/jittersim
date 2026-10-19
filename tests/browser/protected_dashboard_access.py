@@ -28,17 +28,23 @@ def idle(page):
         "() => !adminTokenChecking && !dashboardRefresh && !dashboardPoll", timeout=30000)
 
 
-def hold_first_diagnostics(page):
-    """Hold the first read of the diagnostics, which every token check makes. Return the held
-    routes and the handler to remove."""
+def hold_first_read(page, pattern):
+    """Hold the first request to `pattern` and let every later one through. Return the held routes
+    and the handler to remove."""
 
     held = []
 
     def handler(route):
         held.append(route) if not held else route.continue_()
 
-    page.route("**/api/diagnostics", handler)
+    page.route(pattern, handler)
     return held, handler
+
+
+def hold_first_diagnostics(page):
+    """Hold the first read of the diagnostics, which every token check makes."""
+
+    return hold_first_read(page, "**/api/diagnostics")
 
 
 def wait_for_held(held, page):
@@ -93,6 +99,43 @@ def check_a_second_token_check_waits_for_the_first(page):
     expect(page.locator("#private-dashboard")).to_be_visible()
 
 
+def check_a_token_edit_does_not_wait_for_a_check_that_hangs(page):
+    """The Pi does not answer a token check. The person edits the token and chooses Check token.
+    The new check used to queue behind the hung one and say nothing until that one gave up. It
+    starts at once, and the late answer of the old check changes nothing."""
+
+    idle(page)
+    held, handler = hold_first_read(page, "**/api/dashboard-access/status")
+    page.evaluate("""() => {
+      window.staleEnded = false;
+      window.stale = checkAdminToken().then(() => { window.staleEnded = true; });
+    }""")
+    wait_for_held(held, page)
+    page.locator("#open-admin-credentials").click()
+    field = page.locator("#admin-token")
+    field.fill("")
+    field.fill("browser-test")
+    page.locator("#check-admin-token").click()
+    status = page.locator("#token-check-status")
+    # The old check gives up after 15 seconds (REQUEST_TIMEOUT_MS), so a new check that waited for
+    # it could not be done within 10.
+    expect(status).to_have_text("Token accepted. Diagnostics loaded.", timeout=10000)
+    expect(page.locator("#admin-credential-state")).to_have_text("Accepted")
+    expect(page.locator("#private-dashboard")).to_be_visible()
+    # The new check is done and the old one still waits for the Pi.
+    assert page.evaluate("window.staleEnded") is False, "the old check did not hang"
+    # It answers late with a refusal that would lock the dashboard if anything used it.
+    held[0].fulfill(status=401, content_type="application/json", body=json.dumps({"error": "unauthorized"}))
+    page.wait_for_function("() => window.staleEnded", timeout=15000)
+    page.unroute("**/api/dashboard-access/status", handler)
+    expect(status).to_have_text("Token accepted. Diagnostics loaded.")
+    expect(page.locator("#admin-credential-state")).to_have_text("Accepted")
+    expect(page.locator("#private-dashboard")).to_be_visible()
+    assert page.evaluate(
+        "() => [adminTokenVerified, adminTokenRejected, adminTokenRefused]") == [True, False, False]
+    page.locator("#close-credentials").click()
+
+
 def run():
     environment = {**os.environ, "JITTERSIM_BROWSER_TEST_WIFI_PEER": "1",
                    "JITTERSIM_BROWSER_TEST_PROTECTED_PEER": "1"}
@@ -142,6 +185,7 @@ def run():
                 expect(listing.locator("button")).to_have_count(0)
                 check_a_refresh_during_the_token_check_is_not_a_failed_token(page)
                 check_a_second_token_check_waits_for_the_first(page)
+                check_a_token_edit_does_not_wait_for_a_check_that_hangs(page)
                 # A separate saved grant adds a second reason; removing it keeps protection access.
                 page.locator('[data-page-link="access"]').click()
                 expect(page.locator("#dashboard-access-panel")).to_be_visible()

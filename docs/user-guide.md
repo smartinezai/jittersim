@@ -947,10 +947,12 @@ before and after a profile. The Pi cannot run a speed test as the phone, so:
    median, 90th percentile, peak, bytes and drops. It also sends one ping per
    second from the Pi to the device for the round trip and loss over the test
    Wi-Fi. For a device with its own profile that round trip includes the
-   profile's download delay and the waiting the running speed test causes. With
-   **Same as everyone** or **Everyone else** the Pi's own ping does not pass the
-   shared queue, so the result calls it an unshaped Wi-Fi round trip and it does
-   not include the profile's delay. A device that blocks ping shows `No answer`.
+   profile's download delay and the waiting the running speed test causes, and
+   the echo loss it reports includes the profile's download loss, not only the
+   Wi-Fi loss. With **Same as everyone** or **Everyone else** the Pi's own ping
+   does not pass the shared queue, so the result calls it an unshaped Wi-Fi
+   round trip and it does not include the profile's delay. A device that blocks
+   ping shows `No answer`.
 4. **Finish now** saves early, **Cancel test** saves nothing, and closing the
    window keeps the measurement running. A new apply during the window ends it
    and marks the result `changed`.
@@ -959,10 +961,13 @@ Each result keeps the time, the device's MAC address and name, the profile that
 really applied (a schedule, timer, scenario or group profile is named as such)
 and its values, the label and the numbers you type in from the device's own
 speed test page. Results are part of the configuration backup and of the CSV and
-JSON exports, so share those files with care. **Compare**
-shows the change in each number between two results and whether the speed
-matches the profile's cap (`Matches the cap`, `Faster than the cap`, `Slower
-than the cap`, `No speed limit set`). **Export CSV** and **Export JSON** download
+JSON exports, so share those files with care. The settings export and import do
+not carry results: an import neither removes nor brings results. Deleting a
+saved device keeps its results, which belong to its MAC address, until the
+keep-newest limit or **Delete** removes them. **Compare** shows the change in
+each number between two results and whether the speed matches the profile's
+cap (`Matches the cap`, `Faster than the cap`, `Slower than the cap`, `No speed
+limit set`). **Export CSV** and **Export JSON** download
 the device's results without any token or password. **Delete** on a result asks
 in the page first (**Delete result** or **Cancel**) and cannot be undone. The Pi
 keeps the newest 50 results per device and 500 in total.

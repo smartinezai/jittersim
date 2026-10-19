@@ -22,6 +22,15 @@ next release takes them over.
   on, a device that asks a DNS server of its own choice (such as 8.8.8.8) does not
   teach the Pi service list addresses. A household website rule sends every lookup
   through the Pi's resolver, and then the Pi learns from that device again.
+- Choosing Check token after you edit the token no longer waits for an earlier
+  check that the Pi never answered. The new check starts at once, and the late
+  answer of the old one changes nothing.
+- Revoke all homepage pairings is read out by a screen reader once instead of
+  twice. The pairing code still appears in its own line, and the result of
+  Revoke now shows in the message at the top instead of in that line.
+- Clear on the Measurements page asks again after Copy table as Markdown failed
+  because the browser refused the clipboard. A table counts as kept only when
+  the copy worked.
 - The look at the air before a boot rename no longer depends on the Pi's language. Its
   `nmcli` calls run with untranslated output (`LC_ALL=C.UTF-8`, so names with umlauts and
   other non-ASCII letters still match). A Pi with a German or other locale still waits
@@ -52,6 +61,10 @@ next release takes them over.
   results and compares them with numbers entered from a speed test run on the
   device. Deleting a result asks in the page's own dialog. The start check
   also compares the loss burst length of the queues with the applied profile.
+- Speed test follow-ups: errors show in the open speed test window instead of
+  under it, a length such as 45.5 is refused with a message, the export uses the
+  dashboard's request handling, and one damaged saved result no longer hides the
+  others. Labels reject hidden control and format characters (the joiners that emoji and Persian words need are allowed).
 - **Address changes** on the Devices page: a saved device that comes back with a
   new private Wi-Fi address is suggested ("This looks like Dad's phone ... Move
   its settings?") with Yes, No and Not this device. Off, Ask (default) and

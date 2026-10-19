@@ -172,10 +172,12 @@ function guardDraft(id, continueEditing) {
   return true;
 }
 
+// True when the text is on the clipboard. False when the browser refused and the text is offered to select.
 async function copyReport(text, label) {
   try {
     await navigator.clipboard.writeText(text);
     showMessage(label + ' copied.', 'success');
+    return true;
   } catch (error) {
     const fallback = element('report-copy-fallback');
     fallback.hidden = false;
@@ -183,6 +185,7 @@ async function copyReport(text, label) {
     fallback.focus();
     fallback.select();
     showMessage('Select and copy the text below. Clipboard access is unavailable.', 'success');
+    return false;
   }
 }
 

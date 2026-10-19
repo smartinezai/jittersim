@@ -364,7 +364,8 @@
             cache: "no-store",
             signal: controller.signal
           });
-          data = await response.json();
+          // A download (options.download) is a file when it works and the usual JSON when it fails.
+          data = options.download && response.ok ? await response.blob() : await response.json();
         } catch (networkError) {
           // A dropped Wi-Fi shows up here. Say so plainly and keep the sign-in untouched.
           throw typeof lostConnectionError === "function" ? lostConnectionError(networkError) : networkError;
@@ -407,7 +408,7 @@
           if (formNote) formNote.remove();
           if (typeof renderDraftNotice === "function") renderDraftNotice();
         }
-        if (method === "GET" && typeof recordRead === "function") recordRead(path, null);
+        if (method === "GET" && !options.download && typeof recordRead === "function") recordRead(path, null);
         return data;
       } catch (error) {
         if (options.isResponseCurrent && !options.isResponseCurrent()) throw error;
@@ -420,9 +421,12 @@
             uncertainWritePaths.add(path);
             error.message += ". The change's result is unknown. Check its saved settings before trying again.";
           }
-          notePiNotAnswering(path);
+          // A download is one click, not a poll that clears itself, so it must not leave the
+          // header stuck on "Pi not answering". The error still reaches the caller.
+          if (!options.download) notePiNotAnswering(path);
         }
-        if (tokenRevision === adminTokenRevision && method === "GET" && typeof recordRead === "function") recordRead(path, error);
+        // A download is one click, not a list the page reads again, so it adds no retry note.
+        if (tokenRevision === adminTokenRevision && method === "GET" && !options.download && typeof recordRead === "function") recordRead(path, error);
         if (tokenRevision === adminTokenRevision && typeof formError === "function") formError(submitForm, error.message);
         throw error;
       } finally {
@@ -5816,23 +5820,32 @@
       };
     }
 
-    // Checks never overlap: two share the token state and the first one's end locked the dashboard
-    // under the second. A call during a check waits for it, then checks once for every caller.
+    // Checks of one token never overlap: two share the token state and the first one's end locked
+    // the dashboard under the second. A call during a check waits for it, then checks once for every
+    // caller. A check of an older token is already dead (it drops whatever it finds), so the first
+    // call after a token edit does not wait for it, even when it hangs.
     async function checkAdminToken() {
-      if (!adminTokenCheckRunning) return startAdminTokenCheck();
+      if (!adminTokenCheckRunning || adminTokenCheckRevision !== adminTokenRevision) {
+        return startAdminTokenCheck();
+      }
       if (!adminTokenCheckNext) {
-        adminTokenCheckNext = adminTokenCheckRunning.catch(() => {}).then(() => {
-          adminTokenCheckNext = null;
+        const queued = adminTokenCheckRunning.catch(() => {}).then(() => {
+          // A check that started at once for a newer token has taken this one's place.
+          if (adminTokenCheckNext !== queued) return adminTokenCheckRunning;
           return startAdminTokenCheck();
         });
+        adminTokenCheckNext = queued;
       }
       return adminTokenCheckNext;
     }
 
     let adminTokenCheckRunning = null;
+    let adminTokenCheckRevision = -1;
     let adminTokenCheckNext = null;
 
     function startAdminTokenCheck() {
+      adminTokenCheckNext = null;
+      adminTokenCheckRevision = adminTokenRevision;
       const run = runAdminTokenCheck().finally(() => {
         if (adminTokenCheckRunning === run) adminTokenCheckRunning = null;
       });
@@ -6663,7 +6676,8 @@
       try {
         await request("/api/homepage/revoke", "POST", {});
         if (!homepageRequestCurrent(owner)) return;
-        element("homepage-code").textContent = "All homepage pairings revoked.";
+        // Not written into #homepage-code as well: an <output> is a live region of its own, so a
+        // screen reader would hear the result twice. The output speaks the pairing code only.
         showMessage("All homepage pairings revoked.", "success");
       } catch (error) {
         if (homepageRequestCurrent(owner)) showMessage(error.message, "error");
@@ -9850,8 +9864,9 @@
 
     element("copy-measurements").addEventListener("click", async () => {
       const runs = measurementRuns;
-      await copyReport(measurementMarkdown(runs), "Measurement table");
-      keptMeasurementRuns = runs;
+      // Only a copy that worked keeps the runs. When the browser refuses the clipboard the text is
+      // offered to select instead, and nothing says it was copied.
+      if (await copyReport(measurementMarkdown(runs), "Measurement table")) keptMeasurementRuns = runs;
     });
 
     element("clear-measurements").addEventListener("click", async (event) => {
