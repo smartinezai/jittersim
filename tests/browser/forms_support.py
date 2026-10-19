@@ -15,6 +15,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.phone import sidebar_control
+from tests.browser.route_support import keep_interception_on
 
 TOKEN = "browser-test"
 HEADERS = {"Authorization": "Bearer " + TOKEN}
@@ -69,6 +70,8 @@ def run_journey(title, check):
                         viewport={"width": width, "height": height}, locale="en-US"
                     )
                     page = context.new_page()
+                    # Interception stays on, so removing a route never loses a request (route_support).
+                    keep_interception_on(page)
                     errors = []
                     page.on("pageerror", lambda error: errors.append(str(error)))
                     check(page, base, width)

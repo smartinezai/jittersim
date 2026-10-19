@@ -1,0 +1,84 @@
+$ nft -f -  # replace project-owned traffic rules atomically
+| add table inet jittersim
+| delete table inet jittersim
+| add table netdev jittersim_download
+| delete table netdev jittersim_download
+| add table netdev jittersim_download
+| add chain netdev jittersim_download download { type filter hook egress device "wlan0" priority 0; policy accept; }
+| add table inet jittersim
+| add chain inet jittersim forward { type filter hook forward priority -150; policy accept; }
+| add chain inet jittersim input { type filter hook input priority -150; policy accept; }
+| add chain inet jittersim output { type filter hook output priority -150; policy accept; }
+| add rule inet jittersim forward iifname "wlan0" meta mark set 0
+| add chain inet jittersim upload_class { type filter hook forward priority 100; policy accept; }
+| add rule inet jittersim upload_class iifname "wlan0" oifname "eth0" ct state invalid drop comment "never forward untracked test traffic to the router"
+| add rule inet jittersim upload_class iifname "wlan0" ct mark set meta mark and 0xff
+| add set inet jittersim svc_2 { type ipv4_addr; size 2048; }
+| add element inet jittersim svc_2 { 203.0.113.3, 203.0.113.9 }
+| add set inet jittersim svc_3 { type ipv4_addr; size 2048; }
+| add rule inet jittersim input iifname "wlan0" tcp dport 8080 return comment "keep dashboard sign-in reachable"
+| add rule inet jittersim output oifname "wlan0" tcp sport 8080 meta mark set 2147483648
+| add rule netdev jittersim_download download meta mark 2147483648 meta mark set 0 return comment "keep local dashboard replies usable"
+| add rule inet jittersim output oifname "wlan0" meta mark and 0xff != 0 ct mark set meta mark and 0xff
+| add rule inet jittersim input iifname "wlan0" ether saddr != { aa:bb:cc:dd:ee:01 } drop comment "allow only listed test clients"
+| add rule inet jittersim forward iifname "wlan0" ether saddr != { aa:bb:cc:dd:ee:01 } drop comment "allow only listed test clients"
+| add rule inet jittersim forward iifname "wlan0" ip daddr { 203.0.113.8 } drop comment "block global website destinations"
+| add rule inet jittersim input iifname "wlan0" ether saddr { 02:00:00:00:00:aa, 02:00:00:00:00:bb } meta mark set 0 return comment "unaffected by profiles"
+| add rule inet jittersim forward iifname "wlan0" ether saddr { 02:00:00:00:00:aa, 02:00:00:00:00:bb } meta mark set 0 return comment "unaffected by profiles"
+| add rule netdev jittersim_download download ether daddr { 02:00:00:00:00:aa, 02:00:00:00:00:bb } meta mark set 0 return comment "unaffected by profiles"
+| add rule inet jittersim forward iifname "wlan0" oifname "eth0" ip daddr != @svc_2 ip daddr != @svc_3 ip daddr != { 203.0.113.9, 203.0.113.3 } drop comment "general profile website allowlist"
+| add rule inet jittersim forward oifname "wlan0" meta mark set 1073741824 comment "identify forwarded test downloads"
+| add rule inet jittersim forward iifname "wlan0" oifname "eth0" ip daddr != @svc_2 ip daddr != @svc_3 drop comment "general profile outage"
+| add rule netdev jittersim_download download meta mark { 1, 1073741824 } drop comment "general profile outage"
+| add rule inet jittersim forward iifname "wlan0" oifname "eth0" meta nfproto ipv6 drop comment "general profile outage over IPv6"
+| add rule inet jittersim forward iifname "wlan0" oifname "eth0" meta nfproto ipv4 meta mark set 1 counter comment "usage-device general-profile upload"
+| add rule netdev jittersim_download download meta mark { 1, 1073741824 } ether type ip meta mark set 1 counter comment "usage-device general-profile download"
+| add rule inet jittersim output oifname "eth0" meta mark 1 counter comment "usage-device general-profile upload"
+| add rule inet jittersim forward iifname "wlan0" ip daddr @svc_2 drop comment "service list outage"
+| add rule netdev jittersim_download download meta mark 536870914 drop comment "service list outage"
+| add rule inet jittersim output oifname "eth0" meta mark 2 drop comment "service list outage"
+| add rule inet jittersim forward iifname "wlan0" ip daddr @svc_2 meta mark set 2 counter comment "service-list games upload"
+| add rule inet jittersim forward oifname "wlan0" ip saddr @svc_2 meta mark set 536870914 counter comment "service-list games download"
+| add rule netdev jittersim_download download meta mark 536870914 meta mark set 2 counter comment "usage-device general-profile download"
+| add rule inet jittersim forward iifname "wlan0" ip daddr @svc_3 meta mark set 3 counter comment "service-list video upload"
+| add rule inet jittersim forward oifname "wlan0" ip saddr @svc_3 meta mark set 536870915 counter comment "service-list video download"
+| add rule netdev jittersim_download download meta mark 536870915 meta mark set 3 counter comment "usage-device general-profile download"
+$ tc qdisc replace dev eth0 root handle 10: prio bands 4 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0  # create project queue root on eth0
+$ tc qdisc replace dev eth0 parent 10:1 handle 100: fq_codel  # preserve fair queuing for ordinary traffic on eth0
+$ tc qdisc del dev eth0 parent 10:3 handle 52:  # remove the duplicate queue of device servicelist:games on eth0 before its queue changes kind  [ignore_failure]
+$ tc qdisc replace dev eth0 parent 10:4 handle 63: fq_codel  # preserve fair queuing for device servicelist:video on eth0
+$ tc filter replace dev eth0 protocol ip parent 10: pref 3 handle 3 fw flowid 10:4  # route ip mark 3 on eth0
+$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 103 handle 3 fw flowid 10:4  # route ipv6 mark 3 on eth0
+$ tc qdisc replace dev eth0 parent 10:3 handle 42: netem delay 220ms corrupt 0% rate 0bit  # apply upload impairment for device servicelist:games on eth0
+$ tc filter replace dev eth0 protocol ip parent 10: pref 2 handle 2 fw flowid 10:3  # route ip mark 2 on eth0
+$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 102 handle 2 fw flowid 10:3  # route ipv6 mark 2 on eth0
+$ tc qdisc del dev eth0 parent 10:2 handle 41:  # remove the netem queue of device general-profile on eth0 before its queue changes kind  [ignore_failure]
+$ tc qdisc replace dev eth0 parent 10:2 handle 51: netem delay 100ms 20ms loss gemodel 0.7732% 25.0000% corrupt 0% rate 1500kbit  # apply upload impairment for device general-profile on eth0
+$ tc filter replace dev eth0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2  # route ip mark 1 on eth0
+$ tc filter replace dev eth0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2  # route ipv6 mark 1 on eth0
+$ tc qdisc replace dev jittersim-ifb root handle 10: prio bands 2 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0  # create project queue root on jittersim-ifb
+$ tc qdisc replace dev jittersim-ifb parent 10:1 handle 100: fq_codel  # preserve fair queuing for ordinary traffic on jittersim-ifb
+$ tc qdisc del dev jittersim-ifb parent 10:2 handle 41:  # remove the netem queue of device general-profile on jittersim-ifb before its queue changes kind  [ignore_failure]
+$ tc qdisc replace dev jittersim-ifb parent 10:2 handle 51: netem corrupt 2% rate 0bit  # apply upload corruption for device general-profile on jittersim-ifb
+$ tc filter replace dev jittersim-ifb protocol ip parent 10: pref 1 handle 1 fw flowid 10:2  # route ip mark 1 on jittersim-ifb
+$ tc filter replace dev jittersim-ifb protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2  # route ipv6 mark 1 on jittersim-ifb
+$ tc qdisc add dev wlan0 handle ffff: ingress  # create the upload intake on wlan0
+$ tc filter add dev wlan0 parent ffff: protocol all pref 1 flower src_mac 02:00:00:00:00:aa action ok  # keep an unaffected device out of the upload intake on wlan0
+$ tc filter add dev wlan0 parent ffff: protocol all pref 1 flower src_mac 02:00:00:00:00:bb action ok  # keep an unaffected device out of the upload intake on wlan0
+$ tc filter add dev wlan0 parent ffff: protocol all pref 2 matchall action connmark continue  # restore each connection's upload class on wlan0
+$ tc filter add dev wlan0 parent ffff: protocol ip pref 11 handle 1 fw action mirred egress redirect dev jittersim-ifb  # send ip upload class 1 through jittersim-ifb
+$ tc filter add dev wlan0 parent ffff: protocol ipv6 pref 111 handle 1 fw action mirred egress redirect dev jittersim-ifb  # send ipv6 upload class 1 through jittersim-ifb
+$ tc qdisc replace dev wlan0 root handle 10: prio bands 4 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0  # create project queue root on wlan0
+$ tc qdisc replace dev wlan0 parent 10:1 handle 100: fq_codel  # preserve fair queuing for ordinary traffic on wlan0
+$ tc qdisc del dev wlan0 parent 10:3 handle 52:  # remove the duplicate queue of device servicelist:games on wlan0 before its queue changes kind  [ignore_failure]
+$ tc qdisc del dev wlan0 parent 10:4 handle 53:  # remove the duplicate queue of device servicelist:video on wlan0 before its queue changes kind  [ignore_failure]
+$ tc qdisc replace dev wlan0 parent 10:3 handle 42: netem loss random 7% corrupt 0% rate 0bit  # apply download impairment for device servicelist:games on wlan0
+$ tc filter replace dev wlan0 protocol ip parent 10: pref 2 handle 2 fw flowid 10:3  # route ip mark 2 on wlan0
+$ tc filter replace dev wlan0 protocol ipv6 parent 10: pref 102 handle 2 fw flowid 10:3  # route ipv6 mark 2 on wlan0
+$ tc qdisc replace dev wlan0 parent 10:4 handle 43: netem delay 9ms corrupt 0% rate 0bit  # apply download impairment for device servicelist:video on wlan0
+$ tc filter replace dev wlan0 protocol ip parent 10: pref 3 handle 3 fw flowid 10:4  # route ip mark 3 on wlan0
+$ tc filter replace dev wlan0 protocol ipv6 parent 10: pref 103 handle 3 fw flowid 10:4  # route ipv6 mark 3 on wlan0
+$ tc qdisc del dev wlan0 parent 10:2 handle 41:  # remove the netem queue of device general-profile on wlan0 before its queue changes kind  [ignore_failure]
+$ tc qdisc replace dev wlan0 parent 10:2 handle 51: netem delay 50ms loss random 1% reorder 5% duplicate 4% corrupt 3% rate 0bit  # apply download impairment for device general-profile on wlan0
+$ tc filter replace dev wlan0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2  # route ip mark 1 on wlan0
+$ tc filter replace dev wlan0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2  # route ipv6 mark 1 on wlan0

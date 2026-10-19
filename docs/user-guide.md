@@ -364,6 +364,42 @@ Copying the router's Wi-Fi name can make the debugging computer join the Pi.
 Use saved dashboard access below to keep control while testing. SSH still
 requires the router network or a local Pi terminal.
 
+#### The Pi Wi-Fi name after a reboot
+
+After a copy that worked the Pi returns to the router's Wi-Fi name at every
+boot, for example from `JitterSim-Recovery`. Before that it reads the Wi-Fi
+names on the air once: first the list the Pi already has, then at most one
+fresh scan. That scan is active (the Pi asks nearby Wi-Fis to answer, as a
+phone does), but it never signs in to or changes the router, and the boot
+waits for it about 20 seconds at most.
+
+- When the router's own Wi-Fi already sends the router name, the Pi keeps
+  `JitterSim-Recovery` for this boot, or takes it when it had the router name.
+  Two Wi-Fis with one name on two subnets make phones and laptops switch
+  between them, which looks like "connected but no internet". Household
+  devices then use the router Wi-Fi, also the ones that were on the Pi under
+  the router name, and test devices join `JitterSim-Recovery` with the same
+  password. A neighbour, a guest network or a mesh repeater with exactly the
+  router name has the same effect.
+- When the look finds nothing, cannot run or the radio is busy, the boot does
+  what it did before and uses the router name. A problem with the look never
+  keeps the test Wi-Fi off. At a cold boot the Pi first waits a few seconds for
+  its Wi-Fi radio to be ready, so the look can run.
+- To use the router name again, switch the router Wi-Fi off and reboot the Pi,
+  or run `sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow router`
+  to use it now anyway.
+
+`sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow status`
+shows what the last boot saw and why it chose the name (`boot_decision` and
+`boot_scan`, for example `router-on-air` and `seen`). The dashboard does not
+show this yet.
+
+The test Wi-Fi also does not start when the Pi's Ethernet address is inside
+`192.168.50.0/24`, the Pi Wi-Fi's own subnet, because the Pi could not route
+both. `systemctl status jittersim-ap` and the `uplink` line of `status` say so.
+Change the router's LAN to another subnet, for example `192.168.0.0/24`, and
+reboot the Pi. The check runs only when the Wi-Fi starts.
+
 ### Dashboard access from Pi Wi-Fi
 
 On the Pi Wi-Fi open `https://netlab.local:8080`, the same address that works
@@ -598,6 +634,15 @@ line says `Running for N devices only` and **Start** resumes every saved
 setting. **Reset network** or **Panic** stops the devices again. After Panic or
 a router outage, choose **Start** first.
 
+While a profile for Everyone runs you can also give one device its own profile.
+Choose a profile beside the connected client and click **Apply profile**. That
+device leaves Everyone and runs the profile you chose. Everyone keeps running for
+every other device with the same profile and the same shared limit. The status
+line says how many devices run their own profile. **Start**, **Apply to all**,
+**Stop for everyone**, **Reset network** and **Panic** end this for every device,
+and deleting the device ends it for that device. Nothing paused starts as a side
+effect.
+
 The line under the button counts what is saved. The message after a start counts
 what JitterSim really started. Access rules also run after a start so a start
 with no profiles saved says that they apply. Without the Pi helper the dashboard
@@ -673,10 +718,11 @@ current override.
 **Apply profile** starts the profile for that client at once. While JitterSim
 runs, the saved settings are applied again with it. After **Reset network**
 only that client starts and everything else stays paused. While a profile for
-Everyone is active, or before its first start, **Apply profile** is refused and
-nothing is saved. Stop it with **Stop for everyone**, choose **Reset network**,
-or save the choice under **Saved devices** for later. An **Apply profile**
-request during Reset or Panic is refused too. If a device-only start fails,
+Everyone runs, that client leaves Everyone and runs its own profile. While
+Everyone is saved but not running, or a saved change has not reached the network
+yet, **Apply profile** is refused and nothing is saved. Choose **Start**, choose
+**Reset network**, or save the choice under **Saved devices** for later. An
+**Apply profile** request during Reset or Panic is refused too. If a device-only start fails,
 JitterSim resets the Pi and retries that reset when needed.
 
 Click **Protect** to protect a connected client from every profile,

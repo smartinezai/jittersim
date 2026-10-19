@@ -9,6 +9,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.phone import sidebar_control
+from tests.browser.route_support import keep_interception_on
 
 SLOW = {
     "id": "slow",
@@ -177,6 +178,9 @@ def run():
                 for width, height in ((1920, 1000), (390, 844)):
                     context = browser.new_context(viewport={"width": width, "height": height})
                     page = context.new_page()
+                    # The journey adds and removes routes while the page reads. Without this the
+                    # last removal can lose a request and the page waits 15 seconds (route_support).
+                    keep_interception_on(page)
                     errors = []
                     page.on("pageerror", lambda error: errors.append(str(error)))
                     base = f"http://127.0.0.1:{port}"
