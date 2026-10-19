@@ -6,6 +6,10 @@ normal `pytest` run on a Mac skips them.
 
 - `run-in-docker.sh`: the datapath and access tests (`test_datapath.py`,
   `test_access.py`) plus the smoke check, in one privileged container.
+- `test_panic_crash_matrix.py` (part of `run-in-docker.sh`, about six
+  minutes): Panic and Reset after a crash, a failed command or a stalled `tc`
+  at every step of a heavy apply, judged from the kernel state and a router
+  capture. See `docs/panic-crash-matrix-2026-10-18.md`.
 - `test_router_wire_guard.py` (part of `run-in-docker.sh`): a capture on the
   router's port that fails on any frame the Pi must never send toward the
   router (foreign MACs, damaged headers, test Wi-Fi source addresses, DHCP or

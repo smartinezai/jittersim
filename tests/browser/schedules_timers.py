@@ -100,6 +100,11 @@ def check_schedule_form(page, base, width):
     open_page(page, "schedules")
     row = schedule_row(page, "work")
     expect(row).to_contain_text("Mon–Fri · 09:00–17:00 · work · Enabled")
+    # Every button names its row, with the id because two schedules can share a target and a profile.
+    for verb in ("Edit", "Delete"):
+        expect(row.get_by_role(
+            "button", name=f"{verb} {DEVICE_TITLE} → Slow connection (work)", exact=True
+        )).to_have_text(verb)
     expect(page.locator("#schedule-clock")).to_contain_text("(")
     assert rows_inside(page.locator("#schedule-list"))
     no_overflow(page, width)
@@ -107,7 +112,7 @@ def check_schedule_form(page, base, width):
 
     # Edit fills the form from the row. Saving the same id does not count as an overlap with
     # itself and changes the saved schedule in place.
-    row.get_by_role("button", name="Edit", exact=True).click()
+    row.get_by_role("button", name=re.compile(r"^Edit ")).click()
     expect(page.locator("#schedule-id")).to_have_value("work")
     expect(page.locator("#schedule-device")).to_have_value(f"device:{DEVICE}")
     expect(page.locator("#schedule-profile")).to_have_value("slow")
@@ -273,14 +278,14 @@ def check_schedule_form(page, base, width):
 
     # Delete takes the row away at once and from the Pi.
     row = schedule_row(page, "keys")
-    row.get_by_role("button", name="Delete", exact=True).focus()
+    row.get_by_role("button", name=re.compile(r"^Delete ")).focus()
     page.keyboard.press("Enter")
     expect(page.locator("#message")).to_contain_text("Schedule deleted.")
     expect(schedule_row(page, "keys")).to_have_count(0)
     assert "keys" not in saved_schedules(page, base)
     for remaining in ("work", "work-late", "touching", "bob-work", "night", "others", "others-too",
                       "fine-id"):
-        schedule_row(page, remaining).get_by_role("button", name="Delete", exact=True).click()
+        schedule_row(page, remaining).get_by_role("button", name=re.compile(r"^Delete ")).click()
         expect(schedule_row(page, remaining)).to_have_count(0)
     expect(page.locator("#schedule-list")).to_have_text("No schedules yet.")
     assert saved_schedules(page, base) == {}

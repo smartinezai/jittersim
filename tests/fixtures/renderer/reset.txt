@@ -1,0 +1,4 @@
+$ nft delete table inet jittersim  # remove the project-owned nftables table  [ignore_failure]
+$ nft delete table netdev jittersim_download  # remove the project-owned download table  [ignore_failure]
+$ tc qdisc del dev eth0 root handle 10:  # remove the project-owned root queue from eth0  [ignore_failure]
+$ tc qdisc del dev wlan0 root handle 10:  # remove the project-owned root queue from wlan0  [ignore_failure]

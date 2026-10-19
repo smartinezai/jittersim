@@ -561,10 +561,12 @@ async function openTestSession(id) {
 async function saveTestSession(finish=false, attach=false) {
   if (!activeTestRecord) throw new Error('Choose a test session.');
   const submittedDraft = formDrafts.get('test-session-edit');
+  const attached = measurementRuns;
   const result = await request('/api/test-sessions/save', 'POST', {
     id:activeTestRecord.id, revision:activeTestRecord.revision, notes:element('test-session-notes').value,
-    finish, ...(attach ? {measurements:measurementRuns} : {})
+    finish, ...(attach ? {measurements:attached} : {})
   });
+  if (attach) keptMeasurementRuns = attached;
   activeTestRecord = result.session;
   if (formDrafts.get('test-session-edit') === submittedDraft) formDrafts.delete('test-session-edit');
   await loadTestSessions(); await openTestSession(activeTestRecord.id);
@@ -676,6 +678,7 @@ function restoreWorkflowFocus(opener, anchor) {
   if (!opener.isConnected) {
     const twin = anchor && controlAtAnchor(anchor);
     if (twin && !twin.disabled) twin.focus({preventScroll:true});
+    else if (anchor) focusListInstead(anchor.scope);
     return;
   }
   if (!opener.disabled) { opener.focus({preventScroll:true}); return; }
@@ -689,6 +692,15 @@ function restoreWorkflowFocus(opener, anchor) {
   });
   watcher.observe(opener, {attributes:true, attributeFilter:['disabled']});
   window.setTimeout(() => watcher.disconnect(), 120000);
+}
+
+// The row that asked is gone (removed while the question was open): its list is the nearest place.
+function focusListInstead(listId) {
+  const list = document.getElementById(listId);
+  const active = document.activeElement;
+  if (!list || !list.isConnected || list.closest('[hidden]') || (active && active !== document.body)) return;
+  if (!list.hasAttribute('tabindex')) list.setAttribute('tabindex', '-1');
+  list.focus({preventScroll:true});
 }
 
 let releaseState = null;
@@ -1292,7 +1304,7 @@ function installReleaseControls() {
     <h3 class="online-heading">Settings</h3>
     <label class="update-auto-check"><input id="online-daily-check" type="checkbox" disabled><span>Check automatically every day</span></label>
     <label class="update-auto-check"><input id="online-install-automatically" type="checkbox" disabled><span>Install automatically</span></label>
-    <p class="form-note">Install automatically installs a new signed release without anyone pressing Install. It uses the same checks and the same recovery copy as a manual install. Both settings are off until you turn them on.</p>
+    <p class="form-note">Install automatically lets the daily check install a new signed release without anyone pressing Install, so it needs Check automatically every day to be on. Check for updates and the terminal checks never install on their own. It uses the same checks and the same recovery copy as a manual install. Both settings are off until you turn them on.</p>
     <p id="online-setting-status" class="form-note" role="status"></p>
     <details><summary>The GitHub token</summary><p>The repository is private, so the Pi needs a read-only token for this one repository. Create it on GitHub (Settings, Developer settings, Fine-grained tokens, only this repository, Contents read-only, with an expiry date). Then run <code id="update-token-command">the setup command shown after sign-in</code> on the Pi, paste the token and press Ctrl-D. This page never asks for the token and never shows it.</p></details>
     <label class="update-auto-check"><input id="check-staged-updates-on-open" type="checkbox" disabled><span>Look for a release staged on this Pi when the dashboard opens</span></label>

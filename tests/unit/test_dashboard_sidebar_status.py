@@ -511,3 +511,54 @@ def test_the_runtime_line_names_a_device_only_start():
     )
     assert two["text"].startswith("Running for 2 devices only.")
     assert normal["text"].startswith("Running. Your saved settings are applied.")
+
+
+def test_a_device_beside_everyone_is_listed_with_its_own_profile():
+    # Everyone runs. The Air runs its own profile beside it and the TV follows Everyone.
+    result = status(
+        everyoneExceptions=["air"],
+        generalState=general(active=True),
+        profiles=[{"id": "slow-test", "name": "Slow test"}, {"id": "low", "name": "Low"}],
+        clients=[
+            client("Air", "02:00:00:00:00:01", assigned_device_id="air",
+                   assigned_profile_id="slow-test"),
+            client("TV", "02:00:00:00:00:02", assigned_device_id="tv", assigned_profile_id="low"),
+            client("Phone", "02:00:00:00:00:03"),
+            client("Group laptop", "02:00:00:00:00:04", assigned_device_id="laptop",
+                   assigned_profile_id="low"),
+        ],
+        serviceLists=[{"name": "Video", "enabled": True}],
+    )
+
+    assert result["general"] == {"text": "Everyone: Shared slow · active", "tone": "on"}
+    assert result["devices"]["summary"] == "4 devices affected"
+    assert result["devices"]["items"] == [
+        {"name": "Air", "profile": "Slow test"},
+        {"name": "TV", "profile": "Shared slow"},
+        {"name": "Phone", "profile": "Shared slow"},
+        {"name": "Group laptop", "profile": "Shared slow"},
+    ]
+    assert "Video" in result["lists"]["text"]
+
+
+def test_the_runtime_line_names_the_devices_beside_everyone():
+    script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
+    start = script.index("function runtimeStatusText(")
+    source = script[start : script.index("function applyButtonLabel(", start)]
+    program = source + (
+        "\nconsole.log(JSON.stringify(["
+        "runtimeStatusText('applied', true, {everyoneExceptions: ['air']}),"
+        "runtimeStatusText('unknown', true, {everyoneExceptions: ['air', 'tv']}),"
+        "runtimeStatusText('error', true, {everyoneExceptions: ['air']}),"
+        "runtimeStatusText('applied', true, {everyoneExceptions: []})]));"
+    )
+    result = subprocess.run([NODE, "-"], input=program, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    one, two, failed, normal = json.loads(result.stdout)
+    assert one["text"] == (
+        "Running. Everyone covers all devices except 1 device that runs its own profile. "
+        "Start puts them back on Everyone."
+    )
+    assert two["text"].startswith("Running. Everyone covers all devices except 2 devices that run")
+    assert failed["text"] == "The last apply failed. Check the Pi."
+    assert normal["text"].startswith("Running. Your saved settings are applied.")

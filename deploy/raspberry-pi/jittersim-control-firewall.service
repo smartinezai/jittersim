@@ -20,10 +20,17 @@ ExecStartPre=-/bin/sh -c 'echo 1 > /proc/sys/net/ipv4/conf/all/arp_ignore && ech
 ExecStart=/usr/sbin/nft -f /etc/jittersim/jittersim-control-firewall.nft
 RemainAfterExit=yes
 # NetworkManager waits for this unit (Before=). Never let a stuck nft hold the
-# network: after 30 s the unit fails, NetworkManager brings up Ethernet and the
-# test Wi-Fi stays off, because jittersim-ap.service refuses to start without
-# this table.
+# network. After 30 s systemd sends nft SIGTERM, waits TimeoutStopSec, then
+# sends SIGKILL (and waits that long once more if nft cannot be killed yet), so
+# the unit fails within under a minute. The default TimeoutStopSec is 90 s
+# and would hold NetworkManager for about 3.5 minutes. NetworkManager then
+# brings up Ethernet and the test Wi-Fi stays off, because jittersim-ap.service
+# refuses to start without this table. If nft is killed after the kernel
+# already committed the rules, the table is loaded but this unit is failed: the
+# test Wi-Fi may then start (safe, the rules exist) but the dashboard, browser
+# proxy and service watcher do not (they require this unit).
 TimeoutStartSec=30
+TimeoutStopSec=5
 
 [Install]
 WantedBy=multi-user.target

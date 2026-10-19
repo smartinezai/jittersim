@@ -27,6 +27,8 @@ def open_question(page, *, verb=None, title=None, text=None, absent=()):
         # The heading names the dialog, and the question is its description.
         expect(box.get_by_role("heading", level=2)).to_have_text(title)
         expect(page.get_by_role("dialog", name=title, exact=True)).to_be_visible()
+        # The description must not say the heading again: a screen reader reads both.
+        assert title not in box.locator("p").inner_text(), (title, box.locator("p").inner_text())
     for fragment in _lines(text):
         expect(box).to_contain_text(fragment)
     shown = box.inner_text()
@@ -108,8 +110,13 @@ def check_destructive_confirms(page):
         del calls[:]
 
         page.get_by_role("link", name=re.compile("^Devices")).click()
+        # Every button of a row names the row. "Delete" alone does not say which device.
+        phone_row = page.locator("#device-table tr", has_text="Test phone")
+        for visible, name in (("Open controls", "Open controls for Test phone"),
+                              ("Edit", "Edit Test phone"), ("Delete", "Delete Test phone")):
+            expect(phone_row.get_by_role("button", name=name, exact=True)).to_have_text(visible)
         delete = page.locator("#device-table tr", has_text="Test phone").get_by_role(
-            "button", name="Delete", exact=True)
+            "button", name="Delete Test phone", exact=True)
         delete.click()
         cancel_with_escape(page, delete, verb="Delete device", title="Delete this device?",
                            text="Its schedules, timers, progressions")
@@ -157,3 +164,83 @@ def check_destructive_confirms(page):
     finally:
         for path in paths:
             page.unroute("**" + path)
+
+
+MEASUREMENT = {
+    "format": "jittersim-measurement", "version": 1, "label": "Confirm run", "target": "1.1.1.1",
+    "summary": {"sent": 2, "loss_percent": 0, "rtt_avg_ms": 12}, "samples": [{"rtt_ms": 10}, {"rtt_ms": 14}],
+}
+CLEARED = "Add result files to compare runs."
+
+
+def add_measurement(page, rows):
+    page.locator("#measurement-files").set_input_files({
+        "name": "run.json", "mimeType": "application/json", "buffer": json.dumps(MEASUREMENT).encode(),
+    })
+    expect(page.locator("#measurement-table tbody tr")).to_have_count(rows)
+
+
+def check_revoke_and_clear_confirms(page):
+    """Revoke all homepage pairings and Clear on the Measurements page ask first and say the result.
+
+    The Pi's answer is stubbed so nothing real is revoked. Clear asks only about runs that exist in
+    the page alone: a table that was copied is kept, so it clears without a question.
+    """
+
+    page.set_viewport_size({"width": 1440, "height": 1000})
+    calls = stub_writes(page, ("/api/homepage/revoke",))
+    try:
+        page.get_by_role("link", name="Profiles", exact=True).click()
+        page.locator("summary", has_text="Pair homepage test extension").click()
+        revoke = page.locator("#homepage-revoke")
+        revoke.click()
+        cancel_with_escape(page, revoke, verb="Revoke all pairings",
+                           title="Revoke all homepage pairings?", text="until it is paired again")
+        assert not calls, calls
+        expect(revoke).to_be_enabled()
+        revoke.click()
+        cancel_with_button(page, revoke, title="Revoke all homepage pairings?")
+        assert not calls, calls
+        revoke.click()
+        answer_confirm(page, "Revoke all pairings", title="Revoke all homepage pairings?")
+        # The result is said once through the one announcer, and the button is ready again.
+        expect(page.locator("#action-announcer")).to_have_text("All homepage pairings revoked.")
+        expect(page.locator("#homepage-code")).to_have_text("All homepage pairings revoked.")
+        assert calls == [("homepage/revoke", {})], calls
+        expect(revoke).to_be_enabled()
+        expect(revoke).to_be_focused()
+    finally:
+        page.unroute("**/api/homepage/revoke")
+
+    page.get_by_role("link", name="Measurements", exact=True).click()
+    page.evaluate("() => { measurementRuns = []; keptMeasurementRuns = measurementRuns; renderMeasurements(); }")
+    clear = page.locator("#clear-measurements")
+    expect(clear).to_be_disabled()
+    add_measurement(page, 1)
+    expect(clear).to_be_enabled()
+    clear.click()
+    cancel_with_escape(page, clear, verb="Clear table", title="Clear the measurement table?",
+                       text=["1 run that exist only in this page", "stay on your computer"])
+    expect(page.locator("#measurement-table tbody tr")).to_have_count(1)
+    clear.click()
+    cancel_with_button(page, clear, title="Clear the measurement table?")
+    expect(page.locator("#measurement-table tbody tr")).to_have_count(1)
+    clear.click()
+    answer_confirm(page, "Clear table", title="Clear the measurement table?")
+    expect(page.locator("#measurement-table")).to_have_text(CLEARED)
+    expect(page.locator("#action-announcer")).to_have_text("Measurement table cleared.")
+    expect(clear).to_be_disabled()
+    # Runs that were copied are kept, so there is nothing to lose.
+    add_measurement(page, 1)
+    page.locator("#copy-measurements").click()
+    expect(page.locator("#message")).to_contain_text(re.compile("Measurement table copied|Select and copy"))
+    clear.click()
+    expect(page.get_by_role("dialog")).to_have_count(0)
+    expect(page.locator("#measurement-table")).to_have_text(CLEARED)
+    # A new run after that is not kept again.
+    add_measurement(page, 1)
+    clear.click()
+    open_question(page, verb="Clear table", title="Clear the measurement table?")
+    page.keyboard.press("Escape")
+    expect(page.get_by_role("dialog")).to_have_count(0)
+    page.evaluate("() => { measurementRuns = []; keptMeasurementRuns = measurementRuns; renderMeasurements(); }")
