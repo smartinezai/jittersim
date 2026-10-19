@@ -84,8 +84,8 @@ const privateDataLockHooks = [];
 const connectedRowHooks = [];
 const window = {setTimeout: () => 1, clearTimeout: () => {}};
 let pending = [];
-function request(path, method, body) {
-  return new Promise((resolve, reject) => pending.push({path, resolve, reject}));
+function request(path, method, body, options) {
+  return new Promise((resolve, reject) => pending.push({path, method, body, options, resolve, reject}));
 }
 function element() { return null; }
 function showMessage() {}
@@ -167,3 +167,170 @@ function speedTestDialog() { return {open: true, showModal() {}}; }
 
     assert outcome == {"results": 0, "history": ["Loading results…"], "baseline": 0,
                        "compareDisabled": True, "pending": 1}
+
+
+# Stubs whose element() hands out one fake node per id, so a test can read what the window shows.
+# showMessage records the page's toast calls and any unhandled rejection is collected.
+FAKE_NODES = """
+function fakeNode(tag) {
+  return {tag, children: [], textContent: '', hidden: false, disabled: false, className: '', value: '',
+    replaceChildren(...items) { this.children = items; }, focus() { this.focused = true; },
+    append(...items) { this.children.push(...items); }, setAttribute() {}, addEventListener() {}};
+}
+const nodes = {};
+const shown = [];
+const unhandled = [];
+process.on('unhandledRejection', (reason) => unhandled.push(reason.message));
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+const text = (id) => (nodes[id] || {}).textContent;
+const document = {createElement: fakeNode};
+"""
+
+
+def stubs_with_nodes():
+    return FAKE_NODES + SPEED_TEST_STUBS.replace(
+        "function element() { return null; }",
+        "function element(id) { return nodes[id] ||= fakeNode('x'); }",
+    ).replace("function showMessage() {}", "function showMessage(message, kind) { shown.push([message, kind]); }")
+
+
+@NEEDS_NODE
+def test_an_error_shows_in_the_open_window_and_only_toasts_when_no_window_is_open():
+    outcome = run_node(
+        stubs_with_nodes() + SPEED_TEST_SCRIPT + """
+speedTestState.dialog = {open: true};
+speedTestSay('Measuring.');
+const afterStatus = [text('speed-test-announce'), text('speed-test-alert')];
+speedTestSay('The Pi did not answer.', 'error');
+const afterError = [text('speed-test-announce'), text('speed-test-alert')];
+speedTestSay('Result deleted.');
+const afterNext = [text('speed-test-announce'), text('speed-test-alert')];
+const toastsWhileOpen = shown.length;
+speedTestState.dialog = {open: false};
+speedTestSay('The window was closed.', 'error');
+console.log(JSON.stringify({afterStatus, afterError, afterNext, toastsWhileOpen, shown}));
+""")
+
+    assert outcome == {
+        "afterStatus": ["Measuring.", ""],
+        "afterError": ["", "The Pi did not answer."],
+        "afterNext": ["Result deleted.", ""],
+        "toastsWhileOpen": 0,
+        "shown": [["The window was closed.", "error"]],
+    }
+
+
+ENDED_RUN = """{state: 'ended', seconds_left: 0, source: 'device', source_label: 'Own queues',
+  source_note: '', live: {download: {kbit: 1, peak_kbit: 1}, upload: {kbit: 1, peak_kbit: 1}},
+  result: null, ended_reason: 'Cancelled. Nothing was saved.'}"""
+
+
+@NEEDS_NODE
+def test_a_failed_reload_after_the_poll_sees_the_end_is_shown_and_never_unhandled():
+    outcome = run_node(
+        stubs_with_nodes() + SPEED_TEST_SCRIPT + """
+(async () => {
+  speedTestState.dialog = {open: true};
+  speedTestState.device = {mac_address: 'aa'};
+  const seen = [];
+  // The poll runs from a timer and nobody awaits it. The end is seen in the status answer
+  // first and as a 404 second; each time reading the results again then fails.
+  for (const failure of [null, 404]) {
+    speedTestState.run = {id: 'r' + seen.length};
+    speedTestPoll();
+    await tick();
+    if (failure) {
+      const gone = new Error('This speed test is not known');
+      gone.status = failure;
+      pending.shift().reject(gone);
+    } else {
+      pending.shift().resolve(%s);
+    }
+    await tick();
+    pending.shift().reject(new Error('The results could not be read.'));
+    await tick();
+    await tick();
+    seen.push([text('speed-test-alert'), speedTestState.run]);
+    speedTestSay('');
+  }
+  console.log(JSON.stringify({seen, unhandled, shown}));
+})();
+""" % ENDED_RUN)
+
+    assert outcome == {
+        "seen": [["The results could not be read.", None]] * 2,
+        "unhandled": [],
+        "shown": [],
+    }
+
+
+@NEEDS_NODE
+def test_a_length_that_is_not_a_whole_number_is_refused_not_replaced_by_the_default():
+    outcome = run_node(
+        stubs_with_nodes() + SPEED_TEST_SCRIPT + """
+(async () => {
+  speedTestState.device = {mac_address: 'aa'};
+  speedTestState.meta = {limits: {min_seconds: 15, max_seconds: 90, default_seconds: 45}};
+  nodes['speed-test-provider'] = {value: 'cloudflare'};
+  nodes['speed-test-label'] = {value: ''};
+  const field = nodes['speed-test-duration'] = fakeNode('input');
+  const refused = {};
+  for (const typed of ['45.5', '', '1e2', '-5', 'abc', '4 5']) {
+    field.value = typed;
+    field.focused = false;
+    try { await speedTestStart(); refused[typed] = 'started'; }
+    catch (error) { refused[typed] = [error.message, field.focused]; }
+  }
+  const requested = pending.length;
+  field.value = ' 30 ';
+  speedTestStart().catch(() => {});
+  await tick();
+  console.log(JSON.stringify({refused, requested, body: pending[0].body, after: pending.length}));
+})();
+""")
+
+    message = "Length must be a whole number of seconds from 15 to 90."
+    assert outcome["refused"] == {
+        typed: [message, True] for typed in ["45.5", "", "1e2", "-5", "abc", "4 5"]
+    }
+    assert outcome["requested"] == 0
+    assert outcome["after"] == 1
+    assert outcome["body"]["duration_seconds"] == 30
+
+
+@NEEDS_NODE
+def test_the_export_goes_through_request_so_its_errors_and_sign_in_lock_are_the_pages():
+    outcome = run_node(
+        stubs_with_nodes() + SPEED_TEST_SCRIPT + """
+(async () => {
+  globalThis.fetch = () => { throw new Error('the export must not call fetch itself'); };
+  const links = [];
+  document.createElement = (tag) => { const node = fakeNode(tag); node.click = () => { node.clicked = true; };
+    node.remove = () => {}; links.push(node); return node; };
+  document.body = {append() {}};
+  URL.createObjectURL = () => 'blob:test';
+  URL.revokeObjectURL = () => {};
+  speedTestState.device = {mac_address: 'aa:bb'};
+  speedTestState.dialog = {open: true};
+  const failing = speedTestExport('csv');
+  await tick();
+  const first = {path: pending[0].path, method: pending[0].method, options: pending[0].options};
+  pending.shift().reject(new Error('Sign in again'));
+  let error = null;
+  try { await failing; } catch (caught) { error = caught.message; }
+  const working = speedTestExport('json');
+  await tick();
+  pending.shift().resolve(new Blob(['{}']));
+  await working;
+  console.log(JSON.stringify({first, error, link: [links[0].download, links[0].clicked],
+    status: text('speed-test-announce')}));
+})();
+""")
+
+    assert outcome == {
+        "first": {"path": "/api/speed-tests/export?format=csv&mac=aa%3Abb", "method": "GET",
+                  "options": {"download": True}},
+        "error": "Sign in again",
+        "link": ["device-speed-tests.json", True],
+        "status": "Export downloaded.",
+    }

@@ -38,6 +38,9 @@ function speedTestButton(label, id, onClick) {
   if (id) button.id = id;
   button.addEventListener('click', async () => {
     const serial = speedTestState.serial;
+    // An older error is about an older click.
+    const alertLine = element('speed-test-alert');
+    if (alertLine) alertLine.textContent = '';
     setButtonBusy(button, true);
     try { await onClick(button); }
     catch (error) {
@@ -65,9 +68,19 @@ function speedTestWhen(seconds) {
 }
 
 function speedTestSay(message, kind) {
-  const line = element('speed-test-announce');
-  if (line) line.textContent = message;
-  if (kind === 'error') showMessage(message, 'error');
+  const dialog = speedTestState.dialog;
+  if (kind === 'error' && !(dialog && dialog.open)) {
+    // No window is open, so the page's own toast is the one place that shows and says it.
+    showMessage(message, 'error');
+    return;
+  }
+  // While the window is open the page behind it is inert: its toast would sit under the window
+  // and its status and alert regions would stay silent. The window keeps one status line for
+  // results and one alert line for errors, and each write clears the other.
+  const statusLine = element('speed-test-announce');
+  const alertLine = element('speed-test-alert');
+  if (statusLine) statusLine.textContent = kind === 'error' ? '' : message;
+  if (alertLine) alertLine.textContent = kind === 'error' ? message : '';
 }
 
 function speedTestQr(provider) {
@@ -114,6 +127,9 @@ function speedTestDialog() {
   const announce = speedTestNode('p', '', 'speed-test-announce');
   announce.id = 'speed-test-announce';
   announce.setAttribute('role', 'status');
+  const alertLine = speedTestNode('p', '', 'form-error speed-test-alert');
+  alertLine.id = 'speed-test-alert';
+  alertLine.setAttribute('role', 'alert');
 
   const start = speedTestNode('section', null, 'speed-test-start');
   start.id = 'speed-test-start';
@@ -189,7 +205,7 @@ function speedTestDialog() {
   const close = speedTestButton('Close', 'speed-test-close', () => dialog.close());
   close.className = 'speed-test-close';
   const note = speedTestNode('p', 'Closing this window keeps a running measurement going on the Pi.', 'speed-test-help');
-  dialog.append(title, announce, start, running, results, note, close);
+  dialog.append(title, announce, alertLine, start, running, results, note, close);
   dialog.addEventListener('close', () => {
     speedTestStopPolling();
     if (speedTestLockClosingDialogs.has(dialog)) {
@@ -254,6 +270,7 @@ async function speedTestOpen(device) {
   speedTestState.editing = null;
   element('speed-test-title').textContent = 'Speed test: ' + (device.display_name || device.ipv4_address || device.mac_address);
   element('speed-test-announce').textContent = '';
+  element('speed-test-alert').textContent = '';
   speedTestClearResults();
   element('speed-test-editor').hidden = true;
   element('speed-test-running').hidden = true;
@@ -300,11 +317,19 @@ async function speedTestLoad() {
 async function speedTestStart() {
   const device = speedTestState.device;
   const serial = speedTestState.serial;
-  const duration = Number(element('speed-test-duration').value);
+  const field = element('speed-test-duration');
+  const typed = field.value.trim();
+  if (!/^\d+$/.test(typed)) {
+    // A length such as 45.5 used to be swapped for the default without a word.
+    const limits = speedTestState.meta && speedTestState.meta.limits;
+    field.focus();
+    throw new Error('Length must be a whole number of seconds' +
+      (limits ? ' from ' + limits.min_seconds + ' to ' + limits.max_seconds : '') + '.');
+  }
   const run = await request('/api/speed-tests/start', 'POST', {
     mac_address: device.mac_address,
     provider: element('speed-test-provider').value,
-    duration_seconds: Number.isInteger(duration) ? duration : speedTestState.meta.limits.default_seconds,
+    duration_seconds: Number(typed),
     label: element('speed-test-label').value
   });
   if (serial !== speedTestState.serial) return;
@@ -358,7 +383,7 @@ async function speedTestPoll() {
     if (serial !== speedTestState.serial || speedTestState.run !== run) return;
     if (error.status === 404) {
       // The dashboard restarted or forgot the run, so there is nothing left to watch.
-      await speedTestFinished({result: null, ended_reason: 'This test is no longer running.'});
+      await speedTestFinishedOrSay({result: null, ended_reason: 'This test is no longer running.'}, serial);
       return;
     }
     speedTestState.pollTimer = window.setTimeout(speedTestPoll, 2000);
@@ -370,7 +395,7 @@ async function speedTestPoll() {
     speedTestState.pollTimer = window.setTimeout(speedTestPoll, 1000);
     return;
   }
-  speedTestFinished(status);
+  speedTestFinishedOrSay(status, serial);
 }
 
 async function speedTestEnd(action) {
@@ -419,6 +444,16 @@ async function speedTestFinished(status, serial = speedTestState.serial) {
   await speedTestLoad();
   if (serial !== speedTestState.serial) return;
   if (status.result) speedTestEdit(status.result);
+}
+
+async function speedTestFinishedOrSay(status, serial) {
+  // The poll is driven by a timer and nobody awaits it, so a failure reading the results again
+  // must be shown here and not left as an unhandled rejection.
+  try {
+    await speedTestFinished(status, serial);
+  } catch (error) {
+    if (serial === speedTestState.serial) speedTestSay(error.message, 'error');
+  }
 }
 
 function speedTestDirection(result, direction) {
@@ -613,13 +648,10 @@ async function speedTestCompare() {
 
 async function speedTestExport(format) {
   const serial = speedTestState.serial;
-  const token = element('admin-token').value.trim();
   const mac = speedTestState.device ? speedTestState.device.mac_address : '';
-  const response = await fetch('/api/speed-tests/export?format=' + format + '&mac=' + encodeURIComponent(mac), {
-    headers: {Authorization: 'Bearer ' + token}, cache: 'no-store'
-  });
-  if (!response.ok) throw new Error('The export could not be made.');
-  const blob = await response.blob();
+  // request() gives the file the same time limit, sign-in lock and error text as every other call.
+  const blob = await request('/api/speed-tests/export?format=' + format + '&mac=' + encodeURIComponent(mac),
+    'GET', undefined, {download: true});
   if (serial !== speedTestState.serial) return;
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');

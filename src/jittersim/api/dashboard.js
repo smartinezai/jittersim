@@ -364,7 +364,8 @@
             cache: "no-store",
             signal: controller.signal
           });
-          data = await response.json();
+          // A download (options.download) is a file when it works and the usual JSON when it fails.
+          data = options.download && response.ok ? await response.blob() : await response.json();
         } catch (networkError) {
           // A dropped Wi-Fi shows up here. Say so plainly and keep the sign-in untouched.
           throw typeof lostConnectionError === "function" ? lostConnectionError(networkError) : networkError;
@@ -407,7 +408,7 @@
           if (formNote) formNote.remove();
           if (typeof renderDraftNotice === "function") renderDraftNotice();
         }
-        if (method === "GET" && typeof recordRead === "function") recordRead(path, null);
+        if (method === "GET" && !options.download && typeof recordRead === "function") recordRead(path, null);
         return data;
       } catch (error) {
         if (options.isResponseCurrent && !options.isResponseCurrent()) throw error;
@@ -420,9 +421,12 @@
             uncertainWritePaths.add(path);
             error.message += ". The change's result is unknown. Check its saved settings before trying again.";
           }
-          notePiNotAnswering(path);
+          // A download is one click, not a poll that clears itself, so it must not leave the
+          // header stuck on "Pi not answering". The error still reaches the caller.
+          if (!options.download) notePiNotAnswering(path);
         }
-        if (tokenRevision === adminTokenRevision && method === "GET" && typeof recordRead === "function") recordRead(path, error);
+        // A download is one click, not a list the page reads again, so it adds no retry note.
+        if (tokenRevision === adminTokenRevision && method === "GET" && !options.download && typeof recordRead === "function") recordRead(path, error);
         if (tokenRevision === adminTokenRevision && typeof formError === "function") formError(submitForm, error.message);
         throw error;
       } finally {
