@@ -3,7 +3,7 @@
 The exact October2 fix list is preserved in [the historical archive](history/2026-10-02-backlog-and-ux/planned-fixes.md).
 New feature ideas are in [feature proposals](feature-proposals-2026-10-09.md).
 
-Baseline: `origin/main` at `00c2cc8f` (the merge of PR 164 on 19 October 2026), checked on
+Baseline: `origin/main` at `f290ea9d` (the merge of PR 171 on 19 October 2026), checked on
 19 October 2026. Statuses come from the source and the merged pull requests on that commit. Nothing
 here was run on a Pi. The 4 October accepted main `5e0fed2` matched tested candidate 6fb864f. Hosted
 jobs cannot start (billing limit), so every pull request is gated by `scripts/local-ci.sh` on its head
@@ -128,7 +128,7 @@ new tickets. The archived list retains all details and proposed fixes.
 
 ## Open fixes
 
-Open on 19 October 2026. The open pull requests (161, 170 and 171, all drafts) and their
+Open on 19 October 2026. The open pull requests (161 and 170, both drafts) and their
 states are in the [roadmap](../ROADMAP.md).
 
 - Two owner decisions from the review of PR 138 ([review results](review-results-carry-forward-2026-10-16.md)).

@@ -180,11 +180,54 @@ def add_measurement(page, rows):
     expect(page.locator("#measurement-table tbody tr")).to_have_count(rows)
 
 
+def record_live_regions(page):
+    """Record every write into a live region from now on (status, alert, log, an <output> or an
+    aria-live that is not off). `window.spoken` lists [id, text] in order. A screen reader says each
+    of these writes, so a result that lands in two regions is said twice."""
+
+    page.evaluate("""() => {
+      window.spoken = [];
+      const live = (node) => {
+        for (let el = node; el && el.getAttribute; el = el.parentElement) {
+          const explicit = el.getAttribute('aria-live');
+          if (explicit) return explicit === 'off' ? null : el;
+          if (['status', 'alert', 'log'].includes(el.getAttribute('role')) || el.tagName === 'OUTPUT') return el;
+        }
+        return null;
+      };
+      new MutationObserver((records) => {
+        for (const record of records) {
+          const target = record.target.nodeType === Node.TEXT_NODE ? record.target.parentElement : record.target;
+          const region = live(target);
+          if (region && region.textContent) window.spoken.push([region.id, region.textContent]);
+        }
+      }).observe(document.body, {childList: true, characterData: true, subtree: true});
+    }""")
+
+
+def regions_that_said(page, text):
+    """The ids of the live regions that had exactly `text` written into them."""
+
+    return sorted({region for region, said in page.evaluate("window.spoken") if said == text})
+
+
+def stub_clipboard(page, works):
+    """Make navigator.clipboard.writeText succeed, or fail as it does when the browser refuses."""
+
+    page.evaluate("""(works) => {
+      Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {
+        writeText: () => works ? Promise.resolve() : Promise.reject(new DOMException('Denied', 'NotAllowedError')),
+      }});
+    }""", works)
+
+
 def check_revoke_and_clear_confirms(page):
     """Revoke all homepage pairings and Clear on the Measurements page ask first and say the result.
 
-    The Pi's answer is stubbed so nothing real is revoked. Clear asks only about runs that exist in
-    the page alone: a table that was copied is kept, so it clears without a question.
+    The Pi's answer is stubbed so nothing real is revoked. Revoke says its result once: the
+    <output> that shows a pairing code is a live region of its own and must not get it as well.
+    Clear asks only about runs that exist in the page alone: a table that was copied is kept, so
+    it clears without a question. A copy that the browser refused keeps nothing.
     """
 
     page.set_viewport_size({"width": 1440, "height": 1000})
@@ -202,10 +245,13 @@ def check_revoke_and_clear_confirms(page):
         cancel_with_button(page, revoke, title="Revoke all homepage pairings?")
         assert not calls, calls
         revoke.click()
+        record_live_regions(page)
         answer_confirm(page, "Revoke all pairings", title="Revoke all homepage pairings?")
         # The result is said once through the one announcer, and the button is ready again.
         expect(page.locator("#action-announcer")).to_have_text("All homepage pairings revoked.")
-        expect(page.locator("#homepage-code")).to_have_text("All homepage pairings revoked.")
+        assert regions_that_said(page, "All homepage pairings revoked.") == ["action-announcer"], \
+            page.evaluate("window.spoken")
+        expect(page.locator("#homepage-code")).to_have_text("")
         assert calls == [("homepage/revoke", {})], calls
         expect(revoke).to_be_enabled()
         expect(revoke).to_be_focused()
@@ -231,9 +277,10 @@ def check_revoke_and_clear_confirms(page):
     expect(page.locator("#action-announcer")).to_have_text("Measurement table cleared.")
     expect(clear).to_be_disabled()
     # Runs that were copied are kept, so there is nothing to lose.
+    stub_clipboard(page, works=True)
     add_measurement(page, 1)
     page.locator("#copy-measurements").click()
-    expect(page.locator("#message")).to_contain_text(re.compile("Measurement table copied|Select and copy"))
+    expect(page.locator("#message")).to_have_text("Measurement table copied.")
     clear.click()
     expect(page.get_by_role("dialog")).to_have_count(0)
     expect(page.locator("#measurement-table")).to_have_text(CLEARED)
@@ -243,4 +290,17 @@ def check_revoke_and_clear_confirms(page):
     open_question(page, verb="Clear table", title="Clear the measurement table?")
     page.keyboard.press("Escape")
     expect(page.get_by_role("dialog")).to_have_count(0)
-    page.evaluate("() => { measurementRuns = []; keptMeasurementRuns = measurementRuns; renderMeasurements(); }")
+    # A copy that the browser refused is not a copy. The text is offered to select instead, and
+    # the runs still exist only in the page, so Clear asks and a no keeps them.
+    stub_clipboard(page, works=False)
+    page.locator("#copy-measurements").click()
+    expect(page.locator("#message")).to_contain_text("Clipboard access is unavailable")
+    expect(page.locator("#report-copy-fallback")).to_be_visible()
+    clear.click()
+    cancel_with_escape(page, clear, verb="Clear table", title="Clear the measurement table?",
+                       text="1 run that exist only in this page")
+    expect(page.locator("#measurement-table tbody tr")).to_have_count(1)
+    page.evaluate("""() => {
+      measurementRuns = []; keptMeasurementRuns = measurementRuns; renderMeasurements();
+      delete navigator.clipboard; document.getElementById('report-copy-fallback').hidden = true;
+    }""")

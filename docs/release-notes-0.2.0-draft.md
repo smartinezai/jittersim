@@ -20,4 +20,4 @@ This is the first signed release of JitterSim. The complete list of changes is i
 
 ## Known limits
 
-Physical acceptance on a real Pi with real phones is still outstanding. Router Wi-Fi is read only. A device cannot run its own profile while Everyone runs. The dashboard cannot show release notes yet, so read them with `sudo jittersim update`. See the known limits in docs/user-guide.md.
+Physical acceptance on a real Pi with real phones is still outstanding. Router Wi-Fi is read only. See the known limits in docs/user-guide.md.

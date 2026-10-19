@@ -141,6 +141,15 @@ the hand-written Unreleased part short.
 
 ### Fixed
 
+- Choosing Check token after you edit the token no longer waits for an earlier
+  check that the Pi never answered. The new check starts at once, and the late
+  answer of the old one changes nothing.
+- Revoke all homepage pairings is read out by a screen reader once instead of
+  twice. The pairing code still appears in its own line, and the result of
+  Revoke now shows in the message at the top instead of in that line.
+- Clear on the Measurements page asks again after Copy table as Markdown failed
+  because the browser refused the clipboard. A table counts as kept only when
+  the copy worked.
 - The Pi's `.local` name is announced again. Avahi's setting
   `disable-user-service-publishing` was `yes`, which made Avahi refuse the name
   service's records, so nothing was ever announced. An install or update sets it

@@ -526,7 +526,7 @@ The project is ready for presentation when it can:
 
 ## Current remaining work
 
-Checked against `origin/main` at `00c2cc8f` (PR 164) on 19 October 2026. Every unticked box in the
+Checked against `origin/main` at `f290ea9d` (PR 171) on 19 October 2026. Every unticked box in the
 milestones above is one of these:
 
 - Owner-run physical acceptance on the Pi (Milestones 9 to 15 and the router security section).
@@ -545,8 +545,8 @@ Hosted CI cannot start jobs (billing limit). Every pull request is gated by
 Merged since the last roadmap reconciliation on 17 October 2026: PR 112 (named install button,
 notes and recovery copy), 117 (wheel build lock), 138 (carry-forward fixes of the Panic batch,
 `8c3f8171`), 139 (release tooling fixes), 141 and 146 (in-page questions, one announcer), 142
-(Pi boot robustness), 143 (stability pass), 147 and 148 (removals), 152 (QA sweep) and 154 (release
-test image). `PANIC_APPROVED_SOURCES` has seven entries. The newest is for PR 138 and main's three
+(Pi boot robustness), 143 (stability pass), 147 and 148 (removals), 152 (QA sweep), 154 (release
+test image) and 171 (three PR 162 review items). `PANIC_APPROVED_SOURCES` has seven entries. The newest is for PR 138 and main's three
 hash-pinned files match it.
 
 Merged on 18 and 19 October: PR 111 (signed notes in the update status, check-only manual checks),
@@ -562,7 +562,6 @@ Open pull requests on 19 October 2026 (all drafts, PR 163 and 165 merged during 
 | --- | --- | --- |
 | 161 | A **Check connection** button that sends probes to a device and compares loss and delay with its profile (replaces PR 153) | Draft |
 | 170 | Finish the follow-ups of the PR 159 security audit | Draft |
-| 171 | Fix three PR 162 review items: token edit, Revoke, failed copy | Draft |
 
 The first release, v0.2.0, is being prepared. `pyproject.toml` already says `0.2.0`, but no tag, no
 GitHub release and no reserved version exist yet (`docs/releases/registry.json`). The release tooling

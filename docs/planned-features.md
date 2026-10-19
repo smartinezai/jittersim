@@ -3,7 +3,7 @@
 This active list replaces the dated October2 status snapshot. The complete
 original backlog and design proposals remain in [the historical archive](history/2026-10-02-backlog-and-ux/README.md).
 
-Baseline: `origin/main` at `00c2cc8f` (the merge of PR 164 on 19 October 2026), checked on
+Baseline: `origin/main` at `f290ea9d` (the merge of PR 171 on 19 October 2026), checked on
 19 October 2026. Statuses come from the source and the merged pull requests on that commit.
 Nothing here was run on a Pi, so physical acceptance remains outstanding. The 4 October accepted
 main `5e0fed2` matched tested candidate 6fb864f (see
@@ -53,7 +53,7 @@ safety audit round 2 and its follow-ups), 151 (address changes), 155 (read route
 (security audit), 160 and 169 (boot Wi-Fi look), 162 (QA leftovers and flaky tests), 164 (soak
 harness and resource fixes), 163 (write route table), 165 (speed test follow-ups), 166 (mutation
 testing), 167 (property tests) and 168 (interrupted apply cleanup). The open pull requests are PR
-161, 170 and 171 (all drafts). They are
+161 and 170 (both drafts). They are
 listed with their state under Current remaining work in the [roadmap](../ROADMAP.md).
 
 The first release, v0.2.0, is being prepared. `pyproject.toml` already says `0.2.0`, no version is
