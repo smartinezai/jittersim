@@ -10,8 +10,15 @@ _INLINE_ASSETS = (
 )
 # The scripts that join dashboard.js inside its closure, right before this call.
 _START_CALL = "    startDashboard();"
-_EXTRA_SCRIPTS = ("workflows.js", "access.js", "reconnect.js", "trust.js", "speed-test.js",
-                  "connection-check.js")
+_EXTRA_SCRIPTS = (
+    "workflows.js",
+    "access.js",
+    "reconnect.js",
+    "trust.js",
+    "speed-test.js",
+    "address-follow.js",
+    "connection-check.js",
+)
 
 
 def assemble_dashboard() -> str:
