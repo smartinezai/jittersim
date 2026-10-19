@@ -356,6 +356,9 @@ class StoreTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 clean_label(bad)
         self.assertEqual(clean_label("Café 日本語 😀  No\tlimits"), "Café 日本語 😀 No limits")
+        # Emoji sequences and Persian words keep their joiner and non-joiner.
+        for joined in ("👩\u200d💻", "🏳\ufe0f\u200d🌈", "می\u200cخواهم"):
+            self.assertEqual(clean_label(joined), joined)
         for bad in ({"other": 1}, {"download_mbit": -1}, {"download_mbit": True},
                     {"download_mbit": "fast"}, {"latency_ms": 1e9}, [1]):
             with self.assertRaises(ValueError):

@@ -35,7 +35,7 @@ next release takes them over.
 - Speed test follow-ups: errors show in the open speed test window instead of
   under it, a length such as 45.5 is refused with a message, the export uses the
   dashboard's request handling, and one damaged saved result no longer hides the
-  others. Labels reject hidden control and format characters.
+  others. Labels reject hidden control and format characters (the joiners that emoji and Persian words need are allowed).
 - The Pi Wi-Fi follows the router. After a **Copy router Wi-Fi to Pi** that
   worked, the Pi records the router's Wi-Fi name and security (no password).
   Every boot renames a saved Wi-Fi with another name, such as

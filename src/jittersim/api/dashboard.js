@@ -421,7 +421,9 @@
             uncertainWritePaths.add(path);
             error.message += ". The change's result is unknown. Check its saved settings before trying again.";
           }
-          notePiNotAnswering(path);
+          // A download is one click, not a poll that clears itself, so it must not leave the
+          // header stuck on "Pi not answering". The error still reaches the caller.
+          if (!options.download) notePiNotAnswering(path);
         }
         // A download is one click, not a list the page reads again, so it adds no retry note.
         if (tokenRevision === adminTokenRevision && method === "GET" && !options.download && typeof recordRead === "function") recordRead(path, error);

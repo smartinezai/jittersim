@@ -52,11 +52,16 @@ def ensure_speed_test_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA)
 
 
+JOINERS = frozenset("\u200c\u200d")
+
+
 def clean_label(value: Any) -> str:
     """A short label without control or format characters, or ValueError.
 
     Unicode categories Cc (including the C1 controls) and Cf (bidirectional overrides, zero
     width characters and the byte order mark) can hide or reorder text in a table or a CSV file.
+    The zero width joiner and non-joiner are the exception: emoji sequences and Persian or
+    Indic words need them, and they cannot reorder text.
     """
 
     if value is None:
@@ -64,7 +69,8 @@ def clean_label(value: Any) -> str:
     if not isinstance(value, str):
         raise ValueError("Label must be text")
     cleaned = " ".join(value.split())
-    if any(unicodedata.category(character) in ("Cc", "Cf") for character in cleaned):
+    if any(unicodedata.category(character) in ("Cc", "Cf") and character not in JOINERS
+           for character in cleaned):
         raise ValueError("Label contains a control character")
     if len(cleaned) > MAX_LABEL_LENGTH:
         raise ValueError(f"Label must be at most {MAX_LABEL_LENGTH} characters")

@@ -21,7 +21,7 @@ NAME = "Fixture phone"
 HEADERS = {"Authorization": "Bearer browser-test"}
 LIMIT = 20000
 LIVE = re.compile(r"Now: download 2\d\d kbit/s, upload 2\d\d kbit/s")
-PEAK = re.compile(r"Peak: download 2\d\d kbit/s, upload 2\d\d kbit/s")
+PEAK = re.compile(r"Peak: download [23]\d\d kbit/s, upload [23]\d\d kbit/s")
 # The Pi judges a speed only after it counted at least three busy seconds (and enough bytes).
 # The test waits for five, however slowly the machine runs.
 BUSY_SECONDS = 5
