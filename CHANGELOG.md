@@ -47,6 +47,10 @@ next release takes them over.
   results and compares them with numbers entered from a speed test run on the
   device. Deleting a result asks in the page's own dialog. The start check
   also compares the loss burst length of the queues with the applied profile.
+- Speed test follow-ups: errors show in the open speed test window instead of
+  under it, a length such as 45.5 is refused with a message, the export uses the
+  dashboard's request handling, and one damaged saved result no longer hides the
+  others. Labels reject hidden control and format characters (the joiners that emoji and Persian words need are allowed).
 - **Address changes** on the Devices page: a saved device that comes back with a
   new private Wi-Fi address is suggested ("This looks like Dad's phone ... Move
   its settings?") with Yes, No and Not this device. Off, Ask (default) and
