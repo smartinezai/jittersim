@@ -299,6 +299,10 @@ ACTION_PATHS = frozenset(
      "/api/access-point/reset-name", "/api/updates/check-online", "/api/updates/retry")
 )
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
+# The health check answers without the token, so a device on the test Wi-Fi could
+# turn every request into a call to the root helper. Without the token the helper
+# is asked at most once in this many seconds (security audit 2026-10-18, A2).
+PUBLIC_HEALTH_REUSE_SECONDS = 1.0
 # What the dashboard says when the standard library refuses a request before any route runs.
 REFUSED_REQUEST_SENTENCES = {
     400: "the request could not be understood",
@@ -951,6 +955,13 @@ RESET_REQUEST_PATHS = frozenset(("/api/reset", "/api/normal-access"))
 # Recorded when a device-only start failed and the helper cleanup did not succeed yet.
 DEVICE_CLEANUP_ERROR = "device-only cleanup failed"
 
+# A device Apply beside Everyone builds the whole plan from the saved settings, so it waits
+# while what runs is older than what is saved.
+_SAVED_SETTINGS_WAIT = (
+    "Saved settings are still waiting to be applied, so Everyone does not run what is "
+    "saved. Nothing was saved. Choose Start to apply them first, then apply this profile."
+)
+_RESET_KEPT = "A reset was recorded meanwhile, so what ran before was not put back."
 _RESET_SAVED_ONLY = {
     "live_applied": False,
     "message": "saved; the network is reset, so choose Start to use it",
@@ -1795,6 +1806,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         payload["running"] = self.scheduler is not None and self.scheduler.is_active
         # The saved devices of a device-only start. Everything else stays reset.
         payload["device_only"] = sorted(self.repository.get_device_start_scope() or ())
+        # The saved devices that run their own profile while Everyone runs for the rest.
+        payload["everyone_exceptions"] = sorted(self.repository.get_everyone_exceptions())
         return payload
 
     def _applied_summary(self, plan: NetworkPlan) -> Dict[str, Any]:
@@ -1858,20 +1871,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 "default_ssid": DEFAULT_ACCESS_POINT_SSID,
             })
         if path == "/api/health":
-            helper_reachable = False
-            if self.helper_client is not None:
-                try:
-                    helper_reachable = self.helper_client.ping().get("ok") is True
-                except HelperClientError:
-                    LOGGER.warning("network helper health check failed")
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "status": "ok" if self.helper_client is None or helper_reachable else "degraded",
-                    "mode": "hardware" if self.helper_client is not None else "configuration-only",
-                    "helper_configured": self.helper_client is not None,
-                    "helper_reachable": helper_reachable,
-                }
-            )
+            return self.health_response(fresh=True)
         if path == "/api/system-health":
             # The public health check carries only the mode like the Pi base. The
             # version and free disk and temperature and uptime need the admin token.
@@ -2159,6 +2159,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             states = device_protection_states(
                 self.repository, snapshot if protected else None
             )
+            beside_everyone = self.repository.get_everyone_exceptions()
             for client in devices:
                 group = groups_by_device.get(client["assigned_device_id"])
                 client["unaffected"] = client["mac_address"] in protected
@@ -2169,7 +2170,11 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 client["group_name"] = group.name if group else None
                 client["group_profile_id"] = group.profile_id if group else None
                 if general_status["active"] and not client["unaffected"]:
-                    client["general_profile_name"] = general_status["profile"]["name"]
+                    if client["assigned_device_id"] in beside_everyone:
+                        # This device left Everyone and runs the profile saved for it.
+                        client["beside_everyone"] = True
+                    else:
+                        client["general_profile_name"] = general_status["profile"]["name"]
             return (
                 HTTPStatus.OK,
                 "application/json",
@@ -4057,6 +4062,31 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
     def _validate_saved_structure(self) -> None:
         if self.repository.get_general_profile() is not None:
+            exceptions = self.repository.get_everyone_exceptions()
+            if exceptions:
+                # Everyone, the devices beside it, their service rules and the service lists
+                # share the classes. Count them structurally: a plan built without DNS leaves
+                # service limits out, which must not let a device in that the real plan refuses.
+                eligible_ids = {
+                    device.id for device in eligible_clients(self.repository).devices
+                    if device.id in exceptions
+                }
+                classes = 1 + len(eligible_ids) + sum(
+                    bool(item.enabled and item.device_id in eligible_ids)
+                    for items in (
+                        self.repository.list_service_quotas(),
+                        self.repository.list_time_quotas(),
+                        self.repository.list_service_assignments(),
+                    )
+                    for item in items
+                ) + sum(item.enabled for item in self.repository.list_service_lists())
+                if classes > MAX_SHAPED_MARKS_PER_PLAN:
+                    raise PlanError(
+                        "Everyone, the devices that run beside it, their service rules and "
+                        "the service lists can use at most "
+                        f"{MAX_SHAPED_MARKS_PER_PLAN} traffic classes together. Remove one or "
+                        "keep the device protected."
+                    )
             compile_stored_plan(repository=self.repository)
             return
         clients = eligible_clients(self.repository)
@@ -4118,7 +4148,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     ),
                 )
         status, content_type, body = self._apply_configuration_locked(
-            connected_snapshot=snapshot, sample_usage=False, device_scope=scoped
+            connected_snapshot=snapshot, sample_usage=False, device_scope=scoped,
+            keep_exceptions=True,
         )
         response = json.loads(body)
         response.update(fields)
@@ -5146,7 +5177,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
         A running saved plan is applied again as before. After a Reset only this
         device starts: Everyone, other saved devices, everyone else, service
-        lists and ad-blocking stay stopped until Start or Apply to everyone.
+        lists and ad-blocking stay stopped until Start or Apply to everyone. While
+        Everyone runs, this device leaves it and runs its own profile. Everyone keeps
+        running for every other device.
         """
 
         if self.helper_client is None:
@@ -5193,17 +5226,29 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 last_action = self.repository.get_runtime_state().last_action
                 stopped = last_action == "reset"
                 general = self.repository.get_general_profile()
+                beside_everyone = False
+                # What runs now, with the saved version it was built from. This Apply builds
+                # the whole plan again from the saved settings, so while Everyone runs it may
+                # only go ahead when the saved settings are exactly what runs: then every
+                # other device keeps what it has. One version check covers every way the two
+                # can differ, such as a failed Start, Apply to all or Stop, or an edit that
+                # did not reach the network yet.
+                running = self.scheduler.running_plan() if self.scheduler is not None else None
+                everyone_runs, saved_runs = self._everyone_and_saved_run(running)
+                if everyone_runs and not saved_runs and not stopped:
+                    raise ValueError(_SAVED_SETTINGS_WAIT)
                 if general is not None and not stopped:
-                    raise ValueError(
-                        f"Everyone uses {general.name} right now, so this device cannot run its own "
-                        "profile yet. Nothing was saved. Stop Everyone first, or save the choice "
-                        "in the device form to use it later."
-                        if last_action is not None else
-                        f"Everyone is saved as {general.name} and would cover this device. Nothing "
-                        "was saved. Choose Reset network first to start only this device, or "
-                        "stop Everyone."
-                    )
-                if stopped:
+                    if not everyone_runs:
+                        # An Everyone that does not run, for example after a failed Start,
+                        # would start for every device as a side effect of this Apply.
+                        raise ValueError(
+                            f"Everyone is saved as {general.name} but is not running. "
+                            "Nothing was saved. Choose Start to run it, Reset network first to "
+                            "start only this device, or stop Everyone."
+                        )
+                    # Everyone runs what is saved. This device leaves it for its own profile.
+                    beside_everyone = True
+                if stopped or beside_everyone:
                     stop_state = self._stop_state()
                     if stop_state != "clear":
                         raise ValueError(
@@ -5214,6 +5259,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                             "Nothing was saved. Try again in a moment."
                         )
                 previous_scope = self.repository.get_device_start_scope() or frozenset()
+                previous_exceptions = self.repository.get_everyone_exceptions()
+                # What runs now, for the case that this start fails at the helper.
+                ran_before = running if beside_everyone else None
+                # The saved version before and after this save, so a put-back can tell
+                # whether the saved settings are again exactly what ran.
+                versions = []
                 if self.scheduler:
                     self.scheduler.sample_before_control_change(repository=self.repository)
                 # Refuse a Panic or a changed helper intent before saving, on both paths.
@@ -5227,6 +5278,11 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
                 def save():
                     with self.repository.transaction():
+                        version = self.repository.get_runtime_state().configuration_version
+                        if ran_before is not None and version != ran_before[0].configuration_version:
+                            # Another process saved settings after the check above.
+                            raise ValueError(_SAVED_SETTINGS_WAIT)
+                        versions.append(version)
                         self.repository.save_device(
                             device, expected=existing, create_only=existing is None
                         )
@@ -5239,6 +5295,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                                     repository=self.repository,
                                     device_scope=previous_scope | {device.id},
                                 )
+                        elif beside_everyone:
+                            self.repository.add_everyone_exception(device.id)
+                            # The classes and the plan with Everyone and this device must
+                            # fit before anything is saved.
+                            self._validate_saved_plan()
+                        versions.append(self.repository.get_runtime_state().configuration_version)
 
                 # Panic cannot land between the last check and the commit.
                 accepted, _ = self._publish_apply(control_intent[0], save)
@@ -5250,11 +5312,34 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 "device": _device_payload(
                     device, labels_by_mac=self.repository.list_connected_device_labels()
                 ),
-                "message": self._base_profile_feedback(device, everyone_paused=stopped),
+                "message": self._base_profile_feedback(
+                    device, everyone_paused=stopped or beside_everyone),
             }
+            if beside_everyone:
+                return self._start_beside_everyone(
+                    fields, snapshot, device, general, control_intent, previous_exceptions,
+                    ran_before, existing, versions)
             if not stopped:
                 return self._saved_control_response(fields, snapshot)
             return self._start_device_only(fields, snapshot, device, control_intent, previous_scope)
+
+    def _everyone_and_saved_run(self, running) -> Tuple[bool, bool]:
+        """Whether Everyone runs, and whether what runs is what is saved.
+
+        `running` is the scheduler's running plan. The saved settings run only when that
+        plan was built from the saved configuration version of now and the last apply
+        succeeded. Without a scheduler only the recorded state can tell.
+        """
+
+        state = self.repository.get_runtime_state()
+        applied = state.observed_state == "applied"
+        if self.scheduler is None:
+            return applied and self.repository.get_general_profile() is not None, applied
+        if running is None:
+            return False, False
+        prepared, _ = running
+        return (prepared.plan.general_profile is not None,
+                applied and prepared.configuration_version == state.configuration_version)
 
     def _stop_state(self) -> str:
         """Whether a Panic, outage or state error keeps profiles stopped: latched, clear or unknown."""
@@ -5268,6 +5353,93 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         latched = any(gateway_status.get(name) is True for name in (
             "outage_stop_latched", "panic_stop_latched", "state_error"))
         return "latched" if latched else "clear"
+
+    def _start_beside_everyone(self, fields, snapshot, device, general, control_intent,
+                               previous_exceptions, ran_before=None, existing=None,
+                               versions=()):
+        """Apply Everyone for all and this device's own profile. Everyone is not cleared."""
+
+        status, content_type, body = self._apply_configuration_locked(
+            connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
+            keep_exceptions=True, expected_version=versions[1] if len(versions) == 2 else None,
+        )
+        response = json.loads(body)
+        response.update(fields)
+        response["live_applied"] = status == HTTPStatus.OK
+        if status == HTTPStatus.OK:
+            response["message"] = (
+                fields["message"]
+                + f" Started for {device.name} while Everyone keeps using {general.name} "
+                "for every other device. Start or Apply to all puts this device back on Everyone."
+            )
+            response["state"] = self._runtime_state_with_running()
+            return status, content_type, _json_bytes(response)
+
+        # The device did not start, so nothing changes: it keeps the assignment it had, or
+        # none, and stays with Everyone, and the earlier exceptions stay. Saved and running
+        # then agree, so a later Apply or retry never installs this failed choice. The check
+        # and the restore are one step under the Panic fence: a Panic that ended the
+        # exceptions is never undone.
+        put_back_version = []
+
+        def restore():
+            failed = self.repository.get_runtime_state()
+            if failed.last_action not in ("apply", "schedule"):
+                return False
+            try:
+                with self.repository.transaction():
+                    # Saved and running agree again after the restore only when nothing
+                    # else was saved since this Apply saved. Read in the same transaction.
+                    clean = (
+                        ran_before is not None and len(versions) == 2
+                        and self.repository.get_runtime_state().configuration_version
+                        == versions[1]
+                    )
+                    if existing is None:
+                        self.repository.delete_device(device.id)
+                    else:
+                        self.repository.save_device(existing, expected=device)
+                    self.repository.restore_everyone_exceptions(previous_exceptions)
+                    # Saving marks the state unknown. The failure stays what it was.
+                    self.repository.update_runtime_state(
+                        observed_state=failed.observed_state, last_action=failed.last_action,
+                        last_result=failed.last_result, last_error=failed.last_error,
+                        keep_everyone_exceptions=bool(previous_exceptions),
+                    )
+                    restored_version = self.repository.get_runtime_state().configuration_version
+                if clean:
+                    put_back_version.append(restored_version)
+            except StorageError:
+                LOGGER.exception("could not put back the device assignment after a failed start")
+                # The device keeps the saved choice that failed, so it goes back to Everyone
+                # instead of running that choice beside it.
+                self.repository.restore_everyone_exceptions(previous_exceptions - {device.id})
+            return True
+
+        accepted, restored = self._publish_apply(control_intent[0], restore)
+        note = ""
+        if status == HTTPStatus.BAD_GATEWAY and accepted and restored and ran_before is not None:
+            # A failed apply may have removed the rules that ran. Put back the plan that ran,
+            # not the saved settings: the device's new profile may be what failed. After a
+            # clean restore the saved settings build that plan again, so it counts as theirs.
+            prepared, rolls = ran_before
+            prepared = replace(prepared, configuration_version=(
+                put_back_version[0] if put_back_version else None))
+            put_back, _, _ = self._apply_configuration_locked(
+                connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
+                keep_exceptions=True, restore_plan=(prepared, rolls),
+            )
+            note = (
+                " What ran before was put back."
+                if put_back == HTTPStatus.OK else
+                " " + _RESET_KEPT if put_back == HTTPStatus.CONFLICT else
+                " What ran before could not be put back, so the dashboard keeps trying."
+            )
+        response["error"] = (
+            "The profile did not start, so nothing changed: the device keeps what it had and "
+            "Everyone keeps running for every device. " + response.get("error", "") + note
+        ).strip()
+        return status, content_type, _json_bytes(response)
 
     def _start_device_only(self, fields, snapshot, device, control_intent, previous_scope):
         """Start the device-only scope after a Reset. Everything else stays stopped."""
@@ -5568,10 +5740,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         ),
                     }
                 )
-        return self._apply_configuration(device_scope=scoped)
+        # A saved change applies again what runs. Devices that run their own profile
+        # beside Everyone keep doing so.
+        return self._apply_configuration(device_scope=scoped, keep_exceptions=True)
 
     def _apply_configuration(self, *, explicit_apply: bool = False, control_intent=None,
-                             device_scope: bool = False) -> Tuple[int, str, bytes]:
+                             device_scope: bool = False,
+                             keep_exceptions: bool = False) -> Tuple[int, str, bytes]:
         if control_intent is None:
             generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
             refused, revision = self._capture_control_intent(generation)
@@ -5582,17 +5757,26 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
         with operation:
             return self._apply_configuration_locked(
-                explicit_apply=explicit_apply, control_intent=control_intent, device_scope=device_scope)
+                explicit_apply=explicit_apply, control_intent=control_intent,
+                device_scope=device_scope, keep_exceptions=keep_exceptions)
 
     @recorded("apply", "dashboard")
     def _apply_configuration_locked(
         self, connected_snapshot=None, *, sample_usage=True, explicit_apply: bool = False, control_intent=None,
-        device_scope: bool = False,
+        device_scope: bool = False, keep_exceptions: bool = False, restore_plan=None,
+        expected_version=None,
     ) -> Tuple[int, str, bytes]:
         """Apply the whole saved plan, or with `device_scope` only a device-only start.
 
+        `restore_plan` is the scheduler's running plan from before, with its saved version
+        and randomization state: a failed apply puts exactly that back, not what the saved
+        settings say now. With `expected_version` the plan must be built from exactly that
+        saved version, or nothing is applied.
+
         A device-only start is read here, under the shared lock, so a Reset that ran
-        while this call waited leaves nothing to start.
+        while this call waited leaves nothing to start. Start and Apply to everyone cover
+        every device. A saved change passes `keep_exceptions`, so the devices that run
+        their own profile beside Everyone keep doing so. They are read here too.
         """
         if self.helper_client is None:
             return (
@@ -5618,14 +5802,48 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         # A device-only start stays a Reset for everything outside its devices.
         runtime_action = "reset" if scope is not None else "apply"
         keep = {"keep_device_scope": True} if scope is not None else {}
-        try:
-            prepared = (
-                self.scheduler.prepare_plan(
-                    repository=self.repository, connected_snapshot=connected_snapshot,
-                    **({"device_scope": scope} if scope is not None else {}),
+        planning = {}
+        applied_keep = keep
+        if scope is not None:
+            planning["device_scope"] = scope
+        else:
+            if self.repository.everyone_exception_rows():
+                # The devices that run beside Everyone stay recorded until the helper accepted
+                # the new plan, whichever action asked for it. A failed Start, Apply to all
+                # or Stop keeps the running policy, and the usage of those devices is still
+                # sampled before the counters restart. Only a plan without them ends them.
+                keep = {"keep_everyone_exceptions": True}
+            if self.repository.get_general_profile() is not None:
+                # Everyone is saved: name the devices beside it, or none for a whole-scope plan.
+                exceptions = (
+                    self.repository.get_everyone_exceptions() if keep_exceptions else frozenset()
                 )
-                if self.scheduler is not None else None
-            )
+                planning["everyone_exceptions"] = exceptions
+                if exceptions:
+                    applied_keep = keep
+            if restore_plan is not None and keep:
+                # The plan that ran comes back with the record that went with it. The next
+                # accepted plan of the saved settings decides whether they still count.
+                applied_keep = keep
+        # A whole-scope update while devices run beside Everyone: if it fails at the helper the
+        # plan that ran is applied again, as for a failed device Apply.
+        ran_before = None
+        if (scope is None and not keep_exceptions and restore_plan is None
+                and self.scheduler is not None and self.repository.everyone_exception_rows()):
+            ran_before = self.scheduler.running_plan()
+        try:
+            if restore_plan is not None:
+                # The plan that ran comes back with its randomization state.
+                prepared, rolls = restore_plan
+                self.scheduler.restore_rolls(rolls)
+            else:
+                prepared = (
+                    self.scheduler.prepare_plan(
+                        repository=self.repository, connected_snapshot=connected_snapshot,
+                        **planning,
+                    )
+                    if self.scheduler is not None else None
+                )
             plan = (
                 prepared.plan
                 if prepared is not None
@@ -5636,7 +5854,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                         if connected_snapshot is not None
                         else station_snapshot(self.helper_client)
                     ),
-                    device_scope=scope,
+                    **planning,
                 )
             )
         except (PlanError, StorageError):
@@ -5645,12 +5863,31 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 "application/json",
                 _json_bytes({"error": "stored configuration cannot be applied"}),
             )
-        accepted, _ = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
-            observed_state="applying", last_action=runtime_action, last_result=None, last_error=None,
-            **keep,
-        ))
+        if expected_version is not None and (
+                (prepared is not None and prepared.configuration_version != expected_version)
+                or self.repository.get_runtime_state().configuration_version != expected_version):
+            # Another process saved settings while the plan was built. They were not applied
+            # yet, so this plan must not install them for other devices.
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({
+                "error": _SAVED_SETTINGS_WAIT})
+        def mark_applying():
+            with self.repository.transaction():
+                if (restore_plan is not None
+                        and self.repository.get_runtime_state().last_action == "reset"):
+                    # A reset, for example `jittersim reset`, landed after the failure. A
+                    # put-back must never undo it.
+                    return False
+                self.repository.update_runtime_state(
+                    observed_state="applying", last_action=runtime_action, last_result=None,
+                    last_error=None, **keep,
+                )
+            return True
+
+        accepted, applying = self._publish_apply(halts_at_start, mark_applying)
         if not accepted:
             return self._apply_refused(halts_at_start)
+        if not applying:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": _RESET_KEPT})
         if self.scheduler is not None and sample_usage:
             # Applying recreates the helper counters, so record their traffic first.
             self.scheduler.sample_usage(repository=self.repository)
@@ -5683,10 +5920,23 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             else:
                 accepted, state = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
                     observed_state="error", last_action=runtime_action, last_result="failure",
-                    last_error=failure,
+                    last_error=failure, **keep,
                 ))
             if not accepted:
                 return self._apply_refused(halts_at_start, undo=True)
+            if ran_before is not None:
+                put_back, _, _ = self._apply_configuration_locked(
+                    connected_snapshot=connected_snapshot, sample_usage=False,
+                    control_intent=(halts_at_start, control_revision), keep_exceptions=True,
+                    restore_plan=ran_before,
+                )
+                failure += (
+                    " What ran before was put back."
+                    if put_back == HTTPStatus.OK else
+                    " " + _RESET_KEPT if put_back == HTTPStatus.CONFLICT else
+                    " What ran before could not be put back, so the dashboard keeps trying."
+                )
+                state = self.repository.get_runtime_state()
             return (
                 HTTPStatus.BAD_GATEWAY,
                 "application/json",
@@ -5705,9 +5955,16 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         def publish():
             if result.get("counters_preserved") is not True:
                 self.repository.rebase_quota_counters(now=int(time.time()))
+            # A plan put back after a failure counts as applied only when the saved settings
+            # of now built it. Otherwise unapplied saved settings stay unapplied.
+            observed = (
+                "unknown" if restore_plan is not None and prepared.configuration_version
+                != self.repository.get_runtime_state().configuration_version
+                else "applied"
+            )
             state = self.repository.update_runtime_state(
-                observed_state="applied", last_action=runtime_action, last_result="success",
-                last_error=None, **keep,
+                observed_state=observed, last_action=runtime_action, last_result="success",
+                last_error=None, **applied_keep,
             )
             if self.scheduler is not None:
                 self.scheduler.activate_plan(repository=self.repository, prepared=prepared,
@@ -5946,6 +6203,47 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             {"result": result, "state": self._runtime_state_with_running(state)}
         )
 
+    def health_response(self, *, fresh: bool) -> Tuple[int, str, bytes]:
+        """The health check. Without `fresh` a helper answer from the last second is reused."""
+
+        helper_reachable = False
+        if self.helper_client is not None:
+            helper_reachable = self._helper_reachable(fresh=fresh)
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {
+                "status": "ok" if self.helper_client is None or helper_reachable else "degraded",
+                "mode": "hardware" if self.helper_client is not None else "configuration-only",
+                "helper_configured": self.helper_client is not None,
+                "helper_reachable": helper_reachable,
+            }
+        )
+
+    def _helper_reachable(self, *, fresh: bool) -> bool:
+        # Created on first use (dict.setdefault is atomic), so servers that tests build
+        # without __init__ answer too.
+        lock = self.__dict__.setdefault("_health_lock", threading.Lock())
+        if not fresh:
+            # One ping at a time for every caller without the token: the others wait
+            # for it and take its answer.
+            with lock:
+                checked_at, reachable = self.__dict__.get("_health_answer", (float("-inf"), False))
+                if time.monotonic() - checked_at < PUBLIC_HEALTH_REUSE_SECONDS:
+                    return reachable
+                reachable = self._ping_helper()
+                self._health_answer = (time.monotonic(), reachable)
+                return reachable
+        reachable = self._ping_helper()
+        with lock:
+            self._health_answer = (time.monotonic(), reachable)
+        return reachable
+
+    def _ping_helper(self) -> bool:
+        try:
+            return self.helper_client.ping().get("ok") is True
+        except HelperClientError:
+            LOGGER.warning("network helper health check failed")
+            return False
+
     def is_authorized(self, authorization_header: Optional[str]) -> bool:
         """Return whether an Authorization header matches the configured admin token."""
 
@@ -6025,7 +6323,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 status, _, _ = self._reset_network(automatic_recovery=True)
                 kind, message = "reset", "Network reset again after the dashboard restarted"
         else:
-            status, _, _ = self._apply_configuration()
+            # Devices that run their own profile beside Everyone run again with it.
+            status, _, _ = self._apply_configuration(keep_exceptions=True)
             kind, message = "apply", "Configuration applied again after the dashboard restarted"
         if status != HTTPStatus.OK:
             LOGGER.error("network state recovery did not complete successfully")
@@ -6142,6 +6441,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 identity = self.server.dashboard_access(self.client_address[0])
                 status, content_type, body = (HTTPStatus.OK, "application/json",
                                               _json_bytes(self.server.address_move_offer(identity)))
+            elif path == "/api/health" and not self.server.is_authorized(self.headers.get("Authorization")):
+                status, content_type, body = self.server.health_response(fresh=False)
             elif path in ("/api/dashboard-access/status", "/api/dashboard-access"):
                 data = self.server.dashboard_access(
                     self.client_address[0], "status" if path.endswith("/status") else "list")
@@ -6483,6 +6784,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        # Another site cannot keep a handle on a dashboard window it opened, nor
+        # embed a dashboard answer in its own page (security audit 2026-10-18, A4).
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         if content_type.startswith("text/html"):
             self.send_header("Content-Security-Policy", DASHBOARD_CONTENT_SECURITY_POLICY)
         for name, value in (headers or {}).items():

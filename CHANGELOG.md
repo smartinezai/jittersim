@@ -8,6 +8,26 @@ next release takes them over.
 
 ## Unreleased
 
+- A helper that restarts after it died during an apply removes the queues and
+  tables that apply left. Before, devices could stay shaped while the dashboard
+  showed nothing running. If that removal fails, the helper still starts and
+  asks for Panic before profiles can start again.
+- The boot step of the Pi Wi-Fi looks once at the Wi-Fi names on the air before it
+  renames the Pi Wi-Fi to the router name. When the router's own Wi-Fi already sends
+  that name, the Pi keeps or takes `JitterSim-Recovery` for that boot, so one name
+  never runs on two subnets. A neighbour, guest network or mesh repeater with
+  exactly that name has the same effect, and devices that joined the Pi under the
+  router name move to the router after such a boot. A failed, busy or empty look
+  changes nothing. `wifi_follow status` shows the decision, the scan result and the
+  reason. The test Wi-Fi also does not start when the Ethernet address is inside
+  `192.168.50.0/24`.
+- Applying a profile to one connected device while a profile for Everyone runs now
+  starts it for that device. The device leaves Everyone and runs its own profile,
+  and Everyone keeps running for every other device. Before, the dashboard refused
+  with "Everyone uses ... right now". It is refused while Everyone is saved but not
+  running, or while what runs is older than the saved settings. A failed start changes nothing. Start, Apply to all, Stop
+  for everyone, Reset network and Panic end it for every device. The change adds a
+  table to the settings database and needs the Pi helper restarted with the update.
 - Add a device speed test that records traffic through the applied profile, saves
   results and compares them with numbers entered from a speed test run on the
   device. Deleting a result asks in the page's own dialog. The start check
@@ -35,6 +55,13 @@ next release takes them over.
 - `jittersim remote update now` follows an install the Pi already started when
   Install automatically is on, and `--json` prints one JSON answer (it cannot
   ask, so it needs `--yes`).
+- A check that a person asks for (the dashboard's Check for updates, `jittersim
+  remote update check` and `now`, `sudo jittersim update check --online`) only
+  checks and stages a release. Only the daily check installs by itself, and only
+  when Install automatically is on.
+- The Pi's update status carries the signed release notes of a release that can
+  be installed now, and a development build (`X.Y.Z.dev+COMMIT`) that stopped
+  can be retried.
 - The Updates page names the staged release on its install button (**Install
   v1.1.0**), shows whether a recovery copy is kept, shows the release notes when
   the Pi reports them, and the install confirmation names the signer and the
@@ -47,9 +74,25 @@ next release takes them over.
   cancels it and focus returns to the control that opened it.
 - A screen reader hears each result once. The dashboard has one status region
   and one alert region for results and errors, and lists that refresh every few
-  seconds (devices, saved profiles, groups, schedules, timers, limits,
-  observations and the router connection) no longer announce themselves. A
-  refresh keeps keyboard focus on the button you were on.
+  seconds (the devices and their conditions, schedules, timers, scenarios,
+  limits, website observations, activity, test sessions and the router
+  connection) no longer announce themselves. Saved profiles and groups are read
+  when a page opens and after a save, not every few seconds. A refresh keeps
+  keyboard focus on the button you were on.
+- **Revoke all homepage pairings** and **Clear** on the Measurements page ask
+  first, in the same dialog as the other destructive actions, and say the result
+  once. Clear asks only when the table holds runs that exist in the page alone:
+  a table that was copied or attached to a test session clears without a
+  question. The Edit, Open controls and Delete buttons of the device table and
+  of the schedule list now say which row they belong to (**Delete Test phone**).
+  The question about restoring the Wi-Fi name has a short heading and no longer
+  repeats it in the first sentence. If the row that asked a question is gone
+  when it closes (somebody removed it meanwhile), focus goes to its list.
+- Checking the admin token no longer fails by itself. Two checks that overlapped
+  (for example Allow this device followed at once by Remove) locked the dashboard
+  with "Token check failed: undefined", and so did a save that refreshed the page
+  while the check was still loading. A check now waits for the one that is
+  running, and a read that a refresh made stale is read again.
 - A save, an Apply or a delete no longer makes the dashboard read out its
   loading notes and device count again. The ad blocking line speaks only when
   its words change, and the random website line speaks only when you ask for it.
@@ -66,3 +109,6 @@ next release takes them over.
 - The dashboard has a new look: layered dark surfaces, a type scale, an icon
   beside each page link, a logo mark and short motion that stops under reduced
   motion. Nothing behaves differently.
+- The installer checks the management firewall after it turns off a newly
+  installed Unbound and hostapd, so a failed check no longer leaves them running.
+  The firewall unit stops a stuck `nft` within under a minute.

@@ -38,6 +38,7 @@ tests/browser/confirm_dialogs.py          journeys address_move group_devices ro
 tests/browser/diagnostics_keyboard.py     dashboard_navigation
 tests/browser/draft_navigation.py         dashboard_navigation
 tests/browser/forms_support.py            schedules_timers limits_quotas
+tests/browser/route_support.py            saved_profiles live_regions protected_dashboard_access schedules_timers limits_quotas
 tests/browser/service_list_focus.py       journeys
 tests/browser/journeys.py                 journeys dns_failure
 tests/browser/router_copy.py              router_copy trust_access

@@ -1,0 +1,5 @@
+$ nft -f -  # add learned service addresses
+| add element inet jittersim svc_8 { 203.0.113.3, 203.0.113.9 }
+| add element inet jittersim svc_9 { 203.0.113.40, 203.0.113.41 }
+$ nft -f -  # remove stale service addresses  [ignore_failure]
+| delete element inet jittersim svc_8 { 203.0.113.2, 203.0.113.4 }

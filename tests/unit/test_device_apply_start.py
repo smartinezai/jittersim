@@ -153,16 +153,17 @@ class DeviceApplyStartTests(DeviceApplyFixture):
 
     # Refusals leave everything as it was.
 
-    def test_everyone_running_refuses_before_saving(self) -> None:
+    def test_everyone_running_starts_the_device_beside_everyone(self) -> None:
+        # The device leaves Everyone and Everyone keeps running for the rest. The full
+        # set of cases is in test_device_apply_everyone.py.
         self.assertEqual(self.write("/api/general-profile", {"profile_id": "low"})[0], 200)
-        before = self.helper.applied_plan
 
         status, result = self.apply_to()
 
-        self.assertEqual(status, 409)
-        self.assertIn("Everyone uses daily climb manual right now", result["error"])
-        self.assertIsNone(self.repository.get_device(AIR_ID))
-        self.assertIs(self.helper.applied_plan, before)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(self.helper.applied_plan.general_profile.profile_id, "low")
+        self.assertEqual(self.running_ids(), [AIR_ID])
+        self.assertEqual(self.repository.get_device(AIR_ID).profile_id, "slow-test")
 
     def test_a_panic_latch_refuses_before_saving(self) -> None:
         self.reset()

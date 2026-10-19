@@ -1,0 +1,4 @@
+$ tc qdisc change dev eth0 parent 10:3 handle 42: netem delay 17ms loss gemodel 100.0000% 25.0000% corrupt 0% rate 0bit  # update upload settings for bob
+$ tc qdisc change dev wlan0 parent 10:3 handle 42: netem delay 17ms 5ms loss gemodel 2.2222% 20.0000% corrupt 0% rate 10gbit  # update download settings for bob
+$ tc qdisc change dev eth0 parent 10:4 handle 43: netem delay 20ms corrupt 0% rate 0bit  # update upload settings for carol
+$ tc qdisc change dev wlan0 parent 10:4 handle 43: netem delay 17ms corrupt 0% rate 800kbit  # update download settings for carol

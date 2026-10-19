@@ -1,0 +1,1 @@
+$ tc qdisc change dev wlan0 parent 10:6 handle 45: netem loss random 11% corrupt 0% rate 0bit  # update download settings for quota:alice-video
