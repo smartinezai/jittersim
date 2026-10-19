@@ -9,22 +9,6 @@ the hand-written Unreleased part short.
 
 ## Unreleased
 
-<<<<<<< HEAD
-- The Pi's firewall drops every packet that a test Wi-Fi device sends from UDP port
-  53 through the Pi. Before, a device could send such a packet to itself or to
-  another device and teach the Pi false addresses for a service list while
-  household website rules were on. Answers to DNS lookups are not affected. A
-  device that runs its own DNS server for the internet through the Pi no longer
-  works. The firewall file is loaded by the update.
-- The browser proxy gives each device at most 16 of its 32 connection slots, so one
-  device can no longer use them all and shut the others out. The 17th connection
-  of a device is closed until it closes another. The log says so at most once in
-  30 seconds and does not name the device.
-- Known limit, now written in the user guide: while no household website rule is
-  on, a device that asks a DNS server of its own choice (such as 8.8.8.8) does not
-  teach the Pi service list addresses. A household website rule sends every lookup
-  through the Pi's resolver, and then the Pi learns from that device again.
-=======
 ### Added
 
 - Update the Pi in one step. `sudo jittersim update` on the Pi (add `--yes` to
@@ -104,6 +88,10 @@ the hand-written Unreleased part short.
 
 ### Changed
 
+- Known limit, now written in the user guide: while no household website rule is
+  on, a device that asks a DNS server of its own choice (such as 8.8.8.8) does not
+  teach the Pi service list addresses. A household website rule sends every lookup
+  through the Pi's resolver, and then the Pi learns from that device again.
 - The dashboard has a new look: layered dark surfaces, a type scale, an icon
   beside each page link, a logo mark and short motion that stops under reduced
   motion. Nothing behaves differently.
@@ -157,7 +145,16 @@ the hand-written Unreleased part short.
 
 ### Fixed
 
->>>>>>> origin/main
+- The Pi's firewall drops every packet that a test Wi-Fi device sends from UDP port
+  53 through the Pi. Before, a device could send such a packet to itself or to
+  another device and teach the Pi false addresses for a service list while
+  household website rules were on. Answers to DNS lookups are not affected. A
+  device that runs its own DNS server for the internet through the Pi no longer
+  works. The firewall file is loaded by the update.
+- The browser proxy gives each device at most 16 of its 32 connection slots, so one
+  device can no longer use them all and shut the others out. The 17th connection
+  of a device is closed until it closes another. The log says so at most once in
+  30 seconds and does not name the device.
 - Choosing Check token after you edit the token no longer waits for an earlier
   check that the Pi never answered. The new check starts at once, and the late
   answer of the old one changes nothing.
