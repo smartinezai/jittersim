@@ -3,7 +3,7 @@
 This page lists every file in `docs/` and the guides that live elsewhere in the
 repository. It groups them by status so you can tell what to trust. The
 overview's detailed feature content now lives in user-guide.md. This index was
-checked against main at `2f68772` on 2026-10-17.
+checked against main at `8c3f8171` on 2026-10-18.
 
 ## What the status words mean
 
@@ -26,7 +26,7 @@ a month (for example `2026-09`) was written in that month.
 | Document | Use it for |
 | --- | --- |
 | [README.md](../README.md) | A short overview, current features and the Pi quick start |
-| [user-guide.md](user-guide.md) | Detailed feature behavior, network boundaries, terminal commands and local development |
+| [user-guide.md](user-guide.md) | Detailed feature behavior, network boundaries, terminal commands, known limits and local development |
 | [deploy/raspberry-pi/README.md](../deploy/raspberry-pi/README.md) | Installing, updating, securing and recovering the Pi. It starts with a recovery quick reference |
 | [pi-acceptance-checklist.md](pi-acceptance-checklist.md) | The owner's list of physical checks on a real Pi |
 | [runbooks/dashboard-unreachable.md](runbooks/dashboard-unreachable.md) | The dashboard does not open. How to reach the Pi when only the test Wi-Fi is available |
@@ -40,7 +40,8 @@ a month (for example `2026-09`) was written in that month.
 | [mutation-testing-2026-10-18.md](mutation-testing-2026-10-18.md) | The mutation-testing run on the plan logic: method, kill rates before and after per module, what was added, and how to run `scripts/mutation-test.py` again |
 | [releasing.md](releasing.md) | Cutting a release with `scripts/release.sh`, installing it and what the local verification record is |
 | [releases/README.md](releases/README.md) | The rules and manual commands behind a release: reserve, build, approve and publish |
-| [../CHANGELOG.md](../CHANGELOG.md) | The notes of every published release |
+| [../CHANGELOG.md](../CHANGELOG.md) | The notes of every published release and the changes still waiting for the next one (Unreleased) |
+| [release-runbook-2026-10-16.md](release-runbook-2026-10-16.md) | The owner's step by step runbook for the first signed release, v0.2.0: the one-time root install, the GitHub token, the release run, the test on the Pi and the check afterwards. Dated: the facts about the Pi are those of 16 October |
 | [release-checklist-template.md](release-checklist-template.md) | The checklist to copy for each numbered release candidate |
 | [measurements-2026-09.md](measurements-2026-09.md) | Measured effects of the profile presets (dated measurements, still cited by the README) |
 
@@ -76,6 +77,11 @@ a month (for example `2026-09`) was written in that month.
 | [design-helper-action-authorization-2026-10-09.md](design-helper-action-authorization-2026-10-09.md) | A proposal for per-caller authorization on the helper socket. Nothing is implemented |
 | [security-audit-2026-10-18.md](security-audit-2026-10-18.md) | Adversarial security audit of main: threat model, verdicts per area, four fixes, the open findings and a proposed helper patch |
 | [qa-report-2026-10-09.md](qa-report-2026-10-09.md) | Exploratory QA of 9 October: seven findings, which PR 126 fixed and what was left as it was (PR 107) |
+| [review-results-carry-forward-2026-10-16.md](review-results-carry-forward-2026-10-16.md) | The reviews of the carry-forward fixes of the Panic batch (PR 138): findings, what was fixed and the two owner decisions that stay open |
+| [backlog-audit-2026-10-16.md](backlog-audit-2026-10-16.md) | A read-only audit of every plan against main on 16 October with the six independent work items it proposed. A status block says what has moved since |
+| [pi-triage-2026-10-16.md](pi-triage-2026-10-16.md) | A read-only look at the Pi on 16 October: what it ran, its health and the boot problems that PR 142 fixed |
+| [review-overengineering-backend.md](review-overengineering-backend.md) | A review of the backend for needless complexity with ranked removals. Items 8 and 9 were done in PR 147 |
+| [review-overengineering-frontend-tests.md](review-overengineering-frontend-tests.md) | The same for the dashboard, tests and CI tooling. Items 5 and 6 were done in PR 148 |
 | [soak-and-resource-audit-2026-10-18.md](soak-and-resource-audit-2026-10-18.md) | The soak harness (`tests/soak/`), leaks and SD-card writes over time, the memory and CPU budget of each service on a Pi 3B+, three fixes and the proposals left |
 
 ### Release records
@@ -83,6 +89,7 @@ a month (for example `2026-09`) was written in that month.
 | Document | Use it for |
 | --- | --- |
 | [releases/registry.json](releases/registry.json) | The live release registry (no version is reserved yet) |
+| [release-notes-0.2.0-draft.md](release-notes-0.2.0-draft.md) | The draft text that `scripts/release.sh --notes-file` takes for the notes of v0.2.0: what a user sees, the upgrade notes and the known limits |
 | [releases/security-repair-plan-2026-10-03.md](releases/security-repair-plan-2026-10-03.md), [results](releases/security-repair-results-2026-10-03.md) and [verification](releases/verification-2026-10-03.md) | The 3 October release-system repairs and local verification. They are records of that work (historical) |
 
 ## Superseded
@@ -330,20 +337,30 @@ the first plan (September 2026) and is historical too.
 
 ## Screenshots
 
-The README shows the two overview images and the user guide shows all five.
-They show sample data. The two overview images were retaken on 2026-10-09
-with the refreshed look (see
-[ui-overhaul-proposal-2026-10-09.md](ui-overhaul-proposal-2026-10-09.md)). The
-staged update screenshot uses the current **Updates** page with the sample
-release `candidate-release`. It shows the automatic recovery copy and the
-collapsed release-notes section. The DNS-failure and router-outage screenshots
-show the earlier look.
+The README shows the two overview images and the user guide shows all five. They show sample data
+from the browser test fixture: no real phone, Pi or home network. All five were retaken on
+2026-10-18 from main `8c3f8171` with the refreshed look (see
+[ui-overhaul-proposal-2026-10-09.md](ui-overhaul-proposal-2026-10-09.md)):
 
-- [experience-overview-desktop.png](screenshots/experience-overview-desktop.png)
-- [experience-overview-phone.png](screenshots/experience-overview-phone.png)
-- [dns-failure-controls.png](screenshots/dns-failure-controls.png)
-- [router-outage-persistence.png](screenshots/router-outage-persistence.png)
-- [staged-update-check.png](screenshots/staged-update-check.png)
+- [experience-overview-desktop.png](screenshots/experience-overview-desktop.png) (1440 by 1000 pixels)
+  and [experience-overview-phone.png](screenshots/experience-overview-phone.png) (430 by 1200):
+  the Devices page after **Start**, with the test phone on the slow profile from a device timer.
+  No update is staged in these two so that the sidebar shows every page link.
+- [dns-failure-controls.png](screenshots/dns-failure-controls.png): the access options of the
+  Access and rules page with a DNS failure chance of 20% applied.
+- [router-outage-persistence.png](screenshots/router-outage-persistence.png): the Router outage
+  behavior card after saving.
+- [staged-update-check.png](screenshots/staged-update-check.png): the Updates and recovery card
+  with the sample release `candidate-release` staged. The fixture also sends release notes, which
+  the real Pi's update status does not carry yet, so the capture leaves them out and the
+  **Release notes** box stays hidden.
+
+`python scripts/docs-screenshots.py` retakes them (add `--out DIR` to write somewhere else first).
+It starts the fixture, drives the pages with Playwright and writes the same five files. It needs
+`pip install 'playwright==1.63.0'` and `python -m playwright install chromium`. Commit only the
+images that changed. The two overview images are about 280 KB and 125 KB because PNGs from
+Chromium do not recompress losslessly. Earlier versions of these two were reduced to a palette of
+200 colours.
 
 The folder `docs/ui-overhaul/` holds the before and after captures of the look
 refresh of PR 115. The proposal embeds them.

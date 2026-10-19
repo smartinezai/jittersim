@@ -4,10 +4,22 @@ The combined Panic batch was reviewed by an Opus agent and by Sol (GPT-6.1) in s
 These items were found and are NOT fixed in the batch. None is new in the batch except the
 rollback cleanup, which was left out on purpose.
 
-## Status (16 October 2026)
-Branch `fix/carry-forward-2026-10-16` works the rollback cleanup and the first three
-pre-existing items below. See docs/review-results-carry-forward-2026-10-16.md for what is
-fixed and what is still open (two owner decisions).
+## Status (18 October 2026)
+PR 138 (merge `8c3f8171`, 18 October 2026) worked the rollback cleanup and the first three
+pre-existing items below. `PANIC_APPROVED_SOURCES` has the entry for it. See
+docs/review-results-carry-forward-2026-10-16.md for what is fixed and what is still open.
+
+| Item | State on main |
+| --- | --- |
+| Rollback cleanup of the upload intake | Merged with an ownership proof (a pref 2 connmark filter or a durable record bound to the interface and the boot). The restore is never blocked. A failed cleanup is tried again after the restore and the final status warns. **Owner decision 1 is open**: block the rollback or keep a cleanup-capable Panic path. Until then the owner action stays: reboot the Pi |
+| Stalled fsync of the stop records | Fixed. The first saves run in a thread with a bounded wait. On a stall Panic removes the rules, releases the household and answers that the recovery is not confirmed. The same stall class in `AdStore.access_transition()` (the household release) is still open |
+| Dashboard Panic and the scheduler lock | Fixed. The three scheduler steps share a bounded wait and Panic still calls the helper, answering unconfirmed when a step cannot take the lock |
+| Rollback restoring `dashboard-access.json` | Fixed for that file (`KEPT_CURRENT_CONFIG`). **Owner decision 2 is open**: a rollback restores the database, so a protected device removed after the update comes back with its protection grant. The default is to accept that and remove the device again |
+| Helper socket authorizes by group only | Open (proposal only, see the design note) |
+| The two boot notes | Open |
+| Reviewer notes O1 and O2 | Open. A late stop-record error has no log line, and an early save error that is not a storage error ends Panic before any rule is removed. Both would change the pinned `helper.py` only for themselves, so they wait for the next change of it for another reason |
+
+The sections below are the list as it stood on 10 October 2026.
 
 ## Rollback cleanup of the upload intake (left out)
 Only a rollback from the first release that contains the upload-safe layout (PR 125) to an older

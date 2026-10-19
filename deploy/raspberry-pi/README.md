@@ -463,7 +463,7 @@ IPv4 address inside `192.168.50.0/24` (`wifi_follow uplink-check`, exit status
 install preflight refuses the same case. Only status 3 stops the unit: an
 unreadable address, a crash or an older module without the action lets the Wi-Fi
 start. It runs once, last before the start, so an address that DHCP hands out
-later is not seen until the next start. A manual Wi-Fi change or **Reset Pi Wi-Fi name** deletes the
+later is not seen until the next start. A manual Wi-Fi change or **Reset Wi-Fi name** deletes the
 record, so the owner's own choice stays. The record also keeps a salted HMAC of the
 copy's password (openssl reads it from nmcli through a pipe, JitterSim never
 sees it), so a Wi-Fi whose security or password changed in another way, for

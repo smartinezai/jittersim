@@ -68,6 +68,17 @@ class CliTests(unittest.TestCase):
                     repository.access_settings().access_options.dns_failure_percent, 25
                 )
 
+    def test_every_dns_failure_help_page_prints(self) -> None:
+        # A bare percent sign in an argparse help string made `set --help` raise a TypeError.
+        for arguments in (["access", "dns-failure", "--help"], ["access", "dns-failure", "show", "--help"],
+                          ["access", "dns-failure", "set", "--help"]):
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                main(arguments)
+            self.assertEqual(stopped.exception.code, 0)
+            self.assertIn("usage:", output.getvalue())
+        self.assertIn("100% failure chance", output.getvalue())
+
     def test_persistence_command_saves_the_mode_and_updates_the_helper(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "settings.db"
