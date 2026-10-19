@@ -12,11 +12,11 @@ dashboard denied, a broken contract. S1 = hardening.
 
 | ID | Sev | Area | Finding | State |
 | --- | --- | --- | --- | --- |
-| A1 | S2 | Hostile Wi-Fi device | The DNS watcher learns service list addresses from answers of any DNS server a client asks, so one test client can put any public address into a list that every affected device shares | **Fixed** (`networking/dns_watch.py`) |
+| A1 | S2 | Hostile Wi-Fi device | The DNS watcher learns service list addresses from answers of any DNS server a client asks, so one test client can put any public address into a list that every affected device shares | **Fixed** (`networking/dns_watch.py`). A review of that fix found a second route, closed by follow-up F1 below (`jittersim-control-firewall.nft`). Known limit F4 below |
 | A2 | S1 | Availability before sign-in | Each unauthenticated `GET /api/health` is one call to the root helper | **Fixed** (`api/server.py`) |
 | A3 | S1 | Availability before sign-in | The browser proxy reads a CONNECT request with a timeout per read, so a client that trickles bytes holds a tunnel slot for good | **Fixed** (`networking/browser_proxy.py`) |
 | A4 | S1 | Hostile web page | No `Cross-Origin-Opener-Policy` and no `Cross-Origin-Resource-Policy` | **Fixed** (`api/server.py`) |
-| A5 | S2 | Availability before sign-in | The browser proxy has 32 tunnel slots for every device together. One device can hold all of them with ordinary idle tunnels | Open, owner decision |
+| A5 | S2 | Availability before sign-in | The browser proxy has 32 tunnel slots for every device together. One device can hold all of them with ordinary idle tunnels | **Fixed** by follow-up: at most 16 for each client address (`networking/browser_proxy.py`) |
 | A6 | S2 | Local process on the Pi | Any process of the `jittersim` user (the login user and every service) can call every helper action and can read the admin token from the dashboard's environment | Open, known (finding 5 of 2026-10-09), patch proposed for the pinned helper |
 | A7 | S1 | Hostile web page | The dashboard accepts any `Host`. DNS rebinding reaches only the public page and health check, and the Origin check of the recovery routes compares the Origin with that same Host | Open, owner decision |
 | A8 | S1 | Availability before sign-in | The homepage policy listener (port 8443) has 4 slots and no per-device share | Open, accepted (experimental feature) |
@@ -68,11 +68,23 @@ route is looked at.
   Fix: an answer counts only when its IPv4 source is the Pi's own address `192.168.50.1`, or
   while the published access policy has DNS rules (`AccessPlan.has_dns_rules`). Then the access
   table redirects every test Wi-Fi lookup to the Pi's resolver and drops direct DNS and DoT
-  (`networking/access.py`, the `dns` and `forward` chain rules), so every answer that leaves
-  comes from the Pi's resolver, even when it carries the address the client asked. Ad blocking
-  rewrites only lookups sent to `192.168.50.1`, so those answers come from it too. An unreadable
-  policy trusts only `192.168.50.1`. Tests: `tests/unit/test_dns_watch.py`
+  (`networking/access.py`, the `dns` and `forward` chain rules), so every answer that the Pi
+  makes comes from the Pi's resolver, even when it carries the address the client asked. Ad
+  blocking rewrites only lookups sent to `192.168.50.1`, so those answers come from it too. An
+  unreadable policy trusts only `192.168.50.1`. Tests: `tests/unit/test_dns_watch.py`
   (`ForwardedAnswerTests`, `RedirectFileTests`). They fail on main.
+
+  This fix alone did not close A1 (follow-up F1, found when PR 159 was reviewed). "Every answer
+  that leaves comes from the resolver" holds only for packets the Pi makes. The Pi also forwards
+  packets that a client makes. Those leave `wlan0` as well, and the access table's rules match
+  destination port 53 only. While household DNS rules are on, a client can send a UDP packet
+  from its own address with source port 53 to itself or to another device through the Pi. It is
+  forwarded `wlan0` to `wlan0`, the watcher sees an outgoing frame from port 53 and trusts every
+  source while the rules are on. The watcher cannot tell such a packet from a forwarded answer.
+  While the rules are off the watcher trusts only the source `192.168.50.1`, so this route needs
+  the rules on (a packet that arrives on `wlan0` with the Pi's own address as its source is a
+  martian packet that the kernel drops by default: from the kernel documentation, not run here).
+  F1 below closes the route in the forward chain of the management firewall, for both states.
 - **mDNS spoofing.** AP isolation keeps one test client's mDNS from the others. On the household
   network anyone can answer for `netlab.local`, but the browser then needs a certificate from the
   Pi's name-constrained CA, so the token is not sent unless the owner clicks through a warning.
@@ -229,11 +241,17 @@ left out on purpose: the dashboard is also reached by IP address, where browsers
   every few seconds held a slot until 72 KiB arrived. Test `ProxyRequestDeadlineTests` (0.5 s
   deadline, one byte every 0.1 s): on main the read did not end for over 5 minutes, now it ends at
   the deadline.
-- **A5 (open).** The proxy has 32 slots shared by all devices and no per-device share. A tunnel
-  stays open while it carries a byte every 300 s. One device can therefore hold every slot with
-  32 ordinary `CONNECT example.com:443` tunnels, and A3 does not change that. Proposal: give each
-  client address at most 16 of the 32 slots (a browser normally needs far fewer). This changes
-  what a single busy test browser may open, so it is the owner's choice.
+- **A5 (fixed by the follow-up PR).** The proxy had 32 slots shared by all devices and no
+  per-device share. A tunnel stays open while it carries a byte every 300 s. One device could
+  therefore hold every slot with 32 ordinary `CONNECT example.com:443` tunnels, and A3 does not
+  change that. Now each client address holds at most 16 of the 32 slots (a browser normally needs
+  far fewer), counted from accept to close, so a connection that has not sent its request yet
+  counts too. The 17th connection of one address is closed without an answer, the same way a
+  full proxy refuses, and logs `browser tunnel rejected: one device already holds its 16 of 32
+  tunnel slots` (no address, MAC address or request text, at most once in 30 s). A slot comes
+  back when the connection ends, fails or cannot start a worker. Behind a second router on the
+  test Wi-Fi, all of its devices share one address and one share. Tests:
+  `ProxyClientShareTests` and `ProxyClientShareSocketTests`.
 - **Helper pool.** Incomplete input never holds an operation slot, and one kept slot serves only
   Panic and its emergency device check (`_uses_panic_reserve`). The browser proxy shares one
   in-flight `clients` scan. Nothing new found.
@@ -255,8 +273,32 @@ No open draft was audited.
 | A2 | `src/jittersim/api/server.py` (`health_response`, `PUBLIC_HEALTH_REUSE_SECONDS`) | `tests/unit/test_security_audit_2026_10_18.py` |
 | A3 | `src/jittersim/networking/browser_proxy.py` (`_read_connect_request`) | same |
 | A4 | `src/jittersim/api/server.py` (`_send_response`) | same |
+| A5 (follow-up PR) | `src/jittersim/networking/browser_proxy.py` (`_ClientSlots`, `BrowserProxyServer.process_request`) | same |
+| F1 (follow-up PR) | `deploy/raspberry-pi/jittersim-control-firewall.nft` (forward chain, `udp sport 53 counter drop`) | `tests/unit/test_dashboard_name_deploy.py` (rule text), `tests/kernel/test_access.py` (packets) |
 
 No Panic-pinned or test-pinned file was changed.
+
+## Follow-ups from the review of PR 159
+
+- **F1 (fixed): a client packet from port 53 passes the forward chain.** See A1 above for the
+  route. The management firewall now drops `iifname <test interface> udp sport 53` in its forward
+  chain (`counter drop`, comment `deny forged DNS answers from test Wi-Fi`). It does not touch an
+  answer a client is meant to get, because those never take this path: the Pi's own resolver
+  answers from the output chain (also when household DNS rules redirect the lookup to port
+  5335), and an answer from the router or the internet arrives on the uplink, where the rule's
+  `iifname` does not match. A device that sends from source port 53 on purpose,
+  such as a DNS server run on a test device for the internet, no longer works through the Pi. The
+  kernel lab test sends one datagram between the two lab clients through the Pi: it arrives from
+  an ordinary source port and is dropped from port 53, and the Pi's own resolver still answers a
+  client.
+- **F4 (known limit): hard-coded DNS loses service list learning while household DNS rules are
+  off.** With the rules off, the watcher trusts only answers from `192.168.50.1`. A device that
+  asks a DNS server of its own choice (a fixed `8.8.8.8` in its network settings, or an app with
+  its own resolver) gets answers from that server, which the watcher ignores on purpose (A1). The
+  device is still shaped by the addresses that other devices and the Pi's own lookups taught
+  the list, but its own answers add nothing. With household DNS rules on, every
+  lookup goes through the Pi's resolver, so the device is learned from again. This is written in
+  the user guide under Service lists.
 
 ## Residual risk
 
@@ -265,6 +307,8 @@ No Panic-pinned or test-pinned file was changed.
   token. The fix is the user split of the 2026-10-09 design note plus the patch above.
 - A1 relies on the published access policy telling the truth about the redirect. If writing the
   policy succeeded but the nft change failed, forwarded answers would count again until the next
-  apply. Direct DNS over TCP is not read at all, so it cannot add addresses.
+  apply. It also relies on the management firewall rule of F1: without it a client packet from
+  port 53 counts as an answer while the rules are on. Direct DNS over TCP is not read at all, so
+  it cannot add addresses.
 - MAC identity can be copied. The token, not the device list, is the authority.
-- A5 and A7 wait for owner decisions.
+- A7 waits for an owner decision.

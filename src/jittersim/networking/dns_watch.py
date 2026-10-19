@@ -6,13 +6,25 @@ which addresses belong to the hostnames of the applied service lists. Matching
 by the answers a client actually got covers content networks that hand
 different addresses to different resolvers.
 
-Only frames the Pi sent out of the test interface count, so a client cannot
-send a forged answer itself. Leaving is not enough on its own: the Pi also
-forwards answers that a client asked another DNS server for, and that server
-can say anything (security audit 2026-10-18, finding A1). So an answer counts
-only when it comes from the Pi's own resolver address, or while household DNS
-rules send every test Wi-Fi lookup through the Pi's resolver and drop direct
-DNS. Only then can every answer on its way out come from that resolver.
+Only frames the Pi sent out of the test interface count. Leaving is not enough
+on its own, because the Pi also forwards frames that it did not make:
+
+- Answers that a client asked another DNS server for. That server can say
+  anything (security audit 2026-10-18, finding A1). So an answer counts only
+  when it comes from the Pi's own resolver address, or while household DNS
+  rules send every test Wi-Fi lookup through the Pi's resolver and drop direct
+  DNS. Only then does every answer that the Pi makes come from that resolver.
+- A packet that a client sends from UDP port 53 to itself or to another device
+  through the Pi. It leaves the test interface like a forwarded answer, with
+  a source address the client picks, and this watcher cannot tell it from one
+  (while household DNS rules are on, every source counts). The forward chain of
+  the management firewall drops every packet that comes in from the test
+  interface with source port 53 (jittersim-control-firewall.nft, follow-up F1
+  of the same audit), and this watcher relies on that rule.
+
+Known limit: while household DNS rules are off, a device that asks a DNS server
+of its own choice (a fixed address such as 8.8.8.8) teaches the Pi nothing,
+because only the Pi's resolver is trusted then.
 """
 
 import argparse
@@ -326,7 +338,9 @@ class ServiceWatcher:
         Without household DNS rules a client may ask any DNS server, and the Pi
         forwards that server's answer out of the test interface like its own. With
         them, direct DNS is dropped and a redirected answer leaves with the address
-        the client asked, so then every source counts.
+        the client asked, so then every source counts. A packet a client sends
+        from port 53 through the Pi never gets here: the management firewall
+        drops it (see the module docstring).
         """
 
         source = frame_source(frame)
