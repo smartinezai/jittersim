@@ -537,6 +537,11 @@ milestones above is one of these:
 - Planned work that has not started: Milestones 16 to 19 (Deliveries B to F of the erratic
   connection plan) and the website list modes of the [planned features](docs/planned-features.md).
 - Planned work in progress: the draft pull requests listed below (Check connection, security follow-ups, QA follow-ups).
+- Requested on 23 October 2026 and not started (see [planned features](docs/planned-features.md)):
+  show which device the browser in use is in the Devices tab, a speed test that runs from the
+  dashboard alone, a global block list larger than 100 names, a quick button to reset the Pi
+  Wi-Fi name, and protected devices that the global block list does not affect. After v0.2.0: a
+  dashboard redesign with components (see [planned features](docs/planned-features.md)).
 - The v0.2.0 release itself (Milestone 12), described below.
 
 Hosted CI cannot start jobs (billing limit). Every pull request is gated by

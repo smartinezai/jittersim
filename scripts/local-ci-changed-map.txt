@@ -27,14 +27,14 @@ tests/test_homepage_reference_fixture.py  none
 
 # The GUI baseline, the accessibility scan and the homepage reference have their own commands.
 tests/browser/gui_*                       none
-tests/browser/a11y_axe.py                 none
+tests/browser/a11y_axe.py                 dashboard_access
 tests/browser/homepage*                   none
 tests/browser/Dockerfile                  none
 tests/browser/GUI_BASELINE.md             none
 tests/browser/vendor/*                    none
 
 # Shared test helpers: the modules that import them.
-tests/browser/confirm_dialogs.py          journeys address_move address_follow group_devices router_copy wifi_recovery wifi_restart_reconnect dashboard_access protected_dashboard_access
+tests/browser/confirm_dialogs.py          journeys address_move address_follow group_devices router_copy wifi_recovery wifi_restart_reconnect dashboard_access protected_dashboard_access device_names
 tests/browser/diagnostics_keyboard.py     dashboard_navigation
 tests/browser/draft_navigation.py         dashboard_navigation
 tests/browser/forms_support.py            schedules_timers limits_quotas
@@ -55,3 +55,7 @@ src/jittersim/api/trust.py                trust_access
 src/jittersim/localca.py                  trust_access
 src/jittersim/networking/adblocking.py    ad_blocking
 src/jittersim/config/adblocking.py        ad_blocking
+src/jittersim/api/connection-check.js     connection_check
+src/jittersim/api/connection-check.css    connection_check
+src/jittersim/api/connection_checks.py    connection_check
+src/jittersim/connection_check.py         connection_check

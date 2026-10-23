@@ -437,10 +437,13 @@ def icmp_checksum(data: bytes) -> int:
     return ~total & 0xFFFF
 
 
-def echo_request(sequence: int, nonce: bytes) -> bytes:
+def echo_request(sequence: int, nonce: bytes, size: int = 0) -> bytes:
+    """An echo request. `size` pads the data after the nonce to that many bytes (like ping's 56)."""
+
+    data = nonce + bytes(max(0, size - len(nonce)))
     header = struct.pack("!BBHHH", ICMP_ECHO_REQUEST, 0, 0, 0, sequence & 0xFFFF)
-    checksum = icmp_checksum(header + nonce)
-    return struct.pack("!BBHHH", ICMP_ECHO_REQUEST, 0, checksum, 0, sequence & 0xFFFF) + nonce
+    checksum = icmp_checksum(header + data)
+    return struct.pack("!BBHHH", ICMP_ECHO_REQUEST, 0, checksum, 0, sequence & 0xFFFF) + data
 
 
 def parse_echo_reply(packet: bytes, nonce: bytes) -> Optional[int]:
@@ -469,14 +472,18 @@ class IcmpProber:
     """Send one echo per tick to one device and collect the replies until the next tick."""
 
     def __init__(self, target: str, *, socket_factory: Callable[[], socket.socket] = None,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, max_probes: int = MAX_PROBES_KEPT,
+                 payload_size: int = 0):
         self.target = target
         self.clock = clock
+        self.max_probes = max_probes
+        self.payload_size = payload_size
         self.probes: Dict[int, Dict[str, Any]] = {}
         self.status = "measured"
         self.reason: Optional[str] = None
         self.nonce = os.urandom(8)
         self._sequence = 0
+        self._arrivals = 0
         self._socket: Optional[socket.socket] = None
         factory = socket_factory or (
             lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP)
@@ -511,12 +518,15 @@ class IcmpProber:
             return
         self._sequence = (self._sequence + 1) & 0xFFFF
         try:
-            self._socket.send(echo_request(self._sequence, self.nonce))
+            self._socket.send(echo_request(self._sequence, self.nonce, self.payload_size))
         except OSError:
             # A full buffer or an unreachable host counts as a lost probe.
             pass
-        self.probes[self._sequence] = {"sent": self.clock(), "rtt_ms": None}
-        while len(self.probes) > MAX_PROBES_KEPT:
+        # `copies` counts the answers to this probe (a duplicate is a second answer) and
+        # `arrival` is the order the first answers came in, which shows reordering.
+        self.probes[self._sequence] = {
+            "sent": self.clock(), "rtt_ms": None, "copies": 0, "arrival": None}
+        while len(self.probes) > self.max_probes:
             self.probes.pop(next(iter(self.probes)))
 
     def collect(self, until: float) -> None:
@@ -540,8 +550,13 @@ class IcmpProber:
                 continue
             sequence = parse_echo_reply(packet, self.nonce)
             probe = self.probes.get(sequence) if sequence is not None else None
-            if probe is not None and probe["rtt_ms"] is None:
+            if probe is None:
+                continue
+            probe["copies"] += 1
+            if probe["rtt_ms"] is None:
                 probe["rtt_ms"] = (self.clock() - probe["sent"]) * 1000
+                probe["arrival"] = self._arrivals
+                self._arrivals += 1
 
     def summary(self) -> Dict[str, Any]:
         # A copy: the sampling thread may still add a probe while a request ends the run.
@@ -549,6 +564,20 @@ class IcmpProber:
         if self.reason:
             result["reason"] = self.reason
         return result
+
+    def records(self) -> List[Dict[str, Any]]:
+        """Every probe in the order it was sent: round trip, answers and arrival order."""
+
+        return [
+            {"rtt_ms": probe["rtt_ms"], "copies": probe["copies"], "arrival": probe["arrival"]}
+            for probe in list(self.probes.values())
+        ]
+
+    def counts(self) -> Tuple[int, int]:
+        """How many probes were sent and how many of them have an answer."""
+
+        probes = list(self.probes.values())
+        return len(probes), sum(1 for probe in probes if probe["rtt_ms"] is not None)
 
     def close(self) -> None:
         if self._socket is not None:
@@ -561,6 +590,7 @@ class NoProber:
 
     def __init__(self, reason: str = "The device has no address yet"):
         self.reason = reason
+        self.status = "unavailable"
 
     def send(self) -> None:
         pass
@@ -570,6 +600,12 @@ class NoProber:
 
     def summary(self) -> Dict[str, Any]:
         return {**summarize_probes({}, "unavailable"), "reason": self.reason}
+
+    def records(self) -> List[Dict[str, Any]]:
+        return []
+
+    def counts(self) -> Tuple[int, int]:
+        return 0, 0
 
     def close(self) -> None:
         pass

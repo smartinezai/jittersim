@@ -29,6 +29,8 @@ a month (for example `2026-09`) was written in that month.
 | [user-guide.md](user-guide.md) | Detailed feature behavior, network boundaries, terminal commands, known limits and local development |
 | [deploy/raspberry-pi/README.md](../deploy/raspberry-pi/README.md) | Installing, updating, securing and recovering the Pi. It starts with a recovery quick reference |
 | [pi-acceptance-checklist.md](pi-acceptance-checklist.md) | The owner's list of physical checks on a real Pi |
+| [test-recipes.md](test-recipes.md) | Short recipes for testing a mobile app: offline at launch, loss during an upload, slow start, high latency and a shared limit. It says plainly that a Wi-Fi drop and rejoin is not available yet |
+| [household-recovery-card.md](household-recovery-card.md) | One printable page to keep next to the router: what normal looks like and what to do in order when the internet is down |
 | [runbooks/dashboard-unreachable.md](runbooks/dashboard-unreachable.md) | The dashboard does not open. How to reach the Pi when only the test Wi-Fi is available |
 | [runbooks/update-rollback-and-recovery-copy.md](runbooks/update-rollback-and-recovery-copy.md) | A failed update, the recovery copy and going back to the previous release |
 | [runbooks/router-outage-pi-only-rollback.md](runbooks/router-outage-pi-only-rollback.md) | The router or the household Wi-Fi is down. Safe order of steps back from Pi-only Wi-Fi |
@@ -42,6 +44,7 @@ a month (for example `2026-09`) was written in that month.
 | [releases/README.md](releases/README.md) | The rules and manual commands behind a release: reserve, build, approve and publish |
 | [../CHANGELOG.md](../CHANGELOG.md) | The notes of every published release and the changes still waiting for the next one (Unreleased) |
 | [release-runbook-2026-10-16.md](release-runbook-2026-10-16.md) | The owner's step by step runbook for the first signed release, v0.2.0: the one-time root install, the GitHub token, the release run, the test on the Pi and the check afterwards. Dated: the facts about the Pi are those of 16 October |
+| [release-0.2.0-owner-commands.md](release-0.2.0-owner-commands.md) | The exact commands, answers and evidence wording the owner uses for v0.2.0, with the Panic trap and the merge freeze |
 | [release-checklist-template.md](release-checklist-template.md) | The checklist to copy for each numbered release candidate |
 | [measurements-2026-09.md](measurements-2026-09.md) | Measured effects of the profile presets (dated measurements, still cited by the README) |
 
@@ -54,6 +57,7 @@ a month (for example `2026-09`) was written in that month.
 | [../ROADMAP.md](../ROADMAP.md) | Milestones and known limits |
 | [feature-proposals-2026-10-09.md](feature-proposals-2026-10-09.md) | Thirty researched feature proposals with sizes and risks. They are proposals and not started work |
 | [implementation-plan-follow-address-changes-2026-10-17.md](implementation-plan-follow-address-changes-2026-10-17.md) | Following a device to its new private Wi-Fi address: evidence, scoring, what may move automatically and what stays manual |
+| [implementation-plan-devices-this-device-2026-10-23.md](implementation-plan-devices-this-device-2026-10-23.md) | The "This device" label on the Connected clients row of the device you browse with: how it is matched, what is never trusted and the one Block sentence |
 
 ### Open investigations and reviews
 
@@ -89,7 +93,7 @@ a month (for example `2026-09`) was written in that month.
 | Document | Use it for |
 | --- | --- |
 | [releases/registry.json](releases/registry.json) | The live release registry (no version is reserved yet) |
-| [release-notes-0.2.0-draft.md](release-notes-0.2.0-draft.md) | The draft text that `scripts/release.sh --notes-file` takes for the notes of v0.2.0: what a user sees, the upgrade notes and the known limits |
+| [release-notes-0.2.0-draft.md](release-notes-0.2.0-draft.md) | The upgrade notes and known limits of v0.2.0. `scripts/release.sh --notes-file` puts them below the Unreleased entries of CHANGELOG.md, and together they are the release notes. The file name keeps `draft` so older links work |
 | [releases/security-repair-plan-2026-10-03.md](releases/security-repair-plan-2026-10-03.md), [results](releases/security-repair-results-2026-10-03.md) and [verification](releases/verification-2026-10-03.md) | The 3 October release-system repairs and local verification. They are records of that work (historical) |
 
 ## Superseded
@@ -199,6 +203,7 @@ are grouped by theme.
 | Plan | Date |
 | --- | --- |
 | [Connected device details](implementation-plan-connected-device-details-2026-09.md) | 2026-09 |
+| [Check connection (probe burst against the applied profile)](implementation-plan-connection-check-2026-10-17.md) | 2026-10-17 |
 | [Clear dashboard action feedback](implementation-plan-dashboard-feedback-2026-09.md) | 2026-09 |
 | [Dashboard follow-ups: stable device identity and visible network state](implementation-plan-dashboard-followups-2026-09.md) | 2026-09 |
 | [Clear private results and repair phone controls](implementation-plan-dashboard-private-and-phone-repairs-2026-10-03.md) | 2026-10-03 |

@@ -288,8 +288,59 @@ class FixtureProber:
         pass
 
 
+class FixtureCheckProber:
+    """Answers the connection check's probes like a device behind the applied download queue.
+
+    It reads the loss and delay the queue has right now and answers accordingly: every tenth
+    probe is lost for a loss of 10 percent. It sends no packet, for the reason FixtureProber gives.
+    """
+
+    status = "measured"
+    reason = None
+
+    def __init__(self, target, probes, impairment):
+        self.loss = impairment.get("loss_percent") or 0
+        self.delay = impairment.get("delay_ms") or 0
+        self.items = []
+
+    def send(self):
+        index = len(self.items)
+        lost = bool(self.loss) and (index * self.loss) % 100 < self.loss
+        answered = sum(1 for item in self.items if item["rtt_ms"] is not None)
+        self.items.append({
+            "rtt_ms": None if lost else self.delay + 12.0 + index % 3,
+            "copies": 0 if lost else 1,
+            "arrival": None if lost else answered,
+        })
+
+    def collect(self, until):
+        pass
+
+    def counts(self):
+        return len(self.items), sum(1 for item in self.items if item["rtt_ms"] is not None)
+
+    def records(self):
+        return [dict(item) for item in self.items]
+
+    def close(self):
+        pass
+
+
 class FixtureServer(ControlServer):
     speed_test_prober_factory = FixtureProber
+
+    def connection_check_prober_factory(self, target, probes):
+        impairment = {}
+        try:
+            queues = self.helper_client.queue_stats()
+        except HelperClientError:
+            queues = []
+        for entry in queues:
+            if entry["direction"] == "download" and not entry["device_id"].startswith(
+                    ("general-profile", "rule:")):
+                impairment = entry["impairment"]
+                break
+        return FixtureCheckProber(target, probes, impairment)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
