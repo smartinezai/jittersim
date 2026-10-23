@@ -9,6 +9,10 @@ the hand-written Unreleased part short.
 
 ## Unreleased
 
+### Added
+
+- `jittersim backup pull` on a Mac saves the Pi's database backup in a private folder (`~/jittersim-backups/` by default) and never replaces a file. It runs once each time. A schedule is a cron or launchd line.
+
 ### JitterSim 0.2.0
 
 The first signed JitterSim release adds safer updates with a recovery copy and health check, per-device profiles, protected-device dashboard access and router Wi-Fi name following. It also improves accessibility and reliability.

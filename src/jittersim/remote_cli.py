@@ -1,9 +1,9 @@
 """Commands that run on your Mac or another computer against the Pi's HTTPS dashboard.
 
-`jittersim connect`, `status`, `profiles`, `traffic`, `wifi show` and `impact` read and change
-the Pi through the same verified dashboard API as the browser. They ask for the admin token
-with a hidden prompt every time and never store it. Each command registers its parser and
-its handler below.
+`jittersim connect`, `status`, `profiles`, `traffic`, `wifi show`, `impact` and `backup pull`
+read and change the Pi through the same verified dashboard API as the browser. They ask for
+the admin token with a hidden prompt every time and never store it. Each command registers its
+parser and its handler below.
 """
 
 import argparse
@@ -21,6 +21,7 @@ from jittersim.config.models import normalize_domain
 from jittersim.remote_client import (
     CA_CERT_ENV,
     EXAMPLE_URL,
+    MAX_BACKUP_BYTES,
     TOKEN_ENV,
     UNDERSTOOD_MESSAGE,
     URL_ENV,
@@ -976,6 +977,62 @@ def _impact(arguments: argparse.Namespace) -> int:
 
 
 # --- end: impact
+
+
+# --- section: backup ----------------------------------------------------------------------
+
+BACKUP_TIMEOUT_SECONDS = 120.0
+BACKUP_FOLDER = "~/jittersim-backups"
+SQLITE_HEADER = b"SQLite format 3\x00"
+
+register_group(
+    "backup", "Save the Pi's database backup on this computer: jittersim backup pull.", ("pull",)
+)
+
+
+def _backup_pull_parser() -> argparse.ArgumentParser:
+    parser = _parser(
+        "jittersim backup pull",
+        "Download the database backup that the dashboard's Download backup button gives and "
+        f"save it in a private folder ({BACKUP_FOLDER} unless you give --directory) under a "
+        "new name with the time in it. A file that exists is never replaced. The backup holds "
+        "device names, addresses and observed domain names, so keep it private. The command "
+        "runs once. Call it from cron or launchd to repeat it.",
+    )
+    parser.add_argument("--directory", type=Path, help="save the backup in this folder instead")
+    return parser
+
+
+@register("backup pull", _backup_pull_parser)
+def _backup_pull(arguments: argparse.Namespace) -> int:
+    client = _client(arguments)
+    data = client.download(
+        "/api/backup", timeout=BACKUP_TIMEOUT_SECONDS, max_bytes=MAX_BACKUP_BYTES
+    )
+    if not data.startswith(SQLITE_HEADER):
+        raise RemoteError("The dashboard answer was not a database backup.")
+    folder = (arguments.directory or Path(BACKUP_FOLDER)).expanduser().resolve()
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = folder / time.strftime("jittersim-backup-%Y%m%dT%H%M%SZ.db", time.gmtime())
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise RemoteError(f"{path} already exists. Nothing was replaced. Try again.") from None
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+    except OSError:
+        path.unlink(missing_ok=True)
+        raise
+    if arguments.json:
+        _print_json({"path": str(path), "bytes": len(data)})
+        return 0
+    _out(f"Saved the backup to {path} ({len(data)} bytes).")
+    _out("It holds device names, addresses and observed domain names. Keep it private.")
+    return 0
+
+
+# --- end: backup
 
 
 # --- section: remote update --------------------------------------------------------------

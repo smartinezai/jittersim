@@ -197,6 +197,7 @@ control characters.
 | `jittersim wifi show` | The router's own Wi-Fi name, read live from the router. It also asks for the router admin password with a hidden prompt. Add `--password` to show the Wi-Fi password too. |
 | `jittersim remote update now` | Asks the Pi to check GitHub for a newer signed release, shows it, asks, installs it and waits until the Pi runs it (900 seconds by default, `--wait SECONDS` changes that). `--yes` skips the question and `--json` prints one JSON answer, which needs `--yes`. `jittersim remote update status`, `check`, `upload` and `install` run the single steps. |
 | `jittersim impact` | The **Impact** check: two samples of the Pi's queues `--wait` seconds apart (10 by default, at most 50) judged with the dashboard's rules. The verdicts name the time it measured such as "in the last 10 seconds". |
+| `jittersim backup pull` | Saves the Pi's database backup, the one **Download backup** gives, in `~/jittersim-backups/` (`--directory FOLDER` picks another folder). The file name carries the UTC time, the folder is private (mode 0700), the file is readable only by you (0600) and a file that exists is never replaced. It prints the path. It exits with 1 and says why when the Pi cannot be reached or the token is refused. |
 
 The terminal commands call the profile for **Everyone** the general profile.
 
@@ -221,6 +222,38 @@ connection to the Pi's router network or its own test Wi-Fi. The command uses
 the trusted HTTPS dashboard on the test Wi-Fi and when SSH cannot answer.
 See
 [Deploy from a Mac](../deploy/raspberry-pi/README.md#deploy-from-a-mac).
+
+#### Back up to your Mac and check the copy
+
+`jittersim backup pull` runs once each time you run it. It has no schedule of
+its own. The backup holds device names, addresses and observed domain names, so
+keep the folder private. To repeat it, call it from cron or a launchd agent. A
+cron line for 03:15 every day that reads the token from the Keychain item
+`jittersim-admin-token` (see `deploy-from-mac.sh --save-token`) looks like
+this. It was not run for this page. If your Keychain does not answer in the
+background, run the command by hand:
+
+```sh
+15 3 * * * JITTERSIM_ADMIN_TOKEN="$(security find-generic-password -s jittersim-admin-token -w)" "$HOME/.jittersim-cli/bin/jittersim" backup pull
+```
+
+JitterSim has no restore command and no restore button for the database file.
+The only restore built into the dashboard is **Import settings...**, which reads
+a file from **Export settings**, not the database backup. The manual steps to
+put a database back on a Pi are in
+[Back up, restore and reimage the Pi](runbooks/restore-and-reimage.md#restore-the-database-on-the-same-pi).
+They were written from the installer and not run on a Pi. A short drill that
+needs no Pi:
+
+1. Run `jittersim backup pull`.
+2. Check that the file opens and passes SQLite's own check. The answer must be
+   `('ok',)`:
+
+   ```sh
+   python3 -I -c 'import sqlite3, sys; from pathlib import Path; c = sqlite3.connect(Path(sys.argv[1]).resolve(strict=True).as_uri() + "?mode=ro", uri=True); print(c.execute("PRAGMA quick_check").fetchone())' ~/jittersim-backups/jittersim-backup-20261023T031500Z.db
+   ```
+
+3. Before you rely on a backup, try the manual restore steps once on a spare Pi.
 
 ## Features
 
