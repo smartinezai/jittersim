@@ -45,13 +45,17 @@ class SensitiveExecutorTests(unittest.TestCase):
             self.run_fixture("printf 'fixture-secret\\n'\n", command)
 
     def test_failure_timeout_and_excess_output_have_no_secret_context(self):
-        command = Command("nmcli", ("connection", "show"), "private check", sensitive=True,
-                          expected_stdout="private-fixture-value\n", timeout_seconds=0.2)
-        for body, timed_out in (
-            ("printf 'private-fixture-value\\n' >&2\nexit 1\n", False),
-            ("printf 'private-fixture-value\\n'\nexec sleep 10\n", True),
+        # Only the sleeping child needs the short timeout. The other two end by themselves, so a
+        # slow child start under load must not turn them into timeouts.
+        def make(timeout_seconds):
+            return Command("nmcli", ("connection", "show"), "private check", sensitive=True,
+                           expected_stdout="private-fixture-value\n",
+                           timeout_seconds=timeout_seconds)
+        for body, timed_out, command in (
+            ("printf 'private-fixture-value\\n' >&2\nexit 1\n", False, make(1)),
+            ("printf 'private-fixture-value\\n'\nexec sleep 10\n", True, make(0.2)),
             ("i=0; while [ \"$i\" -lt 1000 ]; do printf '%1000s' x; i=$((i + 1)); done\n"
-             "exec sleep 10\n", False),
+             "exec sleep 10\n", False, make(1)),
         ):
             with self.subTest(body=body):
                 started = time.monotonic()
