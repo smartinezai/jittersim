@@ -27,9 +27,11 @@ PEAK = re.compile(r"Peak: download [23]\d\d kbit/s, upload [23]\d\d kbit/s")
 BUSY_SECONDS = 5
 
 
-def start_fixture():
+def start_fixture(wifi_peer=False):
     environment = os.environ.copy()
     environment["JITTERSIM_BROWSER_TEST_SCHEDULER"] = "1"
+    # The fixture then sees every browser request as coming from the phone on the test Wi-Fi.
+    environment["JITTERSIM_BROWSER_TEST_WIFI_PEER"] = "1" if wifi_peer else "0"
     process = subprocess.Popen(
         [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True,
         env=environment,
@@ -410,6 +412,89 @@ def check_width(browser, width, height):
         process.wait(timeout=10)
 
 
+def check_dashboard_test(browser):
+    """The phone opens the dashboard itself and tests its speed without an outside site."""
+
+    process, port = start_fixture(wifi_peer=True)
+    try:
+        base = f"http://127.0.0.1:{port}"
+        context = browser.new_context(viewport={"width": 1440, "height": 1000})
+        page = context.new_page()
+        # Over loopback the Pi's 64 MiB per part would arrive before the browser's one-second
+        # warm-up ends. A Wi-Fi-like 8 Mbit/s keeps the timing realistic.
+        context.new_cdp_session(page).send("Network.emulateNetworkConditions", {
+            "offline": False, "latency": 5, "downloadThroughput": 1_000_000,
+            "uploadThroughput": -1})
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        for path, data in (
+                ("/api/dashboard-access/register-self", {"name": NAME}),
+                ("/api/profiles", {"id": "capped", "name": "Capped",
+                                   "download": {"bandwidth_kbit": 250}}),
+                ("/api/connected-device-labels",
+                 {"mac_address": MAC_ADDRESS, "display_name": NAME, "device_type": "phone"}),
+                ("/api/connected-devices/apply-profile",
+                 {"ipv4_address": IP_ADDRESS, "mac_address": MAC_ADDRESS, "profile_id": "capped"}),
+                ("/api/apply", {})):
+            response = page.request.post(base + path, headers=HEADERS, data=data)
+            assert response.ok, (path, response.status, response.text())
+        sign_in(page, base)
+        page.locator('[data-page-link="devices"]').first.click()
+        row = page.locator(f'.connected-row[data-mac-address="{MAC_ADDRESS}"]')
+        row.get_by_role("button", name=f"Test speed of {NAME}").click()
+        # This browser is the phone, so the dashboard test is chosen and needs no length.
+        expect(page.locator("#speed-test-provider")).to_have_value("dashboard")
+        expect(page.locator("#speed-test-duration-label")).to_be_hidden()
+        page.locator("#speed-test-label").fill("From the dashboard")
+        page.locator("#speed-test-begin").click()
+        expect(page.locator("#speed-test-open")).to_contain_text("Keep this window open")
+        expect(page.locator("svg.speed-test-qr")).to_have_count(0)
+        expect(page.locator("#speed-test-announce")).to_have_text(
+            "Speed test saved.", timeout=2 * LIMIT)
+        history = page.locator("#speed-test-history tbody tr")
+        expect(history).to_have_count(1)
+        expect(history.first).to_contain_text("Not tested")
+        expect(history.first).to_contain_text("this browser:")
+        result = page.request.get(base + "/api/speed-tests?mac=" + MAC_ADDRESS,
+                                  headers=HEADERS).json()["results"][0]
+        assert result["provider"] == "dashboard", result
+        browser_speeds = result["summary"]["browser"]
+        assert browser_speeds["download_kbit"] and browser_speeds["reference_kbit"], result
+
+        # A lost response header must end on the browser's deadline, even before a reader exists.
+        stalled = []
+        pattern = "**/api/speed-tests/download?run=deadline-fixture&part=shaped"
+
+        def hold_headers(route):
+            stalled.append(route)
+
+        page.route(pattern, hold_headers)
+        try:
+            bounded = page.evaluate("""async () => {
+              let guard;
+              try {
+                const result = await Promise.race([
+                  speedTestPull({id: 'deadline-fixture'}, 'shaped', 0, speedTestState.serial),
+                  new Promise((_, reject) => {
+                    guard = window.setTimeout(() => reject(new Error('Download did not stop')), 10000);
+                  })
+                ]);
+                return {result, released: speedTestState.streamController === null};
+              } finally { window.clearTimeout(guard); }
+            }""")
+            assert len(stalled) == 1, stalled
+            assert bounded == {"result": None, "released": True}, bounded
+        finally:
+            page.unroute(pattern, hold_headers)
+
+        assert page.evaluate("document.documentElement.scrollWidth") <= 1441
+        assert not errors, errors
+        context.close()
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+
 def run():
     Path("test-results").mkdir(exist_ok=True)
     with sync_playwright() as playwright:
@@ -419,6 +504,7 @@ def run():
         try:
             for width, height in ((1440, 1000), (390, 844)):
                 check_width(browser, width, height)
+            check_dashboard_test(browser)
             print("Device speed test acceptance passed at desktop and phone widths.")
         finally:
             browser.close()

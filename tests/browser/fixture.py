@@ -342,15 +342,22 @@ class FixtureServer(ControlServer):
                 break
         return FixtureCheckProber(target, probes, impairment)
 
-    def write_response_for(self, path, payload):
-        response = super().write_response_for(path, payload)
-        if path != "/api/speed-tests/start" or payload.get("label") != "Fixture fault":
-            return response
-        status, _, body = response
-        if status != 201:
-            return response
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The request handler starts a speed test with the browser's address, so the fault is
+        # hooked into the manager's start.
+        manager = self._speed_test_manager
+        start = manager.start
 
-        run_id = json.loads(body)["id"]
+        def start_with_fault(payload, peer=None):
+            run = start(payload, peer)
+            if isinstance(payload, dict) and payload.get("label") == "Fixture fault":
+                self._fail_speed_test(run["id"])
+            return run
+
+        manager.start = start_with_fault
+
+    def _fail_speed_test(self, run_id):
         manager = self._speed_test_manager
         run = manager.runs[run_id]
         read_queues = manager._read_queues
@@ -363,7 +370,6 @@ class FixtureServer(ControlServer):
 
         manager._read_queues = fail_this_run
         run.deadline = time.monotonic() + 2.5
-        return response
 
     def response_for(self, path, query=""):
         status, content_type, body = super().response_for(path, query)

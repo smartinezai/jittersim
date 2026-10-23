@@ -34,6 +34,22 @@ CAP_EXCEEDED_RATIO = 1.1
 MAX_PROBES_KEPT = 120
 
 DIRECTIONS = ("download", "upload")
+
+# The dashboard-served test (docs/implementation-plan-dashboard-speed-test-2026-10-23.md). The
+# browser on the device downloads a reference part (unshaped: what the Pi and its Wi-Fi can
+# send) and a main part that goes through the device's download queue.
+DASHBOARD_PROVIDER = "dashboard"
+DASHBOARD_WINDOW_SECONDS = 20
+DASHBOARD_PARTS = {"reference": 3, "shaped": 8}
+# The browser ends each part. The server stops sending this much later in any case.
+DASHBOARD_PART_GRACE_SECONDS = 2
+# Bytes per part: about 107 Mbit/s over the reference part's 5 s and 54 over the main part's 10 s.
+DASHBOARD_MAX_BYTES = 64 * 1024 * 1024
+DASHBOARD_MAX_ACTIVE = 1
+DASHBOARD_GAP_SECONDS = 15
+# A cap at or above this share of the reference speed cannot show in the test.
+PI_LIMIT_SHARE = 0.9
+MAX_BROWSER_KBIT = 10_000_000
 SOURCE_LABELS = {
     "device": "This device's own queues",
     "everyone": "Shared queue of the profile for everyone",
@@ -45,10 +61,12 @@ VERDICT_LABELS = {
     "no-cap": "No speed limit set",
     "at-cap": "Matches the cap",
     "above-cap": "Faster than the cap: the limit did not hold",
-    "below-cap": "Slower than the cap: the internet or the device was the limit",
+    "below-cap": "Slower than the cap: the internet, the Pi's Wi-Fi or the device was the limit",
     "not-measured": "Not measured on the Pi",
     "service-rules": "Not judged: a service rule sends some traffic through another queue",
     "service-rules-unknown": "Not judged: the active service rules could not be confirmed",
+    "pi-limit": "Not judged: the cap is at or above what the Pi sends over Wi-Fi",
+    "not-tested": "Not tested: uploads to the Pi itself are not shaped",
 }
 # The verdicts that say how the speed compares with the cap. A service rule withholds them.
 CAP_VERDICTS = frozenset(("at-cap", "above-cap", "below-cap"))
@@ -192,6 +210,28 @@ def summarize_direction(
     return summary
 
 
+def clean_browser(value: Any) -> Dict[str, Optional[float]]:
+    """The two speeds the browser measured in a dashboard test, in kbit/s, or None each."""
+
+    if not isinstance(value, dict) or set(value) - {"download_kbit", "reference_kbit"}:
+        raise ValueError("browser must hold download_kbit and reference_kbit only")
+    cleaned: Dict[str, Optional[float]] = {}
+    for key in ("download_kbit", "reference_kbit"):
+        number = value.get(key)
+        if number is not None and (
+                isinstance(number, bool) or not isinstance(number, (int, float))
+                or not math.isfinite(number) or not 0 <= number <= MAX_BROWSER_KBIT):
+            raise ValueError(f"{key} must be a speed from 0 to {MAX_BROWSER_KBIT} kbit/s")
+        cleaned[key] = None if number is None else round(float(number), 1)
+    return cleaned
+
+
+def pi_limited(cap_kbit: Optional[float], reference_kbit: Optional[float]) -> bool:
+    """Whether a download cap is too high to show against the Pi's own top speed."""
+
+    return bool(cap_kbit and reference_kbit and cap_kbit >= PI_LIMIT_SHARE * reference_kbit)
+
+
 def unmeasured_direction() -> Dict[str, Any]:
     return {"cap_kbit": None, "seconds": 0, "bytes": 0, "verdict": "not-measured"}
 
@@ -224,6 +264,8 @@ COMPARE_FIELDS = (
     ("upload_peak_kbit", ("summary", "upload", "peak_kbit")),
     ("rtt_median_ms", ("summary", "latency", "rtt_median_ms")),
     ("loss_percent", ("summary", "latency", "loss_percent")),
+    ("browser_download_kbit", ("summary", "browser", "download_kbit")),
+    ("browser_reference_kbit", ("summary", "browser", "reference_kbit")),
     ("reported_download_mbit", ("reported", "download_mbit")),
     ("reported_upload_mbit", ("reported", "upload_mbit")),
     ("reported_latency_ms", ("reported", "latency_ms")),
@@ -318,6 +360,7 @@ EXPORT_COLUMNS = (
     "upload_busy_kbit", "upload_p90_kbit", "upload_peak_kbit", "upload_bytes", "upload_drops",
     "upload_verdict",
     "latency_status", "rtt_median_ms", "rtt_p90_ms", "loss_percent",
+    "browser_download_kbit", "browser_reference_kbit",
     "reported_download_mbit", "reported_upload_mbit", "reported_latency_ms", "reported_jitter_ms",
 )
 
@@ -346,6 +389,9 @@ def export_row(result: Dict[str, Any]) -> Dict[str, Any]:
     row["rtt_median_ms"] = latency.get("rtt_median_ms")
     row["rtt_p90_ms"] = latency.get("rtt_p90_ms")
     row["loss_percent"] = latency.get("loss_percent")
+    browser = summary.get("browser") or {}
+    row["browser_download_kbit"] = browser.get("download_kbit")
+    row["browser_reference_kbit"] = browser.get("reference_kbit")
     for field in ("download_mbit", "upload_mbit", "latency_ms", "jitter_ms"):
         row[f"reported_{field}"] = reported.get(field)
     return row
