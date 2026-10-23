@@ -717,6 +717,73 @@ class AccessDatapathTests(unittest.TestCase):
         self.assertIn("jittersim_control", tables)
         self.assertNotIn("jittersim_access_transition", tables)
 
+    def datagram_arrives_between_clients(self, source_port):
+        """Send one datagram from CLIENT to OTHER_CLIENT through the Pi."""
+
+        receiver = subprocess.Popen(
+            [
+                "ip", "netns", "exec", OTHER_CLIENT, "python", "-u", "-c",
+                "import socket\n"
+                "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+                "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+                "s.bind(('0.0.0.0', 9999))\n"
+                "s.settimeout(2)\n"
+                "print('ready')\n"
+                "try:\n"
+                "    print(s.recv(32).decode())\n"
+                "except socket.timeout:\n"
+                "    print('blocked')\n",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            self.assertTrue(select.select([receiver.stdout], [], [], 3)[0])
+            self.assertEqual(receiver.stdout.readline().strip(), "ready")
+            run_in(
+                CLIENT, "python", "-c",
+                "import socket\n"
+                "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+                f"s.bind(('{CLIENT_ADDRESS}', {source_port}))\n"
+                f"s.sendto(b'arrived', ('{OTHER_CLIENT_ADDRESSES[0]}', 9999))\n",
+            )
+            output, error = receiver.communicate(timeout=5)
+            self.assertEqual(receiver.returncode, 0, error)
+            return output.strip()
+        finally:
+            if receiver.poll() is None:
+                receiver.kill()
+                receiver.communicate(timeout=3)
+
+    def test_the_control_firewall_drops_a_forwarded_packet_that_poses_as_a_dns_answer(self):
+        # Follow-up F1 of the security audit of 2026-10-18. The DNS watcher reads the frames
+        # the Pi sends out of the test interface. A device could send a packet from UDP port
+        # 53 to another device through the Pi (or to itself) and pass for a forwarded answer.
+        self.load_control_firewall()
+        # The packet must really cross the Pi: the client routes the other client's address
+        # through it, and the Pi does not tell the client to send it directly instead.
+        run_in(
+            PI, "sh", "-c",
+            "echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects; "
+            "echo 0 > /proc/sys/net/ipv4/conf/wlan0/send_redirects",
+        )
+        run_in(
+            CLIENT, "ip", "route", "add", f"{OTHER_CLIENT_ADDRESSES[0]}/32",
+            "via", "192.168.50.1", "dev", "c0",
+        )
+        # A real answer of the Pi's own resolver still reaches the client. It leaves through
+        # the output chain, not through the forward chain.
+        self.assertIn(
+            "203.0.113.7", self.query("news.example.com", CLIENT, resolver="192.168.50.1")
+        )
+        # An ordinary datagram makes the trip, so the lab path works.
+        self.assertEqual(self.datagram_arrives_between_clients(40000), "arrived")
+        # The same datagram from source port 53 is dropped by the new rule.
+        self.assertEqual(self.datagram_arrives_between_clients(53), "blocked")
+        rules = run_in(PI, "nft", "list", "chain", "inet", "jittersim_control", "forward").stdout
+        self.assertRegex(rules, r"udp sport (?:53|domain) counter packets [1-9]")
+
     def sign_in_listeners(self):
         """Listen on the dashboard port and on another port in the Pi namespace."""
 

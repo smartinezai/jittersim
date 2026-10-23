@@ -40,6 +40,16 @@ table inet jittersim_control {
     chain forward {
         type filter hook forward priority -300; policy accept;
 
+        # A test Wi-Fi device has no honest reason to send a packet from UDP
+        # port 53. DNS answers for it never take this path: the Pi's own
+        # resolver answers from the output chain and an answer from the router
+        # or the internet arrives on the uplink. Without this rule a device
+        # could send such a packet to itself or to another device through the
+        # Pi. It would leave the test interface as if the Pi had forwarded a
+        # DNS answer, and the service list watcher would learn its addresses
+        # while household DNS rules are on (security audit 2026-10-18, A1).
+        iifname "@TEST_INTERFACE@" udp sport 53 counter drop comment "deny forged DNS answers from test Wi-Fi"
+
         # Test-network clients may use the Pi for public internet access, but
         # must not reach the router or other private networks through uplink.
         # Link-local and carrier-grade NAT addresses count as private: some ISP

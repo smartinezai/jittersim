@@ -366,6 +366,7 @@ def test_release_script_dry_run_builds_signed_release_without_touching_github(re
     with tarfile.open(package) as bundle:
         notes = bundle.extractfile("deploy/RELEASE-NOTES.md").read().decode()
     assert notes.startswith("## v0.3.0 - ") and "Dry run release notes" in notes
+    assert (state / "evidence/release-notes.md").read_text() == notes
     # The hand-written Unreleased entries came along, above the generated notes.
     assert notes.index("- ") < notes.index("Dry run release notes")
     receipt = release.verify_local(manifest["commit"], state / "evidence" / release.LOCAL_RECORD,
@@ -539,3 +540,91 @@ def test_tagged_build_carries_only_its_changelog_section(release, source, key, t
                    cwd=source, check=True, capture_output=True)
     with tarfile.open(out / "dev.tar.gz") as bundle:
         assert "deploy/RELEASE-NOTES.md" not in bundle.getnames()
+
+
+@pytest.mark.parametrize("entry", ["A" * 14500, "é" * 7300])
+def test_combined_release_notes_limit_includes_unreleased_and_utf8(source, key, tmp_path, entry):
+    (source / "CHANGELOG.md").write_text("# Changelog\n\n## Unreleased\n\n" + entry + "\n")
+    git(source, "commit", "-qam", "Large Unreleased notes")
+    notes = tmp_path / "notes.md"
+    notes.write_text("B" * 600)
+    result = run_release(source, key, tmp_path, "0.3.0", "--notes-file", str(notes))
+    assert result.returncode != 0
+    assert "combined release notes" in result.stderr and "15000" in result.stderr
+    assert not (tmp_path / "releases/0.3.0").exists()
+
+
+def test_tagged_build_refuses_oversized_notes_without_creating_archive(source, tmp_path):
+    (source / "CHANGELOG.md").write_text("# Changelog\n\n## v0.2.1 - today\n\n" + "é" * 8200 + "\n")
+    git(source, "commit", "-qam", "Oversized release section")
+    git(source, "tag", "v0.2.1")
+    archive = tmp_path / "release.tar.gz"
+    result = subprocess.run(["sh", "deploy/raspberry-pi/build-release.sh", "HEAD", str(archive)],
+                            cwd=source, capture_output=True, text=True)
+    assert result.returncode != 0 and "16384 bytes" in result.stderr
+    assert not archive.exists()
+
+
+def test_record_branch_retry_reuses_commit_and_rejects_remote_changes(source, tmp_path):
+    # Exercise the real final record-and-push block with a bare local origin, stopping before
+    # the PR prompts. No package acceptance or publication is simulated by this check.
+    script = (source / "scripts/release.sh").read_text()
+    version_function = script[script.index("set_version() {"):script.index("# --- The signing key:")]
+    block = script.split("# --- 7. Record the release", 1)[1]
+    block = block[block.index('if [ ! -f "$state/recorded" ]; then'):]
+    block = block.split('    pr=$(gh pr list', 1)[0] + "fi\n"
+    state, package = tmp_path / "state", tmp_path / "package"
+    state.mkdir()
+    package.mkdir()
+    fields = ("version", "commit", "sequence", "archive_sha256", "signature_sha256", "locks_sha256", "checks")
+    (package / "release.json").write_text(json.dumps(dict.fromkeys(fields, "test")))
+    (package / "publication.json").write_text(json.dumps({"tag": "v0.3.0", "release_id": 1}))
+    command = ('set -eu\nsrc=$1\nREPO_ROOT=$1\nstate=$2\npackage=$3\ntag=v0.3.0\nnext=0.3.1\n'
+               'fail() { printf "%s\\n" "$1" >&2; exit 1; }\n' + version_function + block)
+
+    def record():
+        return subprocess.run(["sh", "-c", command, "release-record-test", str(source), str(state), str(package)],
+                              capture_output=True, text=True)
+
+    first = record()
+    assert first.returncode == 0, first.stdout + first.stderr
+    commit = (state / "record-commit").read_text().strip()
+    again = record()
+    assert again.returncode == 0, again.stdout + again.stderr
+    # Declining the final merge must leave the record resumable and keep its worktree.
+    full_block = script.split("# --- 7. Record the release", 1)[1]
+    full_block = full_block[full_block.index('if [ ! -f "$state/recorded" ]; then'):]
+    full_block = full_block.split('say "$tag is published.', 1)[0]
+    decline = command[:command.index('if [ ! -f "$state/recorded" ]; then')] + (
+        'number=0.3.0\nREPOSITORY=test/repo\n'
+        'gh() { printf "42\\n"; }\nask() { return 1; }\nsay() { :; }\n' + full_block)
+    result = subprocess.run(["sh", "-c", decline, "release-record-test", str(source), str(state), str(package)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (state / "recorded").exists() and source.exists()
+    origin = tmp_path / "origin.git"
+    branch = "release/v0.3.0-record"
+    assert git(origin, "rev-parse", branch) == commit
+    # An interruption after a manual or successful merge resumes through the existing PR.
+    git(source, "push", "-q", "origin", branch + ":main")
+    complete = command[:command.index('if [ ! -f "$state/recorded" ]; then')] + (
+        'number=0.3.0\nREPOSITORY=test/repo\nmock_merge=$4\n'
+        'gh() { case "$*" in *"--json state"*) printf "MERGED\\n" ;; '
+        '*"--json mergeCommit"*) printf "%s\\n" "$mock_merge" ;; '
+        '*"--state all"*) printf "42\\n" ;; *) return 1 ;; esac; }\n'
+        'ask() { return 1; }\nsay() { :; }\n' + full_block)
+    result = subprocess.run(["sh", "-c", complete, "release-record-test", str(source), str(state),
+                             str(package), commit], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (state / "recorded").exists()
+    (state / "recorded").unlink()
+    other = tmp_path / "other"
+    git(tmp_path, "clone", "-q", "--branch", branch, str(origin), str(other))
+    git(other, "-c", "user.name=Other", "-c", "user.email=other@example.invalid", "commit", "-q",
+        "--allow-empty", "-m", "Independent record change")
+    git(other, "push", "-q", "origin", branch)
+    remote_commit = git(origin, "rev-parse", branch)
+    rejected = record()
+    assert rejected.returncode != 0
+    assert git(origin, "rev-parse", branch) == remote_commit
+    assert git(source, "rev-parse", branch) == commit

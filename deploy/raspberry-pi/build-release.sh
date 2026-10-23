@@ -75,7 +75,12 @@ if [ "$version" = "$number" ]; then
             found = 1; print; next
         }
         found && /^## / { exit }
-        found { print }' | head -c 16384) || notes=
+        found { print }') || notes=
+    notes_size=$(printf '%s\n' "$notes" | wc -c | tr -d ' ')
+    if [ "$notes_size" -gt 16384 ]; then
+        echo 'build-release.sh: release notes exceed 16384 bytes. Shorten the release section before building' >&2
+        exit 1
+    fi
 fi
 if [ -n "$notes" ]; then
     git archive --format=tar.gz --add-virtual-file="deploy/RELEASE:$manifest

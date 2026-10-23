@@ -535,7 +535,11 @@ Traffic from devices outside the test Wi-Fi stays outside JitterSim. Existing
 affected proxy tunnels close when a new network plan is applied so the browser
 can open them with the current profile. Protected clients keep their tunnels
 when another client's profile changes. Removing protection or changing global
-access rules can close those tunnels.
+access rules can close those tunnels. The proxy serves 32 connections at a time
+for all devices and one device may hold 16 of them, so one device cannot use up
+the proxy for the others. A busy test browser that opens more than 16 tunnels at
+once sees the extra ones closed until it closes some, so some page loads can fail until
+tunnels close. A Mac that uses the Pi as its system proxy counts as one device.
 
 This strict hostname selection covers HTTPS connections that the managed
 browser sends through the proxy. Native apps, browser traffic that bypasses the
@@ -637,9 +641,17 @@ enabled list about once a minute for devices that cached an answer earlier.
 Addresses stay in a list for six hours after they were last seen and a new plan
 starts with the addresses already known. A list holds up to 100 hostnames and
 remembers up to 1024 addresses. A client that sends its own fake DNS answers to
-the Pi teaches it nothing. The browser proxy also checks the lists first by
-exact hostname. Browser tunnels to a listed service are not counted in the
-device's data counters because a list belongs to no single device.
+the Pi teaches it nothing. A device that asks a DNS server of its own choice (a
+fixed address such as 8.8.8.8 in its network settings) teaches the Pi nothing
+either while no household website rule is on, because the Pi then trusts only the
+answers of its own resolver. Such a device still gets a list's profile for the
+addresses that other devices and the Pi's own lookups added. A household website
+rule (a blocked site, a site allow list, a device's site block or a DNS failure
+chance under Access rules) sends every lookup of the test Wi-Fi through the Pi's
+resolver, and then the device is learned from again. The browser proxy also
+checks the lists first by exact hostname. Browser tunnels to a listed service
+are not counted in the device's data counters because a list belongs to no
+single device.
 
 A hostname also matches its subdomains and can only be in one enabled list.
 A list may hold a name and its own subdomain. Other sites on the same server
@@ -831,6 +843,8 @@ The **Address changes** card on the Devices page finds saved devices that came
 back with a new private address. The setting **Follow private address changes**
 has three choices:
 
+<img src="../docs/screenshots/address-changes.png" alt="The Address changes card with Ask selected and one sample suggestion for Dad's phone at a new private address" width="100%" />
+
 - **Ask** (the default): the card says for example "This looks like Dad's phone
   (new private address ...). Move its settings?" with the evidence in plain
   words. **Yes** moves the profile, the name and, for a protected device, its
@@ -985,6 +999,8 @@ a device saw. An older helper makes the card ask for an update.
 
 **Test speed** on a connected device in **Devices** compares the device's speed
 before and after a profile. The Pi cannot run a speed test as the phone, so:
+
+<img src="../docs/screenshots/device-speed-test-controls.png" alt="The speed-test window for Fixture phone with Cloudflare selected, a 45 second length, the label Before profile and the Start measuring button" width="100%" />
 
 1. Choose the speed test site (Cloudflare by default, or LibreSpeed), a length
    (45 seconds by default, 15 to 90) and an optional label, then **Start measuring**.

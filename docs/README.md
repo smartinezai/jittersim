@@ -338,9 +338,10 @@ the first plan (September 2026) and is historical too.
 
 ## Screenshots
 
-The README shows the two overview images and the user guide shows all five. They show sample data
-from the browser test fixture: no real phone, Pi or home network. All five were retaken on
-2026-10-18 from main `8c3f8171` with the refreshed look (see
+The README shows the two overview images and the two new feature images. The user guide shows all
+seven. They use sample data from the browser test fixture: no real phone, Pi or home network. The
+five existing images are unchanged. The two feature images were captured on 2026-10-19 from
+`18c3f3d4` (see
 [ui-overhaul-proposal-2026-10-09.md](ui-overhaul-proposal-2026-10-09.md)):
 
 - [experience-overview-desktop.png](screenshots/experience-overview-desktop.png) (1440 by 1000 pixels)
@@ -355,9 +356,13 @@ from the browser test fixture: no real phone, Pi or home network. All five were 
   with the sample release `candidate-release` staged. The fixture also sends release notes, which
   the real Pi's update status does not carry yet, so the capture leaves them out and the
   **Release notes** box stays hidden.
+- [address-changes.png](screenshots/address-changes.png): the Address changes card with **Ask**
+  selected and one sample suggestion waiting for review.
+- [device-speed-test-controls.png](screenshots/device-speed-test-controls.png): the speed-test
+  window for the sample phone before a test starts, with the site, length, label and start button.
 
-`python scripts/docs-screenshots.py` retakes them (add `--out DIR` to write somewhere else first).
-It starts the fixture, drives the pages with Playwright and writes the same five files. It needs
+`python scripts/docs-screenshots.py` retakes all seven images (add `--out DIR` to write somewhere else first).
+It starts separate local fixtures for the different sample data and drives the pages with Playwright. It needs
 `pip install 'playwright==1.63.0'` and `python -m playwright install chromium`. Commit only the
 images that changed. The two overview images are about 280 KB and 125 KB because PNGs from
 Chromium do not recompress losslessly. Earlier versions of these two were reduced to a palette of

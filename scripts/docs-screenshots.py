@@ -9,7 +9,7 @@ phone, Pi or home network is shown. Run it from the repository root with Playwri
 
     python scripts/docs-screenshots.py
 
-It writes the five files named in docs/README.md ("Screenshots") and nothing else. `--out DIR`
+It writes the files named in docs/README.md ("Screenshots") and nothing else. `--out DIR`
 writes them somewhere else first so that you can compare. Set JITTERSIM_BROWSER_EXECUTABLE to use
 another Chromium. Commit only the images that changed.
 """
@@ -31,20 +31,41 @@ PHONE = {"width": 430, "height": 1200}
 TOKEN = "browser-test"  # the fixture's own test token, never a real one
 
 
-def start_fixture():
+def start_fixture(*, seeded=False, address_follow=False, scheduler=False):
+    environment = os.environ.copy()
+    environment.update({
+        "JITTERSIM_BROWSER_TEST_SEED": "1" if seeded else "0",
+        "JITTERSIM_BROWSER_TEST_ADDRESS_FOLLOW": "1" if address_follow else "0",
+        "JITTERSIM_BROWSER_TEST_SCHEDULER": "1" if scheduler else "0",
+        "PYTHONPATH": os.pathsep.join(
+            part for part in (str(ROOT / "src"), environment.get("PYTHONPATH", "")) if part
+        ),
+    })
     process = subprocess.Popen(
         [sys.executable, "-m", "tests.browser.fixture"],
         cwd=ROOT,
         stdout=subprocess.PIPE,
         text=True,
-        env={**os.environ, "JITTERSIM_BROWSER_TEST_SEED": "1", "JITTERSIM_BROWSER_TEST_SCHEDULER": "1"},
+        env=environment,
     )
     with selectors.DefaultSelector() as selector:
         selector.register(process.stdout, selectors.EVENT_READ)
         if not selector.select(timeout=20):
             process.kill()
             raise RuntimeError("the browser fixture did not start")
-        return process, int(process.stdout.readline().strip())
+        output = process.stdout.readline().strip()
+        if not output:
+            raise RuntimeError(f"the browser fixture exited with status {process.poll()}")
+        return process, int(output)
+
+
+def stop_fixture(process):
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
 
 
 def unlock(page):
@@ -145,24 +166,89 @@ def cards(browser, port, out):
     context.close()
 
 
+def address_changes(browser, out):
+    process, port = start_fixture(address_follow=True)
+    try:
+        context = browser.new_context(viewport=DESKTOP)
+        page = context.new_page()
+        page.goto(f"http://127.0.0.1:{port}")
+        unlock(page)
+
+        card = page.locator("#address-follow-card")
+        expect(card).to_be_visible()
+        expect(card.locator(".address-follow-row")).to_contain_text("Dad's phone")
+        expect(page.locator("#address-follow-mode")).to_have_value("ask")
+        settle(page)
+        card.screenshot(path=str(out / "address-changes.png"))
+        context.close()
+    finally:
+        stop_fixture(process)
+
+
+def speed_test_controls(browser, out):
+    process, port = start_fixture(seeded=True, scheduler=True)
+    try:
+        context = browser.new_context(viewport=DESKTOP)
+        page = context.new_page()
+        base = f"http://127.0.0.1:{port}"
+        page.goto(base)
+
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+
+        def post(path, data):
+            response = page.request.post(base + path, headers=headers, data=data)
+            assert response.ok, (path, response.status, response.text())
+
+        post("/api/connected-device-labels", {
+            "mac_address": "02:00:00:00:00:01",
+            "display_name": "Fixture phone",
+            "device_type": "phone",
+        })
+        post("/api/connected-devices/apply-profile", {
+            "ipv4_address": "192.168.50.184",
+            "mac_address": "02:00:00:00:00:01",
+            "profile_id": "normal",
+        })
+        post("/api/apply", {})
+
+        unlock(page)
+        page.locator('[data-page-link="devices"]').first.click()
+        row = page.locator('.connected-row[data-mac-address="02:00:00:00:00:01"]')
+        row.get_by_role("button", name="Test speed of Fixture phone").click()
+
+        dialog = page.locator("#speed-test-dialog")
+        expect(dialog).to_be_visible()
+        expect(page.locator("#speed-test-provider")).to_have_value("cloudflare")
+        expect(page.locator("#speed-test-begin")).to_be_visible()
+        page.locator("#speed-test-duration").fill("45")
+        page.locator("#speed-test-label").fill("Before profile")
+        page.locator("#speed-test-label").evaluate("element => element.blur()")
+        settle(page)
+        dialog.screenshot(path=str(out / "device-speed-test-controls.png"))
+        context.close()
+    finally:
+        stop_fixture(process)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Retake the screenshots in docs/screenshots.")
     parser.add_argument("--out", type=Path, default=ROOT / "docs" / "screenshots",
-                        help="folder for the five images (default: docs/screenshots)")
+                        help="folder for the seven images (default: docs/screenshots)")
     out = parser.parse_args().out
     out.mkdir(parents=True, exist_ok=True)
-    process, port = start_fixture()
+    process, port = start_fixture(seeded=True, scheduler=True)
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE"))
             overview(browser, port, out / "experience-overview-desktop.png", DESKTOP, False, True)
             overview(browser, port, out / "experience-overview-phone.png", PHONE, True, False)
             cards(browser, port, out)
+            address_changes(browser, out)
+            speed_test_controls(browser, out)
             browser.close()
     finally:
-        process.terminate()
-        process.wait(timeout=10)
-    print("Wrote the five images in", out)
+        stop_fixture(process)
+    print("Wrote the seven images in", out)
 
 
 if __name__ == "__main__":

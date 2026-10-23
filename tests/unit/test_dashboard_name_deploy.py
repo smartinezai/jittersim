@@ -72,6 +72,32 @@ class ControlFirewallTests(unittest.TestCase):
         mdns = [line for line in rendered_firewall("eth7", "wlan7") if "5353" in line]
         self.assertTrue(all('"wlan7"' in line for line in mdns))
 
+    def test_a_test_wifi_packet_from_port_53_is_dropped_before_it_is_forwarded(self) -> None:
+        # Follow-up F1 of the security audit of 2026-10-18. The DNS watcher reads the frames
+        # the Pi sends out of the test interface. A device could send a packet from UDP port
+        # 53 to itself or to another device through the Pi and pass for a forwarded answer.
+        # The packets are checked on a real kernel in tests/kernel/test_access.py.
+        chains = {}
+        current = None
+        for line in rendered_firewall("eth7", "wlan7"):
+            if line.startswith("chain "):
+                current = line.split()[1]
+                chains[current] = []
+            elif current:
+                chains[current].append(line)
+        found = [(name, line) for name, lines in chains.items() for line in lines
+                 if re.search(r"\bsport 53\b", line)]
+
+        self.assertEqual(len(found), 1, found)
+        name, line = found[0]
+        self.assertEqual(name, "forward")
+        self.assertRegex(line, r'^iifname "wlan7" udp sport 53 counter drop\b')
+        # It matches the interface a packet came in on. An answer the Pi makes itself leaves
+        # through the output chain and an answer from the router or the internet arrives on
+        # the uplink, so neither passes this rule.
+        self.assertNotIn("oifname", line)
+        self.assertNotIn("eth7", line)
+
 
 class NameServiceUnitTests(unittest.TestCase):
     def setUp(self) -> None:

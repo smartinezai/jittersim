@@ -38,8 +38,9 @@ It does this and stops only where you must act:
 1. Checks the version is newer than the last tag, reserves it, sets it in the
    two version files and adds GitHub's generated notes (the merged PRs since
    the last tag) to `CHANGELOG.md` in a release commit. Notes longer than
-   15000 bytes stop the run before anything is kept: approval accepts 16000
-   characters and the Pi shows 16 KB. For a first release, whose generated list
+   15000 bytes stop the run before anything is kept. This limit includes the
+   release heading and all hand-written Unreleased entries. Approval accepts
+   16000 characters and the Pi shows 16 KB. For a first release, whose generated list
    is the whole history, give a short text with `--notes-file FILE`.
 2. Runs the checks on that commit (lint, the full Python tests, the browser
    journeys and `scripts/local-ci.sh` when it exists) and signs a local
@@ -51,13 +52,16 @@ It does this and stops only where you must act:
    meantime the checks run again on exactly what was merged.
 4. Builds and signs the exact package. The archive carries its own CHANGELOG
    section, covered by the same signature, so the Pi can show the notes.
+   Acceptance and GitHub publication use that complete archived section too.
+   Direct stable builds refuse sections over 16384 bytes instead of cutting them.
 5. Stops so you can install that exact package on the Pi and test it. Run the
    same command again when you are done: it asks for the tested Pi and one line
    of evidence for each of the six checks, then signs the approval.
 6. Shows a dry run of the publication, asks, then creates the GitHub release
    with the two files and checks the uploaded bytes.
 7. Opens a small PR that records the published release and moves main to the
-   next patch number.
+   next patch number. It saves that commit before a normal push so a repeat
+   reuses the same commit. A changed remote branch stops the push for inspection.
 
 A passphrase on the key is asked by `ssh-add` in your terminal and kept by
 ssh-agent for one hour. The checks can take longer, so the script makes sure of

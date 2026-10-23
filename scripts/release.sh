@@ -186,19 +186,8 @@ print("v%d.%d.%d" % max(found) if found else "")')
         [ -z "$previous" ] || set -- "$@" -f "previous_tag_name=$previous"
         gh api "$@" -q .body >"$evidence/notes.md" || fail "GitHub could not generate the release notes"
     fi
-    # Approval accepts release notes of at most 16000 characters (the install sentence is added to
-    # them) and the Pi shows 16 KB. A longer text would fail at the end, after the evidence of every
-    # gate was typed, so stop now and leave nothing behind.
-    notes_size=$(wc -c <"$evidence/notes.md" | tr -d ' ')
-    if [ "$notes_size" -gt 15000 ]; then
-        if [ "$dry_run" = no ]; then
-            git -C "$REPO_ROOT" worktree remove --force "$src" >/dev/null 2>&1 || true
-            git -C "$REPO_ROOT" branch -D "release/$tag" >/dev/null 2>&1 || true
-        fi
-        rm -rf "$state"
-        fail "the release notes are $notes_size bytes and the limit is 15000. Nothing was kept. Run again with --notes-file and a shorter text"
-    fi
-    python3 - "$src/CHANGELOG.md" "$tag" "$(date +%Y-%m-%d)" "$evidence/notes.md" <<'EOF'
+    # Check the complete section before committing, including hand-written Unreleased entries.
+    if ! python3 - "$src/CHANGELOG.md" "$tag" "$(date +%Y-%m-%d)" "$evidence/notes.md" <<'EOF'
 import sys
 from pathlib import Path
 path, tag, day, notes = Path(sys.argv[1]), sys.argv[2], sys.argv[3], Path(sys.argv[4]).read_text().strip()
@@ -225,11 +214,22 @@ if start is not None:
     written = "".join(lines[start + 1:end]).strip()
     text = "".join(lines[:start] + lines[end:])
 section = f"## {tag} - {day}\n\n" + (written + "\n\n" if written else "") + f"{notes}\n\n"
+if len(section.encode("utf-8")) > 15000:
+    sys.exit(f"the combined release notes are {len(section.encode('utf-8'))} bytes and the limit is 15000. "
+             "Run again with --notes-file and shorter notes or shorten the Unreleased entries")
 lines = text.splitlines(keepends=True)
 at = next((i for i, line in enumerate(lines) if line.startswith("## ")), len(lines))
 head = "".join(lines[:at]).rstrip("\n") + "\n\n"
 path.write_text(head + section + "".join(lines[at:]))
 EOF
+    then
+        if [ "$dry_run" = no ]; then
+            git -C "$REPO_ROOT" worktree remove --force "$src" >/dev/null 2>&1 || true
+            git -C "$REPO_ROOT" branch -D "release/$tag" >/dev/null 2>&1 || true
+        fi
+        rm -rf "$state"
+        fail "release notes could not be prepared. Nothing was kept"
+    fi
     git -C "$src" add pyproject.toml src/jittersim/__init__.py CHANGELOG.md docs/releases/registry.json
     git -C "$src" commit -q -m "Release $tag"
     git -C "$src" rev-parse HEAD >"$state/release-commit"
@@ -354,6 +354,16 @@ if [ ! -f "$package/release.json" ]; then
             --local-evidence "$record"
     fi
 fi
+# Acceptance and GitHub publication use the full section covered by the archive signature.
+python3 - "$package/jittersim-release.tar.gz" "$evidence/release-notes.md" <<'EOF'
+import sys, tarfile
+from pathlib import Path
+with tarfile.open(sys.argv[1]) as archive:
+    notes = archive.extractfile("deploy/RELEASE-NOTES.md").read()
+if not notes.strip() or len(notes) > 15000:
+    sys.exit("the retained archive release notes must contain 1 to 15000 bytes")
+Path(sys.argv[2]).write_bytes(notes)
+EOF
 say "Package: $package/jittersim-release.tar.gz"
 
 if [ "$dry_run" = yes ]; then
@@ -391,7 +401,6 @@ EOF
             [ -n "$text" ] || fail "every gate needs evidence. Nothing was approved"
             set -- "$@" --gate "$gate=$text"
         done
-        { cat "$evidence/notes.md"; printf '\nInstall from the dashboard Updates page or run sudo jittersim update on the Pi. A failed install restores the previous installation automatically.\n'; } >"$evidence/release-notes.md"
         rs accept --bundle "$package" --notes-file "$evidence/release-notes.md" --target "$target" "$@"
     fi
     ensure_key
@@ -409,10 +418,11 @@ fi
 
 # --- 7. Record the release and move main to the next patch version.
 if [ ! -f "$state/recorded" ]; then
+    if [ ! -f "$state/record-commit" ]; then
     git -C "$REPO_ROOT" fetch -q origin main
     cp "$src/docs/releases/registry.json" "$state/registry.json"
     git -C "$src" checkout -q -- docs/releases/registry.json
-    git -C "$src" checkout -q -B "release/$tag-record" origin/main
+    git -C "$src" checkout -q -b "release/$tag-record" origin/main
     cp "$state/registry.json" "$src/docs/releases/registry.json"
     python3 - "$package" "$src/docs/releases/$tag.json" <<'EOF'
 import json, sys
@@ -428,16 +438,34 @@ EOF
     set_version "$next"
     git -C "$src" add docs/releases/registry.json "docs/releases/$tag.json" pyproject.toml src/jittersim/__init__.py
     git -C "$src" commit -q -m "Record the $tag release and start $next development"
-    git -C "$src" push -q -f -u origin "release/$tag-record"
-    pr=$(gh pr list --repo "$REPOSITORY" --head "release/$tag-record" --state open --json number -q '.[0].number')
+    git -C "$src" rev-parse HEAD >"$state/record-commit"
+    fi
+    # Retry the same commit after an interrupted push or PR operation. A changed remote branch
+    # is rejected by a normal push rather than replacing someone else's history.
+    [ "$(git -C "$src" rev-parse "refs/heads/release/$tag-record")" = "$(cat "$state/record-commit")" ] \
+        || fail "the release record branch changed. Inspect it before continuing"
+    git -C "$src" checkout -q "release/$tag-record"
+    git -C "$src" push -q -u origin "release/$tag-record"
+    pr=$(gh pr list --repo "$REPOSITORY" --head "release/$tag-record" --state all --json number -q '.[0].number')
     if [ -z "$pr" ]; then
         gh pr create --repo "$REPOSITORY" --base main --head "release/$tag-record" --title "Record the $tag release" \
             --body "Marks $tag published in the release registry, keeps its identity and check receipts in docs/releases/$tag.json and moves main to $next so development builds stay newer than $tag. Created by scripts/release.sh." >/dev/null
-        pr=$(gh pr list --repo "$REPOSITORY" --head "release/$tag-record" --state open --json number -q '.[0].number')
+        pr=$(gh pr list --repo "$REPOSITORY" --head "release/$tag-record" --state all --json number -q '.[0].number')
     fi
-    if ask "Merge PR #$pr (release record and version $next) now?"; then
-        gh pr merge "$pr" --repo "$REPOSITORY" --merge >/dev/null
+    if [ "$(gh pr view "$pr" --repo "$REPOSITORY" --json state -q .state)" != MERGED ]; then
+        if ask "Merge PR #$pr (release record and version $next) now?"; then
+            gh pr merge "$pr" --repo "$REPOSITORY" --merge >/dev/null
+        else
+            say "Release record PR #$pr is open. Run scripts/release.sh $number again to finish."
+            exit 0
+        fi
     fi
+    merged=$(gh pr view "$pr" --repo "$REPOSITORY" --json mergeCommit -q .mergeCommit.oid)
+    printf '%s\n' "$merged" | LC_ALL=C grep -Eq '^[0-9a-f]{40}$' \
+        || fail "the release record PR is not merged yet. Run again after it is merged"
+    git -C "$REPO_ROOT" fetch -q origin main
+    git -C "$src" merge-base --is-ancestor "$(cat "$state/record-commit")" "$merged" \
+        || fail "the merged PR does not contain the saved release record commit"
     : >"$state/recorded"
     git -C "$REPO_ROOT" worktree remove --force "$src" 2>/dev/null || true
 fi
