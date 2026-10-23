@@ -201,7 +201,7 @@ control characters.
 | `jittersim wifi show` | The router's own Wi-Fi name, read live from the router. It also asks for the router admin password with a hidden prompt. Add `--password` to show the Wi-Fi password too. |
 | `jittersim remote update now` | Asks the Pi to check GitHub for a newer signed release, shows it, asks, installs it and waits until the Pi runs it (900 seconds by default, `--wait SECONDS` changes that). `--yes` skips the question and `--json` prints one JSON answer, which needs `--yes`. `jittersim remote update status`, `check`, `upload` and `install` run the single steps. |
 | `jittersim impact` | The **Impact** check: two samples of the Pi's queues `--wait` seconds apart (10 by default, at most 50) judged with the dashboard's rules. The verdicts name the time it measured such as "in the last 10 seconds". |
-| `jittersim backup pull` | Saves the Pi's database backup, the one **Download backup** gives, in `~/jittersim-backups/` (`--directory FOLDER` picks another folder). The file name carries the UTC time, the folder is private (mode 0700), the file is readable only by you (0600) and a file that exists is never replaced. It prints the path. It exits with 1 and says why when the Pi cannot be reached or the token is refused. |
+| `jittersim backup pull` | Saves the Pi's database backup, the one **Download backup** gives, in `~/jittersim-backups/` (`--directory FOLDER` picks another folder). The file name carries the UTC time. The command makes a folder it creates private (mode 0700) and leaves an existing folder as it is. The file is readable only by you (0600), a file that exists is never replaced and old backups are never deleted. It checks that the answer is a SQLite file and that all of it arrived. It does not check that the database inside is sound: run the check in the drill below. It prints the path. It exits with 1 and says why when the Pi cannot be reached, the token is refused or the answer is cut short, and a failed pull saves nothing. |
 
 The terminal commands call the profile for **Everyone** the general profile.
 
@@ -241,17 +241,25 @@ background, run the command by hand:
 15 3 * * * JITTERSIM_ADMIN_TOKEN="$(security find-generic-password -s jittersim-admin-token -w)" "$HOME/.jittersim-cli/bin/jittersim" backup pull
 ```
 
-JitterSim has no restore command and no restore button for the database file.
+The command never deletes old backups, so a daily line grows the folder: delete
+old files yourself. If the command is killed or the Mac loses power while it
+copies, a hidden file named `.jittersim-backup-` and some letters, ending in
+`.tmp`, can stay in the folder. It is a partial copy and you can delete it. A
+folder on a FAT or exFAT disk does not work, because the command needs hard
+links. Choose a folder on another disk.
+
+No command restores a file you pulled, and the dashboard has no button for it.
 The only restore built into the dashboard is **Import settings...**, which reads
-a file from **Export settings**, not the database backup. The manual steps to
-put a database back on a Pi are in
+a file from **Export settings**, not the database backup. An update rollback
+restores the Pi's own recovery copy, never a file you pulled. The manual steps
+to put a database back on a Pi are in
 [Back up, restore and reimage the Pi](runbooks/restore-and-reimage.md#restore-the-database-on-the-same-pi).
 They were written from the installer and not run on a Pi. A short drill that
 needs no Pi:
 
 1. Run `jittersim backup pull`.
-2. Check that the file opens and passes SQLite's own check. The answer must be
-   `('ok',)`:
+2. Check that the file opens and passes SQLite's own check. The pull command
+   cannot do this for you. The answer must be `('ok',)`:
 
    ```sh
    python3 -I -c 'import sqlite3, sys; from pathlib import Path; c = sqlite3.connect(Path(sys.argv[1]).resolve(strict=True).as_uri() + "?mode=ro", uri=True); print(c.execute("PRAGMA quick_check").fetchone())' ~/jittersim-backups/jittersim-backup-20261023T031500Z.db

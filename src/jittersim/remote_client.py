@@ -740,6 +740,10 @@ class DashboardClient:
                     remaining = getattr(response, "length", None)
                     if len(answer) <= limit and remaining:
                         raise http.client.IncompleteRead(answer, remaining)
+                    # A file download must say how long it is. Without that, a cut is invisible.
+                    if (max_bytes is not None and remaining is None
+                            and not getattr(response, "chunked", False)):
+                        raise http.client.IncompleteRead(answer)
                 except (OSError, ssl.SSLError) as error:
                     if _is_timeout(error):
                         raise _TooSlow() from None
@@ -758,6 +762,8 @@ class DashboardClient:
             ) from None
         except ssl.SSLCertVerificationError as error:
             raise RemoteError(certificate_message(error, self.host)) from None
+        except http.client.IncompleteRead:
+            raise RemoteError("The dashboard's answer stopped before it was complete.") from None
         except (ssl.SSLError, http.client.HTTPException, OSError) as error:
             if _is_timeout(error):
                 raise RemoteError(

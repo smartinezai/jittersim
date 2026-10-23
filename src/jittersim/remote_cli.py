@@ -996,9 +996,12 @@ def _backup_pull_parser() -> argparse.ArgumentParser:
         "jittersim backup pull",
         "Download the database backup that the dashboard's Download backup button gives and "
         f"save it in a private folder ({BACKUP_FOLDER} unless you give --directory) under a "
-        "new name with the time in it. A file that exists is never replaced. The backup holds "
-        "device names, addresses and observed domain names, so keep it private. The command "
-        "runs once. Call it from cron or launchd to repeat it.",
+        "new name with the time in it. A file that exists is never replaced and old backups "
+        "are never deleted. The command checks that the answer is a SQLite file and that all of "
+        "it arrived. It does not check the contents: run PRAGMA quick_check on the copy (the "
+        "user guide has the command). The backup holds device names, addresses and observed "
+        "domain names, so keep it private. The command runs once. Call it from cron or launchd "
+        "to repeat it.",
     )
     parser.add_argument("--directory", type=Path, help="save the backup in this folder instead")
     return parser
@@ -1013,9 +1016,17 @@ def _backup_pull(arguments: argparse.Namespace) -> int:
     if not data.startswith(SQLITE_HEADER):
         raise RemoteError("The dashboard answer was not a database backup.")
     folder = (arguments.directory or Path(BACKUP_FOLDER)).expanduser().resolve()
-    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = folder / time.strftime("jittersim-backup-%Y%m%dT%H%M%SZ.db", time.gmtime())
-    descriptor, temporary = tempfile.mkstemp(prefix=".jittersim-backup-", suffix=".tmp", dir=folder)
+    try:
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".jittersim-backup-", suffix=".tmp", dir=folder
+        )
+    except OSError as error:
+        raise RemoteError(
+            f"The folder {folder} cannot be used: {error.strerror or 'system error'}. "
+            "Choose another folder with --directory."
+        ) from None
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
@@ -1026,6 +1037,12 @@ def _backup_pull(arguments: argparse.Namespace) -> int:
             os.link(temporary, path)
         except FileExistsError:
             raise RemoteError(f"{path} already exists. Nothing was replaced. Try again.") from None
+        except OSError as error:
+            raise RemoteError(
+                f"The folder {folder} cannot take the finished backup "
+                f"({error.strerror or 'system error'}). It needs a disk that supports hard "
+                "links, and FAT and exFAT drives do not. Choose another folder with --directory."
+            ) from None
     finally:
         Path(temporary).unlink(missing_ok=True)
     if arguments.json:
