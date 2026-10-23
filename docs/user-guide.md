@@ -510,7 +510,8 @@ An initial upgrade of an older release still needs wireless access through
 the real router or a local Pi terminal because its firewall predates sign-in.
 Rollback restores that older access behavior while retaining the saved file.
 
-- The Pi's Ethernet network name and router gateway in the dashboard.
+- The Pi's Ethernet network name and router gateway in the dashboard (read at most every 15
+  seconds, and again after any change you make in the dashboard).
 - Rename the Pi test access point and change its password locally.
 - Enter the Vodafone TG3442DE admin password. The Pi does not save it. The
   browser keeps it in the page only, or for 24 hours if you choose Remember.

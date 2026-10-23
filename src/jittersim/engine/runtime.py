@@ -270,6 +270,9 @@ class RuntimeScheduler:
         self._schedule_hint_settings = None
         self._schedule_hints = {}
         self._last_quota_sample_at = 0.0
+        # When each time quota was last sampled. The database keeps only the last sample that
+        # changed the usage, so a quiet device costs no write every 5 s.
+        self._time_quota_sampled_at: Dict[str, int] = {}
         self._last_analytics_cleanup_at = 0.0
         self._analytics_batch_overflowed = False
         self._last_device_counters: Dict[str, int] = {}
@@ -2346,7 +2349,8 @@ class RuntimeScheduler:
                     repository.record_service_usage(quota.id, counter)
             for quota in time_quotas:
                 if quota.device_id in excluded:
-                    repository.rebase_time_quota_sample(quota.id, now=int(now))
+                    # Time while excluded is never charged: count on from now.
+                    self._time_quota_sampled_at[quota.id] = int(now)
                     continue
                 counter_id = time_quota_counter_id(quota.id)
                 counter = service_counters.get(counter_id)
@@ -2358,7 +2362,9 @@ class RuntimeScheduler:
                             counter,
                             int(now),
                             active=self._time_quota_window_is_active(refreshed, now),
+                            previous_sample_at=self._time_quota_sampled_at.get(quota.id, 0),
                         )
+                        self._time_quota_sampled_at[quota.id] = int(now)
             for data_limit in data_limits:
                 refreshed = repository.get_data_limit(data_limit.device_id)
                 if refreshed is not None and self._quota_reset_is_due(refreshed, now):
