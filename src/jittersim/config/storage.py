@@ -1085,7 +1085,10 @@ class ConfigRepository:
         self._commit()
 
     def restore_everyone_exceptions(self, device_ids) -> None:
-        """Put back the exceptions a refused or failed start found, without the new one."""
+        """Replace the recorded exceptions with `device_ids`, leaving out unknown devices.
+
+        A refused or failed start passes the exceptions it found, without the new one.
+        """
 
         with self.transaction():
             self._connection.execute("DELETE FROM everyone_exceptions")

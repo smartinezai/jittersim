@@ -497,6 +497,80 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
         self.assertEqual(status, 409, result)
         self.assertEqual(self.exceptions(), {AIR_ID})
 
+    def test_a_device_that_moved_address_beside_another_save_stays_refused(self) -> None:
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        clients = self.helper.connected_devices()
+        moved_clients = [{**clients[0], "ipv4_address": "192.168.50.190"}, clients[1]]
+        scheduler._last_address_check_at = 0.0
+        real_move = self.repository.move_device_addresses
+
+        def move_then_another_save(moves):
+            done = real_move(moves)
+            self.repository.save_profile(Profile(
+                id="slow-test", name="Slow test", upload=Impairment(delay_ms=2_000)))
+            return done
+
+        with patch.object(self.helper, "connected_devices", return_value=moved_clients), \
+                patch.object(self.repository, "move_device_addresses",
+                             side_effect=move_then_another_save):
+            self.assertTrue(scheduler.tick(repository=self.repository))
+            self.assertEqual(str(self.repository.get_device(AIR_ID).ipv4_address), "192.168.50.190")
+            # The edit was saved too, and the plan of this tick includes it: only a full
+            # apply from the dashboard may count saved edits as running.
+            self.assertIsNone(scheduler.running_plan()[0].configuration_version)
+            status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 409, result)
+        self.assertEqual(self.exceptions(), {AIR_ID})
+
+    def tick_that_moves_the_air_and_then_fails(self, scheduler):
+        """The Air has a new address. The tick saves the move, then the helper refuses the plan.
+
+        The connected devices keep reporting the new address for the later ticks.
+        """
+
+        clients = self.helper.connected_devices()
+        moved_clients = [{**clients[0], "ipv4_address": "192.168.50.190"}, clients[1]]
+        scheduler._last_address_check_at = 0.0
+        patcher = patch.object(self.helper, "connected_devices", return_value=moved_clients)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        before = self.version()
+        self.helper.fail_action = "apply"
+        with self.assertLogs("jittersim.engine.runtime", "ERROR"):
+            self.assertFalse(scheduler.tick(repository=self.repository))
+        self.helper.fail_action = ""
+        scheduler._plan_retry_at = 0.0
+        self.assertEqual(self.version(), before + 1)
+
+    def test_a_tick_that_failed_after_its_move_keeps_the_device_apply_open(self) -> None:
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        self.tick_that_moves_the_air_and_then_fails(scheduler)
+
+        # The next tick applies the plan. The move was the only save, so it still counts.
+        self.assertTrue(scheduler.tick(repository=self.repository))
+
+        self.assertEqual(scheduler.running_plan()[0].configuration_version, self.version())
+        status, result = self.apply_to(PHONE, "low")
+        self.assertEqual(status, 200, result)
+        self.assertEqual(self.exceptions(), {AIR_ID, PHONE_ID})
+
+    def test_a_save_after_a_failed_move_tick_stays_refused(self) -> None:
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        self.tick_that_moves_the_air_and_then_fails(scheduler)
+        self.repository.save_profile(Profile(
+            id="slow-test", name="Slow test", upload=Impairment(delay_ms=2_000)))
+
+        self.assertTrue(scheduler.tick(repository=self.repository))
+
+        self.assertIsNone(scheduler.running_plan()[0].configuration_version)
+        status, result = self.apply_to(PHONE, "low")
+        self.assertEqual(status, 409, result)
+        self.assertEqual(self.exceptions(), {AIR_ID})
+
     def test_a_save_by_another_process_during_the_apply_is_never_installed(self) -> None:
         for moment in ("before saving", "while building"):
             with self.subTest(moment=moment):
@@ -727,6 +801,52 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         state = self.repository.get_runtime_state()
         self.assertEqual((state.observed_state, state.last_action), ("reset", "reset"))
 
+    def test_a_reset_recorded_during_the_put_back_is_never_undone(self) -> None:
+        from jittersim.networking.helper import HelperClientError
+
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        real = self.helper.apply
+        calls = []
+
+        def apply(**arguments):
+            calls.append(arguments["plan"])
+            if len(calls) == 1:
+                raise HelperClientError("simulated helper failure")
+            result = real(**arguments)
+            # `jittersim reset` from another process while the put-back's helper call ran.
+            self.repository.update_runtime_state(
+                observed_state="reset", last_action="reset", last_result="success",
+                last_error=None)
+            return result
+
+        with patch.object(self.helper, "apply", side_effect=apply), \
+                self.assertLogs("jittersim.api.server", "ERROR"):
+            status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("A reset was recorded meanwhile", result["error"])
+        state = self.repository.get_runtime_state()
+        self.assertEqual((state.observed_state, state.last_action), ("reset", "reset"))
+        # Nothing counts the put-back plan as running: the next tick repeats the reset.
+        self.assertIsNone(scheduler.running_plan())
+
+    def test_panic_during_the_put_back_is_named_as_panic_not_as_a_reset(self) -> None:
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        patcher, calls = self.fail_first_apply()
+
+        with patcher, patch.object(scheduler, "restore_rolls",
+                                   side_effect=lambda _rolls: scheduler.halt()), \
+                self.assertLogs("jittersim.api.server", "ERROR"):
+            status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("Panic", result["error"])
+        self.assertNotIn("reset was recorded", result["error"])
+
     def test_a_failed_restore_sends_the_device_back_to_everyone(self) -> None:
         from jittersim.config.storage import StorageError
 
@@ -748,6 +868,29 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         # The saved choice that failed stays saved, so the device must not run it.
         self.assertEqual(self.repository.get_device(AIR_ID).profile_id, "low")
         self.assertEqual(self.exceptions(), frozenset())
+
+    def test_a_storage_error_while_sending_the_device_back_is_survived(self) -> None:
+        from jittersim.config.storage import StorageError
+
+        self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        patcher, _ = self.fail_first_apply()
+        real_save = self.repository.save_device
+
+        def save_device(device, **arguments):
+            if arguments.get("expected") is not None and device.profile_id == "slow-test":
+                raise StorageError("simulated storage failure")
+            return real_save(device, **arguments)
+
+        with patcher, patch.object(self.repository, "save_device", side_effect=save_device), \
+                patch.object(self.repository, "restore_everyone_exceptions",
+                             side_effect=StorageError("simulated storage failure")), \
+                self.assertLogs("jittersim.api.server", "ERROR"):
+            status, result = self.apply_to(profile_id="low")
+
+        # The failure is still answered. Storage cannot be written, so the rows stay.
+        self.assertEqual(status, 502)
+        self.assertIn("did not start", result["error"])
 
     def test_if_putting_it_back_fails_too_the_record_still_says_what_ran(self) -> None:
         self.use_scheduler()
@@ -943,6 +1086,32 @@ class WholeScopeActionTests(EveryoneRunningFixture):
                 self.write("/api/reset", {})
                 self.assertEqual(self.write("/api/general-profile", {"profile_id": "low"})[0], 200)
                 self.assertEqual(self.apply_to()[0], 200)
+
+    def test_panic_during_a_whole_scope_put_back_is_named_as_panic(self) -> None:
+        from jittersim.networking.helper import HelperClientError
+
+        scheduler = self.use_scheduler()
+        scheduler.activate(applied_payload=plan_to_payload(self.helper.applied_plan),
+                           configuration_version=self.version())
+        real = self.helper.apply
+        calls = []
+
+        def apply(**arguments):
+            calls.append(arguments["plan"])
+            if len(calls) == 1:
+                raise HelperClientError("simulated helper failure")
+            return real(**arguments)
+
+        with patch.object(self.helper, "apply", side_effect=apply), \
+                patch.object(scheduler, "restore_rolls",
+                             side_effect=lambda _rolls: scheduler.halt()), \
+                self.assertLogs("jittersim.api.server", "ERROR"):
+            status, result = self.write("/api/apply", {})
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("Panic", result["error"])
+        self.assertNotIn("reset was recorded", result["error"])
 
     def test_a_failed_update_puts_back_the_scheduler_state_with_the_plan(self) -> None:
         from jittersim.networking.helper import HelperClientError
