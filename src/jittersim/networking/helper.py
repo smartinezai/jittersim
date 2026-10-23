@@ -14,6 +14,7 @@ import secrets
 import socket
 import socketserver
 import stat
+import struct
 import threading
 import time
 from dataclasses import asdict
@@ -1986,6 +1987,18 @@ class _Admission:
             slot.release()
 
 
+def _peer_uid(connection: socket.socket) -> Optional[int]:
+    """The user id of the process on the other end of a Unix socket, or None if unknown.
+
+    SO_PEERCRED is Linux only (the Pi). Elsewhere the answer is None.
+    """
+    try:
+        raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        return struct.unpack("3i", raw)[1]
+    except (AttributeError, OSError, struct.error):
+        return None
+
+
 class HelperRequestHandler(socketserver.StreamRequestHandler):
     """Read one newline-delimited JSON request from a Unix socket client."""
 
@@ -2022,6 +2035,14 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "request must be valid JSON"})
             return
         action = payload.get("action") if isinstance(payload, dict) else None
+        if (action == "dashboard-access"
+                and payload.get("operation") in ("local-add", "local-remove")
+                and _peer_uid(self.request) != 0):
+            # Only the root recovery command on the Pi changes saved access directly (audit
+            # A6). The dashboard runs as jittersim and never sends these. Unknown caller: refuse.
+            self._send_response({"ok": False, "error": "Run this command as root on the Pi.",
+                                 "reason": "root-required"})
+            return
         # The request is complete. Only now does it take an operation slot.
         if admission is not None and not self.server.admit_operation(admission, payload):
             self._send_response({"ok": False, "error": "The networking helper is busy. Try again later.",

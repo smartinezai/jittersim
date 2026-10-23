@@ -17,7 +17,7 @@ dashboard denied, a broken contract. S1 = hardening.
 | A3 | S1 | Availability before sign-in | The browser proxy reads a CONNECT request with a timeout per read, so a client that trickles bytes holds a tunnel slot for good | **Fixed** (`networking/browser_proxy.py`) |
 | A4 | S1 | Hostile web page | No `Cross-Origin-Opener-Policy` and no `Cross-Origin-Resource-Policy` | **Fixed** (`api/server.py`) |
 | A5 | S2 | Availability before sign-in | The browser proxy has 32 tunnel slots for every device together. One device can hold all of them with ordinary idle tunnels | **Fixed** by follow-up: at most 16 for each client address (`networking/browser_proxy.py`) |
-| A6 | S2 | Local process on the Pi | Any process of the `jittersim` user (the login user and every service) can call every helper action and can read the admin token from the dashboard's environment | Open, known (finding 5 of 2026-10-09), patch proposed for the pinned helper |
+| A6 | S2 | Local process on the Pi | Any process of the `jittersim` user (the login user and every service) can call every helper action and can read the admin token from the dashboard's environment | **Partly fixed**: the helper accepts `dashboard-access local-add` and `local-remove` only from root (`networking/helper.py`, peer uid check). Other actions stay open to that user because the dashboard needs them, and the token in the environment is still open |
 | A7 | S1 | Hostile web page | The dashboard accepts any `Host`. DNS rebinding reaches only the public page and health check, and the Origin check of the recovery routes compares the Origin with that same Host | Open, owner decision |
 | A8 | S1 | Availability before sign-in | The homepage policy listener (port 8443) has 4 slots and no per-device share | Open, accepted (experimental feature) |
 | A9 | S1 | Secrets | The admin token can be remembered in `localStorage` for a chosen number of hours | Accepted: opt-in, and the strict hash CSP blocks injected script |
@@ -134,9 +134,16 @@ and the DNS watcher. Every such process can:
   `control.env` as environment (`JITTERSIM_ADMIN_TOKEN`) and the same user may read it. This
   part is new to the record. Shown from the code, not run on a Pi.
 
-Proposed patch for the pinned `src/jittersim/networking/helper.py` (not applied: it needs a
-reviewed Panic bundle; the coordinator adds the `PANIC_APPROVED_SOURCES` entry after review).
-It is option 2 of the design note and closes `local-*` against every caller that is not root:
+**Status (2026-10-23): applied in a narrower form.** The helper reads the caller's user id
+with `SO_PEERCRED` and refuses `local-add` and `local-remove` with reason `root-required`
+unless it is 0. A caller whose id cannot be read is refused too. `local-list` is not
+checked: review note F3 found that the dashboard (user `jittersim`) reads it in
+`api/server.py`, so refusing it would break the dashboard. No other action changes,
+Panic included. Tests: `tests/unit/test_helper_peer_check.py`. The proposal below is kept
+for the record.
+
+Original proposal for the pinned `src/jittersim/networking/helper.py`. It is option 2 of the
+design note and closed `local-*` against every caller that is not root:
 
 ```diff
 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
