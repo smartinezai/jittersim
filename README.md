@@ -32,8 +32,8 @@ test. It is for experiments, not a replacement for your home router.
 ## Screenshots
 
 <div align="center">
-  <img src="docs/screenshots/experience-overview-desktop.png" alt="The Devices page on a desktop screen: the sidebar with Start, Reset network and Panic, and a connected test phone on a slow profile" width="68%" />
-  <img src="docs/screenshots/experience-overview-phone.png" alt="The same page on a phone-sized screen, with Panic, the router Wi-Fi status and a Controls button in a bar at the bottom" width="27%" />
+  <img src="docs/screenshots/experience-overview-desktop.png" alt="The Devices page on a desktop screen: the sidebar with Start, Reset network, Panic and Reset Wi-Fi name, and the Everyone and Address changes cards" width="68%" />
+  <img src="docs/screenshots/experience-overview-phone.png" alt="The same page on a phone-sized screen, with the Everyone and Address changes cards and a bar at the bottom with Panic, the router Wi-Fi status and a Controls button" width="27%" />
 </div>
 
 The Address changes card lets you review a saved device's new private Wi-Fi

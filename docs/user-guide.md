@@ -18,8 +18,8 @@ Stable versions use tested signed packages with owner approval. See the
 ## See it in action
 
 <div align="center">
-  <img src="../docs/screenshots/experience-overview-desktop.png" alt="The Devices page with the sidebar controls and a connected test phone whose active profile is Slow connection, started by a timer" width="68%" />
-  <img src="../docs/screenshots/experience-overview-phone.png" alt="The Devices page on a phone-sized screen: the status line, the Everyone card, the connected test phone and a bar with Panic, the router Wi-Fi status and Controls" width="27%" />
+  <img src="../docs/screenshots/experience-overview-desktop.png" alt="The Devices page with the sidebar controls Start, Reset network, Panic and Reset Wi-Fi name, and the Everyone and Address changes cards" width="68%" />
+  <img src="../docs/screenshots/experience-overview-phone.png" alt="The Devices page on a phone-sized screen: the status line, the Everyone and Address changes cards and a bar with Panic, the router Wi-Fi status and Controls" width="27%" />
 </div>
 
 *Screenshots use sample data. No real phone, Pi or home network is shown.*
