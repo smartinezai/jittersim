@@ -90,17 +90,26 @@ def check_quick_reset_name(page):
 
     page.on("request", remember)
     ask = dict(title="Restore the Wi-Fi name?",
-               text=["Wi-Fi will restart", "Every device on it, including this one", "Wi-Fi menu"])
+               text=["goes back to its default name, “TestNet”", "stops the Pi from following the router",
+                     "Wi-Fi will restart", "Every device on it, possibly including this one", "Wi-Fi menu"])
     quick.click()
     cancel_with_escape(page, quick, verb="Restore name", **ask)
+    # Cancel leaves both buttons usable at once.
+    expect(quick).to_be_enabled()
+    expect(page.locator("#reset-wifi-name")).to_be_enabled()
     assert not writes
 
-    seen = drop_connection(page, "**/api/wifi-operation?id=*", 2)
+    # The banner is at the top of the page. Scroll away first: it must come into view by itself.
+    page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+    assert page.evaluate("window.scrollY") > 300
+    seen = drop_connection(page, "**/api/wifi-operation?id=*", 3)
     quick.click()
     answer_confirm(page, "Restore name", **ask)
     banner = page.locator("#wifi-change-banner")
-    # The restart state names the network to join and says the password stays.
+    # The restart state names the network to join and says the password stays. It is on
+    # screen and not under the phone's Controls sheet.
     expect(banner).to_contain_text("Reconnecting to the Pi", timeout=10000)
+    expect(banner).to_be_in_viewport()
     expect(banner).to_contain_text("Join “TestNet” in the Wi-Fi menu")
     expect(banner).to_contain_text("password did not change")
     # Both buttons wait while the Wi-Fi restarts, so a second reset cannot start.

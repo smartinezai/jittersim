@@ -154,8 +154,8 @@
         <div class="router-wifi-copy">
           <button id="refresh-router-wifi" type="button">Check router Wi-Fi</button>
           <button id="sync-router-ap" class="primary" type="button" aria-describedby="router-action-message" disabled>Copy router Wi-Fi to Pi</button>
-          <button id="quick-reset-wifi-name" type="button" disabled>Reset Wi-Fi name</button>
           <p id="router-action-message" class="router-wifi-status"></p>
+          <button id="quick-reset-wifi-name" type="button" disabled>Reset Wi-Fi name</button>
         </div>
       </div>
       <div class="sidebar-version">
@@ -1180,7 +1180,7 @@
   <section class="page" id="page-router" data-page="router" aria-label="Router and Wi-Fi" tabindex="-1" hidden>
     <section class="card wifi-name-card">
     <h2>Wi-Fi name</h2>
-    <p>Restore the Pi's test network name to its default. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts. Use management access.</p>
+    <p>Restore the Pi's test network name to its default. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts, and so does this one if it is on that Wi-Fi. This page waits and shows the result.</p>
     <button id="reset-wifi-name" type="button" disabled aria-describedby="wifi-reset-status">
       <span>Reset Wi-Fi name</span><span class="credential-state">Restore default</span>
     </button>

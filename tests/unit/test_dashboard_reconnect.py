@@ -295,7 +295,7 @@ def test_the_notice_does_not_promise_a_rejoin_when_the_name_or_password_changes(
     assert "name or password" in notice
     assert "Wi-Fi menu" in notice
     # Every phone and laptop on the Pi's Wi-Fi drops, not only the one that pressed the button.
-    assert "Every device on it, including this one" in notice
+    assert "Every device on it, possibly including this one" in notice
     assert "rejoin on its own" not in notice
 
 
@@ -345,6 +345,9 @@ def test_waiting_after_a_name_reset_names_the_default_network_and_keeps_the_pass
 def test_the_sidebar_and_the_settings_page_share_one_name_reset():
     # A second copy of the call would be a second implementation of the reset.
     assert SCRIPT.count('"/api/access-point/reset-name"') == 1
+    buttons = function_source("resetWifiButtons")
+    assert '"reset-wifi-name"' in buttons and '"quick-reset-wifi-name"' in buttons
+    assert 'addEventListener("click", resetWifiName)' in SCRIPT
 
 
 @NEEDS_NODE

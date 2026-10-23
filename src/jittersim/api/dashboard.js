@@ -2091,6 +2091,10 @@
       return [element("reset-wifi-name"), element("quick-reset-wifi-name")];
     }
 
+    function settleResetWifiButtons() {
+      resetWifiButtons().forEach((each) => { setButtonBusy(each, false); each.disabled = !helperConfigured; });
+    }
+
     function updateGeneralProfileControls() {
       const select = element("general-profile-select");
       select.disabled = networkActionBusy || !helperConfigured || profiles.length === 0;
@@ -7439,15 +7443,18 @@
       const status = element("wifi-reset-status");
       // Held while the question is open so a second click or a Wi-Fi save cannot start beside it.
       wifiResetPending = true;
-      if (!await confirmFromButton(button, "The Pi Wi-Fi goes back to its default name. The password and security type stay the same. " + WIFI_RESTART_NOTICE,
+      const defaultName = brandInfo && brandInfo.default_ssid;
+      if (!await confirmFromButton(button, "The Pi Wi-Fi goes back to its default name" + (defaultName ? ", “" + defaultName + "”" : "") +
+          ". The password and security type stay the same. It also stops the Pi from following the router's Wi-Fi name until the router Wi-Fi is copied again. " + WIFI_RESTART_NOTICE,
           {title: "Restore the Wi-Fi name?", confirmLabel: "Restore name"}) || !helperConfigured) {
         wifiResetPending = false;
-        setButtonBusy(button, false);
-        button.disabled = !helperConfigured;
+        settleResetWifiButtons();
         return;
       }
       status.textContent = "Restoring the Pi Wi-Fi name...";
       resetWifiButtons().forEach((each) => { each.disabled = true; });
+      // On a phone the Controls sheet would cover the progress banner.
+      setControlsOpen(false, false);
       const submittedDraft = formDrafts.get("access-point-form");
       const submittedSsid = element("access-point-ssid").value;
       const tokenRevision = adminTokenRevision;
@@ -7464,16 +7471,14 @@
           }
           status.textContent = operation ? operation.message : "Check the Pi Wi-Fi settings.";
           showMessage(status.textContent, operation && operation.state === "succeeded" ? "success" : "error");
-        }, brandInfo && brandInfo.default_ssid);
+        }, defaultName);
         if (tokenRevision === adminTokenRevision && outcome && outcome.gaveUp) status.textContent = "The Pi has not answered yet. See the note on this page.";
       } catch (error) {
         if (tokenRevision === adminTokenRevision) status.textContent = error.message;
         if (tokenRevision === adminTokenRevision) showMessage(error.message, "error");
       } finally {
         wifiResetPending = false;
-        if (tokenRevision === adminTokenRevision) {
-          resetWifiButtons().forEach((each) => { setButtonBusy(each, false); each.disabled = !helperConfigured; });
-        }
+        if (tokenRevision === adminTokenRevision) settleResetWifiButtons();
       }
     }
     resetWifiButtons().forEach((each) => each.addEventListener("click", resetWifiName));

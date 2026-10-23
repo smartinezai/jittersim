@@ -146,9 +146,10 @@ Run `sudo jittersim --help` for the command list. More examples are in the
 Use **Reset Wi-Fi name** in the sidebar (on a phone, in the Controls sheet) or on Router and
 Wi-Fi, or run `sudo jittersim wifi reset` on the Pi.
 It restores the default name `TestNet` and keeps the current password. Confirming the reset
-restarts test Wi-Fi, so every device on it, including the one showing the dashboard, loses its
-connection for a short time. The page says which network to join again and shows when the Pi
-answers. It stops waiting after 90 seconds and offers Check again. Add `--yes` when running
+restarts test Wi-Fi, so every device on it, and the one showing the dashboard if it is on that
+Wi-Fi, loses its connection for a short time. The page says which network to join again and shows when the Pi
+answers. It stops waiting after 90 seconds and offers Check again. A reset also stops the Pi
+from following the router's Wi-Fi name until the router Wi-Fi is copied again. Add `--yes` when running
 without a prompt. This command needs the local helper but not the dashboard or
 its settings database.
 
