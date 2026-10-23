@@ -19,6 +19,23 @@ What has happened since:
   and 121 are open. The Panic-pinned `helper.py` changed again in PR 138, so its function sizes
   moved.
 
+## Status on 23 October 2026 (measured against main `03fe31d8`)
+
+- Item 8 again: the only dead Python left was `clear_everyone_exceptions` (`storage.py`), `_HOST_LABEL`
+  (`mdnsname.py`) and two unused imports in `api/server.py` (`secrets`, `normalize_mac_address`).
+  All four are removed.
+- Item 9: `list_timers`, `reset_prune_clock` and `pending_count` are gone (their tests use
+  `list_active_timers`, the module variable and a small test helper). These stay on purpose because
+  each backs many assertions, is a documented constant, is pinned or runs standalone:
+  `get_service_list`, `begin`, `saved_devices`, `keep_certificate_identity`, `PANIC_REPOSITORY_STEPS`,
+  `LABEL_KINDS`, `FAILURE`, `PACKET_HOST`.
+- Item 11 is done: `UpdateBudget(seconds, message)` replaces `NameBudget`, with the same time and the
+  same message for the dashboard name command.
+- Item 7 stays open on purpose: no shared helper exists. The in-package writers (`adblocking`,
+  `wifi_follow._write_json`, `dashboard_access._save`, `remote_client`, `release_uploads`) differ in
+  owner, mode or directory-handle handling, so merging them into the pinned `access.atomic_write`
+  would change behaviour.
+
 ## Verdict (5 lines)
 
 1. Partly. The backend is **over-large and under-factored more than it is over-abstracted**: there are almost no one-implementation interfaces or forwarding layers, and verified dead code is tiny (about 50 lines).

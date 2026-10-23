@@ -3,7 +3,7 @@ name: Pi release checks
 on:
   pull_request:
   push:
-    branches: [main, feat/service-profiles-and-pi-hardening]
+    branches: [main]
 
 permissions:
   contents: read
@@ -83,6 +83,7 @@ jobs:
       - run: python -m tests.browser.group_devices
       - run: python -m tests.browser.impact_check
       - run: python -m tests.browser.speed_test_window
+      - run: python -m tests.browser.connection_check
       - run: python -m tests.browser.sidebar_status
       - run: python -m tests.browser.apply_clarity
       - run: python -m tests.browser.router_copy

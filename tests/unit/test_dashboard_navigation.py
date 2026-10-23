@@ -74,7 +74,7 @@ def test_sidebar_holds_the_always_available_controls():
     sidebar = sidebar_html()
     for element_id in ("apply-button", "reset-button", "panic-button", "router-wifi-toggle",
                        "open-admin-credentials", "open-router-credentials",
-                       "runtime-summary", "mode-badge", "message"):
+                       "runtime-summary", "mode-badge", "message", "quick-reset-wifi-name"):
         assert f'id="{element_id}"' in sidebar, element_id
     assert 'id="reset-wifi-name"' in page_html("router")
 

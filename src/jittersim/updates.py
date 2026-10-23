@@ -3290,14 +3290,15 @@ COMMAND_CONTEXT = threading.local()
 class UpdateBudget:
     """Share a finite allowance between preparation, installation and recovery."""
 
-    def __init__(self):
+    def __init__(self, seconds=600, message="the update has no time remaining"):
         self.started = time.monotonic()
-        self.deadline = self.started + 600
+        self.deadline = self.started + seconds
         self.recovery_deadline = self.started + 840
+        self.message = message
 
     def check(self):
         if time.monotonic() >= self.deadline:
-            raise UpdateError("the update has no time remaining")
+            raise UpdateError(self.message)
 
     def limit(self, seconds):
         self.check()
