@@ -326,6 +326,7 @@
     .connected-row.protected .connected-controls select:disabled,
     .connected-row.protected .connected-controls button:disabled { opacity: 1; color: var(--tx-disabled); border-color: #2c3847; background: #0f1824; cursor: not-allowed; }
     .protected-badge { display: inline-block; margin-left: 0.5rem; padding: 0.05rem 0.5rem; border: 1px solid #5b6b7f; border-radius: 999px; color: var(--tx-protected); font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em; }
+    .this-device-badge { margin-left: 0.5rem; font-weight: 700; border-color: var(--ok-border); background: var(--ok-bg-2); color: var(--ok-text); }
     .connected-label-editor { margin-top: 0.4rem; color: #a8bdd4; font-size: 0.78rem; }
     .connected-label-editor summary { cursor: pointer; }
     .connected-label-form {

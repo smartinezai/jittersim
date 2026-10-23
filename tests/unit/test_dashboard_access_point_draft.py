@@ -65,14 +65,14 @@ def test_clearing_the_draft_keeps_the_name_the_page_set():
     run('clearDraft("access-point-form");', "JitterSim", 0, "true")
 
 
-def handler(source_start):
+def handler(source_start, end="\n    });"):
     script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
     start = script.index(source_start)
-    return script[start : script.index("\n    });", start)]
+    return script[start : script.index(end, start)]
 
 
 def test_the_reset_and_the_save_clear_the_draft_after_setting_the_field():
-    reset = handler('element("reset-wifi-name").addEventListener("click"')
+    reset = handler("async function resetWifiName(event) {", end="\n    }\n")
     assert reset.index("element(\"access-point-ssid\").value = operation.ssid") < reset.index(
         'clearDraft("access-point-form")'
     )

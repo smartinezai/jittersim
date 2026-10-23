@@ -62,7 +62,6 @@ DBUS_SECONDS = 2.0
 STEP_SECONDS = 10.0
 
 _INTERFACE = re.compile(r"[A-Za-z0-9_.:][A-Za-z0-9_.:-]{0,14}")
-_HOST_LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 LINK_NAMES = {"ethernet": "Ethernet (router network)", "test": "test Wi-Fi"}
 
 
