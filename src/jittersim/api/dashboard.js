@@ -277,7 +277,7 @@
     const SLOW_REQUEST_PATHS = /^\/api\/(apply|reset|normal-access|general-profile|router|wifi|release|import)/;
 
     function requestTimeoutMs(path, method) {
-      if (path === "/api/speed-tests/start" && method === "POST") {
+      if ((path === "/api/speed-tests/start" || path === "/api/connection-checks/start") && method === "POST") {
         return SPEED_TEST_START_TIMEOUT_MS;
       }
       const slow = SLOW_REQUEST_PATHS.test(path) && (method !== "GET" || /^\/api\/(router|wifi)/.test(path));
@@ -709,8 +709,19 @@
       return "Dashboard access is available.";
     }
 
+    // The Pi names the Wi-Fi device it sees for this browser. Only a Wi-Fi ("test" network) address
+    // counts: the management network can name an Ethernet address that is no row. Only that one
+    // address is compared with the lists. Nothing about other clients is needed for it.
+    let thisDeviceMac = null;
+
+    function isThisDevice(mac) {
+      return !!thisDeviceMac && typeof mac === "string" && mac.toLowerCase() === thisDeviceMac;
+    }
+
     async function loadDashboardAccess() {
       const data = await request("/api/dashboard-access/status", "GET");
+      thisDeviceMac = data.network === "test" && typeof data.mac_address === "string"
+        ? data.mac_address.toLowerCase() : null;
       element("allow-dashboard-device").disabled = !data.can_register;
       element("dashboard-access-status").textContent = data.allowed
         ? accessReason(Array.isArray(data.grants) ? data.grants : [])
@@ -2082,8 +2093,17 @@
       element("reset-button").disabled = networkActionBusy || !helperConfigured;
       element("panic-button").disabled = !helperConfigured;
       element("scan-observations").disabled = !helperConfigured;
-      element("reset-wifi-name").disabled = !helperConfigured || wifiResetPending;
+      resetWifiButtons().forEach((each) => { each.disabled = !helperConfigured || wifiResetPending; });
       updateGeneralProfileControls();
+    }
+
+    // The Router and Wi-Fi page and the sidebar both offer Reset Wi-Fi name. They share one handler.
+    function resetWifiButtons() {
+      return [element("reset-wifi-name"), element("quick-reset-wifi-name")];
+    }
+
+    function settleResetWifiButtons() {
+      resetWifiButtons().forEach((each) => { setButtonBusy(each, false); each.disabled = !helperConfigured; });
     }
 
     function updateGeneralProfileControls() {
@@ -3019,6 +3039,12 @@
         const address = document.createElement("p");
         address.className = "connected-address";
         address.textContent = device.display_name || device.ipv4_address || device.mac_address;
+        if (isThisDevice(device.mac_address)) {
+          const mine = document.createElement("span");
+          mine.className = "count-badge this-device-badge";
+          mine.textContent = "This device";
+          address.append(" ", mine);
+        }
         const metadata = document.createElement("p");
         metadata.className = "connected-meta";
         const metadataParts = [device.ipv4_address || "IP address pending", device.mac_address];
@@ -7428,20 +7454,24 @@
       }
     });
 
-    element("reset-wifi-name").addEventListener("click", async (event) => {
+    async function resetWifiName(event) {
       if (wifiResetPending || wifiChangePending || !helperConfigured) return;
       const button = event.currentTarget;
       const status = element("wifi-reset-status");
       // Held while the question is open so a second click or a Wi-Fi save cannot start beside it.
       wifiResetPending = true;
-      if (!await confirmFromButton(button, "The Pi Wi-Fi goes back to its default name. The password and security type stay the same. " + WIFI_RESTART_NOTICE,
+      const defaultName = brandInfo && brandInfo.default_ssid;
+      if (!await confirmFromButton(button, "The Pi Wi-Fi goes back to its default name" + (defaultName ? ", “" + defaultName + "”" : "") +
+          ". The password and security type stay the same. It also stops the Pi from following the router's Wi-Fi name until the router Wi-Fi is copied again. " + WIFI_RESTART_NOTICE,
           {title: "Restore the Wi-Fi name?", confirmLabel: "Restore name"}) || !helperConfigured) {
         wifiResetPending = false;
-        setButtonBusy(button, false);
-        button.disabled = !helperConfigured;
+        settleResetWifiButtons();
         return;
       }
       status.textContent = "Restoring the Pi Wi-Fi name...";
+      resetWifiButtons().forEach((each) => { each.disabled = true; });
+      // On a phone the Controls sheet would cover the progress banner.
+      setControlsOpen(false, false);
       const submittedDraft = formDrafts.get("access-point-form");
       const submittedSsid = element("access-point-ssid").value;
       const tokenRevision = adminTokenRevision;
@@ -7458,19 +7488,17 @@
           }
           status.textContent = operation ? operation.message : "Check the Pi Wi-Fi settings.";
           showMessage(status.textContent, operation && operation.state === "succeeded" ? "success" : "error");
-        });
+        }, defaultName);
         if (tokenRevision === adminTokenRevision && outcome && outcome.gaveUp) status.textContent = "The Pi has not answered yet. See the note on this page.";
       } catch (error) {
         if (tokenRevision === adminTokenRevision) status.textContent = error.message;
         if (tokenRevision === adminTokenRevision) showMessage(error.message, "error");
       } finally {
         wifiResetPending = false;
-        if (tokenRevision === adminTokenRevision) {
-          setButtonBusy(button, false);
-          button.disabled = !helperConfigured;
-        }
+        if (tokenRevision === adminTokenRevision) settleResetWifiButtons();
       }
-    });
+    }
+    resetWifiButtons().forEach((each) => each.addEventListener("click", resetWifiName));
 
     function renderRouterWifi() {
       const button = element("router-wifi-toggle");
@@ -7876,45 +7904,6 @@
 
     const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-    function formatBandwidth(kbit) {
-      if (kbit < 1000) return kbit + " kbit/s";
-      return (kbit / 1000).toFixed(kbit % 1000 ? 1 : 0) + " Mbit/s";
-    }
-
-    function describeImpairment(values) {
-      const parts = [];
-      if (values.delay_ms || values.jitter_ms) {
-        const jitter = values.jitter_ms ? " ± " + values.jitter_ms + " ms" : "";
-        parts.push(values.delay_ms + " ms" + jitter);
-      }
-      if (values.loss_percent) {
-        const bursts = values.loss_burst_packets > 1
-          ? " in bursts of " + values.loss_burst_packets
-          : "";
-        parts.push(values.loss_percent + "% loss" + bursts);
-      }
-      if (values.bandwidth_kbit !== null) parts.push(formatBandwidth(values.bandwidth_kbit));
-      if (values.reorder_percent) parts.push(values.reorder_percent + "% reorder");
-      if (values.duplicate_percent) parts.push(values.duplicate_percent + "% duplicate");
-      if (values.corrupt_percent) parts.push(values.corrupt_percent + "% corrupt");
-      return parts.length ? parts.join(" · ") : "Unchanged";
-    }
-
-    function describeExtras(profile) {
-      const parts = [];
-      if (profile.reroll_interval_seconds) {
-        parts.push("rerolls every " + profile.reroll_interval_seconds + " s");
-      }
-      if (profile.outage_probability) {
-        parts.push(
-          profile.outage_probability + "% outage chance, " +
-          profile.outage_duration_seconds + " s long"
-        );
-      }
-      if (profile.website_mode === "allow_only") parts.push("allows only listed sites");
-      return parts.length ? parts.join(" · ") : "—";
-    }
-
     function hasAdvancedSettings(profile) {
       const advancedImpairment = (values) => Boolean(
         values.reorder_percent || values.duplicate_percent || values.corrupt_percent ||
@@ -8089,28 +8078,6 @@
       return everyoneElseAssigned() || runningScenarios.some((run) => run.everyone_else);
     }
 
-    function renderProfileTable() {
-      renderTable(
-        "profile-table",
-        "No profiles saved yet.",
-        ["Profile", "Upload", "Download", "Extras"],
-        profiles.map((profile) => ({
-          cells: [
-            [profile.name, profile.id],
-            describeImpairment(profile.upload),
-            describeImpairment(profile.download),
-            describeExtras(profile)
-          ],
-          key: profile.id,
-          actions: [
-            ["Edit", () => fillProfileForm(profile)],
-            ["Duplicate", () => duplicateProfile(profile)],
-            ["Delete", (button) => deleteProfile(profile, button)]
-          ]
-        }))
-      );
-    }
-
     const CONDITION_LABELS = { normal: "Normal", degraded: "Degraded", offline: "Offline" };
 
     function conditionCell(state) {
@@ -8268,15 +8235,7 @@
       website_randomness: { variation_percent: 0, enabled_probability: 100 }
     };
 
-    let savedProfileRandomness = DEFAULT_PROFILE_RANDOMNESS;
-
     function fillProfileValues(profile) {
-      savedProfileRandomness = {
-        reroll_interval_randomness: profile.reroll_interval_randomness,
-        outage_duration_randomness: profile.outage_duration_randomness,
-        outage_interval_randomness: profile.outage_interval_randomness,
-        website_randomness: profile.website_randomness
-      };
       fillImpairment("upload", profile.upload);
       fillImpairment("download", profile.download);
       element("profile-seed").value = profile.random_seed === null ? "" : profile.random_seed;
@@ -8940,35 +8899,6 @@
         : message + " It takes effect when the dashboard runs in hardware mode.";
     }
 
-    async function keepUnaffected(macAddress, name, button) {
-      if (button) setButtonBusy(button, true);
-      showMessage("Adding " + macAddress + " to the protected list...", "working");
-      try {
-        const result = await request("/api/unaffected-devices", "POST", {
-          mac_address: macAddress,
-          name: name
-        });
-        refreshAfterSuccess(savedChangeMessage(
-          "Added " + result.unaffected_device.name + " to the protected list.", result
-        ));
-        return true;
-      } catch (error) {
-        showMessage(error.message, "error");
-        return false;
-      } finally {
-        if (button) setButtonBusy(button, false);
-      }
-    }
-
-    function removeUnaffected(macAddress, button) {
-      deleteItem(
-        "/api/unaffected-devices/delete",
-        { mac_address: macAddress },
-        "Removed from the protected list.",
-        button
-      );
-    }
-
     function rerenderConnectedDevices() {
       // Client labels name the everyone-else profile. Leave an open editor alone.
       const container = element("connected-devices");
@@ -9489,10 +9419,6 @@
       if (window.location.hash !== "#" + page) window.history.replaceState(null, "", "#" + page);
     }
 
-    function showRuleSection(name) {
-      showTab(name === "access" ? "access" : "rules");
-    }
-
     function followTabLink(event, name) {
       // A modified click opens the page in a new browser tab instead.
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey ||
@@ -9820,10 +9746,6 @@
       } catch (error) {
         showMessage(error.message, "error");
       }
-    });
-
-    element("profile-form").addEventListener("reset", () => {
-      savedProfileRandomness = DEFAULT_PROFILE_RANDOMNESS;
     });
 
     element("device-cancel-edit").addEventListener("click", () => stopEditing("device"));

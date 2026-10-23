@@ -757,7 +757,7 @@ on the Pi through its management connection or a local terminal. Add `--yes`
 to confirm without a prompt. The command restores `TestNet` and keeps the
 current password and security type. It restarts test Wi-Fi and needs the
 helper but works with the dashboard stopped. The dashboard has the same
-**Reset Wi-Fi name** control on its **Router and Wi-Fi** page.
+**Reset Wi-Fi name** control in its sidebar and on its **Router and Wi-Fi** page.
 Administration remains unavailable from the test network.
 
 **Copy router Wi-Fi to Pi** first checks the source band and personal
@@ -830,7 +830,7 @@ restore the name to `TestNet`, keep the current password and restart test
 Wi-Fi. They require the helper service but work with the dashboard stopped.
 Saved profiles and household access rules are preserved.
 
-Router and Wi-Fi has the same **Reset Wi-Fi name** action. On the test Wi-Fi it
+The sidebar and Router and Wi-Fi have the same **Reset Wi-Fi name** action. On the test Wi-Fi it
 works only from a computer that has signed in and was allowed with **Allow this
 device**, and the restart disconnects that computer too. Keep the router Wi-Fi
 on and a working management route before copying its name to the Pi. If your

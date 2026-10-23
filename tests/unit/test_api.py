@@ -3336,7 +3336,6 @@ class ControlServerTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, payload)
-        self.assertIn('element("profile-form").addEventListener("reset"', DASHBOARD_HTML)
 
     def test_dashboard_shows_each_device_condition(self) -> None:
         table = DASHBOARD_HTML.split("function renderDeviceTable() {", 1)[1]
@@ -3713,7 +3712,6 @@ class ControlServerTests(unittest.TestCase):
             "const element = () => ({value: '', options: [], getAttribute() {return null;}, replaceChildren() {this.options=[];}, appendChild(option) {this.options.push(option);}});\n"
             "const document = {createElement: () => ({})};\n"
             "async function request() { return {profiles: [{id: 'slow', name: 'Slow'}]}; }\n"
-            "function renderProfileTable() {}\n"
             "let editing = [{profile_id: 'slow', duration_seconds: 90}];\n"
             "function scenarioStepsFromForm() { return editing; }\n"
             "const rendered = [];\n"
@@ -3973,7 +3971,6 @@ class ControlServerTests(unittest.TestCase):
             "async function request() {\n"
             "  return {profiles: [{id: 'normal', name: 'Normal'}, {id: '3g', name: '3G'}]};\n"
             "}\n"
-            "function renderProfileTable() {}\n"
             "function scenarioStepsFromForm() { return []; }\n"
             "function renderScenarioSteps() {}\n",
             "loadProfiles().then(() => {\n"

@@ -1095,10 +1095,6 @@ class ConfigRepository:
                 [(device_id,) for device_id in sorted(device_ids)],
             )
 
-    def clear_everyone_exceptions(self) -> None:
-        self._connection.execute("DELETE FROM everyone_exceptions")
-        self._commit()
-
     def get_device_start_scope(self) -> Optional[frozenset]:
         """Return the devices of a device-only start, or None when there is none.
 
@@ -2485,17 +2481,6 @@ class ConfigRepository:
             self._commit()
             return True
         return False
-
-    def list_timers(self) -> tuple:
-        """Return saved timers in newest-first order."""
-
-        rows = self._connection.execute(
-            """
-            SELECT id, device_id, profile_id, started_at, expires_at, enabled
-            FROM timers ORDER BY started_at DESC, id DESC
-            """
-        ).fetchall()
-        return tuple(self._timer_from_row(row) for row in rows)
 
     def list_active_timers(self, *, now: int) -> tuple:
         """Return enabled timers that are active at one Unix timestamp."""
