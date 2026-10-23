@@ -57,9 +57,7 @@ git checkout --detach origin/main
 git log --oneline -1
 ```
 
-Use this checkout (clean, nobody else edits it) for steps 2 and 5. If you would rather not merge
-first: everything still works except that the first publish stops after creating the draft with a
-404 and you run the same `scripts/release.sh 0.2.0` once more (it continues from the draft).
+Use this checkout (clean, nobody else edits it) for steps 2 and 5.
 
 ## 2. One-time bootstrap of the Pi with the current main  [OWNER, one sudo password]
 
@@ -135,15 +133,17 @@ mkdir -p ~/.config/jittersim
 scp -i ~/.ssh/jittersim_ed25519 -o IdentitiesOnly=yes jittersim@192.168.0.17:/etc/jittersim/ca/ca.crt ~/.config/jittersim/pi-ca.crt
 shasum -a 256 ~/.config/jittersim/pi-ca.crt
 # must print 369117764045b53eacb683ee936a791f3b64a9a2758a58b666259e0c94a5c906 (read on the Pi today)
-# The Mac command. Use the `jittersim` you already have. If you have none (this shell had none):
+# The Mac command. Use the `jittersim` you already have:
+JITTERSIM=$(command -v jittersim)
+# Only if you have none (this shell had none), run these three lines instead:
 python3.12 -m venv ~/.venvs/jittersim
 ~/.venvs/jittersim/bin/pip install "/Users/samantha.martinez/Github repos/jittersim.worktrees/release-dryrun"
 JITTERSIM=$HOME/.venvs/jittersim/bin/jittersim
 $JITTERSIM connect --url https://192.168.0.17:8080 --ca-cert ~/.config/jittersim/pi-ca.crt
 ```
 
-(A normal, not editable, install on purpose: the release script removes its own worktree at the
-end, which would break an editable install made from it.)
+(A normal, not editable, install on purpose: step 1 moves that checkout to another commit
+whenever you repeat it, and an editable install would change with it.)
 
 The admin token is read from `JITTERSIM_ADMIN_TOKEN` or asked with a hidden prompt, for example
 `export JITTERSIM_ADMIN_TOKEN="$(security find-generic-password -s jittersim-admin-token -w)"`
@@ -169,8 +169,9 @@ JITTERSIM_RELEASE_LOCAL_CI=none caffeinate -i scripts/release.sh 0.2.0
   requires (lint, python-tests, browser-journeys) always run and are signed. Every PR in main
   was already gated by local-ci. If you want the Docker checks inside the release, use
   `JITTERSIM_RELEASE_LOCAL_CI=release-checks` (and expect an hour or more) or run
-  `lockf -k /private/tmp/claude-501/jittersim-heavy.lock scripts/local-ci.sh release-checks`
-  from another checkout beforehand  [CLAUDE can do that].
+  `scripts/local-ci.sh release-checks` from another clean checkout beforehand  [CLAUDE can do that].
+  Docker steps need a quiet Docker VM: nothing else may use Docker meanwhile (see "The Docker VM"
+  in [local-ci.md](local-ci.md)).
 - Release notes: GitHub's generated list for a first release is the whole history (about 115
   pull requests, 13.7 KB today). Approval accepts at most 16000 characters and the Pi shows 16 KB,
   so the script stops at the very start (nothing kept) when the notes pass 15000 bytes, which
@@ -180,7 +181,7 @@ JITTERSIM_RELEASE_LOCAL_CI=none caffeinate -i scripts/release.sh 0.2.0
   (Put it on the same command line as the variable and `caffeinate` above.) The hand-written
   `## Unreleased` entries of CHANGELOG.md are added above that text, and `release.sh` stops when the
   whole section, with its heading, passes 15000 bytes (`build-release.sh` refuses above 16384). On
-  23 October 2026 the two together are 1865 bytes, because the long list moved to
+  23 October 2026 (main `3afb48d5`) the two together are 2479 bytes, because the long list moved to
   `docs/history/0.2.0-development-changes.md`.
 
 What happens, in order (about 30 to 60 minutes until the first question, longer when other
@@ -224,8 +225,11 @@ protections"). After a restore the Pi runs the dev build again and can only get 
 with a package of a higher release order, i.e. the next release. The gate text says "and back"
 but the same package cannot go back. Options: (a) test the restore last, write that fact in the
 evidence and leave the Pi on the dev build until 0.2.1; (b) leave the restore for the 0.2.1
-acceptance and write down what you actually tested (a failed-install recovery or the bootstrap
-upgrade). Write only what you did.
+acceptance and give `recovery` evidence only for a failed-install recovery you really exercised
+(the bootstrap upgrade is `upgrade` evidence, not recovery). With neither, leave the `recovery`
+answer empty: the run stops and approves nothing, which is right, because the checklist makes
+recovery a release blocker. Never write "not tested": `release.sh` records any answer as passed
+and signs it. Write only what you did.
 
 ### 7. Finish  [OWNER]
 
@@ -271,9 +275,11 @@ it continues from the draft and never replaces an uploaded file.
    - 2c Pi with sudo (one password): `ssh -t -i ~/.ssh/jittersim_ed25519 jittersim@192.168.0.17 'sudo jittersim update check --online'`.
 3. Expected result when the Pi runs the release from step 6:
    `Already up to date: the newest release on GitHub (v0.2.0) is not newer than the installed one.`
-   That is the success message: the Pi used its token, listed the latest release, downloaded
-   both files, verified the signature with the trusted key `mac-20261004` and compared the
-   release order. `jittersim update check` then shows `Online check token: set`.
+   That is the success message. On the first online check after publication the Pi used its
+   token, listed the latest release, downloaded both files, verified the signature with the
+   trusted key `mac-20261004` and compared the release order: keep that first answer as the
+   proof. A later check can show the same words without downloading again (the Pi remembers that
+   it already looked at this release). `jittersim update check` then shows `Online check token: set`.
    If the Pi is still on a dev build (you skipped step 6), the same button says
    `Release 0.2.0 (v0.2.0) is staged and ready to install` and **Install v0.2.0** installs it.
 4. Read the failures like this: `no GitHub token is set` -> step 3; `GitHub refused the token`
