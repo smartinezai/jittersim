@@ -54,6 +54,7 @@ from jittersim.api.address_follow import (
     read_address_follow,
     write_address_follow,
 )
+from jittersim.api.shared_reading import SharedReading
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.api.connection_checks import (
     CHECK_WRITES,
@@ -315,6 +316,15 @@ PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
 # turn every request into a call to the root helper. Without the token the helper
 # is asked at most once in this many seconds (security audit 2026-10-18, A2).
 PUBLIC_HEALTH_REUSE_SECONDS = 1.0
+# Every open dashboard tab polls the helper, and the helper starts a process for each network
+# command. The tabs share one reading for the time below (jittersim.api.shared_reading) and any
+# write drops it (write_response_for). The health poll of a tab (with the token) takes a ping
+# up to this old.
+DASHBOARD_HEALTH_REUSE_SECONDS = 2.0
+# Live traffic runs nft and tc.
+TRAFFIC_REUSE_SECONDS = 1.0
+# The upstream connection runs nmcli, the costliest command on a Pi, and changes rarely.
+UPLINK_REUSE_SECONDS = 15.0
 # What the dashboard says when the standard library refuses a request before any route runs.
 REFUSED_REQUEST_SENTENCES = {
     400: "the request could not be understood",
@@ -1057,6 +1067,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
     # After a reboot the dashboard can start before the helper's socket exists.
     helper_startup_wait_seconds = 30.0
     helper_poll_seconds = 0.5
+    # Set in __init__. A server that a test builds without __init__ has no readings to drop.
+    _shared_readings: Tuple[SharedReading, ...] = ()
 
     def __init__(
         self,
@@ -1106,6 +1118,11 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         self.scheduler = scheduler
         # The device speed test windows. One manager for the life of the server.
         self._speed_test_manager = SpeedTestManager(self)
+        # Readings of the helper that open tabs share. A write, Panic or Reset drops them.
+        self._health_reading = SharedReading()
+        self._traffic_reading = SharedReading()
+        self._uplink_reading = SharedReading()
+        self._shared_readings = (self._health_reading, self._traffic_reading, self._uplink_reading)
         # The connection check shares the speed test manager's run table, limits and shutdown.
         self._connection_check_manager = ConnectionCheckManager(self._speed_test_manager)
         # Protection-derived dashboard access: the last confirmed sync with the root helper.
@@ -1941,7 +1958,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
     @_read_route("/api/health")
     def _get_health(self, query: str) -> Tuple[int, str, bytes]:
-        return self.health_response(fresh=True)
+        return self.health_response(max_age=DASHBOARD_HEALTH_REUSE_SECONDS)
 
     @_read_route("/api/system-health")
     def _get_system_health(self, query: str) -> Tuple[int, str, bytes]:
@@ -2203,7 +2220,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 }
             )
         try:
-            uplink = self.helper_client.uplink_info()
+            uplink = self._uplink_reading.get(self.helper_client.uplink_info, UPLINK_REUSE_SECONDS)
         except HelperClientError:
             LOGGER.exception("could not inspect the upstream connection")
             return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
@@ -2571,8 +2588,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     "profile_limits": {},
                 }
             )
-        try:
+        def read_counters():
             counters = self.helper_client.traffic_counters()
+            return time.time(), counters
+
+        try:
+            sampled_at, counters = self._traffic_reading.get(read_counters, TRAFFIC_REUSE_SECONDS)
         except HelperClientError:
             LOGGER.exception("could not read live traffic counters")
             return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
@@ -2596,7 +2617,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         return HTTPStatus.OK, "application/json", _json_bytes(
             {
                 "available": True,
-                "sampled_at": time.time(),
+                "sampled_at": sampled_at,
                 "devices": device_counters,
                 "queues": device_queues if isinstance(device_queues, dict) else {},
                 "everyone_else": everyone_else if isinstance(everyone_else, dict) else None,
@@ -2652,14 +2673,21 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                            before_replace=None) -> Tuple[int, str, bytes]:
         """Handle one write. before_replace(settings) runs on a validated import or restore
         just before it is saved and may refuse it by returning a response."""
-        if path in RESET_REQUEST_PATHS:
-            # A device Apply that arrives while this runs, or waits behind it, starts nothing.
-            self.note_reset_request()
-            try:
-                return self._tracked_write_response_for(path, payload, before_replace)
-            finally:
-                self.note_reset_finished()
-        return self._tracked_write_response_for(path, payload, before_replace)
+        # Any write may change what the shared readings show (an Apply, a Reset, Panic, a Wi-Fi
+        # change). Drop them before it starts, so a read meanwhile asks the helper again, and
+        # after it ends, so a reading taken meanwhile is not kept. Dropping never waits.
+        self.drop_shared_readings()
+        try:
+            if path in RESET_REQUEST_PATHS:
+                # A device Apply that arrives while this runs, or waits behind it, starts nothing.
+                self.note_reset_request()
+                try:
+                    return self._tracked_write_response_for(path, payload, before_replace)
+                finally:
+                    self.note_reset_finished()
+            return self._tracked_write_response_for(path, payload, before_replace)
+        finally:
+            self.drop_shared_readings()
 
     def _tracked_write_response_for(self, path: str, payload: Dict[str, Any],
                                     before_replace=None) -> Tuple[int, str, bytes]:
@@ -6441,12 +6469,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             {"result": result, "state": self._runtime_state_with_running(state)}
         )
 
-    def health_response(self, *, fresh: bool) -> Tuple[int, str, bytes]:
-        """The health check. Without `fresh` a helper answer from the last second is reused."""
+    def health_response(self, *, max_age: float) -> Tuple[int, str, bytes]:
+        """The health check. A helper answer up to `max_age` seconds old is reused."""
 
         helper_reachable = False
         if self.helper_client is not None:
-            helper_reachable = self._helper_reachable(fresh=fresh)
+            # One ping at a time for every caller: the others wait for it and take its answer.
+            helper_reachable = self._health_reading.get(self._ping_helper, max_age)
         return HTTPStatus.OK, "application/json", _json_bytes(
             {
                 "status": "ok" if self.helper_client is None or helper_reachable else "degraded",
@@ -6456,31 +6485,18 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             }
         )
 
-    def _helper_reachable(self, *, fresh: bool) -> bool:
-        # Created on first use (dict.setdefault is atomic), so servers that tests build
-        # without __init__ answer too.
-        lock = self.__dict__.setdefault("_health_lock", threading.Lock())
-        if not fresh:
-            # One ping at a time for every caller without the token: the others wait
-            # for it and take its answer.
-            with lock:
-                checked_at, reachable = self.__dict__.get("_health_answer", (float("-inf"), False))
-                if time.monotonic() - checked_at < PUBLIC_HEALTH_REUSE_SECONDS:
-                    return reachable
-                reachable = self._ping_helper()
-                self._health_answer = (time.monotonic(), reachable)
-                return reachable
-        reachable = self._ping_helper()
-        with lock:
-            self._health_answer = (time.monotonic(), reachable)
-        return reachable
-
     def _ping_helper(self) -> bool:
         try:
             return self.helper_client.ping().get("ok") is True
         except HelperClientError:
             LOGGER.warning("network helper health check failed")
             return False
+
+    def drop_shared_readings(self) -> None:
+        """Forget the shared health, traffic and uplink readings. It never waits."""
+
+        for reading in self._shared_readings:
+            reading.drop()
 
     def is_authorized(self, authorization_header: Optional[str]) -> bool:
         """Return whether an Authorization header matches the configured admin token."""
@@ -6687,7 +6703,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 status, content_type, body = (HTTPStatus.OK, "application/json",
                                               _json_bytes(self.server.address_move_offer(identity)))
             elif path == "/api/health" and not self.server.is_authorized(self.headers.get("Authorization")):
-                status, content_type, body = self.server.health_response(fresh=False)
+                status, content_type, body = self.server.health_response(
+                    max_age=PUBLIC_HEALTH_REUSE_SECONDS)
             elif path in ("/api/dashboard-access/status", "/api/dashboard-access"):
                 data = self.server.dashboard_access(
                     self.client_address[0], "status" if path.endswith("/status") else "list")

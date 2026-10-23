@@ -76,7 +76,7 @@ requirement. Do not copy credentials into the source tree.
 
 The upgrade notes for observed names: the installer clears the DNS names listed
 under Traffic once when any device is protected, because protected devices are no
-longer watched. It prints a notice with the number of names before it happens.
+longer watched.
 The list fills again as devices browse. Names are kept for 30 days from their last
 sighting.
 

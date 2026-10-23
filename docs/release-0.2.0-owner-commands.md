@@ -2,7 +2,7 @@
 
 **[OWNER]** only you can do it (key passphrase, sudo password, y/N answers). **[EITHER]** anyone can paste it. Every command below was checked against `scripts/release.sh`, `src/jittersim/cli.py` and `src/jittersim/remote_cli.py` on main. The reasons are in the [owner runbook](release-runbook-2026-10-16.md).
 
-Facts on 23 October (main `f2ffa4be`): no tag, no GitHub release, `docs/releases/registry.json` reserves nothing, `pyproject.toml` and `__init__.py` say 0.2.0. The release text (Unreleased entries plus [the notes file](release-notes-0.2.0-draft.md)) is under 2 KB. The script stops above 15000 bytes.
+Facts on 23 October (main `3afb48d5`): no tag, no GitHub release, `docs/releases/registry.json` reserves nothing, `pyproject.toml` and `__init__.py` say 0.2.0. The release text (Unreleased entries plus [the notes file](release-notes-0.2.0-draft.md)) is 2479 bytes there and changes when either changes. The script stops above 15000 bytes.
 
 ## Before you start (all must be true)
 
@@ -73,7 +73,7 @@ Expect `version` `0.2.0` and the reserved `sequence` in the first output. Then d
 
 - `physical`: Installed 0.2.0 on the real Pi with remote update upload and install. The dashboard opened, a slow profile shaped one test phone, a protected device stayed unshaped, Panic stopped the profile and the Pi came back after a reboot with the test Wi-Fi and the dashboard working.
 - `upgrade`: Upgraded in place from 0.2.0.dev+SHORT (bootstrap build of main) to 0.2.0 through the update service. The health check passed and no sudo was needed.
-- `recovery`: choose the one that is true. (a) Restore previous installation was tested and the Pi ran 0.2.0.dev+SHORT again with dashboard, helper and DNS active. (b) Restore was not tested here and the recovery that was exercised is SAY WHAT. If you do (a), do it after every other check: a restore does not lower the Pi's release-order mark, so the Pi cannot install this package again and stays on the development build until 0.2.1.
+- `recovery`: choose the one that is true. (a) Restore previous installation was tested and the Pi ran 0.2.0.dev+SHORT again with dashboard, helper and DNS active. (b) Restore was not tested here and a failed-install recovery was exercised: SAY WHAT. The upgrade to 0.2.0 is `upgrade` evidence, not recovery. If neither is true, leave the answer empty: the run stops and approves nothing (a line like "not tested" would be signed as passed). If you do (a), do it after every other check: a restore does not lower the Pi's release-order mark, so the Pi cannot install this package again and stays on the development build until 0.2.1.
 - `saved_settings`: The profiles, device names and protected-device list I wrote down before the update were all there after it.
 - `management_access`: SSH over Ethernet and the dashboard at https://netlab.local:8080 from the router network worked during and after the update without the test Wi-Fi.
 - `safety_state`: The Panic state and the access rules were the same as I wrote down before the update and Panic still stops profiles.
@@ -86,6 +86,6 @@ gh api repos/smartinezai/jittersim/releases/latest -q .tag_name     # v0.2.0
 $JITTERSIM remote update check                                      # the Pi asks GitHub with its own token
 ```
 
-**[OWNER] Pi dashboard:** open `https://netlab.local:8080`, Updates, **Check for updates**. On the Pi that ran the acceptance it says `Already up to date: the newest release on GitHub (v0.2.0) is not newer than the installed one.` That is the success message. The **Install v0.2.0** button is first used on a Pi that never installed 0.2.0, and on this Pi for 0.2.1. More in runbook section 8.
+**[OWNER] Pi dashboard:** open `https://netlab.local:8080`, Updates, **Check for updates**. On the Pi that ran the acceptance it says `Already up to date: the newest release on GitHub (v0.2.0) is not newer than the installed one.` That is the success message. Only the first check after publication proves the download and signature: keep its answer, because later checks can repeat the words without downloading again. The **Install v0.2.0** button is first used on a Pi that never installed 0.2.0, and on this Pi for 0.2.1. More in runbook section 8.
 
 If it stops with `Required main checks are still running` (exit 78), wait a minute and run step 3 again. A failed check names a log: read it and run step 3 again. A half-finished publish continues from the draft.

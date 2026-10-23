@@ -1,4 +1,4 @@
-"""Exercise upgrades from the service layout observed on the live Pi."""
+"""Check the installer's update-idle guard and source replacement."""
 
 import importlib.util
 import subprocess
@@ -15,62 +15,15 @@ def load_script(name):
     return module
 
 
-services = load_script("retire-services.py")
+idle = load_script("check-update-idle.py")
 release = load_script("replace-source.py")
 
 
-RETIRED = ("jittersim-ap.service", "old-example.service")
-
-
-def test_this_release_retires_nothing():
-    assert services.OBSOLETE_SERVICES == ()
-
-
-def test_retirement_preserves_current_services_and_running_wifi(tmp_path, monkeypatch):
-    monkeypatch.setattr(services, "OBSOLETE_SERVICES", RETIRED)
-    units = tmp_path / "units"
-    units.mkdir()
-    backup = tmp_path / "private-backup"
-    for name in (*services.OBSOLETE_SERVICES, "jittersim-helper.service", "other.service"):
-        (units / name).write_text("original " + name)
-    calls = []
-    services.retire_services(units, backup, run=calls.append, check=lambda _: None,
-                            clear=lambda _: None)
-    assert {item.name for item in units.iterdir()} == {"jittersim-helper.service", "other.service"}
-    assert ["disable", "jittersim-ap.service"] in calls
-    assert not any("--now" in call and "jittersim-ap.service" in call for call in calls)
-    assert not any("stop" in call for call in calls)
-    for name in services.OBSOLETE_SERVICES:
-        assert (backup / name).read_text() == "original " + name
-        assert (backup / name).stat().st_mode & 0o777 == 0o600
-    assert backup.stat().st_mode & 0o777 == 0o700
-    services.retire_services(units, backup, run=calls.append, check=lambda _: None,
-                            clear=lambda _: None)
-    assert calls.count(["disable", "jittersim-ap.service"]) == 1
-
-
-def test_a_failed_retirement_keeps_the_service_and_recovery_copy(tmp_path, monkeypatch):
-    monkeypatch.setattr(services, "OBSOLETE_SERVICES", RETIRED)
-    units = tmp_path / "units"
-    units.mkdir()
-    name = services.OBSOLETE_SERVICES[0]
-    (units / name).write_text("recover this")
-
-    def fail(command):
-        raise subprocess.CalledProcessError(1, command)
-
-    with pytest.raises(subprocess.CalledProcessError):
-        services.retire_services(units, tmp_path / "backup", run=fail, check=lambda _: None,
-                                clear=lambda _: None)
-    assert (units / name).read_text() == "recover this"
-    assert (tmp_path / "backup" / name).read_text() == "recover this"
-
-
 @pytest.mark.parametrize("returncode", [0, 1])
-def test_active_or_unreadable_updater_prevents_retirement(tmp_path, returncode):
+def test_active_or_unreadable_updater_prevents_install(tmp_path, returncode):
     (tmp_path / "jittersim-update.service").touch()
     with pytest.raises(RuntimeError):
-        services.check_update_idle(
+        idle.check_update_idle(
             tmp_path, run=lambda *a, **k: subprocess.CompletedProcess(a, returncode),
         )
 
@@ -78,21 +31,16 @@ def test_active_or_unreadable_updater_prevents_retirement(tmp_path, returncode):
 @pytest.mark.parametrize("returncode", [3, 4])
 def test_inactive_or_unloaded_updater_allows_upgrade(tmp_path, returncode):
     (tmp_path / "jittersim-update.service").touch()
-    services.check_update_idle(
+    idle.check_update_idle(
         tmp_path, run=lambda *a, **k: subprocess.CompletedProcess(a, returncode),
     )
 
 
-@pytest.mark.parametrize("state", [0, 1, 4])
-def test_only_failed_units_have_their_failure_state_reset(state):
-    calls = []
-
-    def run(arguments, **kwargs):
-        calls.append(arguments)
-        return subprocess.CompletedProcess(arguments, state)
-
-    services.clear_failure("jittersim-dns.service", run=run)
-    assert (["systemctl", "reset-failed", "jittersim-dns.service"] in calls) == (state == 0)
+def test_the_installer_checks_the_update_is_idle_before_changing_anything():
+    lines = (Path(__file__).resolve().parents[2] / "deploy/raspberry-pi/install.sh").read_text().splitlines()
+    first = {name: next(i for i, line in enumerate(lines) if name in line)
+             for name in ("check-update-idle.py", "apt-get", "replace-source.py")}
+    assert first["check-update-idle.py"] < first["apt-get"] < first["replace-source.py"]
 
 
 def source_tree(root):
