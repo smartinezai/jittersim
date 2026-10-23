@@ -35,7 +35,7 @@ so the quoted lines are as it returned them.
 | --- | --- |
 | 3G, EDGE, Very bad network, Offline, DSL | The presets of Apple's Network Link Conditioner with the same names. The table of one engineering blog lists them (3G 780 and 330 kbit/s at 100 ms, DSL 2 Mbit/s and 256 kbit/s at 5 ms, Edge 240 and 200 kbit/s at 400 and 440 ms, Very Bad Network 1 Mbit/s at 500 ms with 10% loss, 100% Loss). The speeds, delays and loss JitterSim already used for 3G, EDGE and Very bad network are exactly these, which is the evidence for "based on". The NSHipster page and the Apple forum thread already named in the proposals name the presets but give no numbers, which is why the table was used. The table labels its first column Up and the reader returned it in that order. JitterSim reads the first number of each pair as download (780 kbit/s down for 3G), because the first is the larger speed on every asymmetric row and a DSL line with 256 kbit/s down makes no sense. The sentences in the form and the guide therefore say "as a published table lists it" and "the first number of each pair is used for download" and do not give the direction as Apple's fact. |
 | Slow 3G (Chrome DevTools) | `front_end/core/sdk/NetworkManager.ts` in the DevTools repository says "~500Kbps down", "~500Kbps up" and "400ms RTT" for the preset now titled 3G. The code applies 0.8 times the speed (400 kbit/s) and five times the latency (2000 ms) so that the browser feels like the aimed numbers. The DebugBear page already named in the proposals lists 400 kbit/s and 2000 ms for it. JitterSim delays every packet, so the preset uses the aimed numbers: 200 ms each way and 500 kbit/s each way. |
-| Good 4G, Congested 4G, Lossy Wi-Fi, Train tunnel, Satellite | No source. The commit that added them (`a0bcbb18`) calls them rough approximations and records none. They say so. The Satellite note adds a check anyone can redo: four legs of the 35,786 km geostationary orbit at the speed of light take about 478 ms, so 600 ms is plausible. |
+| Good 4G, Congested 4G, Lossy Wi-Fi, Train tunnel, Satellite | No source. The commit that added them (`a0bcbb18`) calls them rough approximations and records none. They say so. The Satellite note adds a check anyone can redo: four legs of the 35,786 km geostationary orbit at the speed of light take about 478 ms, so about 600 ms (300 ms each way) is plausible. |
 
 ## Decisions
 
@@ -78,7 +78,8 @@ the standard and measures what the Pi really carries.
 
 - Check the Apple numbers once in Network Link Conditioner itself (Additional Tools
   for Xcode, Network Link Conditioner pane) if you have it. The directions (down 780
-  and up 330 kbit/s for 3G, delays 400 down and 440 up for Edge) match the layout of
-  the usual preset pane but were not confirmed against the tool.
+  and up 330 kbit/s for 3G, delays 400 down and 440 up for Edge) are JitterSim's
+  reading of a table that labels its first column Up. They were not confirmed
+  against the tool.
 - Do you want Slow 4G and Fast 4G from DevTools too? Their numbers are in the same
   file. They were not in the proposal.

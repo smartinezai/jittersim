@@ -318,8 +318,9 @@ This reading was not checked in Apple's tool. Chrome DevTools defines Slow 3G in
 the file `front_end/core/sdk/NetworkManager.ts` of its
 [source repository](https://github.com/ChromeDevTools/devtools-frontend) as about
 500 kbit/s and a 400 ms round trip. A preset fills the form with plain values. It
-also clears the seed, the rerolls, the outages, the website rules and the other
-advanced settings, and it sets the Name when you are creating a new profile. The
+also clears the seed, the rerolls, the website rules and the other advanced
+settings, sets the outages only for Train tunnel, and sets the Name when you are
+creating a new profile. The
 [measured effect](measurements-2026-09.md) of four of them is on record.
 
 ### Schedules, timers and randomness
