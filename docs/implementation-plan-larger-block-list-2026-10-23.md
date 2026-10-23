@@ -27,11 +27,14 @@ this change.
   32 lookup places free. A lookup that finds the pool full waits for a place within the plan
   deadline instead of being skipped. (Review of PR 188: renewals in list order filled the
   pool, so the last names lost their addresses after 11 minutes and new names were skipped.)
-- A save of the access rules (`/api/policies`, **Block globally**) and of a device
-  (`/api/devices`) now checks the whole household access policy before it is stored, so a
-  list that would be refused by the helper is refused with its reason at save time instead
-  of "saved but could not be updated". Group saves already had the check: they build the
-  whole plan (`_validate_saved_plan`).
+- Every save that can change the household access policy now checks the whole policy before
+  it is stored: the access rules (`/api/policies`), **Block globally**, a site rule
+  (`/api/site-blocks`), a device (`/api/devices`), and an import or history restore
+  (`check_settings`). Group saves already had the check: they build the whole plan
+  (`_validate_saved_plan`). So a list that the helper would refuse is refused with its
+  reason at save time instead of "saved but could not be updated" or a later failing plan.
+- An invalid name in a domain list is named in the error, so a list pasted with line breaks
+  (the textarea splits on commas) says which entry is wrong.
 - `/api/policies` accepts a body up to the access policy size (256 KiB) instead of 64 KiB:
   2000 typical names alone are 63 KiB of JSON.
 - No pinned file changes. No helper change is needed (see "Helper frame").
@@ -210,10 +213,13 @@ within `PANIC_ANSWER_SECONDS`.
 - More than 4096 addresses: the numerically highest ones are not blocked by address. The log
   says so once. With household rules off, names whose addresses are all left out are not
   blocked at all.
-- Downgrade: an older release refuses a list over 100 names. Its dashboard cannot read the
-  settings and its helper closes the test network at boot ("The test network is closed").
-  Panic still opens it. Shorten the list to 100 names before installing an older release
-  (the user guide says so).
+- Downgrade: an older release refuses a list over 100 names. Its dashboard does not start
+  (it cannot read the settings and restarts every 2 s), so there is no Panic button, and its
+  helper closes the test network at boot ("The test network is closed"). Only
+  `sudo jittersim normal-access` over SSH opens it. Shorten the list to 100 names before a
+  manual downgrade (the user guide says so). **Restore previous installation** is not
+  affected: it restores the database and the access folder from the snapshot taken before
+  the update (limits audit of 23 October).
 - Memory on the Pi: the cache holds up to 4048 names (about 1 MB), Unbound about 20 MB.
 
 ## After

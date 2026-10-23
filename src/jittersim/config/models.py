@@ -147,7 +147,14 @@ def _normalize_domain_list(
 ) -> Tuple[str, ...]:
     if not isinstance(values, (list, tuple)):
         raise ValidationError(f"{field_name} must be a list")
-    normalized = tuple(dict.fromkeys(normalize_domain(value) for value in values))
+    names = []
+    for value in values:
+        try:
+            names.append(normalize_domain(value))
+        except ValidationError as error:
+            # Name the entry: a list pasted with line breaks arrives as one long entry.
+            raise ValidationError(f"{field_name}: {str(value)[:60]!r}: {error}") from None
+    normalized = tuple(dict.fromkeys(names))
     if len(normalized) > limit:
         raise ValidationError(f"{field_name} must contain no more than {limit} domains")
     return normalized

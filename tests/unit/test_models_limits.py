@@ -794,8 +794,10 @@ def test_the_website_policy_lists_are_clean():
     refuses("blocked_domains must contain no more than 80000 characters in total",
             WebsitePolicy, blocked_domains=long_names)
     assert len(WebsitePolicy(blocked_domains=long_names[:1538]).blocked_domains) == 1538
-    refuses("domain must contain valid DNS labels", WebsitePolicy,
-            blocked_domains=full[:10] + ("bad_name!.com",))
+    refuses("blocked_domains: 'bad_name!.com': domain must contain valid DNS labels",
+            WebsitePolicy, blocked_domains=full[:10] + ("bad_name!.com",))
+    refuses("blocked_domains: 'a.example.com\\nb.example.com': domain must contain valid DNS labels",
+            WebsitePolicy, blocked_domains=("a.example.com\nb.example.com",))
 
 
 def block(**f):

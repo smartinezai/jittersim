@@ -277,9 +277,14 @@ def write_access_api(server, path, payload, *, control_intent=None):
             else:
                 rule = SiteBlock(**payload["rule"])
                 blocks = [existing for existing in blocks if existing.id != rule.id] + [rule]
-            accepted, _ = server._publish_apply(generation, lambda: repository.save_access_policies(
-                mac, settings.website_policy, blocks=blocks, expected_version=version
-            ))
+            def save_blocks():
+                with repository.transaction():
+                    repository.save_access_policies(
+                        mac, settings.website_policy, blocks=blocks, expected_version=version
+                    )
+                    server._check_access_rules()
+
+            accepted, _ = server._publish_apply(generation, save_blocks)
             if not accepted:
                 return server._apply_refused(generation)
             repository.record_activity(

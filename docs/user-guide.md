@@ -641,8 +641,11 @@ Changes that block their destination or change their selected queue close them.
 Before a code downgrade, change fresh profiles back to saved patterns or restore
 a compatible private configuration backup. Older releases reject the fresh
 pattern setting. Stop profiles and verify normal traffic before replacing code.
-Also shorten the global block list to 100 names: older releases refuse a longer
-list and then keep the test network closed until you press **Panic**.
+Also shorten the global block list to 100 names. An older release refuses a
+longer list: its dashboard does not start and the test network stays closed.
+Then open it with `sudo jittersim normal-access` over SSH and install the newer
+release again or shorten the list. **Restore previous installation** is not
+affected: it also restores the settings from before the update.
 
 Matching is by destination address. A small service on the Pi reads the DNS
 answers that leave the Pi towards the test Wi-Fi. When an answer names a listed

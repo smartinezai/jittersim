@@ -6431,7 +6431,9 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(
             json.loads(body)["error"],
             "could not add domain to global block list: "
-            "too many distinct device and domain combinations",
+            "too many different device and site rule combinations: each one repeats the "
+            "blocked and allowed names, 16384 names in all at most. "
+            "Remove blocked names or site rules",
         )
         self.assertEqual(self.repository.get_website_policy(), before)
 
@@ -6443,7 +6445,7 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 400)
-        self.assertIn("too many distinct device and domain combinations", json.loads(body)["error"])
+        self.assertIn("too many different device and site rule combinations", json.loads(body)["error"])
         self.assertEqual(self.repository.get_website_policy(), before)
         # Swapping a name keeps the size and still saves.
         status, _, _ = self.server.write_response_for(
@@ -6472,7 +6474,7 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 409)
-        self.assertIn("too many distinct device and domain combinations", json.loads(body)["error"])
+        self.assertIn("too many different device and site rule combinations", json.loads(body)["error"])
         self.assertEqual(self.repository.get_device_group("kids").device_ids, (devices[0].id,))
 
     def test_a_device_save_is_refused_while_the_access_rules_are_over_the_limit(self) -> None:
@@ -6486,8 +6488,44 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 400)
-        self.assertIn("too many distinct device and domain combinations", json.loads(body)["error"])
+        self.assertIn("too many different device and site rule combinations", json.loads(body)["error"])
         self.assertEqual(self.repository.get_device(devices[0].id).name, devices[0].name)
+
+    def test_a_site_rule_that_adds_a_dns_view_over_the_limit_is_not_saved(self) -> None:
+        devices = self._site_rule_views(6)  # with everyone 7 views of 2101 names fit
+        extra = Device("extra", "Extra", "192.168.50.140", "slow")
+        self.repository.save_device(extra)
+        self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS)
+        before = self.repository.access_settings().site_blocks
+
+        status, _, body = self.server.write_response_for(
+            "/api/site-blocks",
+            {"version": self.repository.get_runtime_state().configuration_version,
+             "rule": {"id": "extra-rule", "name": "Extra rule", "domains": ["games.example.com"],
+                      "device_id": extra.id}},
+        )
+
+        self.assertEqual(status, 400, body)
+        self.assertIn("too many different device and site rule combinations", json.loads(body)["error"])
+        self.assertEqual(self.repository.access_settings().site_blocks, before)
+        self.assertEqual(len(before), len(devices))
+
+    def test_an_import_the_helper_would_refuse_stores_nothing(self) -> None:
+        self._site_rule_views(8)
+        self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS)  # 9 views: over the limit
+        exported = self._export(self.server)
+        with ConfigRepository(":memory:") as other_repository:
+            other = ControlServer(("127.0.0.1", 0), other_repository)
+            try:
+                status, _, body = other.write_response_for("/api/import", exported)
+                stored = other_repository.get_website_policy().blocked_domains
+            finally:
+                other.server_close()
+
+        self.assertEqual(status, 400, body)
+        self.assertIn("invalid settings import: too many different device and site rule combinations",
+                      json.loads(body)["error"])
+        self.assertEqual(stored, ())
 
     def _fill_profile(self, count: int) -> None:
         from dataclasses import replace
