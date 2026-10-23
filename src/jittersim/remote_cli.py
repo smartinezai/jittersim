@@ -1029,8 +1029,8 @@ def _open_backup_folder(folder: Path) -> int:
         os.close(directory)
         raise RemoteError(
             f"The folder {folder} can be changed by other users, so a backup in it could be "
-            "swapped. Run chmod go-w on it and make sure you own it, or choose another folder "
-            "with --directory."
+            "swapped. Run chmod go-w on it and make sure you own it (FAT and exFAT disks cannot "
+            "do this), or choose another folder with --directory."
         )
     return directory
 
@@ -1051,34 +1051,41 @@ def _backup_pull(arguments: argparse.Namespace) -> int:
             directory = _open_backup_folder(folder)
         name = time.strftime("jittersim-backup-%Y%m%dT%H%M%SZ.db", time.gmtime())
         temporary = ".jittersim-backup-" + secrets.token_hex(8) + ".tmp"
-        descriptor = os.open(
-            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
-            dir_fd=directory,
-        )
         try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            # Publish only a complete file. Linking refuses a destination that appeared meanwhile.
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                dir_fd=directory,
+            )
             try:
-                os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
-            except FileExistsError:
-                raise RemoteError(
-                    f"{folder / name} already exists. Nothing was replaced. Try again."
-                ) from None
-            except OSError as error:
-                raise RemoteError(
-                    f"The folder {folder} cannot take the finished backup "
-                    f"({error.strerror or 'system error'}). It needs a disk that supports hard "
-                    "links, and FAT and exFAT drives do not. Choose another folder with "
-                    "--directory."
-                ) from None
-        finally:
-            try:
-                os.unlink(temporary, dir_fd=directory)
-            except FileNotFoundError:
-                pass
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                # Publish only a complete file. Linking refuses a destination that appeared
+                # meanwhile.
+                try:
+                    os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+                except FileExistsError:
+                    raise RemoteError(
+                        f"{folder / name} already exists. Nothing was replaced. Try again."
+                    ) from None
+                except OSError as error:
+                    raise RemoteError(
+                        f"The folder {folder} cannot take the finished backup "
+                        f"({error.strerror or 'system error'}). It needs a disk that supports "
+                        "hard links, and FAT and exFAT drives do not. Choose another folder "
+                        "with --directory."
+                    ) from None
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+        except OSError as error:
+            raise RemoteError(
+                f"The folder {folder} cannot take the backup: {error.strerror or 'system error'}. "
+                "Check its permissions and free space, or choose another folder with --directory."
+            ) from None
     finally:
         if directory is not None:
             os.close(directory)

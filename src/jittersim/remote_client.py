@@ -741,7 +741,7 @@ class DashboardClient:
                     if len(answer) <= limit and remaining:
                         raise http.client.IncompleteRead(answer, remaining)
                     # A file download must say how long it is. Without that, a cut is invisible.
-                    if (max_bytes is not None and remaining is None
+                    if (max_bytes is not None and len(answer) <= limit and remaining is None
                             and not getattr(response, "chunked", False)):
                         raise http.client.IncompleteRead(answer)
                 except (OSError, ssl.SSLError) as error:

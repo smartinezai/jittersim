@@ -79,7 +79,6 @@ def test_pull_never_replaces_a_file(dashboard, capsys, tmp_path):
     assert list(folder.iterdir()) == [taken]
 
 
-
 def test_a_refused_token_saves_nothing(dashboard, capsys, tmp_path):
     dashboard.answer("GET", "/api/backup", {"error": "valid bearer authentication is required"},
                      status=401)
@@ -141,6 +140,25 @@ def test_a_cut_short_download_never_becomes_a_backup(capsys, tmp_path):
     assert not folder.exists()
 
 
+def test_an_oversize_answer_without_a_length_says_it_is_too_large(
+    capsys, tmp_path, monkeypatch
+):
+    certificate, key = make_certificate(tmp_path)
+    monkeypatch.setattr("jittersim.remote_cli.MAX_BACKUP_BYTES", 100)
+
+    def no_length(connection, _stop):
+        connection.sendall(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + BACKUP)
+        connection.shutdown(socket.SHUT_WR)
+
+    with tls_server(certificate, key, no_length) as (url, _requests), \
+            patch("jittersim.remote_client.getpass.getpass", return_value=TEST_TOKEN):
+        code = main(["backup", "pull", "--url", url, "--ca-cert", str(certificate),
+                     "--directory", str(tmp_path / "backups")])
+
+    assert code == 1
+    assert capsys.readouterr().err.strip() == "The dashboard answer was too large."
+
+
 def test_an_answer_that_does_not_say_how_long_it_is_never_becomes_a_backup(capsys, tmp_path):
     certificate, key = make_certificate(tmp_path)
 
@@ -168,8 +186,6 @@ def test_a_backup_exactly_at_the_limit_is_saved(dashboard, capsys, tmp_path, mon
     assert code == 0, err
     (saved,) = folder.iterdir()
     assert saved.read_bytes() == BACKUP
-
-
 
 
 @pytest.mark.parametrize("error", [OSError(errno.ENOSPC, "full disk"), KeyboardInterrupt()])
@@ -288,6 +304,73 @@ def test_an_existing_folder_owned_by_someone_else_is_refused(
     assert f"The folder {folder.resolve()} can be changed by other users" in err
     assert dashboard.requests == []
     assert list(folder.iterdir()) == []
+
+
+def test_a_disk_without_hard_links_says_so_and_names_the_folder(
+    dashboard, capsys, tmp_path, monkeypatch
+):
+    def no_links(source, destination, **_):
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+
+    monkeypatch.setattr("jittersim.remote_cli.os.link", no_links)
+    dashboard.answer("GET", "/api/backup", BACKUP)
+    folder = tmp_path / "usb"
+    code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
+
+    assert code == 1
+    assert str(folder.resolve()) in err
+    assert "Operation not supported" in err
+    assert "hard links" in err and "exFAT" in err
+    assert list(folder.iterdir()) == []
+
+
+def test_a_folder_that_cannot_be_used_is_named(dashboard, capsys, tmp_path):
+    dashboard.answer("GET", "/api/backup", BACKUP)
+    not_a_folder = tmp_path / "a-file"
+    not_a_folder.write_text("x")
+    code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(not_a_folder))
+
+    assert code == 1
+    assert f"The folder {not_a_folder.resolve()} cannot be used" in err
+    assert "--directory" in err
+    assert dashboard.requests == []
+
+
+def test_a_folder_that_cannot_take_the_file_is_named(dashboard, capsys, tmp_path):
+    dashboard.answer("GET", "/api/backup", BACKUP)
+    folder = tmp_path / "read-only"
+    folder.mkdir()
+    folder.chmod(0o500)
+    try:
+        code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
+    finally:
+        folder.chmod(0o700)
+
+    assert code == 1
+    assert f"The folder {folder.resolve()} cannot take the backup" in err
+    assert list(folder.iterdir()) == []
+
+
+@pytest.mark.parametrize("target_exists", [True, False])
+def test_a_link_already_at_the_destination_is_never_followed(
+    dashboard, capsys, tmp_path, target_exists
+):
+    dashboard.answer("GET", "/api/backup", BACKUP)
+    folder = tmp_path / "backups"
+    folder.mkdir()
+    target = tmp_path / "somewhere-else"
+    if target_exists:
+        target.write_bytes(b"not a backup")
+    taken = folder / "jittersim-backup-20261023T120000Z.db"
+    taken.symlink_to(target)
+    stub = types.SimpleNamespace(strftime=lambda *_: taken.name, gmtime=lambda: None)
+    with patch("jittersim.remote_cli.time", stub):
+        code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
+
+    assert code == 1
+    assert "already exists" in err
+    assert target.read_bytes() == b"not a backup" if target_exists else not target.exists()
+    assert list(folder.iterdir()) == [taken]
 
 
 def test_the_help_says_what_the_command_keeps_and_how_to_repeat_it(capsys):
