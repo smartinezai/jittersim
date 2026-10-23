@@ -1235,7 +1235,9 @@ function clearUpdatePrivateState() {
   element('release-retry').hidden = true;
   element('update-retry-status').textContent = '';
   element('update-retry-status').hidden = true;
-  for (const id of ['online-check-status','online-setting-status','release-status','update-preference-status']) element(id).textContent = 'Sign in to read update status.';
+  for (const id of ['online-check-status','release-status','update-preference-status']) element(id).textContent = 'Sign in to read update status.';
+  // This line only answers a save, so it stays empty. The sign-in text would still show after signing in.
+  element('online-setting-status').textContent = '';
   element('github-access-hint').textContent = '';
   element('github-access-hint').hidden = true;
   element('sidebar-update-link').textContent = '';

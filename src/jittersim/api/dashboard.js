@@ -3156,6 +3156,7 @@
         const applyButton = document.createElement("button");
         applyButton.type = "button";
         applyButton.textContent = device.assigned_profile_id ? "Apply profile" : "Assign profile";
+        applyButton.setAttribute("aria-label", applyButton.textContent + " for " + (device.display_name || device.mac_address));
         applyButton.addEventListener("click", () => {
           applyProfileToDevice(device, profileSelect.value, applyButton);
         });
@@ -3178,6 +3179,7 @@
         const groupButton = document.createElement("button");
         groupButton.type = "button";
         groupButton.textContent = "Add to group";
+        groupButton.setAttribute("aria-label", groupButton.textContent + " for " + (device.display_name || device.mac_address));
         const rowContext = () => ({
           helperConfigured,
           profileCount: profiles.length,
@@ -9626,6 +9628,7 @@
         const open = document.createElement("button");
         open.type = "button";
         open.textContent = "Open device controls";
+        open.setAttribute("aria-label", open.textContent + " for " + (device.display_name || device.mac_address));
         open.addEventListener("click", () => openDevice(device.assigned_device_id));
         details.appendChild(open);
       }

@@ -23,7 +23,7 @@ from jittersim.engine.plan import EveryoneElseRule, ServiceAssignmentRule, Servi
 from jittersim.measure import load_run
 from jittersim.networking.applier import ApplyError, NetworkApplier
 from jittersim.networking.helper import HelperService
-from jittersim.networking.renderer import UPLOAD_DEVICE
+from jittersim.networking.renderer import SPEED_TEST_DSCP, UPLOAD_DEVICE
 
 from .lab import (
     CLIENT,
@@ -66,6 +66,36 @@ with socket.socket(socket.AF_PACKET, socket.SOCK_RAW) as sender:
     sender.bind((interface, 0))
     for _ in range(3):
         sender.send(b"\xff" * 6 + mac + b"\x08\x00" + header + udp)
+"""
+
+
+# A dashboard on the Pi's port 8080 that sends 1000 bytes with the given TOS byte.
+DASHBOARD_SENDER = r"""
+import socket, sys, time
+
+with socket.socket() as server:
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("192.168.50.1", 8080))
+    server.listen(1)
+    server.settimeout(10)
+    print("ready", flush=True)
+    connection, _ = server.accept()
+    connection.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, int(sys.argv[1]))
+    connection.sendall(b"x" * 1000)
+    time.sleep(3)
+    connection.close()
+"""
+DASHBOARD_READER = r"""
+import socket
+
+with socket.socket() as client:
+    client.bind(("192.168.50.10", 0))
+    client.settimeout(2)
+    client.connect(("192.168.50.1", 8080))
+    try:
+        print(len(client.recv(4096)))
+    except socket.timeout:
+        print("timeout")
 """
 
 
@@ -173,6 +203,24 @@ class LinuxDatapathTests(unittest.TestCase):
             self.ping(namespace=PI, destination="192.168.50.11")[0],
             "the Pi's own traffic on wlan0",
         )
+
+    def dashboard_reply(self, tos: int) -> str:
+        sender = subprocess.Popen(["ip", "netns", "exec", PI, sys.executable, "-c",
+                                   DASHBOARD_SENDER, str(tos)], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(sender.stdout.readline().strip(), "ready")
+            return _in(CLIENT, sys.executable, "-c", DASHBOARD_READER).stdout.strip()
+        finally:
+            sender.kill()
+            sender.wait(timeout=5)
+
+    def test_only_the_dashboard_speed_test_follows_the_download_profile(self) -> None:
+        blocked = Profile(id="blocked", name="Blocked", download=Impairment(loss_percent=100))
+        self.apply([device("a-phone", 10, "blocked")], blocked)
+
+        # Dashboard answers stay usable under any profile. The speed test's main part does not.
+        self.assertEqual(self.dashboard_reply(0), "1000")
+        self.assertEqual(self.dashboard_reply(SPEED_TEST_DSCP << 2), "timeout")
 
     def test_reapplying_the_same_plan_leaves_the_same_state(self) -> None:
         slow = Profile(id="slow", name="Slow", upload=Impairment(delay_ms=50, jitter_ms=10))

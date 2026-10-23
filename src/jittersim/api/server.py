@@ -63,9 +63,11 @@ from jittersim.api.connection_checks import (
     write_connection_check,
 )
 from jittersim.api.speed_tests import (
+    SPEED_TEST_DOWNLOAD,
     SPEED_TEST_WRITES,
     SpeedTestManager,
     read_speed_test,
+    stream_download,
     write_speed_test,
 )
 from jittersim.config.adblocking import MAX_STATE_BYTES as MAX_AD_BLOCKING_BODY_BYTES
@@ -6688,8 +6690,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             if path not in ("/api/dashboard-access/status", "/api/dashboard-access/moves"
                             ) and not self._check_device_access():
                 return
+            if path == SPEED_TEST_DOWNLOAD:
+                stream_download(self)
+                return
         try:
-            if path == "/api/dashboard-access/moves":
+            if path == "/api/speed-tests":
+                # The page offers the dashboard test only on the device's own browser.
+                status, content_type, body = read_speed_test(
+                    self.server, path, parsed_path.query, peer=self.client_address[0])
+            elif path == "/api/dashboard-access/moves":
                 identity = self.server.dashboard_access(self.client_address[0])
                 status, content_type, body = (HTTPStatus.OK, "application/json",
                                               _json_bytes(self.server.address_move_offer(identity)))
@@ -6897,6 +6906,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             elif path == "/api/history/restore":
                 status, content_type, body = self.server.history_restore_for_peer(
                     payload, self.client_address[0])
+            elif path in SPEED_TEST_WRITES:
+                # A dashboard test starts only from the tested device's own browser.
+                status, content_type, body = write_speed_test(
+                    self.server, path, payload, peer=self.client_address[0])
             elif path.startswith("/api/dashboard-access/"):
                 register = path.endswith("/register-self")
                 if set(payload) - ({"name"} if register else {"mac_address"}):
@@ -7002,6 +7015,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self.connection.settimeout(RESPONSE_SEND_TIMEOUT_SECONDS)
         super().send_response(code, message)
 
+    def send_security_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        # Another site cannot keep a handle on a dashboard window it opened, nor
+        # embed a dashboard answer in its own page (security audit 2026-10-18, A4).
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+
     def _send_response(
         self,
         *,
@@ -7034,13 +7056,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", cache_control)
         for name, value in page_headers.items():
             self.send_header(name, value)
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Referrer-Policy", "no-referrer")
-        # Another site cannot keep a handle on a dashboard window it opened, nor
-        # embed a dashboard answer in its own page (security audit 2026-10-18, A4).
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
-        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_security_headers()
         if content_type.startswith("text/html"):
             self.send_header("Content-Security-Policy", DASHBOARD_CONTENT_SECURITY_POLICY)
         for name, value in (headers or {}).items():

@@ -21,7 +21,7 @@ if [ "${1:-}" = --enable-passwordless-staging ]; then
     shift
 fi
 
-SOURCE_DIR=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}
+SOURCE_DIR=${1:-$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)}
 INSTALL_DIR=/opt/jittersim
 CONFIG_DIR=/etc/jittersim
 DATA_DIR=/var/lib/jittersim
