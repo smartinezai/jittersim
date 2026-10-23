@@ -104,6 +104,12 @@ FILLER = os.urandom(16 * 1024)
 MAX_ID = 2**63 - 1
 
 
+def probe_network(server):
+    """The test Wi-Fi network: the only addresses an echo probe may target (None if unknown)."""
+
+    return getattr(server, "_tls_wifi_network", None)
+
+
 class SpeedTestRequestError(ValueError):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
@@ -513,7 +519,8 @@ class SpeedTestManager:
         if target.ipv4 is None:
             run.prober = NoProber()
         else:
-            run.prober = factory(target.ipv4) if factory is not None else IcmpProber(target.ipv4)
+            run.prober = factory(target.ipv4) if factory is not None else IcmpProber(
+                target.ipv4, network=probe_network(self.server))
         return run
 
     def _applied_snapshot(self):
