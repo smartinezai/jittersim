@@ -1199,7 +1199,7 @@
     <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
     <div class="router-controls">
       <button id="open-router-credentials-inline" type="button" aria-controls="credentials-panel" aria-expanded="false">Enter router password</button>
-      <p class="policy-note">Use Copy router Wi-Fi to Pi in the left panel to copy the router's name, password and security together. Keep a separate management connection while the Pi Wi-Fi restarts. Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
+      <p class="policy-note">Use Copy router Wi-Fi to Pi in the sidebar (on a phone, open Controls first) to copy the router's name, password and security together. Keep a separate management connection while the Pi Wi-Fi restarts. Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
     </div>
   </section>
   <section class="card" data-collapse="closed">
@@ -1279,7 +1279,7 @@
     </div>
     <div class="traffic-chart-wrap">
       <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at the Pi with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
-      <div class="traffic-legend" aria-label="Graph legend">
+      <div class="traffic-legend" role="group" aria-label="Graph legend">
         <button type="button" data-traffic-series="upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
         <button type="button" data-traffic-series="download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
         <button type="button" data-traffic-series="isp_upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>

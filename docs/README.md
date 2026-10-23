@@ -57,6 +57,7 @@ a month (for example `2026-09`) was written in that month.
 | [../ROADMAP.md](../ROADMAP.md) | Milestones and known limits |
 | [feature-proposals-2026-10-09.md](feature-proposals-2026-10-09.md) | Thirty researched feature proposals with sizes and risks. They are proposals and not started work |
 | [implementation-plan-follow-address-changes-2026-10-17.md](implementation-plan-follow-address-changes-2026-10-17.md) | Following a device to its new private Wi-Fi address: evidence, scoring, what may move automatically and what stays manual |
+| [implementation-plan-backup-pull-2026-10-23.md](implementation-plan-backup-pull-2026-10-23.md) | `jittersim backup pull`: the route, the folder, the file rules, the limits and what restore means today |
 | [implementation-plan-devices-this-device-2026-10-23.md](implementation-plan-devices-this-device-2026-10-23.md) | The "This device" label on the Connected clients row of the device you browse with: how it is matched, what is never trusted and the one Block sentence |
 
 ### Open investigations and reviews
@@ -218,6 +219,7 @@ are grouped by theme.
 | [Device workflows and repeatable tests](implementation-plan-device-workflows-2026-09.md) | 2026-09 |
 | [Device speed test](implementation-plan-device-speed-test-2026-10-09.md) | 2026-10-09 |
 | [Device speed test review fixes](implementation-plan-device-speed-test-review-fixes-2026-10-14.md) | 2026-10-14 |
+| [Dashboard-served speed test](implementation-plan-dashboard-speed-test-2026-10-23.md) | 2026-10-23 |
 | [Make raw diagnostics reachable from the keyboard](implementation-plan-diagnostics-keyboard-access-2026-10-03.md) | 2026-10-03 |
 | [Diagnostics keyboard request check](implementation-plan-diagnostics-preview-check-2026-10-04.md) | 2026-10-04 |
 | [Finish the coordinated dashboard changes](implementation-plan-final-dashboard-composition-2026-10-04.md) | 2026-10-04 |

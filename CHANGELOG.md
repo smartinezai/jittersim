@@ -9,8 +9,10 @@ the hand-written Unreleased part short.
 
 ## Unreleased
 
+- **Test speed** can now run from the dashboard itself, with no outside server: open the dashboard on the device and the Pi sends it test data through its download profile. Upload still needs a speed test site.
 - Open dashboard tabs share one reading of live traffic, the Ethernet details and the helper check, and a quiet time quota no longer writes to the SD card every 5 seconds.
 - The sidebar has a **Reset Wi-Fi name** button, so the Pi's Wi-Fi name can be restored from any page without opening settings. It uses the same confirmation and the same action as the Router and Wi-Fi page. The restart notice now says that every device on the Pi's Wi-Fi, including the one showing the dashboard, disconnects for a short time, and the page names the network to join again.
+- `jittersim backup pull` on a Mac saves the Pi's database backup in a private folder (`~/jittersim-backups/` by default) and never replaces a file. It runs once each time. A schedule is a cron or launchd line.
 
 ### JitterSim 0.2.0
 

@@ -40,7 +40,7 @@ LOG_SERVICES = {
 }
 MAX_LOG_LINES = 200
 MAX_LOG_OUTPUT_CHARS = 32_000
-REMOTE_COMMANDS = ("connect", "profiles", "traffic", "impact", "remote")
+REMOTE_COMMANDS = ("connect", "profiles", "traffic", "impact", "remote", "backup")
 # `jittersim update` commands that the root update manager runs in this process.
 LOCAL_UPDATE_COMMANDS = {
     "stage": "verify a signed release archive and stage it (root)",
@@ -1045,7 +1045,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "dashboard-name, update stage, update trust-key, version "
             "and wifi reset. "
             "Commands for your Mac through the Pi's HTTPS dashboard: connect, status, "
-            "profiles list/apply-all/stop-all, traffic, wifi show and impact. "
+            "profiles list/apply-all/stop-all, traffic, wifi show, impact and backup pull. "
             "Run one with --help for details."
         )
         parser.print_help()

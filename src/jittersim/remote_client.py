@@ -41,6 +41,7 @@ TOKEN_ENV = "JITTERSIM_ADMIN_TOKEN"
 CONFIG_RELATIVE_PATH = Path(".config") / "jittersim" / "cli.json"
 MAX_CONFIG_BYTES = 4096
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_BACKUP_BYTES = 64 * 1024 * 1024
 MAX_ERROR_BYTES = 64 * 1024
 MAX_MESSAGE_CHARS = 400
 DEFAULT_TIMEOUT_SECONDS = 20.0
@@ -668,6 +669,11 @@ class DashboardClient:
     ) -> Dict[str, Any]:
         return self._send("POST", path, payload, timeout)
 
+    def download(self, path: str, *, timeout: float, max_bytes: int) -> bytes:
+        """GET a file that is not JSON, such as the database backup."""
+
+        return self._fetch("GET", path, None, timeout, max_bytes=max_bytes)
+
     def upload_release(
         self, archive: Path, signature: Path, *, timeout: float = 300.0
     ) -> Dict[str, Any]:
@@ -694,6 +700,21 @@ class DashboardClient:
         self, method: str, path: str, payload: Optional[Dict[str, Any]], timeout: Optional[float],
         *, body: Optional[bytes] = None, extra_headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
+        answer = self._fetch(method, path, payload, timeout, body=body, extra_headers=extra_headers)
+        try:
+            result = json.loads(answer)
+        except (ValueError, RecursionError):
+            raise RemoteError("The dashboard answer was not valid JSON.") from None
+        if not isinstance(result, dict):
+            raise RemoteError(UNDERSTOOD_MESSAGE)
+        return result
+
+    def _fetch(
+        self, method: str, path: str, payload: Optional[Dict[str, Any]], timeout: Optional[float],
+        *, body: Optional[bytes] = None, extra_headers: Optional[Dict[str, str]] = None,
+        max_bytes: Optional[int] = None,
+    ) -> bytes:
+        limit = self.max_bytes if max_bytes is None else max_bytes
         seconds = self.timeout if timeout is None else timeout
         headers = {"Accept": "application/json", **(extra_headers or {})}
         if self._token is not None:
@@ -713,7 +734,16 @@ class DashboardClient:
         try:
             with opener.open(request, timeout=seconds) as response:
                 try:
-                    answer = _read_bounded(response, self.max_bytes + 1, deadline)
+                    answer = _read_bounded(response, limit + 1, deadline)
+                    # read1() can reach EOF while Content-Length still has bytes remaining.
+                    # Do not let a cut-short binary answer become a successful download.
+                    remaining = getattr(response, "length", None)
+                    if len(answer) <= limit and remaining:
+                        raise http.client.IncompleteRead(answer, remaining)
+                    # A file download must say how long it is. Without that, a cut is invisible.
+                    if (max_bytes is not None and len(answer) <= limit and remaining is None
+                            and not getattr(response, "chunked", False)):
+                        raise http.client.IncompleteRead(answer)
                 except (OSError, ssl.SSLError) as error:
                     if _is_timeout(error):
                         raise _TooSlow() from None
@@ -732,21 +762,17 @@ class DashboardClient:
             ) from None
         except ssl.SSLCertVerificationError as error:
             raise RemoteError(certificate_message(error, self.host)) from None
+        except http.client.IncompleteRead:
+            raise RemoteError("The dashboard's answer stopped before it was complete.") from None
         except (ssl.SSLError, http.client.HTTPException, OSError) as error:
             if _is_timeout(error):
                 raise RemoteError(
                     f"The dashboard did not answer within {js_number(seconds)} seconds."
                 ) from None
             raise RemoteError("The connection to the dashboard failed.") from None
-        if len(answer) > self.max_bytes:
+        if len(answer) > limit:
             raise RemoteError("The dashboard answer was too large.")
-        try:
-            result = json.loads(answer)
-        except (ValueError, RecursionError):
-            raise RemoteError("The dashboard answer was not valid JSON.") from None
-        if not isinstance(result, dict):
-            raise RemoteError(UNDERSTOOD_MESSAGE)
-        return result
+        return answer
 
     def _unreachable(self, reason: Any, seconds: float) -> RemoteError:
         if isinstance(reason, ssl.SSLCertVerificationError):
