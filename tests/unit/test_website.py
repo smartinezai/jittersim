@@ -13,6 +13,23 @@ from jittersim.engine.service import compile_stored_plan
 from jittersim.engine.website import build_website_filters, resolve_domains
 
 
+class FakeClock:
+    """Stands in for the time module inside website.py only."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def numbered_answer(name, port, *_):
+    """A distinct address for each name, after a short lookup delay like a real resolver."""
+    time.sleep(0.001)
+    number = int(name.split(".")[0][1:]) if name.startswith("h") else 65535
+    return ((None, None, None, None, (f"10.9.{number >> 8}.{number & 255}", port)),)
+
+
 def wait_for_renewals() -> None:
     """Wait for the background lookups that renew expired answers."""
     with website._resolution_cache_lock:
@@ -136,8 +153,48 @@ class WebsiteResolutionTests(unittest.TestCase):
                     resolve_domains(domains=("example.com",)), (IPv4Address("203.0.113.11"),)
                 )
 
-    def test_the_cache_holds_a_full_global_block_list(self) -> None:
-        self.assertGreater(website._MAX_CACHED_DOMAINS, MAX_GLOBAL_BLOCKED_DOMAINS)
+    def test_a_name_waits_for_a_place_when_other_lookups_fill_the_pool(self) -> None:
+        from jittersim.engine.lookup_pool import MAX_UNFINISHED_LOOKUPS
+
+        deadline = time.monotonic() + 5
+        while website._lookup_pool.unfinished() and time.monotonic() < deadline:
+            time.sleep(0.01)  # lookups left by earlier tests
+        release = threading.Event()
+        held = [website._lookup_pool.submit(release.wait, 5) for _ in range(MAX_UNFINISHED_LOOKUPS)]
+        self.assertIsNone(website._lookup_pool.submit(release.wait, 5))
+        threading.Timer(0.2, release.set).start()
+        result = ((None, None, None, None, ("203.0.113.10", 0)),)
+        with patch("jittersim.engine.website.socket.getaddrinfo", return_value=result):
+            with website.lookup_session() as session:
+                found = resolve_domains(domains=("waits.example.com",))
+        for future in held:
+            future.result(timeout=5)
+        self.assertEqual((found, session.timed_out), ((IPv4Address("203.0.113.10"),), []))
+
+    def test_a_full_block_list_keeps_every_address_past_the_stale_window(self) -> None:
+        """One plan a second for longer than the cache life plus the stale window.
+
+        Every name must keep its addresses on every pass, and a new name must still be
+        looked up while many renewals are due.
+        """
+
+        clock = FakeClock()
+        names = [f"h{n}.example.com" for n in range(MAX_GLOBAL_BLOCKED_DOMAINS)]
+        last = int(website._RESOLUTION_CACHE_SECONDS + website._STALE_SECONDS) + 120
+        with patch("jittersim.engine.website.time", clock), patch(
+            "jittersim.engine.website.socket.getaddrinfo", side_effect=numbered_answer
+        ):
+            for second in range(last):
+                clock.now = float(second)
+                with website.lookup_session() as session:
+                    found = resolve_domains(domains=names)
+                self.assertEqual((len(found), session.timed_out), (len(names), []), second)
+                wait_for_renewals()
+            # Many answers are due now. A name that was never looked up is not skipped.
+            clock.now += website._RESOLUTION_CACHE_SECONDS
+            with website.lookup_session() as session:
+                found = resolve_domains(domains=names + ["new.example.com"])
+            self.assertEqual((len(found), session.timed_out), (len(names) + 1, []))
 
     def test_default_resolution_cache_has_a_fixed_size(self) -> None:
         result = ((None, None, None, None, ("203.0.113.10", 0)),)

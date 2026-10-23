@@ -9,7 +9,7 @@ the hand-written Unreleased part short.
 
 ## Unreleased
 
-- The global block list holds 2000 names instead of 100. Saving checks the whole household access policy first, and the website lookups no longer stall while many names are renewed.
+- The global block list holds 2000 names instead of 100. Saving checks the whole household access policy first, and the address lookups renew a long list name by name without stalling a plan.
 - The sidebar has a **Reset Wi-Fi name** button, so the Pi's Wi-Fi name can be restored from any page without opening settings. It uses the same confirmation and the same action as the Router and Wi-Fi page. The restart notice now says that every device on the Pi's Wi-Fi, including the one showing the dashboard, disconnects for a short time, and the page names the network to join again.
 
 ### JitterSim 0.2.0

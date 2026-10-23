@@ -16,15 +16,22 @@ this change.
   `MAX_GLOBAL_BLOCKED_CHARACTERS`). The API error, the resolver cache size and the tests use
   them. Profile website lists, the global allow list, quotas and service rules keep 100.
 - The address layer blocks at most **4096 resolved addresses**
-  (`MAX_GLOBAL_BLOCKED_ADDRESSES` in `engine/website.py`). Above that it keeps the lowest
-  4096 so the set does not flap and logs a warning. The DNS layer still refuses every listed
-  name while household access rules are on.
+  (`MAX_GLOBAL_BLOCKED_ADDRESSES` in `engine/compiler.py`). Above that it keeps the 4096
+  numerically lowest so the set does not flap, and logs a warning once. The DNS layer still
+  refuses every listed name while household access rules are on. With household rules off,
+  a name whose addresses are all left out is not blocked (the user guide says so).
 - The website name cache grows from 512 names to the list limit plus 2048, and a plan uses
   an expired answer (at most 10 minutes past its normal 60 seconds) while a background
   lookup renews it. Without this a long list stalls every scheduler pass (measured below).
-- A save of the access rules (`/api/policies`, **Block globally**) now checks the whole
-  household access policy before it is stored, so a list that would be refused by the helper
-  is refused with its reason at save time instead of "saved but could not be updated".
+  Renewals start after the plan's own lookups, the oldest answer first, and leave 8 of the
+  32 lookup places free. A lookup that finds the pool full waits for a place within the plan
+  deadline instead of being skipped. (Review of PR 188: renewals in list order filled the
+  pool, so the last names lost their addresses after 11 minutes and new names were skipped.)
+- A save of the access rules (`/api/policies`, **Block globally**) and of a device
+  (`/api/devices`) now checks the whole household access policy before it is stored, so a
+  list that would be refused by the helper is refused with its reason at save time instead
+  of "saved but could not be updated". Group saves already had the check: they build the
+  whole plan (`_validate_saved_plan`).
 - `/api/policies` accepts a body up to the access policy size (256 KiB) instead of 64 KiB:
   2000 typical names alone are 63 KiB of JSON.
 - No pinned file changes. No helper change is needed (see "Helper frame").
@@ -33,8 +40,14 @@ this change.
 Why 2000 and not 3000 or 5000: the helper frame (256 KiB, pinned) carries the names once and
 the resolved addresses once. 2000 typical names leave about 60 KiB of room after the address
 cap. The first lookup of every name has to finish inside one 10-second plan deadline with 8
-lookup threads: 2000 names at 20 ms each take about 6 seconds, 3000 take 9. And with 2000
-names, 8 distinct household DNS views still fit the existing 16384 view limit (below).
+lookup threads: 2000 names at 20 ms each take about 6 seconds, 3000 take 9.
+
+DNS views: each distinct view repeats the whole block list, the allowed names and its site
+rules, and all views together may hold 16384 names (`MAX_EXPANDED_DOMAINS`). With 2000
+blocked and 100 allowed names that is 7 views: everyone plus 6 different per-device or
+per-group site-rule combinations (8 without allowed names). Before, with 100 and 100, it was
+about 81. A save that would pass the limit is refused with "too many distinct device and
+domain combinations". The limit stays: 16384 names keep Unbound near 20 MB (measured below).
 
 ## How a blocked name is enforced
 
@@ -152,15 +165,16 @@ The `apply` frame carries the access plan (the names) and `global_blocked_addres
 of a large plan the frame is 174 KiB (measured). A unit test
 (tests/unit/test_global_block_list.py) builds that worst case, with 15 devices, 100 allowed
 names and 200 denied MAC addresses, and checks it stays under three quarters of
-`MAX_MESSAGE_BYTES`. A frame that is still too large is
-refused by the dashboard side before it is sent ("helper request is too large"), so nothing
-is half applied. Panic and Reset frames are small and do not carry the list. No helper change
-is needed.
+`MAX_MESSAGE_BYTES`. Panic and Reset frames are small and do not carry the list. No helper
+change is needed.
 
-Pre-existing and left as it is: the access policy alone may be up to 256 KiB (for example 512
-site-rule names of 253 characters each) and then the apply frame can pass 256 KiB whatever the
-block list holds. This change does not make that worse beyond the 88 KiB the block list may
-now take.
+Not guaranteed: the save-time check bounds the access policy (256 KiB), not the apply frame,
+and the addresses are only known when a plan is built. With 100 allowed names of 253
+characters the frame is 197 KiB; with 256 site-rule names of 253 characters as well it is
+263 KiB. Such a plan is saved and then refused at every Apply with "helper request is too
+large". The refusal is clean: the dashboard refuses before it sends anything, so nothing is
+half applied, and Panic is not affected. It needs unusually long names; typical names stay
+near 150 KiB. Part of this was possible before (long site-rule names alone).
 
 ## Validation
 
@@ -188,23 +202,45 @@ within `PANIC_ANSWER_SECONDS`.
 - Stale answers: an address may be blocked up to 10 minutes after the name moved. Only blocks
   stay a little longer. Allow-list and quota names use the same cache and also keep their old
   addresses during a renewal, as they did during the 60 s cache life.
-- Renewals share the 32 queued lookups with new names. While many renewals wait, a new
-  name can miss one pass and is tried again 30 s later. DNS refuses it meanwhile when
-  household rules are on.
+- Renewals share the 32 queued lookups with new names. They use at most 24 places, the
+  oldest answer first, so every name is renewed in turn: at 24 a pass and one pass a second a
+  name of 2000 is renewed about every 83 s, well inside the 660 s it may be used.
 - A plan is built while the control lock is held. The first pass over 2000 new names holds
   it for up to the 10 s lookup deadline, as 100 slow names could before.
-- More than 4096 addresses: the highest ones are not blocked by address. The log says so.
+- More than 4096 addresses: the numerically highest ones are not blocked by address. The log
+  says so once. With household rules off, names whose addresses are all left out are not
+  blocked at all.
+- Downgrade: an older release refuses a list over 100 names. Its dashboard cannot read the
+  settings and its helper closes the test network at boot ("The test network is closed").
+  Panic still opens it. Shorten the list to 100 names before installing an older release
+  (the user guide says so).
 - Memory on the Pi: the cache holds up to 4048 names (about 1 MB), Unbound about 20 MB.
 
 ## After
 
-The same lookup script with the change (20 ms a lookup, 6 s cache life, 20 passes):
+The same lookup script with the first version of the change (20 ms a lookup, 6 s cache life,
+20 passes). It measured pass time only, not coverage past the stale window:
 
 | Names | First pass s | Slowest later pass s | Later passes over 1 s |
 | --- | --- | --- | --- |
 | 100 | 0.33 | 0.00 | 0 of 19 |
 | 1000 | 3.11 | 0.00 | 0 of 19 |
 | 2000 | 6.28 | 0.01 | 0 of 19 |
+
+With the review fix, real time, the real 60 s cache life and 600 s stale window, one plan a
+second, 2000 names, a fake resolver with a fixed delay:
+
+| Lookup delay | Run | First pass s | Slowest later pass s | Passes over 1 s | Fewest names with addresses |
+| --- | --- | --- | --- | --- | --- |
+| 20 ms | 200 s | 5.76 | 0.004 | 0 of 194 | 2000 of 2000 |
+| 100 ms | 200 s | 10.01 (deadline) | 10.0 | 2 of 176 | 1538 of 2000 (while warming up) |
+| 100 ms, counted after the first 60 s | 150 s | | 0.004 | 0 of 126 | 2000 of 2000 |
+
+At 100 ms a lookup the first pass reaches its 10 s deadline with about 800 names. The others
+are logged, tried again 30 s later and all have addresses within a minute. After that no pass
+waits. The unit test `test_a_full_block_list_keeps_every_address_past_the_stale_window` runs
+the same with a fake clock past 60 + 600 s plus 2 minutes and checks every name on every pass
+(on the first version of this change it lost the last 80 names).
 
 Kernel lab (`test_panic_and_reset_remove_a_full_global_block_list_in_time`, the heavy plan
 with 2000 names and 4096 blocked addresses): apply 0.3 to 0.4 s, Panic 0.1 s, Reset under

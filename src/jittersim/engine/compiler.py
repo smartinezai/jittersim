@@ -50,22 +50,24 @@ MAX_SERVICE_LIST_DOMAINS_PER_PLAN = 400
 # The addresses of the global block list that a plan blocks, so the helper's apply request
 # stays well under its 256 KiB. The DNS rules still refuse every listed name.
 MAX_GLOBAL_BLOCKED_ADDRESSES = 4096
-# How many addresses the last plan left out, so the same warning is not logged every second.
-_left_out_addresses = 0
+# Whether the warning below was logged. Logged again only after the list fit once more.
+_address_cap_logged = False
 
 
 def _bounded_blocked_addresses(addresses: Sequence[IPv4Address]) -> tuple:
-    global _left_out_addresses
-    ordered = tuple(sorted(set(addresses), key=str))
-    left_out = max(0, len(ordered) - MAX_GLOBAL_BLOCKED_ADDRESSES)
-    if left_out and left_out != _left_out_addresses:
+    """The numerically lowest MAX_GLOBAL_BLOCKED_ADDRESSES addresses, in text order."""
+
+    global _address_cap_logged
+    ordered = sorted(set(addresses), key=int)
+    over = len(ordered) > MAX_GLOBAL_BLOCKED_ADDRESSES
+    if over and not _address_cap_logged:
         LOGGER.warning(
             "The global block list resolved to %d addresses. Only %d are blocked by address. "
             "DNS still refuses every listed name while household access rules are on.",
             len(ordered), MAX_GLOBAL_BLOCKED_ADDRESSES,
         )
-    _left_out_addresses = left_out
-    return ordered[:MAX_GLOBAL_BLOCKED_ADDRESSES]
+    _address_cap_logged = over
+    return tuple(sorted(ordered[:MAX_GLOBAL_BLOCKED_ADDRESSES], key=str))
 
 
 def compile_plan(

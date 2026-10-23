@@ -3002,9 +3002,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             if capacity_error is not None:
                 return capacity_error
         try:
-            self.repository.save_device(device, expected=expected)
+            with self.repository.transaction():
+                self.repository.save_device(device, expected=expected)
+                self._check_access_rules()
         except DeviceConflictError as error:
             return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+        except ValueError as error:
+            return _bad_request("invalid device configuration", error)
         labels_by_mac = self.repository.list_connected_device_labels()
         state = self._device_protection_states().get(device.id)
         return HTTPStatus.OK, "application/json", _json_bytes(
@@ -3573,8 +3577,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     blocks=blocks, options=options,
                     expected_version=payload.get("version"),
                 )
-                # Refuse what the helper would refuse, before it is stored.
-                build_access_plan(self.repository.access_settings())
+                self._check_access_rules()
         except DeviceConflictError as error:
             return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
         except (KeyError, TypeError, ValueError) as error:
@@ -4138,8 +4141,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             updated = replace(policy, blocked_domains=listed)
             with self.repository.transaction():
                 self.repository.save_website_policy(updated)
-                # Refuse what the helper would refuse, before it is stored.
-                build_access_plan(self.repository.access_settings())
+                self._check_access_rules()
         except (KeyError, TypeError, ValueError, StorageError) as error:
             return _bad_request("could not add domain to global block list", error)
         arguments = {"control_intent": control_intent} if control_intent is not None else {}
@@ -4275,6 +4277,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     {"error": "service list does not exist"}
                 )
             return self._apply_saved_change("deleted_id", list_id)
+
+    def _check_access_rules(self) -> None:
+        """Refuse what the helper would refuse. Call it inside the save transaction.
+
+        Group saves get the same check from _validate_saved_plan, which builds the plan.
+        """
+
+        build_access_plan(self.repository.access_settings())
 
     def _validate_saved_plan(self) -> None:
         # Saving checks structure atomically. Applying resolves live addresses later.

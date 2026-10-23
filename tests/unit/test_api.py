@@ -6363,10 +6363,6 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(self.repository.get_website_policy().blocked_domains), MAX_GLOBAL_BLOCKED_DOMAINS - 1)
 
-    def test_the_block_list_limit_message_names_the_limit(self) -> None:
-        self.assertEqual(MAX_GLOBAL_BLOCKED_DOMAINS, 2000)
-        self.assertEqual(FULL_BLOCK_LIST, "The global block list can hold 2000 names. Remove some first.")
-
     def test_a_full_block_list_is_saved_through_the_access_rules_form(self) -> None:
         """The textarea of the Access and rules page sends the whole list in one body."""
 
@@ -6392,13 +6388,19 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(response["status"], 200, response.get("body"))
         self.assertEqual(self.repository.get_website_policy().blocked_domains, tuple(names))
 
-    def test_a_block_list_the_helper_would_refuse_is_not_saved(self) -> None:
-        """Every site rule makes its own DNS view with the whole global list."""
+    def _site_rule_views(self, rules: int) -> list:
+        """Devices with one site rule each and 100 globally allowed names.
+
+        Every distinct device view repeats the whole global list and the allowed names, and
+        all views together may hold 16384 names (engine/access.py MAX_EXPANDED_DOMAINS).
+        """
+
+        from dataclasses import replace
 
         from jittersim.config.models import SiteBlock
 
         devices = []
-        for number in range(9):
+        for number in range(rules):
             device = Device(f"view{number}", f"View {number}", f"192.168.50.{120 + number}", "slow")
             self.repository.save_device(device)
             devices.append(device)
@@ -6408,7 +6410,15 @@ class ControlServerTests(unittest.TestCase):
             for number, device in enumerate(devices)
         )
         self.repository.save_access_policies(None, None, blocks=blocks)
-        self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS - 1)
+        allowed = tuple(f"allowed{n}.example.com" for n in range(100))
+        self.repository.save_website_policy(
+            replace(self.repository.get_website_policy(), allowed_domains=allowed))
+        return devices
+
+    def test_a_block_list_the_helper_would_refuse_is_not_saved(self) -> None:
+        # 8 views (everyone and 7 devices) of 1947 + 1 + 100 names are exactly 16384.
+        self._site_rule_views(7)
+        self._fill_block_list(1947)
         before = self.repository.get_website_policy()
 
         status, _, body = self.server.write_response_for(
@@ -6423,22 +6433,59 @@ class ControlServerTests(unittest.TestCase):
         )
         self.assertEqual(self.repository.get_website_policy(), before)
 
+        websites = {"mode": "unrestricted", "allowed_domains": list(before.allowed_domains)}
         status, _, body = self.server.write_response_for(
             "/api/policies",
-            {"websites": {"mode": "unrestricted", "allowed_domains": [],
+            {"websites": {**websites,
                           "blocked_domains": list(before.blocked_domains) + ["one-more.example.com"]}},
         )
 
         self.assertEqual(status, 400)
         self.assertIn("too many distinct device and domain combinations", json.loads(body)["error"])
         self.assertEqual(self.repository.get_website_policy(), before)
-        # A smaller list with the same site rules still saves.
+        # Swapping a name keeps the size and still saves.
         status, _, _ = self.server.write_response_for(
             "/api/policies",
-            {"websites": {"mode": "unrestricted", "allowed_domains": [],
-                          "blocked_domains": list(before.blocked_domains[:100])}},
+            {"websites": {**websites,
+                          "blocked_domains": list(before.blocked_domains[1:]) + ["one-more.example.com"]}},
         )
         self.assertEqual(status, 200)
+
+    def test_a_group_change_that_adds_a_dns_view_over_the_limit_is_refused(self) -> None:
+        from jittersim.config.models import DeviceGroup, SiteBlock
+
+        devices = self._site_rule_views(6)
+        extra = Device("extra", "Extra", "192.168.50.140", "slow")
+        self.repository.save_device(extra)
+        self.repository.save_device_group(DeviceGroup("kids", "Kids", (devices[0].id,)))
+        blocks = self.repository.access_settings().site_blocks + (
+            SiteBlock("kids-rule", "Kids rule", ("games.example.com",), group_id="kids"),)
+        self.repository.save_access_policies(None, None, blocks=blocks)
+        # 7 views of 2101 names fit. The extra device would make an 8th.
+        self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS)
+
+        status, _, body = self.server.write_response_for(
+            "/api/groups",
+            {"id": "kids", "name": "Kids", "device_ids": [devices[0].id, extra.id]},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertIn("too many distinct device and domain combinations", json.loads(body)["error"])
+        self.assertEqual(self.repository.get_device_group("kids").device_ids, (devices[0].id,))
+
+    def test_a_device_save_is_refused_while_the_access_rules_are_over_the_limit(self) -> None:
+        devices = self._site_rule_views(8)
+        self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS)  # 9 views: over the limit
+
+        status, _, body = self.server.write_response_for(
+            "/api/devices",
+            {"id": devices[0].id, "name": "Renamed", "ipv4_address": str(devices[0].ipv4_address),
+             "profile_id": "slow"},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("too many distinct device and domain combinations", json.loads(body)["error"])
+        self.assertEqual(self.repository.get_device(devices[0].id).name, devices[0].name)
 
     def _fill_profile(self, count: int) -> None:
         from dataclasses import replace

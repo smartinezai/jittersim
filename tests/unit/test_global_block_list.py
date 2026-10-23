@@ -83,14 +83,17 @@ class GlobalBlockListLimitTests(unittest.TestCase):
 
     def test_a_plan_blocks_at_most_the_address_cap_and_says_so_once(self) -> None:
         many = addresses(MAX_GLOBAL_BLOCKED_ADDRESSES + 10)
-        compiler._left_out_addresses = 0
+        compiler._address_cap_logged = False
         with self.assertLogs("jittersim.engine.compiler", logging.WARNING) as logged:
             first = compile_plan(devices=[], profiles={"p": PROFILE}, global_blocked_addresses=many)
+            # A changing answer above the cap is not logged again.
             again = compile_plan(devices=[], profiles={"p": PROFILE},
-                                 global_blocked_addresses=tuple(reversed(many)))
+                                 global_blocked_addresses=tuple(reversed(many[:-1])))
             logging.getLogger("jittersim.engine.compiler").warning("end")
-        self.assertEqual(len(first.global_blocked_addresses), MAX_GLOBAL_BLOCKED_ADDRESSES)
-        # The same addresses each time, so the nft set does not change from plan to plan.
+        # The numerically lowest addresses (10.0.0.0 to 10.0.15.255), the same each time,
+        # so the nft set does not change from plan to plan.
+        self.assertEqual(set(first.global_blocked_addresses),
+                         set(many[:MAX_GLOBAL_BLOCKED_ADDRESSES]))
         self.assertEqual(first.global_blocked_addresses, again.global_blocked_addresses)
         self.assertEqual(len(logged.records), 2)
         self.assertIn("4106 addresses", logged.output[0])
@@ -98,7 +101,7 @@ class GlobalBlockListLimitTests(unittest.TestCase):
         below = compile_plan(devices=[], profiles={"p": PROFILE},
                              global_blocked_addresses=addresses(5))
         self.assertEqual(len(below.global_blocked_addresses), 5)
-        self.assertEqual(compiler._left_out_addresses, 0)
+        self.assertFalse(compiler._address_cap_logged)
 
 
 class ProtectedDevicesTodayTests(unittest.TestCase):
@@ -120,12 +123,11 @@ class ProtectedDevicesTodayTests(unittest.TestCase):
             if command.stdin and "block global website destinations" in command.stdin
         ).splitlines()
         drop = next(i for i, line in enumerate(script) if "block global website" in line)
-        protected = next(
-            i for i, line in enumerate(script)
-            if "forward" in line and "unaffected by profiles" in line
-        )
-        # 1. The address drop comes before the protected devices' return.
-        self.assertLess(drop, protected)
+        returns = [i for i, line in enumerate(script) if "unaffected by profiles" in line
+                   and ("inet jittersim input" in line or "inet jittersim forward" in line)]
+        # 1. The address drop (forward chain) comes before the protected devices' returns.
+        self.assertEqual(len(returns), 2)
+        self.assertLess(drop, min(returns))
 
         access = AccessPlan(websites=WebsitePolicy(blocked_domains=("news.example.com",)))
         dns = render_dns(access, local_name="testbox.local")
@@ -135,7 +137,6 @@ class ProtectedDevicesTodayTests(unittest.TestCase):
         self.assertIn('access-control-view: 192.168.50.0/24 "everyone"', dns)
         self.assertIn('local-zone: "news.example.com." always_nxdomain', dns)
         self.assertIn('dns iifname "wlan0" udp dport 53 redirect', firewall)
-        self.assertNotIn(PROTECTED_MAC, firewall)
         # 3. The ad-blocking resolver of protected devices keeps the household refusal.
         ads = filtering_config(("ads.example.net",), (), access).decode()
         self.assertIn('local-zone: "news.example.com." always_nxdomain', ads)

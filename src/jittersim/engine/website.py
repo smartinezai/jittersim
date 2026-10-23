@@ -20,7 +20,7 @@ from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, 
 
 from jittersim.config.models import MAX_GLOBAL_BLOCKED_DOMAINS, Device, WebsitePolicy
 
-from .lookup_pool import BoundedLookupPool
+from .lookup_pool import MAX_UNFINISHED_LOOKUPS, BoundedLookupPool
 from .plan import WebsiteFilter
 
 LOGGER = logging.getLogger(__name__)
@@ -174,17 +174,37 @@ def _cached_addresses(*, domain: str) -> tuple:
     return result_addresses
 
 
-def _fresh_addresses(domain: str, *, stale: bool = False) -> Optional[tuple]:
-    """Return a cached answer that has not expired, or None.
-
-    With `stale` an answer up to _STALE_SECONDS past its expiry also counts.
-    """
+def _fresh_addresses(domain: str) -> Optional[tuple]:
+    """Return a cached answer that has not expired, or None."""
 
     with _resolution_cache_lock:
         cached = _resolution_cache.get(domain)
-        if cached is None or cached[0] + (_STALE_SECONDS if stale else 0.0) <= time.monotonic():
+        if cached is None or cached[0] <= time.monotonic():
             return None
         return cached[1]
+
+
+def _stale_entry(domain: str) -> Optional[tuple]:
+    """Return (expiry, addresses) of an answer at most _STALE_SECONDS past its expiry, or None."""
+
+    with _resolution_cache_lock:
+        cached = _resolution_cache.get(domain)
+        if cached is None or cached[0] + _STALE_SECONDS <= time.monotonic():
+            return None
+        return cached
+
+
+def _renew(stale: List[tuple]) -> None:
+    """Start background lookups for expired answers, the oldest first.
+
+    The oldest first, so every name is renewed in turn however long the list is. Renewals
+    leave RESOLVER_THREADS places of the shared pool free for names that have no answer.
+    """
+
+    for _, name in sorted(stale):
+        if _lookup_pool.unfinished() >= MAX_UNFINISHED_LOOKUPS - RESOLVER_THREADS:
+            return
+        _start_lookup(name, None)
 
 
 def _recently_timed_out(domain: str) -> bool:
@@ -267,6 +287,8 @@ def resolve_domains(
     session = getattr(_session_state, "session", None) or LookupSession(RESOLVE_WAIT_SECONDS)
     addresses = set()
     waiting: Dict[str, Future] = {}
+    # (expiry, name) of the expired answers used in this call. Renewed after the lookups below.
+    stale: List[tuple] = []
 
     def missed(name: str) -> None:
         session.note_timeout(name)
@@ -280,10 +302,10 @@ def resolve_domains(
                 if resolver is None:
                     cached = _fresh_addresses(name)
                     if cached is None:
-                        cached = _fresh_addresses(name, stale=True)
-                        if cached is not None:
-                            # Renew in the background. A full pool tries again next plan.
-                            _start_lookup(name, None)
+                        entry = _stale_entry(name)
+                        if entry is not None:
+                            stale.append((entry[0], name))
+                            cached = entry[1]
                     if cached is not None:
                         addresses.update(cached)
                         continue
@@ -298,6 +320,10 @@ def resolve_domains(
                     if waiting:
                         names.appendleft(name)
                         break
+                    # Other callers fill the pool. Wait for a place within the deadline.
+                    if _lookup_pool.wait_for_room(session.remaining()):
+                        names.appendleft(name)
+                        continue
                     missed(name)
                     continue
                 waiting[name] = future
@@ -320,13 +346,15 @@ def resolve_domains(
                 except Exception:  # one unresolvable name must not hide the others
                     LOGGER.debug("could not resolve %s", name, exc_info=True)
         for name in names:
-            cached = _fresh_addresses(name, stale=True) if resolver is None else None
-            if cached is not None:
-                addresses.update(cached)
+            entry = _stale_entry(name) if resolver is None else None
+            if entry is not None:
+                addresses.update(entry[1])
+                stale.append((entry[0], name))
             else:
                 session.note_timeout(name)
         for name in waiting:
             missed(name)
+        _renew(stale)
     finally:
         if resolver is not None:
             for future in waiting.values():

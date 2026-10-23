@@ -640,6 +640,8 @@ Changes that block their destination or change their selected queue close them.
 Before a code downgrade, change fresh profiles back to saved patterns or restore
 a compatible private configuration backup. Older releases reject the fresh
 pattern setting. Stop profiles and verify normal traffic before replacing code.
+Also shorten the global block list to 100 names: older releases refuse a longer
+list and then keep the test network closed until you press **Panic**.
 
 Matching is by destination address. A small service on the Pi reads the DNS
 answers that leave the Pi towards the test Wi-Fi. When an answer names a listed
@@ -967,7 +969,11 @@ buttons. A group opened stays open when the page refreshes.
   address, and to a protected device that uses ad blocking.
 - While JitterSim runs it also blocks up to 4096 addresses that the listed names
   resolve to. A name keeps its last addresses for up to 10 minutes while they are
-  looked up again.
+  looked up again. Above 4096 addresses the log says so, and with household
+  access rules off some listed names are then not blocked.
+- Each device or group with its own site rules gets its own copy of the global
+  list in the filtered DNS. With a full list and 100 allowed names, 6 different
+  site-rule combinations fit. A save that needs more is refused and says so.
 - A group of system or content delivery names has no **Block all** because one
   click could cut the device off the internet. Block single names instead.
   **Unblock blocked names** removes blocks from such a group.
