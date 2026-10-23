@@ -165,10 +165,10 @@ scripts/local-ci.sh unit --docker 3.13
 
 This runs pytest in a throw-away `python:X.Y-slim-bookworm` container with the
 source copied in (the checkout is mounted read-only). The container is limited to
-1 CPU and 1 GB. Two things differ from a native run. The image has no Git, and
-the worktree's `.git` file points outside the container, so the Git-backed tests
-skip, as in the "native no-Git" suite of the 4 October verification. The kernel
-tests also skip because the container is not privileged. Read the skip counts
+1 CPU and 1 GB. The slim image has no Git, Node, `ssh-keygen` or `jittersim` group, so the
+container installs the first three with `apt` (it needs network access and takes about a minute),
+creates the group and commits the copied source as one snapshot, which lets the Git-backed tests
+run. The kernel tests still skip because the container is not privileged. Read the skip counts
 in the summary.
 
 The browser, GUI and homepage commands run on the venv Python only.

@@ -934,6 +934,10 @@ docker_pytest() {
         mkdir /work
         tar -C /src --exclude=./.venv-local-ci-* --exclude=./test-results --exclude=./node_modules -cf - . | tar -C /work -xf -
         cd /work
+        # The slim image has no Git, Node, ssh-keygen or jittersim group, which some tests need.
+        apt-get update -qq && apt-get install -y -qq --no-install-recommends git nodejs openssh-client >/dev/null
+        groupadd -f jittersim
+        git init -q . && git add -A && git -c user.name=ci -c user.email=ci@localhost commit -q -m snapshot
         python -m pip install --quiet ".[dev]"
         python -m pytest -p no:cacheprovider -ra "--junitxml=/out/$1" "${@:2}"
       ' pytest "$junit" ${target:+"$target"} ${EXTRA[@]+"${EXTRA[@]}"}
