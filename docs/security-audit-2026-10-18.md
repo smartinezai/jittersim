@@ -235,8 +235,10 @@ left out on purpose: the dashboard is also reached by IP address, where browsers
   `12785 health requests -> 12785 helper pings`. The helper's own reserve kept ordinary reads
   answering on the Mac (503 of 503), so no starvation was shown, but on a Pi 3B+ it is root CPU on
   demand of any test device. Now an answer without the token reuses the last helper answer for 1 s
-  and only one such ping runs at a time. With the token every request still asks the helper, so
-  the update health check sees the live state. Tests: `PublicHealthReuseTests`.
+  and only one such ping runs at a time. With the token every request still asked the helper, so
+  the update health check saw the live state (since 2026-10-23 an answer up to 2 s old is reused
+  there too, see [the sharing plan](implementation-plan-share-polled-readings-2026-10-23.md)).
+  Tests: `PublicHealthReuseTests`.
 - **A3 (fixed).** `_read_connect_request` set a 10 s timeout per `recv`. A client sending one byte
   every few seconds held a slot until 72 KiB arrived. Test `ProxyRequestDeadlineTests` (0.5 s
   deadline, one byte every 0.1 s): on main the read did not end for over 5 minutes, now it ends at
