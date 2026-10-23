@@ -201,6 +201,7 @@ control characters.
 | `jittersim wifi show` | The router's own Wi-Fi name, read live from the router. It also asks for the router admin password with a hidden prompt. Add `--password` to show the Wi-Fi password too. |
 | `jittersim remote update now` | Asks the Pi to check GitHub for a newer signed release, shows it, asks, installs it and waits until the Pi runs it (900 seconds by default, `--wait SECONDS` changes that). `--yes` skips the question and `--json` prints one JSON answer, which needs `--yes`. `jittersim remote update status`, `check`, `upload` and `install` run the single steps. |
 | `jittersim impact` | The **Impact** check: two samples of the Pi's queues `--wait` seconds apart (10 by default, at most 50) judged with the dashboard's rules. The verdicts name the time it measured such as "in the last 10 seconds". |
+| `jittersim backup pull` | Saves the Pi's database backup, the one **Download backup** gives, in `~/jittersim-backups/` (`--directory FOLDER` picks another folder). The file name carries the UTC time. A missing folder is created with mode 0700. An existing folder is used only if you own it and group and others cannot write in it. Otherwise the command stops before the download and tells you to run `chmod go-w` on it, because someone who can write there could swap the file. The file is readable only by you (0600), a file that exists is never replaced and old backups are never deleted. It checks that the answer is a SQLite file and that all of it arrived. It does not check that the database inside is sound: run the check in the drill below. It prints the path. It exits with 1 and says why when the Pi cannot be reached, the token is refused or the answer is cut short, and a failed pull saves nothing. |
 
 The terminal commands call the profile for **Everyone** the general profile.
 
@@ -226,6 +227,46 @@ the trusted HTTPS dashboard on the test Wi-Fi and when SSH cannot answer.
 See
 [Deploy from a Mac](../deploy/raspberry-pi/README.md#deploy-from-a-mac).
 
+#### Back up to your Mac and check the copy
+
+`jittersim backup pull` runs once each time you run it. It has no schedule of
+its own. The backup holds device names, addresses and observed domain names, so
+keep the folder private. To repeat it, call it from cron or a launchd agent. A
+cron line for 03:15 every day that reads the token from the Keychain item
+`jittersim-admin-token` (see `deploy-from-mac.sh --save-token`) looks like
+this. It was not run for this page. If your Keychain does not answer in the
+background, run the command by hand:
+
+```sh
+15 3 * * * JITTERSIM_ADMIN_TOKEN="$(security find-generic-password -s jittersim-admin-token -w)" "$HOME/.jittersim-cli/bin/jittersim" backup pull
+```
+
+The command never deletes old backups, so a daily line grows the folder: delete
+old files yourself. If the command is killed or the Mac loses power while it
+copies, a hidden file named `.jittersim-backup-` and some letters, ending in
+`.tmp`, can stay in the folder. It is a partial copy and you can delete it. A
+folder on a FAT or exFAT disk does not work, because the command needs hard
+links. Choose a folder on another disk.
+
+No command restores a file you pulled, and the dashboard has no button for it.
+The only restore built into the dashboard is **Import settings...**, which reads
+a file from **Export settings**, not the database backup. An update rollback
+restores the Pi's own recovery copy, never a file you pulled. The manual steps
+to put a database back on a Pi are in
+[Back up, restore and reimage the Pi](runbooks/restore-and-reimage.md#restore-the-database-on-the-same-pi).
+They were written from the installer and not run on a Pi. A short drill that
+needs no Pi:
+
+1. Run `jittersim backup pull`.
+2. Check that the file opens and passes SQLite's own check. The pull command
+   cannot do this for you. The answer must be `('ok',)`:
+
+   ```sh
+   python3 -I -c 'import sqlite3, sys; from pathlib import Path; c = sqlite3.connect(Path(sys.argv[1]).resolve(strict=True).as_uri() + "?mode=ro", uri=True); print(c.execute("PRAGMA quick_check").fetchone())' ~/jittersim-backups/jittersim-backup-20261023T031500Z.db
+   ```
+
+3. Before you rely on a backup, try the manual restore steps once on a spare Pi.
+
 ## Features
 
 ### Profiles and network effects
@@ -244,6 +285,43 @@ See
   browser while other proxied sites keep the device's ordinary profile.
 - Service lists that give chosen apps and sites their own profile on every
   affected device with no per-device setup.
+
+### Profile presets and where they come from
+
+**Start from a preset** on the **Profiles** page fills the form with a rough
+starting point. Nothing is saved until you choose **Save profile**. The same
+name carries different numbers in different tools, so each preset says what it
+is based on here and under **Where the presets come from** in the form:
+
+| Preset | Based on |
+| --- | --- |
+| DSL | Apple Network Link Conditioner DSL preset as a published table lists it (2 Mbit/s and 256 kbit/s, 5 ms each way). The first number of each pair is used for download. |
+| Good 4G | A rough estimate made for this tool. No published source. |
+| Congested 4G | A rough estimate made for this tool. No published source. |
+| 3G | Apple Network Link Conditioner 3G preset as a published table lists it (780 and 330 kbit/s, 100 ms each way), plus 20 ms jitter. The first number of each pair is used for download. |
+| Slow 3G (Chrome DevTools) | Chrome DevTools Slow 3G, now called 3G (about 500 kbit/s each way, 400 ms round trip). |
+| EDGE (2G) | Apple Network Link Conditioner Edge preset as a published table lists it (240 and 200 kbit/s, 400 and 440 ms), plus jitter and 1% loss. The first number of each pair is used for download. |
+| Satellite | A rough estimate made for this tool. Light alone needs about 480 ms for a geostationary round trip, so about 600 ms (300 ms each way) is plausible. |
+| Lossy Wi-Fi | A rough estimate made for this tool. No published source. |
+| Train tunnel | A rough estimate made for this tool. No published source. |
+| Very bad network | Apple Network Link Conditioner Very Bad Network preset as a published table lists it (1 Mbit/s and 500 ms each way, 10% loss), plus 100 ms jitter and loss bursts of 2. |
+| Offline | Every packet lost both ways. Apple's Network Link Conditioner calls this 100% Loss. |
+
+A delay applies in each direction, so a round trip takes both. 3G adds about
+200 ms and Slow 3G about 400 ms. The Apple numbers are those of Network Link
+Conditioner's presets of the same name. They were read on 23 October 2026 from a
+[published table of its presets](https://engineering.countingup.com/network-link-conditioner/)
+and not from the tool itself. That table labels its first column Up. JitterSim
+uses the first number of each pair for download and the second for upload,
+because the first is the larger speed on these links (780 and 330 kbit/s for 3G).
+This reading was not checked in Apple's tool. Chrome DevTools defines Slow 3G in
+the file `front_end/core/sdk/NetworkManager.ts` of its
+[source repository](https://github.com/ChromeDevTools/devtools-frontend) as about
+500 kbit/s and a 400 ms round trip. A preset fills the form with plain values. It
+also clears the seed, the rerolls, the website rules and the other advanced
+settings, sets the outages only for Train tunnel, and sets the Name when you are
+creating a new profile. The
+[measured effect](measurements-2026-09.md) of four of them is on record.
 
 ### Schedules, timers and randomness
 
@@ -284,7 +362,7 @@ See
 - A saved list of **Protected devices** that no profile or profile quota affects.
 - A live upload and download graph with packet rates for assigned devices.
 - MAC address allowlists and denylists.
-- A global blocked-site list.
+- A global blocked-site list of up to 2000 names (80000 characters in all).
 - Profile-specific website lists that allow selected services while blocking
   the rest.
 - Per-device website rules that can change as a progression session advances.
@@ -298,8 +376,9 @@ See
 - An impact check in Diagnostics that shows packet loss and speed limits
   actually happening to each device.
 - A **Test speed** button on each connected device that measures its real speed
-  through the Pi while it runs a public speed test, keeps the results and compares
-  a result before a profile with one after it.
+  through the Pi, from the dashboard itself (no outside server) or while it runs a
+  public speed test, keeps the results and compares a result before a profile with
+  one after it.
 - A **Check connection** button on each connected device that sends a short burst
   of pings from the Pi and compares the loss, round trip, jitter, duplicates and
   order with the profile that applies to the device.
@@ -510,7 +589,8 @@ An initial upgrade of an older release still needs wireless access through
 the real router or a local Pi terminal because its firewall predates sign-in.
 Rollback restores that older access behavior while retaining the saved file.
 
-- The Pi's Ethernet network name and router gateway in the dashboard.
+- The Pi's Ethernet network name and router gateway in the dashboard (read at most every 15
+  seconds, and again after any change you make in the dashboard).
 - Rename the Pi test access point and change its password locally.
 - Enter the Vodafone TG3442DE admin password. The Pi does not save it. The
   browser keeps it in the page only, or for 24 hours if you choose Remember.
@@ -640,6 +720,11 @@ Changes that block their destination or change their selected queue close them.
 Before a code downgrade, change fresh profiles back to saved patterns or restore
 a compatible private configuration backup. Older releases reject the fresh
 pattern setting. Stop profiles and verify normal traffic before replacing code.
+Also shorten the global block list to 100 names. An older release refuses a
+longer list: its dashboard does not start and the test network stays closed.
+Then open it with `sudo jittersim normal-access` over SSH and install the newer
+release again or shorten the list. **Restore previous installation** is not
+affected: it also restores the settings from before the update.
 
 Matching is by destination address. A small service on the Pi reads the DNS
 answers that leave the Pi towards the test Wi-Fi. When an answer names a listed
@@ -961,8 +1046,17 @@ buttons. A group opened stays open when the page refreshes.
 - **Add all to profile** adds every name of a group to the profile chosen on the
   device card. **Block all** blocks every name. It reads **Block remaining**
   when some are blocked and **Unblock all** when all are. One call changes the
-  whole group or nothing. A call takes at most 64 names and a block list or a
-  profile website list holds 100 names.
+  whole group or nothing. A call takes at most 64 names. The global block list
+  holds 2000 names and a profile website list 100.
+- The global block list also applies to protected devices, by DNS and by
+  address, and to a protected device that uses ad blocking.
+- While JitterSim runs it also blocks up to 4096 addresses that the listed names
+  resolve to. A name keeps its last addresses for up to 10 minutes while they are
+  looked up again. Above 4096 addresses the log says so, and with household
+  access rules off some listed names are then not blocked.
+- Each device or group with its own site rules gets its own copy of the global
+  list in the filtered DNS. With a full list and 100 allowed names, 6 different
+  site-rule combinations fit. A save that needs more is refused and says so.
 - A group of system or content delivery names has no **Block all** because one
   click could cut the device off the internet. Block single names instead.
   **Unblock blocked names** removes blocks from such a group.
@@ -1006,11 +1100,38 @@ a device saw. An older helper makes the card ask for an update.
 ### Device speed test
 
 **Test speed** on a connected device in **Devices** compares the device's speed
-before and after a profile. The Pi cannot run a speed test as the phone, so:
+before and after a profile.
+
+**From the dashboard (no outside server).** Open the dashboard on the device you
+want to test (it needs dashboard access and the admin token), go to **Devices**
+and choose **Test speed** on that device's own row. **This dashboard** is then
+selected. **Start measuring** makes the Pi send test data to this browser for
+about 12 seconds: first 3 seconds without the profile (what the Pi and its Wi-Fi
+can send right now), then 8 seconds through the device's download profile. The
+browser times both, leaving out the first second of each, and the Pi counts the
+same data in the device's queue. The result shows both and is saved like any
+other. Limits:
+
+- Download only. Uploads to the Pi itself never pass the upload profile, so an
+  upload number would not show the profile. Upload says `Not tested`.
+- The device needs a profile of its own (one with nothing set measures without
+  limits). The Pi's own data does not pass the shared queue of **Same as
+  everyone** or **Everyone else**.
+- When the profile's cap is at or above 90% of what the Pi can send, the result
+  says so instead of judging the cap: a Pi 3B+ sends a few tens of Mbit/s over
+  Wi-Fi, so a higher cap cannot show in this test.
+- One dashboard test runs at a time, a device can be tested again 15 seconds
+  after its last test, and nothing starts while Panic or a router outage keeps
+  profiles stopped.
+- The part through the profile counts toward the device's data limit like any
+  download (at most 64 MiB per test).
+
+**With a speed test site.** Use this for upload, for a shared queue, or from
+another computer. The Pi cannot run a speed test as the phone, so:
 
 <img src="../docs/screenshots/device-speed-test-controls.png" alt="The speed-test window for Fixture phone with Cloudflare selected, a 45 second length, the label Before profile and the Start measuring button" width="100%" />
 
-1. Choose the speed test site (Cloudflare by default, or LibreSpeed), a length
+1. Choose the speed test site (Cloudflare or LibreSpeed), a length
    (45 seconds by default, 15 to 90) and an optional label, then **Start measuring**.
 2. On the device, open the link or scan the QR code and run the test there.
 3. The Pi reads the device's queue counters once per second (the counters the

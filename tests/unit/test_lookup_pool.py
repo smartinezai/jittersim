@@ -55,6 +55,50 @@ def test_completed_and_failed_work_release_capacity():
     assert pool.submit(lambda: "next").result(timeout=2) == "next"
 
 
+def test_room_waiter_keeps_cancelled_capacity_and_wakes_after_consumption():
+    pool = BoundedLookupPool(workers=1, name="bounded-pool-room-test")
+    started = threading.Event()
+    release = threading.Event()
+    waiting = threading.Event()
+    finished = threading.Event()
+    answers = []
+
+    def blocked():
+        started.set()
+        assert release.wait(timeout=5)
+
+    running = pool.submit(blocked)
+    queued = []
+    waiter = None
+    try:
+        assert started.wait(timeout=2)
+        queued = [pool.submit(lambda: None) for _ in range(MAX_UNFINISHED_LOOKUPS - 1)]
+        assert all(future is not None for future in queued)
+        assert all(future.cancel() for future in queued)
+        assert pool.unfinished() == MAX_UNFINISHED_LOOKUPS
+        assert not pool.wait_for_room(timeout=0.02)
+
+        def wait_for_capacity():
+            waiting.set()
+            answers.append(pool.wait_for_room(timeout=3))
+            finished.set()
+
+        waiter = threading.Thread(target=wait_for_capacity, daemon=True)
+        waiter.start()
+        assert waiting.wait(timeout=2)
+        assert not finished.wait(timeout=0.05)
+        release.set()
+        assert finished.wait(timeout=1), "consuming work must notify capacity waiters"
+        assert answers == [True]
+    finally:
+        release.set()
+        if waiter is not None:
+            waiter.join(timeout=4)
+        wait([running, *queued], timeout=5)
+    assert pool.wait_for_room(timeout=1)
+    assert pool.submit(lambda: "recovered").result(timeout=2) == "recovered"
+
+
 @pytest.mark.parametrize("layer", ["pool", "website", "service", "nested-service", "proxy"])
 def test_stuck_lookup_does_not_delay_interpreter_exit(layer):
     # A thread assertion cannot catch concurrent.futures' interpreter-exit join.

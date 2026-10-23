@@ -10,20 +10,23 @@ test. It is for experiments, not a replacement for your home router.
 ## What you can try
 
 - Slow, delay or interrupt a test connection.
+- Start a profile from a preset such as DSL, Slow 3G or Satellite. Each says what its numbers are based on.
 - Save different settings for one device or the whole test Wi-Fi, and start a
   single device on its own profile.
 - Schedule changes, run a timer or gradually switch between settings.
-- Control device, website and service access, with data and time limits.
+- Control device, website and service access, with data and time limits. The
+  global block list holds up to 2000 names.
 - Protect a device from every profile. A protected device opens the dashboard
   with the admin token alone and can have ads blocked.
 - Review connected devices and traffic while a test runs. Measure a device's
-  speed before and after a profile, or check its packet loss, delay and jitter
-  against the profile.
+  speed before and after a profile (from the dashboard itself, with no outside
+  server), or check its packet loss, delay and jitter against the profile.
 - Follow a saved device to its new private Wi-Fi address, with Ask, Automatic and Undo.
 - Choose whether active profiles resume after a router outage.
 - Restore the Pi's test Wi-Fi to its default name with one sidebar button. The page names the network to join again.
 - Update the Pi in one step from the dashboard or a terminal with a signed
   release, a recovery copy and an automatic health check.
+- Save a copy of the Pi's settings database on your Mac with `jittersim backup pull`.
 
 ## Screenshots
 

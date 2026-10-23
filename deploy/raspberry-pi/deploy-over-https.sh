@@ -96,7 +96,7 @@ if [ "$save_token" = yes ]; then
 fi
 
 case $ref in ''|-*) fail "refusing ref '$ref'" 2 ;; esac
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo=$(git -C "$script_dir" rev-parse --show-toplevel) || fail "run this from a JitterSim checkout"
 commit=$(git -C "$repo" rev-parse --verify --quiet "$ref^{commit}") || fail "unknown ref '$ref'" 2
 short=$(git -C "$repo" rev-parse --short "$commit")

@@ -1085,7 +1085,10 @@ class ConfigRepository:
         self._commit()
 
     def restore_everyone_exceptions(self, device_ids) -> None:
-        """Put back the exceptions a refused or failed start found, without the new one."""
+        """Replace the recorded exceptions with `device_ids`, leaving out unknown devices.
+
+        A refused or failed start passes the exceptions it found, without the new one.
+        """
 
         with self.transaction():
             self._connection.execute("DELETE FROM everyone_exceptions")
@@ -1665,13 +1668,6 @@ class ConfigRepository:
             self._connection.executemany('INSERT INTO ad_blocking_allowances VALUES (?)',
                                          ((domain,) for domain in domains))
             self._bump_configuration_version()
-
-    def rebase_time_quota_sample(self, quota_id: str, *, now: int) -> None:
-        self._connection.execute(
-            "UPDATE time_quotas SET last_sample_at = ? WHERE id = ?",
-            (now, quota_id),
-        )
-        self._commit()
 
     def rebase_quota_counters(self, *, now: int) -> None:
         """Preserve spent usage when applying a replacement counter table."""
@@ -3387,8 +3383,15 @@ class ConfigRepository:
         sampled_at: int,
         *,
         active: bool,
+        previous_sample_at: int = 0,
     ) -> Optional[TimeQuota]:
-        """Merge one traffic sample into a timed quota's active seconds."""
+        """Merge one traffic sample into a timed quota's active seconds.
+
+        The stored `last_sample_at` is the last sample that changed the usage. A sample
+        that sees no traffic stores nothing (every 5 s that would be a journaled write on
+        the SD card), so the caller passes the time of its last such sample as
+        `previous_sample_at` and the later of the two starts the elapsed time.
+        """
 
         quota = self.get_time_quota(quota_id)
         if quota is None:
@@ -3400,12 +3403,16 @@ class ConfigRepository:
             or sampled_at < 0
         ):
             raise StorageError("time quota traffic sample is invalid")
+        if counter_bytes == quota.counter_bytes and quota.last_sample_at > 0:
+            return quota
         counter_reset = counter_bytes < quota.counter_bytes
         traffic_seen = counter_bytes > quota.counter_bytes and not counter_reset
-        elapsed = max(0, sampled_at - quota.last_sample_at)
+        # A stored 0 means no sample yet. Then nothing is charged, whatever the caller remembers.
+        last_sample_at = max(quota.last_sample_at, previous_sample_at) if quota.last_sample_at else 0
+        elapsed = max(0, sampled_at - last_sample_at)
         active_seconds = (
             min(60, elapsed)
-            if active and traffic_seen and quota.last_sample_at > 0
+            if active and traffic_seen and last_sample_at > 0
             else 0
         )
         updated_used = min(2**63 - 1, quota.used_seconds + active_seconds)

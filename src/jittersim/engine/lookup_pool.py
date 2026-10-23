@@ -24,7 +24,8 @@ class BoundedLookupPool:
         self._name = name
         self._threads = []
         self._jobs = Queue(maxsize=MAX_UNFINISHED_LOOKUPS)
-        self._lock = threading.Lock()
+        # A condition, so a caller can wait for a free place (wait_for_room).
+        self._lock = threading.Condition()
         self._unfinished: Set[Future] = set()
 
     def submit(self, function: Callable, *arguments) -> Optional[Future]:
@@ -70,3 +71,15 @@ class BoundedLookupPool:
     def _finished(self, future: Future) -> None:
         with self._lock:
             self._unfinished.discard(future)
+            self._lock.notify_all()
+
+    def unfinished(self) -> int:
+        with self._lock:
+            return len(self._unfinished)
+
+    def wait_for_room(self, timeout: float) -> bool:
+        """Wait up to `timeout` seconds until submit can take more work."""
+        with self._lock:
+            return self._lock.wait_for(
+                lambda: len(self._unfinished) < MAX_UNFINISHED_LOOKUPS, timeout
+            )

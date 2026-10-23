@@ -302,6 +302,7 @@ class StartTests(CheckBase):
             self.start(probes=250)
         self.assertEqual(built["target"], "192.168.50.10")
         self.assertEqual((built["max_probes"], built["payload_size"]), (250, 56))
+        self.assertEqual(str(built["network"]), "192.168.50.0/24")
 
     def test_a_thread_that_cannot_start_leaves_no_phantom_run(self) -> None:
         self.manager.autostart = True
