@@ -187,6 +187,13 @@ class ConnectionCheckManager:
             notes.append("The network is reset or the helper cannot read queues.")
         shaped = target.source == "device" and not protected
         grace = grace_seconds(impairment, shaped=shaped)
+        # These read the repository and can fail, so they come before the prober: a failure then
+        # leaves no open socket behind.
+        signature = None if protected else _signature(
+            speed, target.plan, target.states, target.source, target.ipv4)
+        profile = speed._profile_snapshot(
+            target.owner, target.queue_id, "none" if protected else target.source,
+            {} if protected else target.entries, target.plan, target.states)
         factory = getattr(speed.server, "connection_check_prober_factory", None)
         if factory is not None:
             prober = factory(target.ipv4, probes)
@@ -213,8 +220,7 @@ class ConnectionCheckManager:
             settle=waits_for_late_copies(impairment),
             drift_reason=None,
             last_watch=target.mono,
-            signature=None if protected else _signature(
-                speed, target.plan, target.states, target.source, target.ipv4),
+            signature=signature,
             source="none" if protected else target.source,
             source_note=" ".join(notes) or None,
             service_rules=target.service_rules,
@@ -223,9 +229,7 @@ class ConnectionCheckManager:
             burst_packets=(impairment or {}).get("loss_burst_packets"),
             upload_set=upload_set,
             identity=identity,
-            profile=speed._profile_snapshot(
-                target.owner, target.queue_id, "none" if protected else target.source,
-                {} if protected else target.entries, target.plan, target.states),
+            profile=profile,
             prober=prober,
         )
 

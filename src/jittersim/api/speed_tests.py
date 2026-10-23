@@ -339,7 +339,7 @@ class SpeedTestManager:
                 or mac_address)
         now, mono = self.clock(), self.monotonic()
         target = ResolvedDevice(
-            mac_address=mac_address, client=client, ipv4=ipv4, device=device, name=name,
+            mac_address=mac_address, ipv4=ipv4, device=device, name=name,
             now=now, mono=mono, plan=None, states=None, owner=device,
             queue_id=device.id if device else None, source="none", entries={}, notes=[],
             service_rules=None, reset=False)
@@ -570,12 +570,15 @@ class SpeedTestManager:
         }
 
     def _trim(self) -> None:
-        ended = [run for run in self.runs.values()
-                 if run.state != "running" and
-                 not run.startup_uncertain and
-                 (run.thread is None or not run.thread.is_alive())]
-        for run in ended[:-KEEP_ENDED_RUNS] if len(ended) > KEEP_ENDED_RUNS else []:
-            self.runs.pop(run.id, None)
+        # Each kind keeps its own newest ended runs, so many short checks cannot push out a
+        # speed test that the page has not read yet.
+        for kind in KIND_NAMES:
+            ended = [run for run in self.runs.values()
+                     if run.kind == kind and run.state != "running" and
+                     not run.startup_uncertain and
+                     (run.thread is None or not run.thread.is_alive())]
+            for run in ended[:-KEEP_ENDED_RUNS]:
+                self.runs.pop(run.id, None)
 
     # Sampling.
 
