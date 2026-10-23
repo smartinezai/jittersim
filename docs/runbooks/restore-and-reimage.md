@@ -41,6 +41,8 @@ name each time.
 1. **The database.** Run the command in
    [Private database backup](../../deploy/raspberry-pi/README.md#private-database-backup).
    It refuses to replace a file and checks the copy.
+   From a Mac, `jittersim backup pull` saves the dashboard's own backup of the
+   database without SSH (see the [user guide](../user-guide.md#back-up-to-your-mac-and-check-the-copy)).
 2. **The files.** Make a private archive of the configuration and the access
    state. The archive holds the admin token and the authority's private key:
 
