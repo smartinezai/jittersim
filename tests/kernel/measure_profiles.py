@@ -32,7 +32,8 @@ from .lab import (
     run_in,
 )
 
-# The dashboard's presets of the same names.
+# The dashboard's presets of the same names. tests/unit/test_profile_presets.py checks that the
+# numbers match, so the dashboard script stays the one source.
 PROFILES = (
     Profile(id="normal", name="Normal"),
     Profile(

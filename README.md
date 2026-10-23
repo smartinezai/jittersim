@@ -10,6 +10,7 @@ test. It is for experiments, not a replacement for your home router.
 ## What you can try
 
 - Slow, delay or interrupt a test connection.
+- Start a profile from a preset such as DSL, Slow 3G or Satellite. Each says what its numbers are based on.
 - Save different settings for one device or the whole test Wi-Fi, and start a
   single device on its own profile.
 - Schedule changes, run a timer or gradually switch between settings.

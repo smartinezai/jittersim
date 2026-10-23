@@ -53,6 +53,7 @@ a month (for example `2026-09`) was written in that month.
 | [planned-fixes.md](planned-fixes.md) | Known problems and what changed since the last tested candidate |
 | [../ROADMAP.md](../ROADMAP.md) | Milestones and known limits |
 | [feature-proposals-2026-10-09.md](feature-proposals-2026-10-09.md) | Thirty researched feature proposals with sizes and risks. They are proposals and not started work |
+| [implementation-plan-preset-sources-2026-10-23.md](implementation-plan-preset-sources-2026-10-23.md) | Citing the profile presets: where each number comes from, the two new presets and why there is no 802.11ac one |
 | [implementation-plan-follow-address-changes-2026-10-17.md](implementation-plan-follow-address-changes-2026-10-17.md) | Following a device to its new private Wi-Fi address: evidence, scoring, what may move automatically and what stays manual |
 
 ### Open investigations and reviews

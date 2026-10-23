@@ -465,6 +465,21 @@ def run():
                     expect(row).to_be_visible()
                     expect(page.locator("#profile-id")).to_have_value("")
                     expect(page.locator("#profile-form-title")).to_have_text("Save profile")
+
+                    # A preset fills the form, opens the advanced settings only when it uses
+                    # them and every preset says what it is based on.
+                    page.locator("#profile-preset").select_option(label="Train tunnel")
+                    expect(page.locator("#upload-delay")).to_have_value("200")
+                    expect(page.locator("#profile-advanced")).to_have_attribute("open", "")
+                    page.locator("#profile-preset").select_option(label="DSL")
+                    expect(page.locator("#download-bandwidth")).to_have_value("2000")
+                    expect(page.locator("#profile-advanced")).not_to_have_attribute("open", "")
+                    page.get_by_text("Where the presets come from", exact=True).click()
+                    presets = page.locator("#profile-preset option").count() - 1
+                    expect(page.locator("#profile-preset-sources li")).to_have_count(presets)
+                    expect(page.locator("#profile-preset-sources")).to_contain_text(
+                        "Slow 3G (Chrome DevTools): Chrome DevTools Slow 3G"
+                    )
                     assert not errors, errors
                     context.close()
                 print("Saved profiles dashboard acceptance passed at desktop and phone widths.")
