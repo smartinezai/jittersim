@@ -4,7 +4,8 @@ Run it only in a disposable container with NET_ADMIN and NET_RAW capabilities.
 A DNS answer leaves the Pi towards a client. The watcher must read it through
 the kernel filter, tell the helper about the address and make later traffic to
 that address follow the list's profile. With household DNS rules off, answers
-from other DNS servers and answers a client sends to the Pi teach nothing.
+from other DNS servers, answers a client sends to the Pi and frames that carry
+another station's MAC address teach nothing.
 """
 
 import socket
@@ -41,6 +42,7 @@ OFFLINE = Profile(
 LEARNED = "198.18.0.9"
 FORGED = "198.18.0.10"
 UNTRUSTED = "198.18.0.11"
+RELAYED = "198.18.0.12"
 
 
 def encode_name(value):
@@ -117,7 +119,7 @@ def main():
     run("ip", "link", "set", "client0", "address", AFFECTED)
     run("ip", "addr", "add", "192.168.50.1/24", "dev", "jittersim0")
     run("ip", "addr", "add", "198.18.0.1/24", "dev", "up0")
-    for address in (LISTED, OTHER, LEARNED, FORGED, UNTRUSTED, "198.18.0.53"):
+    for address in (LISTED, OTHER, LEARNED, FORGED, UNTRUSTED, RELAYED, "198.18.0.53"):
         run("ip", "neigh", "replace", address, "lladdr", REMOTE, "nud", "permanent", "dev", "up0")
     run(
         "ip",
@@ -195,6 +197,16 @@ def main():
                 "an address from a DNS answer was not shaped"
             )
 
+            # A frame another station sent and the access point relayed keeps that station's
+            # MAC address, even with the Pi's own address as its source IP address.
+            resolver.send(
+                answer_frame(
+                    AFFECTED, REMOTE, "192.168.50.1", CLIENT, "cdn.streaming.example", RELAYED
+                )
+            )
+            time.sleep(1.0)
+            assert to_server(RELAYED), "a frame with another station's MAC address was learned"
+
             # Unrelated answers and answers a client sends to the Pi teach nothing.
             resolver.send(
                 answer_frame(test_mac, AFFECTED, "192.168.50.1", CLIENT, "unrelated.example", OTHER)
@@ -219,7 +231,8 @@ def main():
             run("ip", "link", "del", "jittersim0")
             run("ip", "link", "del", "up0")
     print(
-        "Trusted DNS answers taught listed addresses; remote, unlisted and client-sent answers did not."
+        "Trusted DNS answers taught listed addresses; remote, relayed, unlisted and "
+        "client-sent answers did not."
     )
 
 

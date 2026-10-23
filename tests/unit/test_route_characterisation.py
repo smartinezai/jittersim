@@ -19,8 +19,10 @@ import os
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from jittersim.api.server import WRITE_PATHS, ControlServer
+from jittersim.api import server as server_module
+from jittersim.api.server import DASHBOARD_CONTENT_SECURITY_POLICY, WRITE_PATHS, ControlServer
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.config.storage import ConfigRepository
 from tests.unit.test_api import FakeHelper
@@ -34,6 +36,14 @@ AUTH_HEADERS = {
 }
 KEPT_HEADERS = ("Allow", "WWW-Authenticate", "Retry-After", "Content-Disposition",
                 "Cache-Control", "Connection")
+# Sent with every answer. The snapshot does not record them, so a test below pins them.
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+}
 
 READ_PATHS = (
     "/", "/favicon.ico", "/api/brand", "/api/health", "/api/system-health",
@@ -178,6 +188,67 @@ class RouteCharacterisationTests(unittest.TestCase):
         # Routes added later answer with their own tests: only the recorded corpus is compared.
         compared = {key: observed.get(key) for key in recorded}
         self.assertEqual(compared, recorded)
+
+    def _answer(self, server, method, path, auth="none"):
+        connection = http.client.HTTPConnection(*server.server_address, timeout=10)
+        connection.request(method, path, headers={"Host": "127.0.0.1", **AUTH_HEADERS[auth]})
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        return response
+
+    def test_every_answer_has_the_security_headers_and_only_the_page_has_the_csp(self):
+        server = self._serve("helper")
+        for method, path, auth, content_type in (
+            ("GET", "/", "none", "text/html"),
+            ("GET", "/api/health", "none", "application/json"),
+            ("GET", "/api/profiles", "admin", "application/json"),
+            ("GET", "/api/profiles", "none", "application/json"),
+            ("GET", "/api/nope", "admin", "application/json"),
+            ("POST", "/api/apply", "none", "application/json"),
+        ):
+            with self.subTest(method=method, path=path, auth=auth):
+                response = self._answer(server, method, path, auth)
+                self.assertTrue(response.getheader("Content-Type").startswith(content_type))
+                for name, value in SECURITY_HEADERS.items():
+                    self.assertEqual(response.getheader(name), value, name)
+                policy = response.getheader("Content-Security-Policy")
+                if content_type != "text/html":
+                    self.assertIsNone(policy)
+                    continue
+                self.assertEqual(policy, DASHBOARD_CONTENT_SECURITY_POLICY)
+                directives = dict(part.split(" ", 1) for part in policy.split("; "))
+                others = {name: value for name, value in directives.items()
+                          if name not in ("script-src", "style-src")}
+                self.assertEqual(
+                    others,
+                    {"default-src": "'none'", "connect-src": "'self'", "img-src": "'self' data:",
+                     "base-uri": "'none'", "form-action": "'self'", "frame-ancestors": "'none'"})
+                # Inline code runs only by its hash: no 'unsafe-inline', no nonce, no host.
+                for name in ("script-src", "style-src"):
+                    sources = directives[name].split(" ")
+                    self.assertTrue(sources and all(
+                        source.startswith("'sha256-") for source in sources), name)
+
+    def test_health_pings_the_helper_fresh_with_the_token_and_reuses_its_answer_without(self):
+        server = self._serve("helper")
+        pings = []
+
+        class CountingHelper(FakeHelper):
+            def ping(self):
+                pings.append(1)
+                return super().ping()
+
+        server.helper_client = CountingHelper()
+        with patch.object(server_module, "PUBLIC_HEALTH_REUSE_SECONDS", 3600.0):
+            for auth in ("none", "wrong", "none"):
+                self.assertEqual(self._answer(server, "GET", "/api/health", auth).status, 200)
+            # Without the token one ping serves every caller for the reuse window.
+            self.assertEqual(len(pings), 1)
+            for _ in range(2):
+                self.assertEqual(self._answer(server, "GET", "/api/health", "admin").status, 200)
+            # With the token every request asks the helper itself.
+            self.assertEqual(len(pings), 3)
 
     def test_no_recorded_write_route_disappeared(self):
         recorded = json.loads(SNAPSHOT.read_text())

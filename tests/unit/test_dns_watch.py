@@ -1,6 +1,7 @@
 import random
 import socket
 import struct
+import threading
 import unittest
 from ipaddress import IPv4Address
 from unittest.mock import patch
@@ -20,6 +21,7 @@ from jittersim.networking.dns_watch import (
     ServiceWatcher,
     parse_dns_frame,
     parse_dns_message,
+    watch,
 )
 from jittersim.networking.helper import HelperClientError
 
@@ -61,6 +63,7 @@ def frame_for(
     options=b"",
     ethertype=0x0800,
     dst_mac=b"\x02" * 6,
+    src_mac=b"\x04" * 6,
     source="192.168.50.1",
 ):
     udp = struct.pack("!HHHH", sport, 40000, 8 + len(message), 0) + message
@@ -78,7 +81,7 @@ def frame_for(
         socket.inet_aton(source),
         socket.inet_aton("192.168.50.10"),
     )
-    return dst_mac + b"\x04" * 6 + struct.pack("!H", ethertype) + ip + options + udp
+    return dst_mac + src_mac + struct.pack("!H", ethertype) + ip + options + udp
 
 
 STREAMING = ("streaming", ("netflix.com", "nflxvideo.net"))
@@ -607,6 +610,81 @@ class ForwardedAnswerTests(unittest.TestCase):
         self.assertIsNone(dns_watch.frame_source(ipv6))
         self.assertEqual(dns_watch.frame_source(frame_for(b"x" * 12, source="198.51.100.7")),
                          IPv4Address("198.51.100.7"))
+
+
+class SourceMacTests(unittest.TestCase):
+    """A frame that only looks like the Pi's answer: another station's frame relayed on the air.
+
+    Without client isolation the access point passes a frame from one client to another.
+    It leaves the interface like the Pi's own frames, with the first client's MAC address as
+    its source, and a client can write any IP source address into it.
+    """
+
+    OWN = b"\x02\xaa\xbb\xcc\xdd\xee"
+    OTHER = b"\x02\x11\x22\x33\x44\x55"
+    ADDRESS = "203.0.113.7"
+
+    def setUp(self) -> None:
+        self.helper = Helper()
+        self.redirected = False
+        self.watcher = ServiceWatcher(
+            helper_client=self.helper,
+            applied_plan=lambda: plan_payload(STREAMING),
+            clock=Clock(),
+            dns_redirected=lambda: self.redirected,
+        )
+        self.watcher.refresh_lists()
+        self.message = dns_message("www.netflix.com", [a_record(b"\xc0\x0c", self.ADDRESS)])
+
+    def test_only_frames_with_the_interface_address_as_source_count(self) -> None:
+        self.watcher.interface_mac = self.OWN
+
+        self.watcher.observe(frame_for(self.message, src_mac=self.OTHER), OUTGOING)
+        self.assertFalse(self.watcher.flush())
+        # The same holds while household DNS rules make every IP source address count.
+        self.redirected = True
+        self.watcher.observe(frame_for(self.message, src_mac=self.OTHER, source="203.0.113.53"),
+                             OUTGOING)
+        self.assertFalse(self.watcher.flush())
+
+        self.watcher.observe(frame_for(self.message, src_mac=self.OWN), OUTGOING)
+        self.assertTrue(self.watcher.flush())
+        self.assertEqual(self.helper.calls, [{"streaming": [IPv4Address(self.ADDRESS)]}])
+
+    def test_without_a_known_interface_address_the_source_ip_rules_alone_decide(self) -> None:
+        self.assertIsNone(self.watcher.interface_mac)
+
+        self.watcher.observe(frame_for(self.message, src_mac=self.OTHER), OUTGOING)
+
+        self.assertTrue(self.watcher.flush())
+
+    def test_the_watch_loop_takes_the_interface_address_from_the_socket(self) -> None:
+        stop = threading.Event()
+        relayed = dns_message("www.netflix.com", [a_record(b"\xc0\x0c", "203.0.113.8")])
+        frames = [
+            (frame_for(self.message, src_mac=self.OWN), ("wlan0", 3, OUTGOING, 1, self.OWN)),
+            (frame_for(relayed, src_mac=self.OTHER), ("wlan0", 3, OUTGOING, 1, self.OTHER)),
+        ]
+
+        class Socket:
+            def getsockname(self):
+                return "wlan0", 3, 0, 1, SourceMacTests.OWN
+
+            def recvfrom(self, _size):
+                if frames:
+                    return frames.pop(0)
+                stop.set()
+                raise socket.timeout
+
+            def close(self):
+                pass
+
+        watch(self.watcher, Socket, stop)
+        self.watcher.flush()
+
+        self.assertEqual(self.watcher.interface_mac, self.OWN)
+        sent = [address for call in self.helper.calls for address in call["streaming"]]
+        self.assertEqual(sent, [IPv4Address(self.ADDRESS)])
 
 
 class RedirectFileTests(unittest.TestCase):
