@@ -985,6 +985,7 @@ _SAVED_SETTINGS_WAIT = (
     "saved. Nothing was saved. Choose Start to apply them first, then apply this profile."
 )
 _RESET_KEPT = "A reset was recorded meanwhile, so what ran before was not put back."
+_PANIC_KEPT = "Panic stopped the network meanwhile, so what ran before was not put back."
 _RESET_SAVED_ONLY = {
     "live_applied": False,
     "message": "saved; the network is reset, so choose Start to use it",
@@ -5640,7 +5641,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
     def _start_beside_everyone(self, fields, snapshot, device, general, control_intent,
                                previous_exceptions, ran_before=None, existing=None,
                                versions=()):
-        """Apply Everyone for all and this device's own profile. Everyone is not cleared."""
+        """Apply Everyone for all and this device's own profile. Everyone is not cleared.
+
+        If the helper refuses the plan nothing changes: the device keeps the assignment it
+        had and the plan that ran before is applied again, unless a Panic or a reset was
+        recorded meanwhile. Those are never undone.
+        """
 
         status, content_type, body = self._apply_configuration_locked(
             connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
@@ -5664,6 +5670,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         # and the restore are one step under the Panic fence: a Panic that ended the
         # exceptions is never undone.
         put_back_version = []
+        undo_failed = []
 
         def restore():
             failed = self.repository.get_runtime_state()
@@ -5695,8 +5702,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             except StorageError:
                 LOGGER.exception("could not put back the device assignment after a failed start")
                 # The device keeps the saved choice that failed, so it goes back to Everyone
-                # instead of running that choice beside it.
-                self.repository.restore_everyone_exceptions(previous_exceptions - {device.id})
+                # instead of running that choice beside it. If storage fails again the rows
+                # stay as they are, and the failure is still answered.
+                try:
+                    self.repository.restore_everyone_exceptions(previous_exceptions - {device.id})
+                except StorageError:
+                    LOGGER.exception("could not send the device back to Everyone")
+                    undo_failed.append(True)
             return True
 
         accepted, restored = self._publish_apply(control_intent[0], restore)
@@ -5712,17 +5724,31 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
                 keep_exceptions=True, restore_plan=(prepared, rolls),
             )
-            note = (
-                " What ran before was put back."
-                if put_back == HTTPStatus.OK else
-                " " + _RESET_KEPT if put_back == HTTPStatus.CONFLICT else
-                " What ran before could not be put back, so the dashboard keeps trying."
-            )
-        response["error"] = (
+            note = self._put_back_note(put_back, control_intent[0])
+        lead = (
+            "The profile did not start, and the database could not be written to undo it: the "
+            "saved choice for this device may still be in place. "
+            if undo_failed else
             "The profile did not start, so nothing changed: the device keeps what it had and "
-            "Everyone keeps running for every device. " + response.get("error", "") + note
-        ).strip()
+            "Everyone keeps running for every device. "
+        )
+        response["error"] = (lead + response.get("error", "") + note).strip()
         return status, content_type, _json_bytes(response)
+
+    def _put_back_note(self, put_back_status, generation) -> str:
+        """Say how putting back the plan that ran before a failed apply ended.
+
+        A Panic since the apply started wins, whatever the put-back answered: it stops the
+        network and is never undone. Otherwise a 409 means a reset was recorded meanwhile.
+        """
+
+        if self._panic_since(generation):
+            return " " + _PANIC_KEPT
+        if put_back_status == HTTPStatus.OK:
+            return " What ran before was put back."
+        if put_back_status == HTTPStatus.CONFLICT:
+            return " " + _RESET_KEPT
+        return " What ran before could not be put back, so the dashboard keeps trying."
 
     def _start_device_only(self, fields, snapshot, device, control_intent, previous_scope):
         """Start the device-only scope after a Reset. Everything else stays stopped."""
@@ -6053,8 +6079,10 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
         `restore_plan` is the scheduler's running plan from before, with its saved version
         and randomization state: a failed apply puts exactly that back, not what the saved
-        settings say now. With `expected_version` the plan must be built from exactly that
-        saved version, or nothing is applied.
+        settings say now. A Panic or a reset recorded meanwhile, before or during the helper
+        call, is never undone: the answer is 409 and the record stays what it was. With
+        `expected_version` the plan must be built from exactly that saved version, or
+        nothing is applied.
 
         A device-only start is read here, under the shared lock, so a Reset that ran
         while this call waited leaves nothing to start. Start and Apply to everyone cover
@@ -6153,12 +6181,15 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             # yet, so this plan must not install them for other devices.
             return HTTPStatus.CONFLICT, "application/json", _json_bytes({
                 "error": _SAVED_SETTINGS_WAIT})
+        def reset_since_failure():
+            # A reset, for example `jittersim reset`, landed after the failure. A put-back
+            # must never undo it. Called inside the transaction that would write over it.
+            return (restore_plan is not None
+                    and self.repository.get_runtime_state().last_action == "reset")
+
         def mark_applying():
             with self.repository.transaction():
-                if (restore_plan is not None
-                        and self.repository.get_runtime_state().last_action == "reset"):
-                    # A reset, for example `jittersim reset`, landed after the failure. A
-                    # put-back must never undo it.
+                if reset_since_failure():
                     return False
                 self.repository.update_runtime_state(
                     observed_state="applying", last_action=runtime_action, last_result=None,
@@ -6213,12 +6244,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     control_intent=(halts_at_start, control_revision), keep_exceptions=True,
                     restore_plan=ran_before,
                 )
-                failure += (
-                    " What ran before was put back."
-                    if put_back == HTTPStatus.OK else
-                    " " + _RESET_KEPT if put_back == HTTPStatus.CONFLICT else
-                    " What ran before could not be put back, so the dashboard keeps trying."
-                )
+                failure += self._put_back_note(put_back, halts_at_start)
                 state = self.repository.get_runtime_state()
             return (
                 HTTPStatus.BAD_GATEWAY,
@@ -6238,17 +6264,22 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         def publish():
             if result.get("counters_preserved") is not True:
                 self.repository.rebase_quota_counters(now=int(time.time()))
-            # A plan put back after a failure counts as applied only when the saved settings
-            # of now built it. Otherwise unapplied saved settings stay unapplied.
-            observed = (
-                "unknown" if restore_plan is not None and prepared.configuration_version
-                != self.repository.get_runtime_state().configuration_version
-                else "applied"
-            )
-            state = self.repository.update_runtime_state(
-                observed_state=observed, last_action=runtime_action, last_result="success",
-                last_error=None, **applied_keep,
-            )
+            with self.repository.transaction():
+                if reset_since_failure():
+                    # A reset landed during the helper call. It stays the record and the
+                    # plan is not activated.
+                    return None
+                # A plan put back after a failure counts as applied only when the saved
+                # settings of now built it. Otherwise unapplied saved settings stay unapplied.
+                observed = (
+                    "unknown" if restore_plan is not None and prepared.configuration_version
+                    != self.repository.get_runtime_state().configuration_version
+                    else "applied"
+                )
+                state = self.repository.update_runtime_state(
+                    observed_state=observed, last_action=runtime_action, last_result="success",
+                    last_error=None, **applied_keep,
+                )
             if self.scheduler is not None:
                 self.scheduler.activate_plan(repository=self.repository, prepared=prepared,
                                              counters_preserved=result.get("counters_preserved") is True)
@@ -6257,6 +6288,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         accepted, state = self._publish_apply(halts_at_start, publish)
         if not accepted:
             return self._apply_refused(halts_at_start, undo=True)
+        if state is None:
+            # The put-back plan may be live on the helper: repeat the reset now instead of
+            # waiting for a tick.
+            try:
+                self.helper_client.reset()
+            except HelperClientError:
+                LOGGER.warning("could not repeat the reset recorded meanwhile", exc_info=True)
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": _RESET_KEPT})
         return (
             HTTPStatus.OK,
             "application/json",

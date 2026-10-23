@@ -45,6 +45,7 @@ a month (for example `2026-09`) was written in that month.
 | [../CHANGELOG.md](../CHANGELOG.md) | The notes of every published release and the changes still waiting for the next one (Unreleased) |
 | [release-runbook-2026-10-16.md](release-runbook-2026-10-16.md) | The owner's step by step runbook for the first signed release, v0.2.0: the one-time root install, the GitHub token, the release run, the test on the Pi and the check afterwards. Dated: the facts about the Pi are those of 16 October |
 | [release-0.2.0-owner-commands.md](release-0.2.0-owner-commands.md) | The exact commands, answers and evidence wording the owner uses for v0.2.0, with the Panic trap and the merge freeze |
+| [owner-acceptance-card-2026-10-24.md](owner-acceptance-card-2026-10-24.md) | One short card for the owner's physical acceptance of v0.2.0 on the Pi: safety first, the install, six checks, the recovery choice and the six evidence answers |
 | [release-checklist-template.md](release-checklist-template.md) | The checklist to copy for each numbered release candidate |
 | [measurements-2026-09.md](measurements-2026-09.md) | Measured effects of the profile presets (dated measurements, still cited by the README) |
 

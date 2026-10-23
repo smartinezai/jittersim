@@ -230,6 +230,9 @@ class RuntimeScheduler:
         # The saved configuration version the applied plan was built from. It counts only
         # while `_current_payload` is set.
         self._applied_version: Optional[int] = None
+        # The saved versions right before and right after the tick's own moves of saved
+        # devices, kept until a tick publishes a plan that includes them.
+        self._pending_move: Optional[Tuple[int, int]] = None
         self._paused = True
         # Counts Panic requests so an apply that was running meanwhile can tell.
         self._halt_count = 0
@@ -749,10 +752,11 @@ class RuntimeScheduler:
         A scheduled apply changes timed and random effects only: it leaves access rule and
         ad-blocking edits pending. So it never makes newer saved settings count as running.
         Only a full apply from the dashboard does. The one exception is `moved_from`: the
-        version right before this tick moved saved devices to their new addresses, which the
-        plan of this tick includes.
+        version right before the moves of saved devices to their new addresses, which the
+        plan of this tick includes. A published plan ends the pending move.
         """
 
+        self._pending_move = None
         if self._applied_version is not None and self._applied_version in (
                 configuration_version, moved_from):
             self._applied_version = configuration_version
@@ -971,16 +975,23 @@ class RuntimeScheduler:
                     return False
             # Moving a saved device to its new address is a saved change too. When the
             # moves were the only saves, the plan of this tick, built after them, covers
-            # both versions.
-            moved_from = None
+            # both versions. A tick that fails after its move keeps the claim for the next
+            # tick, as long as nothing else was saved since.
+            pending = self._pending_move
+            if pending is not None and pending[1] != configuration_version:
+                pending = None
             own_saves = self._follow_device_addresses(
                 repository=active_repository, now=current_time, halts_at_start=halts_at_start
             )
             if own_saves:
                 moved = active_repository.get_runtime_state().configuration_version
                 if moved == configuration_version + own_saves:
-                    moved_from = configuration_version
+                    pending = (pending[0] if pending else configuration_version, moved)
+                else:
+                    pending = None
                 configuration_version = moved
+            self._pending_move = pending
+            moved_from = pending[0] if pending else None
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
             if current_time - self._last_analytics_cleanup_at >= 24 * 60 * 60:
@@ -1202,8 +1213,6 @@ class RuntimeScheduler:
             return 0
         if not snapshot.get("association_status_available"):
             return 0
-        # A saved device that came back with a new private address moves first when the
-        # owner chose Automatic, so the IP follow below moves it in this same check.
         generation = self.apply_generation if halts_at_start is None else halts_at_start
         own_saves = 0
 
@@ -1217,6 +1226,8 @@ class RuntimeScheduler:
                 own_saves += repository.get_runtime_state().configuration_version - before
             return result
 
+        # A saved device that came back with a new private address moves first when the
+        # owner chose Automatic, so the IP follow below moves it in this same check.
         try:
             follow_automatically(
                 repository, snapshot, now=int(now),

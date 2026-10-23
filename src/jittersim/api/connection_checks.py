@@ -22,6 +22,7 @@ from jittersim.api.speed_tests import (
     _payload_id,
     _query_mac,
     pick_queues,
+    probe_network,
     response,
 )
 from jittersim.config.exemptions import normalize_exempt_mac
@@ -198,7 +199,8 @@ class ConnectionCheckManager:
         if factory is not None:
             prober = factory(target.ipv4, probes)
         else:
-            prober = IcmpProber(target.ipv4, max_probes=probes, payload_size=PAYLOAD_BYTES)
+            prober = IcmpProber(target.ipv4, max_probes=probes, payload_size=PAYLOAD_BYTES,
+                                network=probe_network(speed.server))
         if isinstance(prober, NoProber) or getattr(prober, "status", "measured") == "unavailable":
             reason = getattr(prober, "reason", None) or "not allowed"
             prober.close()

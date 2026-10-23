@@ -459,13 +459,23 @@ def parse_echo_reply(packet: bytes, nonce: bytes) -> Optional[int]:
     return struct.unpack("!H", packet[6:8])[0]
 
 
+def inside_network(address: str, network) -> bool:
+    """True for a host address of the network (not its network or broadcast address)."""
+
+    try:
+        value = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return value in network and value not in (network.network_address, network.broadcast_address)
+
+
 def same_subnet(local: str, target: str, prefix: int = 24) -> bool:
     try:
         network = ipaddress.ip_network(f"{local}/{prefix}", strict=False)
         address = ipaddress.ip_address(target)
     except ValueError:
         return False
-    return address in network and local != target
+    return address in network and local != target and inside_network(target, network)
 
 
 class IcmpProber:
@@ -473,7 +483,7 @@ class IcmpProber:
 
     def __init__(self, target: str, *, socket_factory: Callable[[], socket.socket] = None,
                  clock: Callable[[], float] = time.monotonic, max_probes: int = MAX_PROBES_KEPT,
-                 payload_size: int = 0):
+                 payload_size: int = 0, network=None):
         self.target = target
         self.clock = clock
         self.max_probes = max_probes
@@ -490,6 +500,10 @@ class IcmpProber:
         )
         try:
             ipaddress.IPv4Address(target)
+            if network is not None and not inside_network(target, network):
+                # The caller named the test Wi-Fi network: no socket for an address outside it.
+                self._unavailable("The device is not on the test Wi-Fi network")
+                return
             sock = factory()
         except (OSError, ValueError):
             self._unavailable("ICMP is not allowed for the dashboard")
@@ -503,7 +517,8 @@ class IcmpProber:
             sock.close()
             self._unavailable("The device's address cannot be reached from the dashboard")
             return
-        if not same_subnet(local, target):
+        if not same_subnet(local, target) or (
+                network is not None and not inside_network(local, network)):
             sock.close()
             self._unavailable("The dashboard is not on the device's network")
             return
