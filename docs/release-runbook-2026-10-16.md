@@ -274,8 +274,8 @@ it continues from the draft and never replaces an uploaded file.
    That is the success message: the Pi used its token, listed the latest release, downloaded
    both files, verified the signature with the trusted key `mac-20261004` and compared the
    release order. `jittersim update check` then shows `Online check token: set`.
-   If the Pi is still on a dev build (you skipped step 6 or restored), the same button says
-   `Release 0.2.0 (v0.2.0) is staged and ready to install` and **Install update** installs it.
+   If the Pi is still on a dev build (you skipped step 6), the same button says
+   `Release 0.2.0 (v0.2.0) is staged and ready to install` and **Install v0.2.0** installs it.
 4. Read the failures like this: `no GitHub token is set` -> step 3; `GitHub refused the token`
    -> expired or wrong token; `GitHub has no release here or this token cannot see the
    repository` -> the token is not for `smartinezai/jittersim` or lacks Contents read;
