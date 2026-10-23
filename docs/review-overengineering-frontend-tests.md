@@ -35,8 +35,8 @@ What has happened since:
   test. ESLint `no-unused-vars` over the assembled page now reports only the functions that the two
   script blocks share (`readOldAdminTools`, `scrollBehavior`, `revealElement`). The CI step that runs
   ESLint is still open.
-- Item 8 was looked at and left on purpose. All 45 guards in `dashboard.js` and the 6 in
-  `dashboard-navigation.js` name functions of the same page, but about 150 node tests build their page
+- Item 8 was looked at and left on purpose. All 51 guards (42 in `dashboard.js`, 6 in
+  `dashboard-navigation.js`, 3 in `reconnect.js`) name functions of the same page, but about 150 node tests build their page
   from hand-cut fragments and rely on the guards. Removing them needs stubs in about 11 test preludes,
   which adds more test lines than it removes. Do it together with one shared test prelude.
 - Item 16: the stale branch is removed from `wifi-recovery.yml`. The rename and the single ruff run are
