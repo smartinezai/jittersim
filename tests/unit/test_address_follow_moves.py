@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from jittersim.api.server import ControlServer, WRITE_PATHS
+from jittersim.config import address_follow
 from jittersim.config.address_follow import (
     HISTORY_LIMIT,
     UNDO_SECONDS,
@@ -16,7 +17,6 @@ from jittersim.config.address_follow import (
     current_suggestions,
     follow_automatically,
     move_profile_and_label,
-    reset_prune_clock,
     undo_profile_and_label,
 )
 from jittersim.config.exemptions import UnaffectedDevice
@@ -43,7 +43,7 @@ def snapshot(*stations):
 
 
 def seed(repository, *, protected=False, label=True):
-    reset_prune_clock()
+    address_follow._last_prune = None  # so the next check prunes
     repository.save_profile(Profile(id="slow", name="Slow"))
     repository.save_device(Device("dad", "Dad", "192.168.50.20", "slow", OLD))
     if label:

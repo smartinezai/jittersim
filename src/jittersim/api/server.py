@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import re
-import secrets
 import select
 import signal
 import socket
@@ -56,6 +55,12 @@ from jittersim.api.address_follow import (
     write_address_follow,
 )
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
+from jittersim.api.connection_checks import (
+    CHECK_WRITES,
+    ConnectionCheckManager,
+    read_connection_check,
+    write_connection_check,
+)
 from jittersim.api.speed_tests import (
     SPEED_TEST_WRITES,
     SpeedTestManager,
@@ -108,7 +113,6 @@ from jittersim.config.models import (
     ValidationError,
     WebsitePolicy,
     normalize_domain,
-    normalize_mac_address,
     time_quota_counter_id,
 )
 from jittersim.config.protection import (
@@ -299,7 +303,7 @@ RELEASE_UPLOAD_HEADER = "X-Jittersim-Archive-Bytes"
 # dashboard serves one request at a time so a slow sender cannot hold it for longer.
 RELEASE_UPLOAD_SECONDS = 120.0
 WRITE_PATHS = (WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/preview"}
-               | {RELEASE_UPLOAD_PATH} | SPEED_TEST_WRITES | ADDRESS_FOLLOW_WRITES)
+               | {RELEASE_UPLOAD_PATH} | SPEED_TEST_WRITES | ADDRESS_FOLLOW_WRITES | CHECK_WRITES)
 ACTION_PATHS = frozenset(
     ("/api/apply", "/api/reset", "/api/observations/scan", "/api/update-preferences",
      "/api/access-point/reset-name", "/api/updates/check-online", "/api/updates/retry")
@@ -1101,6 +1105,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         self.scheduler = scheduler
         # The device speed test windows. One manager for the life of the server.
         self._speed_test_manager = SpeedTestManager(self)
+        # The connection check shares the speed test manager's run table, limits and shutdown.
+        self._connection_check_manager = ConnectionCheckManager(self._speed_test_manager)
         # Protection-derived dashboard access: the last confirmed sync with the root helper.
         self._protected_access_lock = threading.Lock()
         self._protected_access_state: Dict[str, Any] = {
@@ -1890,6 +1896,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         speed_test = read_speed_test(self, path, query)
         if speed_test is not None:
             return speed_test
+        connection_check = read_connection_check(self, path, query)
+        if connection_check is not None:
+            return connection_check
         follow = read_address_follow(self, path)
         if follow is not None:
             return follow
@@ -2659,6 +2668,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         speed_test = write_speed_test(self, path, payload)
         if speed_test is not None:
             return speed_test
+        connection_check = write_connection_check(self, path, payload)
+        if connection_check is not None:
+            return connection_check
         control_intent = None
         live_access = path in ACCESS_WRITES and path not in (
             "/api/normal-access", "/api/site-blocks", "/api/site-blocks/delete"

@@ -14,6 +14,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.confirm_dialogs import cancel_with_escape
+
 MAC_ADDRESS = "02:00:00:00:00:01"
 NAME = "Fixture laptop"
 UNKNOWN = "Unknown device (192.168.50.77)"
@@ -114,6 +116,9 @@ def check_width(browser, width, height):
         expect(page.locator("#workspace-title")).to_have_text(NAME)
         expect(page.locator("#workspace-address")).to_contain_text("192.168.50.184")
         expect(devices_page).not_to_contain_text(PLACEHOLDER)
+        # This browser is on loopback, so the Pi names no Wi-Fi device for it: no row says so.
+        expect(page.locator("#connected-devices .connected-row")).to_have_count(1)
+        expect(page.locator("#connected-devices")).not_to_contain_text("This device")
 
         # Schedules and limits: the schedule, the running scenario and the timer
         schedules = open_page("schedules")
@@ -137,6 +142,10 @@ def check_width(browser, width, height):
             "button", name="Block " + NAME)).to_be_visible()
         expect(access).not_to_contain_text(PLACEHOLDER)
         expect(page.locator("#site-rule-target")).not_to_contain_text(PLACEHOLDER)
+        block = page.locator("#access-device-list").get_by_role("button", name="Block " + NAME)
+        block.click()
+        cancel_with_escape(page, block, verb="Continue", text="Block network access for " + NAME + "?",
+                           absent="device you are using")
 
         # Activity: the scheduler's events and their Open buttons
         activity = open_page("activity")

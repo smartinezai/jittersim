@@ -262,6 +262,9 @@ class WatcherTests(unittest.TestCase):
     def answer(self, qname, *records, direction=OUTGOING, flags=0x8180):
         self.watcher.observe(frame_for(dns_message(qname, list(records), flags)), direction)
 
+    def pending_count(self, list_id):
+        return len(self.watcher._pending.get(list_id, ()))
+
     def test_a_listed_answer_reaches_the_helper_once(self) -> None:
         self.answer("www.netflix.com", a_record(b"\xc0\x0c", "203.0.113.5"))
 
@@ -376,7 +379,7 @@ class WatcherTests(unittest.TestCase):
             ]
             self.answer("www.netflix.com", *records)
 
-        self.assertLessEqual(self.watcher.pending_count("streaming"), MAX_PENDING_PER_LIST)
+        self.assertLessEqual(self.pending_count("streaming"), MAX_PENDING_PER_LIST)
 
     def test_a_new_plan_changes_what_is_watched(self) -> None:
         self.payload = plan_payload(("music", ("spotify.com",)))
@@ -417,11 +420,11 @@ class WatcherTests(unittest.TestCase):
         to_other = frame_for(message)
 
         self.assertEqual(self.parse_calls_for(to_protected), [])
-        self.assertEqual(self.watcher.pending_count("streaming"), 0)
+        self.assertEqual(self.pending_count("streaming"), 0)
         self.assertFalse(self.watcher.flush())
 
         self.assertEqual(self.parse_calls_for(to_other), [to_other])
-        self.assertEqual(self.watcher.pending_count("streaming"), 1)
+        self.assertEqual(self.pending_count("streaming"), 1)
 
     def test_every_protected_client_is_skipped(self) -> None:
         macs = ["02:00:00:00:00:05", "02:00:00:00:00:06", "AA:BB:CC:DD:EE:00"]

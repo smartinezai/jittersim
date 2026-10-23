@@ -312,9 +312,6 @@ class ServiceWatcher:
         for key in [key for key in self._sent if key[0] not in known]:
             del self._sent[key]
 
-    def pending_count(self, list_id: str) -> int:
-        return len(self._pending.get(list_id, ()))
-
     def observe(self, frame: bytes, packet_type: int) -> None:
         """Note the listed addresses in one frame that left the test interface.
 
