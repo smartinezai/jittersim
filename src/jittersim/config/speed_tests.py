@@ -24,8 +24,13 @@ RESULT_STATUSES = frozenset(("complete", "finished-early", "changed", "fault"))
 REPORTED_FIELDS = ("download_mbit", "upload_mbit", "latency_ms", "jitter_ms")
 REPORTED_MAXIMUM = 100_000.0
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS speed_test_results (
+SPEED_TABLE = "speed_test_results"
+# Connection checks (docs/implementation-plan-connection-check-2026-10-17.md) keep their rows in a
+# table of their own with the same columns, so the speed test list never shows them and an older
+# version of the program that does not know the table simply leaves it alone.
+CHECK_TABLE = "connection_check_results"
+TABLE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS {table} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at INTEGER NOT NULL,
     finished_at INTEGER NOT NULL,
@@ -37,19 +42,20 @@ CREATE TABLE IF NOT EXISTS speed_test_results (
     provider TEXT NOT NULL,
     source TEXT NOT NULL,
     protected INTEGER NOT NULL DEFAULT 0,
-    profile_json TEXT NOT NULL DEFAULT '{}',
-    summary_json TEXT NOT NULL DEFAULT '{}',
-    reported_json TEXT NOT NULL DEFAULT '{}'
+    profile_json TEXT NOT NULL DEFAULT '{{}}',
+    summary_json TEXT NOT NULL DEFAULT '{{}}',
+    reported_json TEXT NOT NULL DEFAULT '{{}}'
 );
-CREATE INDEX IF NOT EXISTS speed_test_results_device_idx
-    ON speed_test_results(mac_address, id DESC);
+CREATE INDEX IF NOT EXISTS {table}_device_idx
+    ON {table}(mac_address, id DESC);
 """
 
 
 def ensure_speed_test_schema(connection: sqlite3.Connection) -> None:
-    """Create the table and its index when missing. Safe to run on every start."""
+    """Create the tables and their indexes when missing. Safe to run on every start."""
 
-    connection.executescript(SCHEMA)
+    for table in (SPEED_TABLE, CHECK_TABLE):
+        connection.executescript(TABLE_SCHEMA.format(table=table))
 
 
 JOINERS = frozenset("\u200c\u200d")
@@ -107,6 +113,8 @@ def _encoded(value: Dict[str, Any]) -> str:
 class SpeedTestStore:
     """Read and write speed test rows on the repository's connection and lock."""
 
+    table = SPEED_TABLE
+
     def __init__(self, repository):
         self.repository = repository
         self.db = repository._connection
@@ -132,7 +140,7 @@ class SpeedTestStore:
         with self.repository._lock:
             try:
                 cursor = self.db.execute(
-                    "INSERT INTO speed_test_results (started_at, finished_at, mac_address, "
+                    f"INSERT INTO {self.table} (started_at, finished_at, mac_address, "
                     "device_id, device_name, label, status, provider, source, protected, "
                     "profile_json, summary_json, reported_json) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -140,14 +148,14 @@ class SpeedTestStore:
                 )
                 identifier = cursor.lastrowid
                 self.db.execute(
-                    "DELETE FROM speed_test_results WHERE mac_address = ? AND id NOT IN "
-                    "(SELECT id FROM speed_test_results WHERE mac_address = ? "
+                    f"DELETE FROM {self.table} WHERE mac_address = ? AND id NOT IN "
+                    f"(SELECT id FROM {self.table} WHERE mac_address = ? "
                     "ORDER BY id DESC LIMIT ?)",
                     (row["mac_address"], row["mac_address"], MAX_RESULTS_PER_DEVICE),
                 )
                 self.db.execute(
-                    "DELETE FROM speed_test_results WHERE id NOT IN "
-                    "(SELECT id FROM speed_test_results ORDER BY id DESC LIMIT ?)",
+                    f"DELETE FROM {self.table} WHERE id NOT IN "
+                    f"(SELECT id FROM {self.table} ORDER BY id DESC LIMIT ?)",
                     (MAX_RESULTS_TOTAL,),
                 )
                 self.repository._commit()
@@ -160,7 +168,7 @@ class SpeedTestStore:
         try:
             with self.repository._lock:
                 row = self.db.execute(
-                    "SELECT * FROM speed_test_results WHERE id = ?", (identifier,)
+                    f"SELECT * FROM {self.table} WHERE id = ?", (identifier,)
                 ).fetchone()
         except sqlite3.Error as error:
             raise StorageError("could not read the speed test result") from error
@@ -171,11 +179,11 @@ class SpeedTestStore:
             with self.repository._lock:
                 if mac_address is None:
                     rows = self.db.execute(
-                        "SELECT * FROM speed_test_results ORDER BY id DESC LIMIT ?", (limit,)
+                        f"SELECT * FROM {self.table} ORDER BY id DESC LIMIT ?", (limit,)
                     ).fetchall()
                 else:
                     rows = self.db.execute(
-                        "SELECT * FROM speed_test_results WHERE mac_address = ? "
+                        f"SELECT * FROM {self.table} WHERE mac_address = ? "
                         "ORDER BY id DESC LIMIT ?",
                         (mac_address, limit),
                     ).fetchall()
@@ -204,7 +212,7 @@ class SpeedTestStore:
             if changes:
                 try:
                     cursor = self.db.execute(
-                        f"UPDATE speed_test_results SET {', '.join(changes)} WHERE id = ?",
+                        f"UPDATE {self.table} SET {', '.join(changes)} WHERE id = ?",
                         (*values, identifier),
                     )
                     self.repository._commit()
@@ -219,7 +227,7 @@ class SpeedTestStore:
         with self.repository._lock:
             try:
                 cursor = self.db.execute(
-                    "DELETE FROM speed_test_results WHERE id = ?", (identifier,)
+                    f"DELETE FROM {self.table} WHERE id = ?", (identifier,)
                 )
                 self.repository._commit()
             except sqlite3.Error as error:
@@ -233,6 +241,12 @@ def _object(text: str) -> Dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("expected a JSON object")
     return value
+
+
+class ConnectionCheckStore(SpeedTestStore):
+    """The rows of the connection check: the same columns and bounds, another table."""
+
+    table = CHECK_TABLE
 
 
 def _result(row: sqlite3.Row) -> Dict[str, Any]:
