@@ -169,8 +169,14 @@ def full_block_list_plan():
     names = tuple(f"ads{n}.tracker-{n % 97}.example.com" for n in range(MAX_GLOBAL_BLOCKED_DOMAINS))
     # 198.18.0.0/15 is for benchmarks. Every other address, so nft cannot merge ranges.
     blocked = tuple(IPv4Address(0xC6120000 + 2 * n) for n in range(MAX_GLOBAL_BLOCKED_ADDRESSES))
-    return heavy_plan(access=replace(HOUSEHOLD, websites=WebsitePolicy(blocked_domains=names)),
-                      blocked=blocked)
+    # This probe requires a DNS answer; random DNS faults would instead reject
+    # 20% of its queries before Unbound can answer the blocked name.
+    access = replace(
+        HOUSEHOLD,
+        options=replace(HOUSEHOLD.options, dns_failure_percent=0),
+        websites=WebsitePolicy(blocked_domains=names),
+    )
+    return heavy_plan(access=access, blocked=blocked)
 
 
 def everyone_plan():
