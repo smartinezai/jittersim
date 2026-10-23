@@ -129,6 +129,7 @@ are grouped by theme.
 | [Persistence mode for router outages](implementation-plan-router-outage-persistence-2026-09.md) | 2026-09 |
 | [Router Wi-Fi import compatibility](implementation-plan-router-wifi-import-2026-09.md) | 2026-09 |
 | [Router Wi-Fi recovery repair](implementation-plan-router-wifi-recovery-2026-10-04.md) | 2026-10-04 |
+| [Quick button to reset the Pi's Wi-Fi name](implementation-plan-wifi-name-quick-reset-2026-10-23.md) | 2026-10-23 |
 | [WPA3 hotspot upgrade](implementation-plan-wpa3-2026-09.md) | 2026-09 |
 
 ### Updates, releases and installation

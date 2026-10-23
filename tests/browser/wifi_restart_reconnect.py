@@ -10,7 +10,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
-from tests.browser.confirm_dialogs import answer_confirm
+from tests.browser.confirm_dialogs import answer_confirm, cancel_with_escape
+from tests.browser.phone import close_controls, sidebar_control
 
 TOKEN_KEY = "jittersim.remembered.admin-token"
 RAW_BROWSER_TEXT = re.compile(r"Load failed|Failed to fetch|NetworkError")
@@ -74,6 +75,51 @@ def check_reset_name(page):
     banner.get_by_role("button", name="Dismiss").click()
     expect(banner).to_be_hidden()
     page.unroute("**/api/wifi-operation?id=*")
+
+
+def check_quick_reset_name(page):
+    """The sidebar button starts the same reset from a page that is not Router and Wi-Fi."""
+    page.locator('[data-page-link="devices"]').click()
+    quick = sidebar_control(page, "#quick-reset-wifi-name")
+    expect(quick).to_be_enabled()
+    writes = []
+
+    def remember(request):
+        if request.url.endswith("/api/access-point/reset-name"):
+            writes.append(request.post_data_json)
+
+    page.on("request", remember)
+    ask = dict(title="Restore the Wi-Fi name?",
+               text=["Wi-Fi will restart", "Every device on it, including this one", "Wi-Fi menu"])
+    quick.click()
+    cancel_with_escape(page, quick, verb="Restore name", **ask)
+    assert not writes
+
+    seen = drop_connection(page, "**/api/wifi-operation?id=*", 2)
+    quick.click()
+    answer_confirm(page, "Restore name", **ask)
+    banner = page.locator("#wifi-change-banner")
+    # The restart state names the network to join and says the password stays.
+    expect(banner).to_contain_text("Reconnecting to the Pi", timeout=10000)
+    expect(banner).to_contain_text("Join “TestNet” in the Wi-Fi menu")
+    expect(banner).to_contain_text("password did not change")
+    # Both buttons wait while the Wi-Fi restarts, so a second reset cannot start.
+    expect(quick).to_be_disabled()
+    expect(page.locator("#reset-wifi-name")).to_be_disabled()
+    assert_no_raw_error(page)
+    assert_still_signed_in(page)
+    expect(banner).to_contain_text("Wi-Fi change finished", timeout=20000)
+    expect(banner).to_contain_text("restored")
+    expect(quick).to_be_enabled()
+    expect(page.locator("#reset-wifi-name")).to_be_enabled()
+    assert len(seen) >= 3
+    # One write only. The Pi answers it before the restart and the page then reads the result.
+    assert len(writes) == 1 and writes[0]["request_id"], writes
+    page.remove_listener("request", remember)
+    banner.get_by_role("button", name="Dismiss").click()
+    expect(banner).to_be_hidden()
+    page.unroute("**/api/wifi-operation?id=*")
+    close_controls(page)
 
 
 def check_access_point_form(page):
@@ -237,6 +283,7 @@ def run():
                 expect(page.locator("#admin-credential-state")).to_contain_text("Accepted")
                 page.locator("#remember-admin-token").check()
                 page.locator("#close-credentials").click()
+                check_quick_reset_name(page)
                 page.locator('[data-page-link="router"]').click()
                 check_reset_name(page)
                 check_access_point_form(page)

@@ -2082,8 +2082,13 @@
       element("reset-button").disabled = networkActionBusy || !helperConfigured;
       element("panic-button").disabled = !helperConfigured;
       element("scan-observations").disabled = !helperConfigured;
-      element("reset-wifi-name").disabled = !helperConfigured || wifiResetPending;
+      resetWifiButtons().forEach((each) => { each.disabled = !helperConfigured || wifiResetPending; });
       updateGeneralProfileControls();
+    }
+
+    // The Router and Wi-Fi page and the sidebar both offer Reset Wi-Fi name. They share one handler.
+    function resetWifiButtons() {
+      return [element("reset-wifi-name"), element("quick-reset-wifi-name")];
     }
 
     function updateGeneralProfileControls() {
@@ -7428,7 +7433,7 @@
       }
     });
 
-    element("reset-wifi-name").addEventListener("click", async (event) => {
+    async function resetWifiName(event) {
       if (wifiResetPending || wifiChangePending || !helperConfigured) return;
       const button = event.currentTarget;
       const status = element("wifi-reset-status");
@@ -7442,6 +7447,7 @@
         return;
       }
       status.textContent = "Restoring the Pi Wi-Fi name...";
+      resetWifiButtons().forEach((each) => { each.disabled = true; });
       const submittedDraft = formDrafts.get("access-point-form");
       const submittedSsid = element("access-point-ssid").value;
       const tokenRevision = adminTokenRevision;
@@ -7458,7 +7464,7 @@
           }
           status.textContent = operation ? operation.message : "Check the Pi Wi-Fi settings.";
           showMessage(status.textContent, operation && operation.state === "succeeded" ? "success" : "error");
-        });
+        }, brandInfo && brandInfo.default_ssid);
         if (tokenRevision === adminTokenRevision && outcome && outcome.gaveUp) status.textContent = "The Pi has not answered yet. See the note on this page.";
       } catch (error) {
         if (tokenRevision === adminTokenRevision) status.textContent = error.message;
@@ -7466,11 +7472,11 @@
       } finally {
         wifiResetPending = false;
         if (tokenRevision === adminTokenRevision) {
-          setButtonBusy(button, false);
-          button.disabled = !helperConfigured;
+          resetWifiButtons().forEach((each) => { setButtonBusy(each, false); each.disabled = !helperConfigured; });
         }
       }
-    });
+    }
+    resetWifiButtons().forEach((each) => each.addEventListener("click", resetWifiName));
 
     function renderRouterWifi() {
       const button = element("router-wifi-toggle");
