@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from jittersim.api.server import ControlServer
-from jittersim.config.models import Device, Impairment, Profile, Scenario, ScenarioStep
+from jittersim.config.models import Device, Impairment, Profile, Scenario, ScenarioStep, Timer
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClientError
@@ -99,15 +99,33 @@ class ApiRuntimeIntegrationTests(unittest.TestCase):
         self.start_timer()
         self.post("/api/reset", {})
         self.save_scenario()
-        timers = self.repository.list_active_timers(now=1_000)
-        self.assertEqual(len(timers), 1)
+        # The public active-only reader cannot detect a rejected start deleting or
+        # rewriting inactive/expired rows. Preserve the complete stored state.
+        self.repository.save_device(Device("past", "Past", "192.168.50.11", "normal"))
+        self.repository.save_device(Device("off", "Off", "192.168.50.12", "normal"))
+        self.repository.save_timer(Timer("expired", "past", "slow", 800, 900))
+        self.repository.save_timer(Timer("inactive", "off", "slow", 900, 1_100, enabled=False))
+
+        def timer_rows():
+            return tuple(tuple(row) for row in self.repository._connection.execute(
+                "SELECT id, device_id, profile_id, started_at, expires_at, enabled "
+                "FROM timers ORDER BY id"
+            ))
+
+        timers = timer_rows()
+        self.assertEqual(timers, (
+            ("expired", "past", "slow", 800, 900, 1),
+            ("inactive", "off", "slow", 900, 1_100, 0),
+            ("short", "alice", "slow", 1_000, 1_060, 1),
+        ))
 
         self.start_scenario(expected=409)
+        self.assertEqual(timer_rows(), timers)
         self.clock.return_value = 1_011
         self.post("/api/apply", {})
 
         self.assertEqual(self.repository.list_scenario_runs(), ())
-        self.assertEqual(self.repository.list_active_timers(now=1_000), timers)
+        self.assertEqual(timer_rows(), timers)
         self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 300)
 
     def test_scenario_requires_hardware_playback(self):
