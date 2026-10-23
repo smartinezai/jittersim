@@ -86,6 +86,7 @@ a month (for example `2026-09`) was written in that month.
 | [pi-triage-2026-10-16.md](pi-triage-2026-10-16.md) | A read-only look at the Pi on 16 October: what it ran, its health and the boot problems that PR 142 fixed |
 | [review-overengineering-backend.md](review-overengineering-backend.md) | A review of the backend for needless complexity with ranked removals. Items 8 and 9 were done in PR 147, item 4 partly in PR 177 |
 | [review-overengineering-frontend-tests.md](review-overengineering-frontend-tests.md) | The same for the dashboard, tests and CI tooling. Items 5 and 6 were done in PR 148 |
+| [implementation-plan-share-polled-readings-2026-10-23.md](implementation-plan-share-polled-readings-2026-10-23.md) | Tabs share one reading of traffic, uplink and helper health, and a quiet time quota stops writing every 5 s (audit proposals 4, 5, 6 and 9): windows, staleness, restart rule |
 | [implementation-plan-legacy-code-removal-2026-10-23.md](implementation-plan-legacy-code-removal-2026-10-23.md) | Item 4 of the backend review: which legacy and migration code was removed or kept, with the proof per candidate |
 | [soak-and-resource-audit-2026-10-18.md](soak-and-resource-audit-2026-10-18.md) | The soak harness (`tests/soak/`), leaks and SD-card writes over time, the memory and CPU budget of each service on a Pi 3B+, three fixes and the proposals left |
 
