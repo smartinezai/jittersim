@@ -43,7 +43,7 @@ DASHBOARD_WINDOW_SECONDS = 20
 DASHBOARD_PARTS = {"reference": 3, "shaped": 8}
 # The browser ends each part. The server stops sending this much later in any case.
 DASHBOARD_PART_GRACE_SECONDS = 2
-# Bytes per part: about 60 Mbit/s for the reference part's whole time and 50 for the main one.
+# Bytes per part: about 107 Mbit/s over the reference part's 5 s and 54 over the main part's 10 s.
 DASHBOARD_MAX_BYTES = 64 * 1024 * 1024
 DASHBOARD_MAX_ACTIVE = 1
 DASHBOARD_GAP_SECONDS = 15
@@ -61,7 +61,7 @@ VERDICT_LABELS = {
     "no-cap": "No speed limit set",
     "at-cap": "Matches the cap",
     "above-cap": "Faster than the cap: the limit did not hold",
-    "below-cap": "Slower than the cap: the internet or the device was the limit",
+    "below-cap": "Slower than the cap: the internet, the Pi's Wi-Fi or the device was the limit",
     "not-measured": "Not measured on the Pi",
     "service-rules": "Not judged: a service rule sends some traffic through another queue",
     "service-rules-unknown": "Not judged: the active service rules could not be confirmed",

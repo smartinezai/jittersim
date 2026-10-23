@@ -23,7 +23,8 @@ ROOT_HANDLE = "10:"
 # traffic (the Pi itself, ARP, DHCP and unassigned clients) on a fair queue.
 DEFAULT_CLASS = f"{ROOT_HANDLE}1"
 DASHBOARD_REPLY_MARK = 0x80000000
-# Wi-Fi maps DSCP 2 to best effort like unmarked traffic (its top three bits are 0).
+# mac80211 maps DSCP 2 to best effort like unmarked traffic (its top three bits are 0).
+# The dashboard also resets the socket priority to 0. Not yet checked on the Pi's own Wi-Fi.
 SPEED_TEST_DSCP = 2
 GENERAL_DOWNLOAD_MARK = 0x40000000
 # Forwarded downloads for everyone else carry this mark until the download hook

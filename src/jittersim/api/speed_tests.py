@@ -94,6 +94,10 @@ NOT_OWN_QUEUE = (
     "The dashboard test needs a profile of this device's own: the Pi's own traffic does not pass "
     "a shared queue, and with no profile nothing is shaped. Apply a profile to this device (one "
     "with nothing set measures without limits) or use a speed test site.")
+# Linux only. Other systems (a Mac running the tests) have no socket priority to reset.
+SO_PRIORITY = getattr(socket, "SO_PRIORITY", None)
+# How long a part waits for the other part's stream to end before it is refused.
+STREAM_WAIT_SECONDS = 1.0
 # Sent again and again, never changed: no file and no memory that grows with the test.
 FILLER = os.urandom(16 * 1024)
 # Ids are SQLite integers. A larger number cannot exist, so it is a bad request, not a fault.
@@ -760,7 +764,8 @@ class SpeedTestManager:
             # Uploads to the Pi itself never pass the upload queue on the uplink.
             summary["upload"] = {**unmeasured_direction(), "verdict": "not-tested"}
             summary["browser"] = run.browser or {"download_kbit": None, "reference_kbit": None}
-            if summary["download"].get("verdict") in CAP_VERDICTS and pi_limited(
+            # A rate above the cap is a real failure of the limit, so only these two are hidden.
+            if summary["download"].get("verdict") in ("at-cap", "below-cap") and pi_limited(
                     caps["download"], summary["browser"]["reference_kbit"]):
                 summary["download"]["verdict"] = "pi-limit"
         latency = dict(run.prober.summary())
@@ -856,19 +861,27 @@ class SpeedTestManager:
 
         if part not in DASHBOARD_PARTS:
             raise SpeedTestRequestError("part must be reference or shaped")
-        with self.lock:
-            run = self._running(run_id)
-            if run.provider != DASHBOARD_PROVIDER:
-                raise SpeedTestRequestError("This test does not use the dashboard", 409)
-            if peer != run.ipv4_address:
-                raise SpeedTestRequestError(NOT_THIS_DEVICE, 403)
-            if run.streaming or part in run.parts:
-                raise SpeedTestRequestError("This part of the test already ran", 409)
-            if getattr(self.server, "_resets_pending", 0):
-                raise SpeedTestRequestError("Reset or Panic is running.", 409)
-            run.parts.add(part)
-            run.streaming = True
-            return run, DASHBOARD_PARTS[part] + DASHBOARD_PART_GRACE_SECONDS
+        # The browser asks for the main part as soon as it ends the reference part. The server
+        # may not have seen that end yet, so it waits a moment instead of refusing.
+        wait_until = time.monotonic() + STREAM_WAIT_SECONDS
+        while True:
+            with self.lock:
+                run = self._running(run_id)
+                if run.provider != DASHBOARD_PROVIDER:
+                    raise SpeedTestRequestError("This test does not use the dashboard", 409)
+                if peer != run.ipv4_address:
+                    raise SpeedTestRequestError(NOT_THIS_DEVICE, 403)
+                if part in run.parts:
+                    raise SpeedTestRequestError("This part of the test already ran", 409)
+                if getattr(self.server, "_resets_pending", 0):
+                    raise SpeedTestRequestError("Reset or Panic is running.", 409)
+                if not run.streaming:
+                    run.parts.add(part)
+                    run.streaming = True
+                    return run, DASHBOARD_PARTS[part] + DASHBOARD_PART_GRACE_SECONDS
+            if time.monotonic() >= wait_until:
+                raise SpeedTestRequestError("The other part of this test is still running", 409)
+            time.sleep(0.05)
 
     def close_stream(self, run: SpeedTestRun) -> None:
         with self.lock:
@@ -1127,6 +1140,11 @@ def stream_download(handler) -> None:
         try:
             connection.setsockopt(socket.IPPROTO_IP, socket.IP_TOS,
                                   SPEED_TEST_DSCP << 2 if part == "shaped" else 0)
+            # Setting the TOS also sets the socket priority (2 for this TOS). The Pi's Wi-Fi
+            # driver can take that priority as the background class, so put it back to 0: both
+            # parts then use the same Wi-Fi class.
+            if SO_PRIORITY is not None:
+                connection.setsockopt(socket.SOL_SOCKET, SO_PRIORITY, 0)
         except OSError:
             refuse(503, "The Pi could not mark the test data. Nothing was sent.")
             return

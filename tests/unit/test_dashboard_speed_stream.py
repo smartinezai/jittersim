@@ -24,10 +24,11 @@ START = "/api/speed-tests/start"
 class FakeConnection:
     def __init__(self):
         self.tos = []
+        self.priority = []
         self.timeouts = []
 
     def setsockopt(self, level, name, value):
-        self.tos.append(value)
+        (self.tos if name == socket.IP_TOS else self.priority).append(value)
 
     def settimeout(self, seconds):
         self.timeouts.append(seconds)
@@ -87,7 +88,10 @@ class DashboardTestBase(ManagerBase):
         super().setUp()
         # Short parts so the tests stay fast. The limits are the same code.
         for patcher in (mock.patch.dict(routes.DASHBOARD_PARTS, {"reference": 0.2, "shaped": 0.2}),
-                        mock.patch.object(routes, "DASHBOARD_PART_GRACE_SECONDS", 0.1)):
+                        mock.patch.object(routes, "DASHBOARD_PART_GRACE_SECONDS", 0.1),
+                        mock.patch.object(routes, "STREAM_WAIT_SECONDS", 0.2),
+                        # Linux's value, so the reset is checked on any system.
+                        mock.patch.object(routes, "SO_PRIORITY", 12)):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -168,6 +172,8 @@ class StreamTests(DashboardTestBase):
         shaped = self.stream(self.run_id, "shaped")
         self.assertEqual(reference.connection.tos, [0, 0])
         self.assertEqual(shaped.connection.tos, [0x08, 0])
+        # The TOS sets the socket priority too: it goes back to 0 so both parts share a Wi-Fi class.
+        self.assertEqual(shaped.connection.priority, [0])
         for handler in (reference, shaped):
             self.assertEqual(handler.status, 200)
             self.assertTrue(handler.close_connection)
@@ -202,6 +208,18 @@ class StreamTests(DashboardTestBase):
         self.assertEqual(overlap["status"][0], 409)
         self.assertEqual(self.stream(self.run_id, "shaped").refused[0], 409)
         self.assertIn("already ran", self.stream(self.run_id, "shaped").refused[1])
+
+    def test_the_main_part_waits_briefly_for_the_reference_part_to_end(self) -> None:
+        run = self.manager.runs[self.run_id]
+        run.parts.add("reference")
+        run.streaming = True
+        threading.Timer(0.05, self.manager.close_stream, args=(run,)).start()
+        self.assertEqual(self.stream(self.run_id, "shaped").status, 200)
+        # A part that never ends is refused after the short wait.
+        run.parts.discard("shaped")
+        run.streaming = True
+        refused = self.stream(self.run_id, "shaped").refused
+        self.assertEqual(refused, (409, "The other part of this test is still running"))
 
     def test_a_site_run_has_no_stream(self) -> None:
         self.manager.cancel(self.run_id)
@@ -258,6 +276,19 @@ class ResultTests(DashboardTestBase):
         _, ended = self.finish(run["id"], {"reference_kbit": 260, "download_kbit": 240})
         self.assertEqual(ended["result"]["summary"]["download"]["verdict"], "pi-limit")
 
+    def test_a_rate_above_the_cap_is_still_reported_near_the_pis_speed(self) -> None:
+        read = self.helper.queue_stats
+
+        def twice_the_download():
+            return [{**entry, "bytes": entry["bytes"] * 2} if entry["direction"] == "download"
+                    else entry for entry in read()]
+
+        self.helper.queue_stats = twice_the_download
+        _, run = self.start_dashboard()
+        self.run_seconds(run["id"], 8)
+        _, ended = self.finish(run["id"], {"reference_kbit": 260, "download_kbit": 500})
+        self.assertEqual(ended["result"]["summary"]["download"]["verdict"], "above-cap")
+
     def test_browser_speeds_are_checked(self) -> None:
         _, run = self.start_dashboard()
         for browser in ({"download_kbit": -1}, {"download_kbit": "9"}, {"download_kbit": True},
@@ -287,6 +318,10 @@ class HttpTests(DashboardTestBase):
 
     def setUp(self) -> None:
         super().setUp()
+        # A real socket: only this system's own socket priority option is valid.
+        patcher = mock.patch.object(routes, "SO_PRIORITY", getattr(socket, "SO_PRIORITY", None))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.server.admin_token = "admin-token"
         # The test client connects from 127.0.0.1, so that is the device's address here. Without
         # a scheduler the saved device decides which queue is measured.

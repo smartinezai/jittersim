@@ -1030,6 +1030,8 @@ other. Limits:
 - One dashboard test runs at a time, a device can be tested again 15 seconds
   after its last test, and nothing starts while Panic or a router outage keeps
   profiles stopped.
+- The part through the profile counts toward the device's data limit like any
+  download (at most 64 MiB per test).
 
 **With a speed test site.** Use this for upload, for a shared queue, or from
 another computer. The Pi cannot run a speed test as the phone, so:

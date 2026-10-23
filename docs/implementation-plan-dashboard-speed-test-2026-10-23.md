@@ -56,9 +56,11 @@ device's queue. Only the dashboard process sends from port 8080 on the Pi, and i
 only on the socket of one speed test download, which is always closed afterwards
 (`Connection: close`), so no later dashboard answer can reuse it.
 
-DSCP 2 (TOS byte 0x08) was chosen because Wi-Fi maps it to best effort like unmarked traffic
-(the kernel takes the top three DSCP bits, which are 0), so the test is not given a different
-Wi-Fi priority than ordinary downloads. The pinned access table is not changed. While a MAC
+DSCP 2 (TOS byte 0x08) was chosen because mac80211 maps it to best effort like unmarked traffic
+(it takes the top three DSCP bits, which are 0). Setting the TOS also sets the socket priority
+to 2, which the Pi's own Wi-Fi driver (brcmfmac, not mac80211) may take as the background
+class, so the dashboard sets the priority back to 0 right after (review of PR 189, F1). Both
+parts should then use the same Wi-Fi class. This is not yet checked on a Pi. The pinned access table is not changed. While a MAC
 allow or deny list is on, its egress chain accepts the reply mark before it drops a denied
 device, so a speed test download to a denied device is dropped. Such a device cannot pass the
 dashboard checks to start a test anyway.
@@ -149,7 +151,8 @@ the `pi-limit` verdict uses it. Profiles that cap below the ceiling (the usual c
 | The Pi's CPU or Wi-Fi limits the speed | Likely at high caps | A cap looks "not reached" | The reference part and the `pi-limit` verdict. |
 | Streaming slows Panic | Low | Panic answer later | One stream at most, no lock or helper while sending, stream ends on Reset or Panic. |
 | A script with the token loops tests | Low | Pi busy | 1 at a time, 15 s gap, 64 MiB and at most 10 s per part, two parts per run. |
-| Kernel or driver ignores the DSCP rule | Low | Main part is unshaped | The Pi's own queue counters still show it: the cap verdict would read "above cap". The kernel datapath test checks the rule. |
+| Kernel or driver ignores the DSCP rule | Low | Main part is unshaped | The main part would bypass the device queue, so the Pi's counters would read "too little traffic" while the browser shows a high speed. The kernel datapath test checks the rule. |
+| Bytes still in the send buffer when a part ends by the byte cap | Low | They leave unshaped after the TOS is reset, so the browser's main-part number reads a little high | Only when a cap above about 54 Mbit/s reaches the 64 MiB limit. The Pi's queue numbers stay correct. In the usual case the browser ends the part and the buffer is dropped (review F5). |
 
 ## Tests
 
