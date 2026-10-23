@@ -301,7 +301,7 @@ class Lab:
                 f"--log-facility={self.directory}/router-dnsmasq.log"]
         if self.router_authoritative:
             argv.append("--dhcp-authoritative")
-        self.router_dnsmasq = self.spawn(ROUTER, argv)
+        self.spawn(ROUTER, argv)
         self._wait_port(ROUTER, "192.168.0.1", 53)
 
     def router_fault(self, rule=None):

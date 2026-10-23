@@ -19,7 +19,7 @@ What has happened since:
   and 121 are open. The Panic-pinned `helper.py` changed again in PR 138, so its function sizes
   moved.
 
-## Status on 23 October 2026 (main `03fe31d8`)
+## Status on 23 October 2026 (measured against main `03fe31d8`)
 
 - Item 8 again: the only dead Python left was `clear_everyone_exceptions` (`storage.py`), `_HOST_LABEL`
   (`mdnsname.py`) and two unused imports in `api/server.py` (`secrets`, `normalize_mac_address`).
@@ -31,9 +31,10 @@ What has happened since:
   `LABEL_KINDS`, `FAILURE`, `PACKET_HOST`.
 - Item 11 is done: `UpdateBudget(seconds, message)` replaces `NameBudget`, with the same time and the
   same message for the dashboard name command.
-- Item 7 stays open on purpose. Outside the pinned and standalone files only `adblocking.atomic_write`
-  is left. It sets the group before it writes the data, so merging it into the pinned
-  `access.atomic_write` would change behaviour.
+- Item 7 stays open on purpose: no shared helper exists. The in-package writers (`adblocking`,
+  `wifi_follow._write_json`, `dashboard_access._save`, `remote_client`, `release_uploads`) differ in
+  owner, mode or directory-handle handling, so merging them into the pinned `access.atomic_write`
+  would change behaviour.
 
 ## Verdict (5 lines)
 

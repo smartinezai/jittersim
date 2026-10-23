@@ -131,7 +131,7 @@ class DashboardNameCommandTests(unittest.TestCase):
         code, _, err = self.run_cli("set", "bench.local", "--yes")
 
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.budget.deadline - self.budget.started, 120)
+        self.assertAlmostEqual(self.budget.deadline - self.budget.started, 120, places=3)
         self.budget.deadline = self.budget.started
         with self.assertRaisesRegex(updates.UpdateError, "name change exceeded its time allowance"):
             self.budget.check()
