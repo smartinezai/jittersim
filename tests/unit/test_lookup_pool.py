@@ -55,7 +55,7 @@ def test_completed_and_failed_work_release_capacity():
     assert pool.submit(lambda: "next").result(timeout=2) == "next"
 
 
-@pytest.mark.parametrize("layer", ["pool", "website", "service", "nested-service"])
+@pytest.mark.parametrize("layer", ["pool", "website", "service", "nested-service", "proxy"])
 def test_stuck_lookup_does_not_delay_interpreter_exit(layer):
     # A thread assertion cannot catch concurrent.futures' interpreter-exit join.
     # Every fake resolver blocks forever, without DNS or other network access.
@@ -86,6 +86,33 @@ elif layer == "website":
             assert website.resolve_domains(domains=("stuck.invalid",)) == ()
         assert started.is_set()
         assert session.timed_out == ["stuck.invalid"]
+elif layer == "proxy":
+    import socket
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+    from jittersim.networking import browser_proxy
+
+    with TemporaryDirectory() as directory, \
+            patch.object(browser_proxy, "RESOLVE_TIMEOUT_SECONDS", 0.1):
+        proxy = browser_proxy.BrowserProxyServer(
+            ("127.0.0.1", 0), active_plan_path=Path(directory) / "active.json",
+            client_network="127.0.0.0/8", resolve_addresses=stuck,
+            mark_socket=lambda *_: None,
+        )
+        thread = threading.Thread(
+            target=proxy.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True,
+        )
+        thread.start()
+        try:
+            with socket.create_connection(proxy.server_address, timeout=2) as client:
+                client.sendall(b"CONNECT stuck.invalid:443 HTTP/1.1\r\n\r\n")
+                assert b"503 Service Unavailable" in client.recv(4096)
+            assert started.is_set()
+        finally:
+            proxy.shutdown()
+            proxy.server_close()
+            thread.join(timeout=2)
+            assert not thread.is_alive()
 else:
     class Helper:
         def service_addresses(self, answers):

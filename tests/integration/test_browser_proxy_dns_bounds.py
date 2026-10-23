@@ -82,11 +82,10 @@ def proxies(tmp_path, monkeypatch):
         resolver.release.set()
         for proxy, _ in servers:
             close(proxy)
-        executors = {pool._executor}
-        for proxy, _ in servers:
-            executors.add(getattr(proxy.resolver, "_executor", proxy.resolver))
-        for executor in executors:
-            executor.shutdown(wait=True, cancel_futures=True)
+        # Process-lifetime daemon pools have no executor exit/join hook.
+        # Release the fake resolver and wait for actual work to drain.
+        for candidate in {pool, *(proxy.resolver for proxy, _ in servers)}:
+            wait_until(lambda: not candidate._unfinished)
 
 
 def connect(proxy, index=0):
@@ -104,8 +103,7 @@ def batch(proxy, offset=0, size=16):
 
 
 def queued(proxy):
-    executor = getattr(proxy.resolver, "_executor", proxy.resolver)
-    return executor._work_queue.qsize()
+    return proxy.resolver._jobs.qsize()
 
 
 def test_timed_out_connections_do_not_grow_unfinished_dns_work(proxies):
