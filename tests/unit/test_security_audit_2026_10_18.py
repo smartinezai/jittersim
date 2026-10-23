@@ -80,10 +80,14 @@ class PublicHealthReuseTests(unittest.TestCase):
             self.get()
         self.assertEqual(self.helper.pings, 2)
 
-    def test_a_request_with_the_token_always_asks_the_helper(self) -> None:
+    def test_requests_with_the_token_share_a_ping_for_the_dashboard_time(self) -> None:
+        # The dashboard's own health poll: every open tab asks every 5 s.
         for _ in range(3):
             self.get("Bearer admin-token")
-        self.assertEqual(self.helper.pings, 3)
+        self.assertEqual(self.helper.pings, 1)
+        with patch.object(server_module, "DASHBOARD_HEALTH_REUSE_SECONDS", 0.0):
+            self.get("Bearer admin-token")
+        self.assertEqual(self.helper.pings, 2)
 
     def test_a_wrong_token_is_treated_as_no_token(self) -> None:
         for _ in range(3):

@@ -9,6 +9,8 @@ the hand-written Unreleased part short.
 
 ## Unreleased
 
+- Open dashboard tabs share one reading of live traffic, the Ethernet details and the helper check, and a quiet time quota no longer writes to the SD card every 5 seconds.
+
 ### JitterSim 0.2.0
 
 The first signed JitterSim release adds safer updates with a recovery copy and health check, per-device profiles, protected-device dashboard access and router Wi-Fi name following. It also improves accessibility and reliability.
