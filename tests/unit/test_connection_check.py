@@ -443,6 +443,20 @@ def test_a_profile_that_sets_only_upload_values_is_not_called_a_match():
     # A download speed cap keeps its own guidance.
     capped = summary(records(100), impairment=setting(bandwidth_kbit=250), upload_set=True)
     assert capped["verdict"] == "inconclusive"
+
+
+def test_upload_only_does_not_hide_a_real_download_difference():
+    # The profile sets nothing the probes pass, but the link itself loses every second ping.
+    # That is a real difference and must show, with the upload note first.
+    lossy = summary(records(100, lost=range(0, 100, 2)), upload_set=True)
+    assert metric(lossy, "loss")["status"] == "more"
+    assert lossy["verdict"] == "more"
+    assert lossy["notes"][0] == check.UPLOAD_NOTE
+    assert lossy["notes"].count(check.UPLOAD_NOTE) == 1
+    # The same link without an upload value gets the same verdict.
+    assert summary(records(100, lost=range(0, 100, 2)))["verdict"] == "more"
+    # A healthy link keeps `upload-only`.
+    assert summary(records(100), upload_set=True)["verdict"] == "upload-only"
     # A withheld verdict and a baseline come first.
     assert summary(records(100), upload_set=True, service_rules=True)["verdict"] == (
         "service-rules")
@@ -551,7 +565,7 @@ def test_every_verdict_and_status_has_a_label():
     for status in ("matches", "less", "more", "extra", "borderline", "inconclusive",
                    "not-judged"):
         assert status in check.STATUS_LABELS
-    for name in check.METRIC_IDS:
+    for name in check.JUDGED_IDS:
         assert name in check.METRIC_LABELS
 
 

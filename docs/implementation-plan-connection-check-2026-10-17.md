@@ -144,7 +144,7 @@ The overall verdict combines them:
 | `differs` | some `less` and some `more` |
 | `borderline` | no `less` or `more`, but at least one `borderline` (close, run again with more probes) |
 | `inconclusive` | nothing could be judged because the probes cannot tell the set values from a healthy link. Says how many probes are needed |
-| `upload-only` | the profile sets nothing on the download side but sets upload values. The probes pass no upload queue, so a healthy link says nothing about the profile: no verdict, the upload note comes first |
+| `upload-only` | the profile sets nothing on the download side but sets upload values. The probes pass no upload queue, so a healthy link says nothing about the profile: no verdict, the upload note comes first. A real `less` or `more` on the download side (a link that loses pings) still shows as that verdict, with the upload note first |
 | `baseline` | no profile applies, the device is protected, or the network is reset. The numbers are the plain Wi-Fi path |
 | `not-comparable` | the device is covered by Same as everyone or Everyone else: the Pi's probes are not shaped. Reads "unshaped Wi-Fi round trip, not comparable with the profile" |
 | `service-rules` | a service rule, service list or active quota applies to the device (or could not be confirmed): verdict withheld like in PR 121 |
@@ -155,7 +155,7 @@ The overall verdict combines them:
 | `unverified` | the final helper reads failed for a device with its own profile, so a change cannot be ruled out |
 
 The order of the checks is: `changed`, `fault`, `unverified`, probes unavailable, `out-of-range`,
-`no-answer`, `not-comparable`, `baseline`, service rules, `upload-only`, then the combination
+`no-answer`, `not-comparable`, `baseline`, service rules, `upload-only` (only when no number is `less` or `more`), then the combination
 above. A change
 or a fault comes first for every kind of run, so a baseline is never shown for a device that
 left the Wi-Fi or got a profile during the burst.

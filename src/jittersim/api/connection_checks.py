@@ -31,13 +31,11 @@ from jittersim.connection_check import (
     CHECK_PROVIDER,
     DEFAULT_PROBES,
     MAX_PROBES,
-    METRIC_LABELS,
     MIN_PROBES,
     PAYLOAD_BYTES,
     PROBE_INTERVAL_SECONDS,
     SERVICE_RULES_CHECK_NOTE,
     SERVICE_RULES_UNKNOWN_CHECK_NOTE,
-    STATUS_LABELS,
     VERDICT_LABELS,
     build_summary,
     check_export_csv,
@@ -503,8 +501,12 @@ def _read(server, path, query):
     if path == "/api/connection-checks":
         mac_address = _query_mac(query)
         speed = manager.speed
-        runs = [run.payload(speed.monotonic()) for run in speed.active("check")
-                if mac_address is None or run.mac_address == mac_address]
+        # A check ends under this lock (its state, reason and result change together), so the
+        # payloads are built under it, like the speed test list. Only the manager lock is taken
+        # here: the repository and the scheduler are not, so the lock order of `_end` holds.
+        with speed.lock:
+            runs = [run.payload(speed.monotonic()) for run in speed.active("check")
+                    if mac_address is None or run.mac_address == mac_address]
         return response({
             "limits": {
                 "default_probes": DEFAULT_PROBES,
@@ -513,10 +515,7 @@ def _read(server, path, query):
                 "probes_per_second": round(1 / PROBE_INTERVAL_SECONDS),
                 "max_active": MAX_ACTIVE_RUNS,
             },
-            "metric_labels": METRIC_LABELS,
-            "status_labels": STATUS_LABELS,
             "verdict_labels": VERDICT_LABELS,
-            "source_labels": SOURCE_LABELS,
             "active": runs,
             "results": store.list(mac_address, limit=50 if mac_address else 200),
         })

@@ -838,6 +838,22 @@ class RouteTests(CheckBase):
         checks = json.loads(self.get("/api/connection-checks")[2])
         self.assertEqual([item["id"] for item in checks["active"]], [check_run["id"]])
 
+    def test_the_active_list_builds_each_run_under_the_manager_lock_only(self) -> None:
+        # A check ends under the manager lock, so the page's copy of a run is made under it too.
+        # The repository lock is not held then: `_end` takes the manager lock first and the
+        # repository after it, and a read that took them the other way round could deadlock.
+        self.start()
+        held = []
+        payload = checks_module.ConnectionCheckRun.payload
+
+        def watching(run, now):
+            held.append((self.manager.lock._is_owned(), self.repository._lock._is_owned()))
+            return payload(run, now)
+
+        with mock.patch.object(checks_module.ConnectionCheckRun, "payload", watching):
+            self.assertEqual(self.get("/api/connection-checks", "mac=" + PHONE)[0], 200)
+        self.assertEqual(held, [(True, False)])
+
     def test_results_export_and_delete_use_their_own_table(self) -> None:
         _, run = self.start()
         result = self.finish(run["id"])["result"]

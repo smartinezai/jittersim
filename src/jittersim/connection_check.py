@@ -70,7 +70,6 @@ MIN_JUDGED_BANDWIDTH_KBIT = 2 * PROBE_DEMAND_KBIT
 # The saved rows share the speed test table layout. The provider column names the probe.
 CHECK_PROVIDER = "icmp-echo"
 
-METRIC_IDS = ("loss", "delay", "jitter", "duplicate", "reorder", "corrupt", "cap")
 # The numbers that can give a verdict. Corruption and the cap never do.
 JUDGED_IDS = ("loss", "delay", "jitter", "duplicate", "reorder")
 METRIC_LABELS = {
@@ -643,26 +642,25 @@ def _delay_row(burst: _Burst) -> Dict[str, Any]:
                 "The round trip is in the range the set delay gives.")
 
 
-def _jitter_row(burst: _Burst) -> Tuple[Dict[str, Any], Optional[float]]:
+def _jitter_row(burst: _Burst) -> Dict[str, Any]:
     stats, jitter = burst.stats, burst.jitter
     measured = ("-" if stats["jitter_ms"] is None else
                 f"{_ms_text(stats['jitter_ms'])} average change between two probes")
     set_text = f"{int(jitter)} ms" if jitter else "Not set"
     if not burst.judging:
-        return burst.unjudged("jitter", set_text, measured), None
+        return burst.unjudged("jitter", set_text, measured)
     if burst.reorder:
         return _row("jitter", set_text, measured, "not-judged",
-                    "Not judged: the profile reorders packets, so some probes skip the delay."
-                    ), None
+                    "Not judged: the profile reorders packets, so some probes skip the delay.")
     if not jitter:
-        return _row("jitter", set_text, measured, "not-judged", "No jitter is set."), None
+        return _row("jitter", set_text, measured, "not-judged", "No jitter is set.")
     if burst.duplicate or burst.corrupt:
         return _row("jitter", set_text, measured, "not-judged",
                     "Not judged: duplication or corruption changes which answer comes first, "
-                    "so the jitter cannot be compared."), None
+                    "so the jitter cannot be compared.")
     if burst.received < MIN_REPLIES_FOR_JITTER or stats["jitter_pairs"] < MIN_PAIRS_FOR_JITTER:
         return _row("jitter", set_text, measured, "not-judged",
-                    "Too few answers in a row to judge the jitter."), None
+                    "Too few answers in a row to judge the jitter.")
     expected = simulated_timing(burst.delay, jitter, 0.0, burst.loss)["jitter_ms"]
     about = f" (about {_ms_text(expected)})"
     low = JITTER_LOW_FACTOR * expected
@@ -678,7 +676,7 @@ def _jitter_row(burst: _Burst) -> Tuple[Dict[str, Any], Optional[float]]:
     else:
         status = "matches"
         sentence = "The round trip varies as much as the profile's jitter gives" + about + "."
-    return _row("jitter", set_text, measured, status, sentence), expected
+    return _row("jitter", set_text, measured, status, sentence)
 
 
 def _duplicates_are_predictable(burst: _Burst) -> bool:
@@ -762,7 +760,8 @@ def build_summary(
     `none`. `impairment` is the applied download impairment of the device's own queue. It is
     only given for a device with its own profile that is not protected: nothing else is shaped.
     `upload_set` says that the upload side of that queue sets something: a profile that sets
-    nothing on the download side then gets `upload-only`, never `matches`.
+    nothing on the download side then gets `upload-only`, never `matches`. A real difference on
+    the download side (more loss or delay than nothing) still gets its own verdict.
     `service_rules` is True or None when a service rule applies or could not be confirmed, which
     withholds the verdict for a shaped device. `changed_reason` and `unverified_reason` say that
     the profile changed during the burst or that the end state could not be read: no verdict.
@@ -793,7 +792,7 @@ def build_summary(
     burst = _Burst(stats, setting, reason=reason, burst_packets=burst_packets)
     loss_row, loss_need = _loss_row(burst)
     delay_row = _delay_row(burst)
-    jitter_row, expected_jitter = _jitter_row(burst)
+    jitter_row = _jitter_row(burst)
     duplicate_row, duplicate_need = _duplicate_row(burst)
     rows = [loss_row, delay_row, jitter_row, duplicate_row, _reorder_row(burst)]
     if burst.corrupt:
@@ -811,11 +810,12 @@ def build_summary(
         ("loss", burst.loss or burst.corrupt), ("delay", burst.delay), ("jitter", burst.jitter),
         ("duplicate", burst.duplicate), ("reorder", burst.reorder)) if value}
     confirmed = [row["status"] for row in rows if row["id"] in set_ids]
+    upload_only = upload_set and not set_ids and not burst.bandwidth
     verdict = _overall(
         statuses, confirmed, received=stats["received"], sent=stats["sent"], source=source,
         shaped=shaped, protected=protected, withheld=withheld, probe_status=probe_status,
         loss_status=loss_row["status"], only_cap=bool(burst.bandwidth) and not set_ids,
-        upload_only=upload_set and not set_ids and not burst.bandwidth)
+        upload_only=upload_only)
     notes = list(notes) + burst.notes
     if verdict == "no-answer":
         notes.insert(0, NO_ANSWER_NOTE)
@@ -825,7 +825,7 @@ def build_summary(
         notes.insert(0, BASELINE_NOTE)
     elif verdict in ("changed", "fault", "unverified", "out-of-range"):
         notes.insert(0, reason or "")
-    elif verdict == "upload-only":
+    elif verdict == "upload-only" or (upload_only and verdict in ("less", "more", "differs")):
         notes.insert(0, UPLOAD_NOTE)
     if verdict == "inconclusive" and burst.bandwidth and not set_ids:
         notes.append("This profile sets only a speed cap, which a burst of probes cannot "
@@ -856,7 +856,6 @@ def build_summary(
             "rtt_min_ms", "rtt_mean_ms", "rtt_median_ms", "rtt_p95_ms", "rtt_max_ms",
             "jitter_ms")},
         "expected": _impairment_text(setting) if shaped else None,
-        "expected_jitter_ms": _round(expected_jitter, 2),
         "burst_packets": burst_packets,
         "probes_needed": max(wanted) if wanted else None,
         "probes_needed_over_max": out_of_reach,
@@ -898,11 +897,12 @@ def _overall(statuses: Sequence[str], confirmed: Sequence[str], *, received: int
         return "baseline"
     if withheld is not None:
         return withheld
-    if upload_only:
-        # The download side sets nothing, so a healthy link would "match" a profile the probes
-        # never pass. Say that it cannot be judged.
-        return "upload-only"
     less, more = "less" in statuses, "more" in statuses
+    if upload_only and not (less or more):
+        # The download side sets nothing, so a healthy link would "match" a profile the probes
+        # never pass. Say that it cannot be judged. A real difference on the download side (a
+        # lossy or slow link) still shows as its own verdict, with the upload note first.
+        return "upload-only"
     if less and more:
         return "differs"
     if more:
