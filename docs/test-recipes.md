@@ -15,10 +15,14 @@ recipes were not run on a Pi for this page.
 2. On **Devices**, choose **Check for devices**. The phone shows under
    **Connected clients**.
 3. Make the profile of the recipe on **Profiles**. Pick a preset under **Start
-   from a preset** or fill the fields, then choose **Save profile**.
+   from a preset** or fill the fields. Give it a **Profile ID** (lowercase letters,
+   digits, hyphens) and a **Name**, then choose **Save profile**. Also save a
+   profile named `No limits` with every field at 0 and **Bandwidth** empty. It is
+   the phone's normal profile in the timer and scenario recipes.
 4. Beside the phone choose the profile and press **Assign profile** (the button
    reads **Apply profile** once the phone is saved). If the dashboard asks you
    to choose **Start** first, do that. After **Panic** you always need **Start**.
+   A scenario needs **Start** first even after **Reset network**.
 5. **Saved devices** shows the phone as Normal, Degraded or Offline.
    **Diagnostics** then **Impact** shows the loss and the speed cap that really
    happened (see [Impact check](user-guide.md#impact-check)).
@@ -38,7 +42,7 @@ network (SSH never works from the test Wi-Fi). See
   the phone.
 - **Do:** quit the app completely and launch it.
 - **Watch:** the first screen. Does it show an offline message or its saved
-  content soon, or spin for ever? How long until it gives up? Then press
+  content soon, or spin forever? How long until it gives up? Then press
   **Reset network** with the app still open and watch whether it recovers without
   a relaunch.
 - **Pass:** a usable offline state within your time limit, no crash, and a
@@ -46,24 +50,24 @@ network (SSH never works from the test Wi-Fi). See
 - **Note:** the phone stays joined to the Wi-Fi. The Pi drops every packet, so the
   app sees a network that is up but silent, not the "no network" state of
   airplane mode. Use airplane mode on the phone when you need that case.
-- **Stop:** **Reset network**, or **Panic**.
 
 ## Packet loss in the middle of an upload
 
-- **Use:** two profiles. `No limits` has nothing set and is the phone's normal
-  profile (assign it first so the phone is a saved device). `Upload loss` has
-  **Loss (%)** 20 and **Loss bursts (packets)** 3 under **Upload** and nothing
-  under **Download**.
+- **Use:** `No limits` as the phone's normal profile (assign it first so the phone
+  is a saved device) and a profile `Upload loss` with **Loss (%)** 20 and **Loss
+  bursts (packets)** 3 under **Upload** and nothing under **Download**.
 - **Do:** on **Schedules and limits** open **Run a profile timer**. Pick the phone,
   `Upload loss` and a **Duration (minutes)** of 1 or more. Start a large upload
-  in the app, then press **Start timer**. The loss starts at once and the phone
-  goes back to `No limits` when the timer ends.
+  in the app, then press **Start timer**. The loss starts at once when the network
+  is started and the phone goes back to `No limits` when the timer ends.
 - **Watch:** the progress bar, the retries and the end of the loss. Does the upload
   continue where it stopped or start again? **Impact** shows `set 20%` with the
   actual loss for the upload.
 - **Pass:** the upload finishes after the loss ends, with no duplicate or damaged
   file, or the app stops with a clear message and offers a retry.
-- **Stop:** the timer ends by itself. To end it sooner press **Reset network**.
+- **Stop:** the timer ends by itself. To end it sooner press **Cancel** beside the
+  timer under **Run a profile timer**. **Reset network** only pauses the loss: it
+  returns at the next **Start** while the timer runs.
 
 ## Wi-Fi drop and rejoin: not available yet
 
@@ -81,7 +85,6 @@ Wi-Fi connection needs a supported access point and Pi hardware testing (see the
 - **A real rejoin.** Switch Wi-Fi off and on in the phone's settings while a profile
   runs. If the phone comes back with a new private Wi-Fi address see
   [Address changes](user-guide.md#address-changes) so its profile follows it.
-- **Stop:** **Reset network**, or **Panic**.
 
 ## Slow start
 
@@ -96,7 +99,8 @@ Wi-Fi connection needs a supported access point and Pi hardware testing (see the
   loading when the speed comes back without a relaunch.
 - **Pass:** it shows progress instead of a false "no connection" error and loads
   fully once the connection is fast again.
-- **Stop:** the timer ends by itself. **Reset network** ends it sooner.
+- **Stop:** the timer ends by itself. **Cancel** beside the timer or **Stop** beside a
+  running scenario ends it sooner. **Reset network** only pauses it.
 
 ## High latency
 
@@ -112,7 +116,6 @@ Wi-Fi connection needs a supported access point and Pi hardware testing (see the
   delay. The **Test speed** window pings the phone and its round trip includes the
   profile's download delay (see [Device speed test](user-guide.md#device-speed-test)).
 - **Pass:** every action completes once, with no duplicate submit.
-- **Stop:** **Reset network**, or **Panic**.
 
 ## A shared limit
 
