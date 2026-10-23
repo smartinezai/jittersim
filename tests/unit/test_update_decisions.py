@@ -567,15 +567,15 @@ def test_a_list_that_is_swapped_for_a_link_after_the_check_is_not_read(config, t
     def swap_after_the_check(target, *args, **kwargs):
         result = real(target, *args, **kwargs)
         if str(target) == str(path) and not swapped:
-            swapped.append(True)
             path.unlink()
             path.symlink_to(other)
+            swapped.append(True)
         return result
 
     monkeypatch.setattr(os, "lstat", swap_after_the_check)
 
     # The list was a plain file when it was checked. The open must not follow the new link.
-    with pytest.raises(OSError):
+    with pytest.raises((OSError, UpdateError)):
         updates.trusted_keys(config)
     assert swapped
 

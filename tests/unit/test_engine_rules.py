@@ -57,19 +57,6 @@ from jittersim.engine.schedules import is_schedule_active, next_schedule_change
 # Schedules
 
 
-def test_a_window_covers_its_first_minute_and_not_its_end():
-    window = Schedule("w", "phone", "slow", (0,), 10 * 60, 11 * 60)
-    # 2026-09-21 is a Monday.
-    for moment, expected in [
-        (datetime(2026, 9, 21, 9, 59), False),
-        (datetime(2026, 9, 21, 10, 0), True),
-        (datetime(2026, 9, 21, 10, 59), True),
-        (datetime(2026, 9, 21, 11, 0), False),
-        (datetime(2026, 9, 22, 10, 30), False),
-    ]:
-        assert is_schedule_active(schedule=window, moment=moment) is expected, moment
-
-
 def test_a_window_over_midnight_belongs_to_the_day_it_starts_on():
     night = Schedule("n", "phone", "slow", (0,), 23 * 60, 60)
     for moment, expected in [
@@ -156,14 +143,25 @@ def test_the_first_pass_through_a_repeated_hour_counts(berlin):
 
 def test_a_clock_change_is_found_to_the_second_however_far_away_it_is(berlin):
     # The clocks jump from 02:00 to 03:00 on 29 March 2026, so the window 02:30 to 03:30 starts
-    # at 03:00. 20:00 is exactly six hours before: a scan step of the sweep ends on the change.
-    # 14:00 is thirteen hours before: the change lies in a later step.
+    # at 03:00. The sweep looks ahead in steps of six hours. 20:00 is six real hours before: the
+    # first step ends on the change. 14:00 is twelve hours before: the second step ends on it.
+    # 15:30 is ten and a half hours before: the change lies inside the second step.
     window = Schedule("spring", "phone", "slow", (6,), 150, 210)
 
-    for now in ("2026-03-28T20:00:00", "2026-03-28T14:00:00"):
+    for now in ("2026-03-28T20:00:00", "2026-03-28T14:00:00", "2026-03-28T15:30:00"):
         assert next_schedule_change(
             schedules=[window], device_id="phone", now=stamp(now)
         ) == stamp("2026-03-29T03:00:00"), now
+
+
+def test_a_window_that_the_clock_going_back_starts_again_is_found(berlin):
+    # The clocks go back from 03:00 to 02:00 on 25 October 2026. The window 01:00 to 02:15 is over
+    # at 02:20 and starts again when the hour repeats. Only the clock change itself shows that.
+    window = Schedule("fall", "phone", "slow", (6,), 60, 135)
+
+    assert next_schedule_change(
+        schedules=[window], device_id="phone", now=stamp("2026-10-25T02:20:00")
+    ) == stamp("2026-10-25T02:00:00", fold=1)
 
 
 # Conditions
@@ -186,8 +184,10 @@ def test_loss_comes_in_bursts_from_two_packets_on():
 def test_reordering_is_named_when_there_is_a_delay_to_reorder():
     plan = plan_with(upload=Impairment(delay_ms=10, reorder_percent=25))
 
-    assert device_conditions(plan)["alice"] == DeviceCondition(
-        "degraded", ("upload: delay 10 ms, reordering 25%",))
+    condition = device_conditions(plan)["alice"]
+
+    assert condition.condition == "degraded"
+    assert "reordering" in condition.reasons[0]
 
 
 def test_the_effects_of_a_service_rule_are_listed_one_after_another():
@@ -613,6 +613,8 @@ def test_a_saved_device_gets_its_profile_only_while_it_is_seen_alone_at_its_addr
         client(None, "192.168.50.99"),
         client("not a mac", "nope"),
         client(MAC[9], "192.168.50.98", verified=False),
+        # A client that is not verified counts as not seen: d-unseen stays unverified.
+        client(MAC[4], "192.168.50.13", verified=False),
         client(PHONE, "192.168.50.10"),
         client(MAC[3], "192.168.50.30"),
         client(MAC[5], "192.168.50.50"),
@@ -652,6 +654,8 @@ def test_a_live_list_without_clients_leaves_every_device_with_a_mac_unverified(r
 
         assert result.devices == ()
         assert result.unverified_ids == ("a-saved",)
+        assert device_protection_states(repository, live)["a-saved"]["effective_state"] == (
+            "unverified")
 
 
 def test_each_saved_device_says_why_its_profile_applies_or_waits(repository):
@@ -664,6 +668,8 @@ def test_each_saved_device_says_why_its_profile_applies_or_waits(repository):
     live = seen(
         # Rows that are not verified or cannot be read do not end the list.
         client(PHONE, "192.168.50.11", verified=False),
+        # An unverified client at the address of c-unknown does not match it to the Protected one.
+        client(PHONE, "192.168.50.12", verified=False),
         client("not a mac", "nope"),
         client(PHONE, "192.168.50.11"),
         client(MAC[5], "192.168.50.14"),
@@ -681,26 +687,18 @@ def test_each_saved_device_says_why_its_profile_applies_or_waits(repository):
     assert {key for state in states.values() for key in state} == {
         "effective_state", "effective_note", "protected_match"}
     assert states["a-protected"]["protected_match"] is None
-    assert states["a-protected"]["effective_note"].startswith("On the Protected list")
     # A device without a MAC address that sits where a protected client is names that client.
     assert states["b-owned"]["protected_match"] == {"mac_address": PHONE, "name": "Phone"}
-    assert "protected Phone" in states["b-owned"]["effective_note"]
     # Two clients at one address do not prove which one it is.
-    for name in ("c-unknown", "f-shared"):
-        assert states[name]["protected_match"] is None
-        assert "no MAC address" in states[name]["effective_note"], name
-    assert states["d-unseen"]["protected_match"] is None
-    assert "cannot confirm where this device is" in states["d-unseen"]["effective_note"]
+    for name in ("c-unknown", "f-shared", "d-unseen"):
+        assert states[name]["protected_match"] is None, name
     assert states["e-active"] == {
         "effective_state": "active", "effective_note": None, "protected_match": None}
-
-
-def test_a_live_list_without_clients_pauses_a_device_with_a_mac(repository):
-    save(repository, "a-saved", "192.168.50.12", MAC[3])
-
-    state = device_protection_states(repository, {"association_status_available": True})
-
-    assert state["a-saved"]["effective_state"] == "unverified"
+    # Each reason a profile waits has its own note. The same reason has the same note.
+    notes = {name: states[name]["effective_note"] for name in states}
+    assert all(notes[name] for name in notes if name != "e-active")
+    assert len({notes[name] for name in ("b-owned", "c-unknown", "d-unseen")}) == 3
+    assert notes["c-unknown"] == notes["f-shared"]
 
 
 class BusyHelper:

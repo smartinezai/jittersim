@@ -69,12 +69,13 @@ dependencies. `scripts/mutation-test.py setup` makes it.
 | `config/storage.py (row conversion and migrations)` (rerun, after PR 149) | 254 | 61.8 / 78.5 | 86.2 / 95.6 | 10 logic, 25 sql |
 | `updates.py (version, manifest, signature, archive, keys)` | 577 | 75.0 / 80.9 | 96.2 / 96.2 (94.8 before the addendum) | 22 logic, all equivalent |
 | `updates.py (release floor, trust file)` | 37 | 67.6 / 73.5 | 100.0 / 100.0 | none |
-| `engine/schedules, progression, randomizer, eligibility, conditions, scenarios` (whole run, see the addendum) | 1396 | 79.2 / 79.2 | 96.5 / 96.5 | 49 logic: 14 note wording, 35 equivalent |
+| `engine/schedules, progression, randomizer, eligibility, conditions, scenarios` (whole run, see the addendum) | 1396 | 79.2 / 79.2 | 96.2 / 96.2 | 53 logic: 18 note wording, 35 equivalent |
 
 The five rows marked "rerun" were measured again on this branch after it was merged with main
 (0b9fe90f, which contains PR 149). "Before" is the first run on 8c3f8171 and the mutant counts
 differ a little because PR 149 changed those files. The other rows (`config/models.py`,
-`networking/deadlines.py`, `updates.py`, the engine rules) are from the first run. PR 149 did not
+`networking/deadlines.py`, the first `updates.py` rows) are from the first run. The engine rules
+row and the version, manifest and signature row of `updates.py` are from the addendum below. PR 149 did not
 change those files. Main later changed `updates.py` for the signed update notes, the status and
 the online checks (#111), but not one of the functions that the two `updates` rows mutate (`only`
 in `MODULES`), so those figures still hold. `git diff 8c3f8171 HEAD` is empty for the other three.
@@ -209,10 +210,12 @@ Run on origin/main 03fe31d8 with mutmut 3.8.0, at most four workers. Two things 
 
 **The engine rules** (`engine/schedules.py`, `conditions.py`, `progression.py`, `randomizer.py`,
 `eligibility.py`, `scenarios.py`). The whole run has 1396 mutants. Before the new tests 1106 were
-killed (79.2 percent, 290 survivors). After, 1347 are killed (96.5 percent, 49 survivors). The
-selection for this module also got `tests/unit/test_helper_snapshot_cache.py`, which already
-held `station_snapshot` (56 of the first survivors were "no tests" only because that file was
-not in the selection).
+killed (79.2 percent, 290 survivors). After, 1343 are killed (96.2 percent, 53 survivors). Two
+things made the gain. The selection for this module also got
+`tests/unit/test_helper_snapshot_cache.py`, which already held `station_snapshot` (56 of the first
+survivors were "no tests" only because that file was not in the selection): the old tests with
+the new selection kill 1155 (82.7 percent, measured with `run --tests-from origin/main`). The new
+tests make up the rest, 82.7 to 96.2 percent.
 
 **The 30 `updates.py` survivors.** 8 were real gaps and are killed: 555 of 577 (96.2 percent). The
 other 22 are equivalent (below).
@@ -225,7 +228,8 @@ What the survivors showed:
   shift the boundaries, or that the first pass through a repeated hour counts. A clock change that
   lay more than one six-hour scan step away was never tested: a mutant that lost the old offset
   after the first step still passed, and so would have missed the exact second of a window that
-  the clock change starts.
+  the clock change starts. A window that starts again when the clocks go back is found only
+  through the clock change itself, and has its own test.
 - The progression between profiles was held for two fields only. Dropping any other field of the
   profile or of the impairment (reorder, duplicate, bandwidth, every `*_randomness`, the outage and
   reroll settings, the switch of seed and mode at the end) changed nothing in a test.
@@ -253,7 +257,12 @@ What was added:
   and the list that is swapped for a link after its check.
 - `scripts/mutation-test.py`: `test_helper_snapshot_cache.py` joined the `engine_rules` selection.
 
-Equivalent mutants and the reason for each (ids are mutmut's per-function numbers):
+Equivalent mutants and the reason for each (ids are mutmut's per-function numbers). Two groups
+are equivalent only on the machine of this run, macOS with Python 3.12: the file name case
+(`release_floor` 8, `staged_problem` 41) needs a case-insensitive file system, and the default
+byte order (`seeded_generator` 17, `_signature_fields` 39) needs Python 3.11 or newer, while
+`pyproject.toml` allows 3.9. On Linux or Python 3.9 those four are killed.
+
 
 | Function | Ids | Reason |
 | --- | --- | --- |
@@ -271,7 +280,7 @@ Equivalent mutants and the reason for each (ids are mutmut's per-function number
 | `seeded_generator` | 10 | `"UTF-8"` is `"utf-8"`. |
 | `seeded_generator` | 17 | The byte order defaults to big endian from Python 3.11. Python 3.9 would fail it. |
 | `station_snapshot` | 48, 49, 54, 55 | They store a copy of the last good list on a helper that has its own memory. The copy is never read for such a helper (the other branch returns first). |
-| `device_protection_states` | 56, 57, 89, 95, 98, 99, 100, 101, 102, 104, 105, 107, 108, 109 | Only the words of the explanatory notes change (the `XX` and case mutants). The tests pin who is protected, who is matched and why a profile waits, not the sentences. |
+| `device_protection_states` | 53, 54, 55, 56, 57, 89, 95, 98, 99, 100, 101, 102, 104, 105, 106, 107, 108, 109 | Only the words of the explanatory notes change (the `XX` and case mutants). The tests pin who is protected, who is matched and that each reason a profile waits has its own note, not the sentences. |
 | `_check_key_text` | 6, 8, 9 | `KEY_TEXT` already limits the key to 68 base64 characters, so `validate` has nothing to refuse. |
 | `_signature_fields` | 4, 59 | `"ASCII"` is `"ascii"`. |
 | `_signature_fields` | 34 | A third field is read and not used. |
