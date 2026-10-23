@@ -1,17 +1,29 @@
 """Keep DNS work bounded across calls that have already timed out."""
 
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
+from queue import Queue
 from typing import Callable, Optional, Set
 
 MAX_UNFINISHED_LOOKUPS = 32
 
 
 class BoundedLookupPool:
-    """Share fixed workers and refuse work when the bounded queue is full."""
+    """Share process-lifetime daemon workers with bounded unfinished work.
+
+    DNS cannot reliably be interrupted in a thread. A stuck lookup keeps its
+    slot, but must not hold interpreter exit after the caller's deadline. Using
+    ThreadPoolExecutor here would join even daemon workers at interpreter exit.
+    Only best-effort lookups belong in this pool, never shutdown cleanup.
+    """
 
     def __init__(self, *, workers: int, name: str) -> None:
-        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix=name)
+        if workers <= 0:
+            raise ValueError("workers must be greater than 0")
+        self._workers = workers
+        self._name = name
+        self._threads = []
+        self._jobs = Queue(maxsize=MAX_UNFINISHED_LOOKUPS)
         # A condition, so a caller can wait for a free place (wait_for_room).
         self._lock = threading.Condition()
         self._unfinished: Set[Future] = set()
@@ -20,12 +32,29 @@ class BoundedLookupPool:
         with self._lock:
             if len(self._unfinished) >= MAX_UNFINISHED_LOOKUPS:
                 return None
+            if len(self._threads) < self._workers:
+                thread = threading.Thread(
+                    target=self._work, name=f"{self._name}-{len(self._threads)}", daemon=True
+                )
+                # Reserve before start: an interrupted start may still create a
+                # physical worker, so its slot must not be used twice.
+                self._threads.append(thread)
+                thread.start()
             result = Future()
-            future = self._executor.submit(self._run, result, function, arguments)
-            self._unfinished.add(future)
-        # A finished future invokes its callback immediately.
-        future.add_done_callback(self._finished)
+            self._unfinished.add(result)
+            self._jobs.put_nowait((result, function, arguments))
         return result
+
+    def _work(self) -> None:
+        while True:
+            result, function, arguments = self._jobs.get()
+            try:
+                self._run(result, function, arguments)
+            finally:
+                self._finished(result)
+                self._jobs.task_done()
+                # Idle workers must not retain a completed lookup's arguments.
+                del result, function, arguments
 
     @staticmethod
     def _run(result: Future, function: Callable, arguments: tuple) -> None:
