@@ -29,6 +29,8 @@ a month (for example `2026-09`) was written in that month.
 | [user-guide.md](user-guide.md) | Detailed feature behavior, network boundaries, terminal commands, known limits and local development |
 | [deploy/raspberry-pi/README.md](../deploy/raspberry-pi/README.md) | Installing, updating, securing and recovering the Pi. It starts with a recovery quick reference |
 | [pi-acceptance-checklist.md](pi-acceptance-checklist.md) | The owner's list of physical checks on a real Pi |
+| [test-recipes.md](test-recipes.md) | Short recipes for testing a mobile app: offline at launch, loss during an upload, slow start, high latency and a shared limit. It says plainly that a Wi-Fi drop and rejoin is not available yet |
+| [household-recovery-card.md](household-recovery-card.md) | One printable page to keep next to the router: what normal looks like and what to do in order when the internet is down |
 | [runbooks/dashboard-unreachable.md](runbooks/dashboard-unreachable.md) | The dashboard does not open. How to reach the Pi when only the test Wi-Fi is available |
 | [runbooks/update-rollback-and-recovery-copy.md](runbooks/update-rollback-and-recovery-copy.md) | A failed update, the recovery copy and going back to the previous release |
 | [runbooks/router-outage-pi-only-rollback.md](runbooks/router-outage-pi-only-rollback.md) | The router or the household Wi-Fi is down. Safe order of steps back from Pi-only Wi-Fi |
