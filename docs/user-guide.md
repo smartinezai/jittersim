@@ -1393,5 +1393,7 @@ scripts/local-ci.sh list     # every step and its command
   [key rotation and trusted keys](../docs/runbooks/key-rotation-and-trusted-keys.md),
   [restore and reimage](../docs/runbooks/restore-and-reimage.md)
 - [Measured effects of the profile presets](../docs/measurements-2026-09.md)
+- [Test recipes for mobile apps](test-recipes.md)
+- [Household recovery card](household-recovery-card.md): one printable page to keep next to the router
 - [Product roadmap and known limits](../ROADMAP.md)
 - [Index of the documents in `docs/`](../docs/README.md)

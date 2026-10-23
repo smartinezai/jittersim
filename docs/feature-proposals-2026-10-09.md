@@ -66,6 +66,7 @@ the Sources section. Items are ordered by value against risk.
 9. **Test recipes for mobile apps** (developer experience). One short page per case: offline at launch, loss in the middle of an upload, Wi-Fi drop and rejoin, captive portal, IPv6-only. Each names the profile, what to watch and what a pass looks like.
    Why: iOS apps use waitsForConnectivity for the lift and Wi-Fi to cellular cases [28]. Apple's own conditioner ships 100% loss and high latency DNS profiles [6].
    Size S (docs only). Household risk none. Helper: no. Depends on: nothing. Later cases link to items 21, 22, 28 and 29.
+   Delivered on 2026-10-23 in PR 176: [test recipes](test-recipes.md). Captive portal and IPv6-only are not included because JitterSim has neither, and the Wi-Fi drop and rejoin case says it is not available yet.
 
 10. **Scenario files and a run command** (developer experience). Keep conditions in the app's repository and replay them identically with `jittersim run slow-upload.json --wait`, with a `--dry-run` that prints what would change.
    Why: Toxiproxy tests set faults from code and reset them afterwards [2]. Comcast offers `--dry-run` and `--stop` [4]. Facebook's ATC kept shared profiles such as 2G rural and No Connectivity [13].
@@ -82,6 +83,7 @@ the Sources section. Items are ordered by value against risk.
 13. **Household recovery card** (safety). A printable one-page card to keep next to the router: Pi power, the router Wi-Fi button, the dashboard address, `sudo jittersim normal-access` and what normal looks like.
    Why: the 4 October outage needed a router reset and the recovery steps were spread over several documents.
    Size S (docs only). Household risk none. Helper: no. Depends on: the Pi acceptance checklist and the router outage notes.
+   Delivered on 2026-10-23 in PR 176: [household recovery card](household-recovery-card.md).
 
 14. **Pull a backup to the Mac** (reliability). `jittersim backup pull` saves the settings backup to the Mac on demand or on a schedule, and a restore drill proves it works.
    Why: a brown-out or power cut can still damage a Pi's card, so keep an image backup and a spare card [24]. The dashboard only offers a manual download today. A read-only root is a separate spike, because saved data would need its own writable partition [24].
