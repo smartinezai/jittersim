@@ -36,7 +36,8 @@ WIDE_FONTS = (
 STRESSES = (("normal fonts", ""), ("wide fonts", WIDE_FONTS))
 SHEET_CONTROLS = (
     "#active-profile-select", "#active-profile-button", "#apply-button", "#reset-button",
-    "#sync-router-ap", "#refresh-router-wifi", "#open-admin-credentials", "#open-router-credentials",
+    "#sync-router-ap", "#refresh-router-wifi", "#quick-reset-wifi-name",
+    "#open-admin-credentials", "#open-router-credentials",
 )
 
 
