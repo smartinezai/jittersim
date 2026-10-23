@@ -88,6 +88,7 @@ the Sources section. Items are ordered by value against risk.
 14. **Pull a backup to the Mac** (reliability). `jittersim backup pull` saves the settings backup to the Mac on demand or on a schedule, and a restore drill proves it works.
    Why: a brown-out or power cut can still damage a Pi's card, so keep an image backup and a spare card [24]. The dashboard only offers a manual download today. A read-only root is a separate spike, because saved data would need its own writable partition [24].
    Size S. Household risk low. Helper: no. Depends on: the existing backup download, Mac command line.
+   Delivered on 23 October 2026, see [the plan](implementation-plan-backup-pull-2026-10-23.md). The command runs once each time. A schedule is a cron or launchd line in the user guide. The database file has no restore command, only manual steps in a runbook.
 
 15. **Prometheus metrics** (observability). A read-only page for Grafana: set against actual loss and speed, queue wait, Pi temperature and throttle flags over days.
    Why: the text format is a plain HTTP page [40] and the Impact check already reads the counters. Token protected and reachable only on the management network.

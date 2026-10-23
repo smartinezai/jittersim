@@ -1,15 +1,17 @@
 """Commands that run on your Mac or another computer against the Pi's HTTPS dashboard.
 
-`jittersim connect`, `status`, `profiles`, `traffic`, `wifi show` and `impact` read and change
-the Pi through the same verified dashboard API as the browser. They ask for the admin token
-with a hidden prompt every time and never store it. Each command registers its parser and
-its handler below.
+`jittersim connect`, `status`, `profiles`, `traffic`, `wifi show`, `impact` and `backup pull`
+read and change the Pi through the same verified dashboard API as the browser. They ask for
+the admin token with a hidden prompt every time and never store it. Each command registers its
+parser and its handler below.
 """
 
 import argparse
 import json
 import os
 import re
+import secrets
+import stat
 import sys
 import time
 from pathlib import Path
@@ -21,6 +23,7 @@ from jittersim.config.models import normalize_domain
 from jittersim.remote_client import (
     CA_CERT_ENV,
     EXAMPLE_URL,
+    MAX_BACKUP_BYTES,
     TOKEN_ENV,
     UNDERSTOOD_MESSAGE,
     URL_ENV,
@@ -976,6 +979,126 @@ def _impact(arguments: argparse.Namespace) -> int:
 
 
 # --- end: impact
+
+
+# --- section: backup ----------------------------------------------------------------------
+
+BACKUP_TIMEOUT_SECONDS = 120.0
+BACKUP_FOLDER = "~/jittersim-backups"
+SQLITE_HEADER = b"SQLite format 3\x00"
+
+register_group(
+    "backup", "Save the Pi's database backup on this computer: jittersim backup pull.", ("pull",)
+)
+
+
+def _backup_pull_parser() -> argparse.ArgumentParser:
+    parser = _parser(
+        "jittersim backup pull",
+        "Download the database backup that the dashboard's Download backup button gives and "
+        f"save it in a private folder ({BACKUP_FOLDER} unless you give --directory) under a "
+        "new name with the time in it. A folder that other users own or can write in is "
+        "refused. A file that exists is never replaced and old backups are never deleted. "
+        "The command checks that the answer is a SQLite file and that all of "
+        "it arrived. It does not check the contents: run PRAGMA quick_check on the copy (the "
+        "user guide has the command). The backup holds device names, addresses and observed "
+        "domain names, so keep it private. The command runs once. Call it from cron or launchd "
+        "to repeat it.",
+    )
+    parser.add_argument("--directory", type=Path, help="save the backup in this folder instead")
+    return parser
+
+
+def _open_backup_folder(folder: Path) -> int:
+    """Open the folder and check that exact directory: nobody else may be able to write in it.
+
+    Someone who can write in the folder could swap the temporary file before it is linked.
+    Every later step uses the opened directory, so the check and the use are the same place.
+    """
+
+    try:
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as error:
+        raise RemoteError(
+            f"The folder {folder} cannot be used: {error.strerror or 'system error'}. "
+            "Choose another folder with --directory."
+        ) from None
+    info = os.fstat(directory)
+    if info.st_uid != os.geteuid() or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        os.close(directory)
+        raise RemoteError(
+            f"The folder {folder} can be changed by other users, so a backup in it could be "
+            "swapped. Run chmod go-w on it and make sure you own it (FAT and exFAT disks cannot "
+            "do this), or choose another folder with --directory."
+        )
+    return directory
+
+
+@register("backup pull", _backup_pull_parser)
+def _backup_pull(arguments: argparse.Namespace) -> int:
+    client = _client(arguments)
+    folder = (arguments.directory or Path(BACKUP_FOLDER)).expanduser().resolve()
+    # A folder that exists is checked before the download. A missing one is made after it.
+    directory = _open_backup_folder(folder) if folder.exists() else None
+    try:
+        data = client.download(
+            "/api/backup", timeout=BACKUP_TIMEOUT_SECONDS, max_bytes=MAX_BACKUP_BYTES
+        )
+        if not data.startswith(SQLITE_HEADER):
+            raise RemoteError("The dashboard answer was not a database backup.")
+        if directory is None:
+            directory = _open_backup_folder(folder)
+        name = time.strftime("jittersim-backup-%Y%m%dT%H%M%SZ.db", time.gmtime())
+        temporary = ".jittersim-backup-" + secrets.token_hex(8) + ".tmp"
+        try:
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                dir_fd=directory,
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                # Publish only a complete file. Linking refuses a destination that appeared
+                # meanwhile.
+                try:
+                    os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+                except FileExistsError:
+                    raise RemoteError(
+                        f"{folder / name} already exists. Nothing was replaced. Try again."
+                    ) from None
+                except OSError as error:
+                    raise RemoteError(
+                        f"The folder {folder} cannot take the finished backup "
+                        f"({error.strerror or 'system error'}). It needs a disk that supports "
+                        "hard links, and FAT and exFAT drives do not. Choose another folder "
+                        "with --directory."
+                    ) from None
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+        except OSError as error:
+            raise RemoteError(
+                f"The folder {folder} cannot take the backup: {error.strerror or 'system error'}. "
+                "Check its permissions and free space, or choose another folder with --directory."
+            ) from None
+    finally:
+        if directory is not None:
+            os.close(directory)
+    path = folder / name
+    if arguments.json:
+        _print_json({"path": str(path), "bytes": len(data)})
+        return 0
+    _out(f"Saved the backup to {path} ({len(data)} bytes).")
+    _out("It holds device names, addresses and observed domain names. Keep it private.")
+    return 0
+
+
+# --- end: backup
 
 
 # --- section: remote update --------------------------------------------------------------

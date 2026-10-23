@@ -25,7 +25,7 @@ pytestmark = pytest.mark.usefixtures("remote_environment")
     "command",
     [["status"], ["profiles", "list"], ["traffic"], ["impact"], ["wifi", "show"],
      ["traffic", "block", "example.com"], ["profiles", "apply-all", "slow"],
-     ["profiles", "stop-all"]],
+     ["profiles", "stop-all"], ["backup", "pull"]],
 )
 def test_plain_http_is_refused_before_any_prompt_or_request(tmp_path, capsys, command):
     with fake_dashboard(tmp_path, tls=False) as plain:
@@ -40,7 +40,8 @@ def test_plain_http_is_refused_before_any_prompt_or_request(tmp_path, capsys, co
 
 @pytest.mark.parametrize(
     "command",
-    [["status"], ["profiles", "list"], ["traffic"], ["impact"], ["wifi", "show"]],
+    [["status"], ["profiles", "list"], ["traffic"], ["impact"], ["wifi", "show"],
+     ["backup", "pull"]],
 )
 def test_a_wrong_certificate_never_sends_the_token(dashboard, capsys, tmp_path, command):
     other, _ = make_certificate(tmp_path, "other")
@@ -110,7 +111,8 @@ def test_the_environment_token_is_used_for_scripts(dashboard, capsys, monkeypatc
 def test_help_names_where_the_commands_run_and_the_token_risk(capsys):
     for command in (["status", "--json", "--help"], ["impact", "--help"],
                     ["wifi", "show", "--help"], ["profiles", "list", "--help"],
-                    ["traffic", "block", "--help"], ["connect", "--help"]):
+                    ["traffic", "block", "--help"], ["connect", "--help"],
+                    ["backup", "pull", "--help"]):
         with pytest.raises(SystemExit) as stop:
             main(command)
         assert stop.value.code == 0
@@ -125,7 +127,7 @@ def test_the_top_level_help_names_the_mac_commands_and_the_pi_commands(capsys):
     text = " ".join(capsys.readouterr().out.split())
     assert "Headless commands on the Pi:" in text
     assert ("Commands for your Mac through the Pi's HTTPS dashboard: connect, status, "
-            "profiles list/apply-all/stop-all, traffic, wifi show and impact.") in text
+            "profiles list/apply-all/stop-all, traffic, wifi show, impact and backup pull.") in text
 
 
 def test_the_remote_modules_load_without_the_pi_networking_code():
