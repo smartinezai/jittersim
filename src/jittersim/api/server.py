@@ -5623,6 +5623,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         # and the restore are one step under the Panic fence: a Panic that ended the
         # exceptions is never undone.
         put_back_version = []
+        undo_failed = []
 
         def restore():
             failed = self.repository.get_runtime_state()
@@ -5660,6 +5661,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     self.repository.restore_everyone_exceptions(previous_exceptions - {device.id})
                 except StorageError:
                     LOGGER.exception("could not send the device back to Everyone")
+                    undo_failed.append(True)
             return True
 
         accepted, restored = self._publish_apply(control_intent[0], restore)
@@ -5676,22 +5678,29 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 keep_exceptions=True, restore_plan=(prepared, rolls),
             )
             note = self._put_back_note(put_back, control_intent[0])
-        response["error"] = (
+        lead = (
+            "The profile did not start, and the database could not be written to undo it: the "
+            "saved choice for this device may still be in place. "
+            if undo_failed else
             "The profile did not start, so nothing changed: the device keeps what it had and "
-            "Everyone keeps running for every device. " + response.get("error", "") + note
-        ).strip()
+            "Everyone keeps running for every device. "
+        )
+        response["error"] = (lead + response.get("error", "") + note).strip()
         return status, content_type, _json_bytes(response)
 
     def _put_back_note(self, put_back_status, generation) -> str:
         """Say how putting back the plan that ran before a failed apply ended.
 
-        A 409 means a Panic or a reset was recorded since the failure. Neither is undone.
+        A Panic since the apply started wins, whatever the put-back answered: it stops the
+        network and is never undone. Otherwise a 409 means a reset was recorded meanwhile.
         """
 
+        if self._panic_since(generation):
+            return " " + _PANIC_KEPT
         if put_back_status == HTTPStatus.OK:
             return " What ran before was put back."
         if put_back_status == HTTPStatus.CONFLICT:
-            return " " + (_PANIC_KEPT if self._panic_since(generation) else _RESET_KEPT)
+            return " " + _RESET_KEPT
         return " What ran before could not be put back, so the dashboard keeps trying."
 
     def _start_device_only(self, fields, snapshot, device, control_intent, previous_scope):
@@ -6211,7 +6220,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             with self.repository.transaction():
                 if reset_since_failure():
                     # A reset landed during the helper call. It stays the record and the
-                    # plan is not activated: the next tick repeats the reset.
+                    # plan is not activated.
                     return None
                 # A plan put back after a failure counts as applied only when the saved
                 # settings of now built it. Otherwise unapplied saved settings stay unapplied.
@@ -6233,6 +6242,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         if not accepted:
             return self._apply_refused(halts_at_start, undo=True)
         if state is None:
+            # The put-back plan may be live on the helper: repeat the reset now instead of
+            # waiting for a tick.
+            try:
+                self.helper_client.reset()
+            except HelperClientError:
+                LOGGER.warning("could not repeat the reset recorded meanwhile", exc_info=True)
             return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": _RESET_KEPT})
         return (
             HTTPStatus.OK,

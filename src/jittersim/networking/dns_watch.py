@@ -265,9 +265,11 @@ class ServiceWatcher:
         # Whether every test Wi-Fi lookup goes through the Pi's resolver right now.
         self._dns_redirected = dns_redirected
         self._resolver_address = resolver_address
-        # The test interface's own MAC address, set by `watch()` when it opens the socket.
-        # None until then: only the source IP address is checked.
+        # The test interface's own MAC address, set by `watch()` when it opens the socket
+        # and read again at every plan check. None until then: only the source IP address
+        # is checked.
         self.interface_mac: Optional[bytes] = None
+        self._last_mac_drop_logged = float("-inf")
         self._clock = clock
         self._matcher = ServiceMatcher(())
         self._lists: Tuple = ()
@@ -323,6 +325,12 @@ class ServiceWatcher:
         if frame[:6] in self._protected:
             return
         if self.interface_mac is not None and frame[6:12] != self.interface_mac:
+            now = self._clock()
+            if now - self._last_mac_drop_logged >= LOG_ERROR_EVERY_SECONDS:
+                self._last_mac_drop_logged = now
+                # No addresses in the log. If this repeats and the Pi's own answers are
+                # missing, the interface address changed and the next plan check follows it.
+                LOGGER.warning("ignored a DNS answer sent from another MAC address than the interface's")
             return
         if not self._trusted_source(frame):
             return
@@ -451,6 +459,8 @@ def watch(
                 now = clock()
                 if now >= next_plan_check:
                     watcher.refresh_lists()
+                    # The address can change while the socket stays open.
+                    watcher.interface_mac = sock.getsockname()[4] or None
                     next_plan_check = now + PLAN_CHECK_SECONDS
                 if now >= next_flush:
                     watcher.flush()

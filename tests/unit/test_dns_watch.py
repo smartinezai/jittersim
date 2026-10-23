@@ -689,6 +689,65 @@ class SourceMacTests(unittest.TestCase):
         sent = [address for call in self.helper.calls for address in call["streaming"]]
         self.assertEqual(sent, [IPv4Address(self.ADDRESS)])
 
+    def test_the_watch_loop_follows_a_changed_interface_address(self) -> None:
+        # The address changes while the socket stays open, for example when the Wi-Fi
+        # driver picks a new random address. The Pi's answers carry the new one.
+        stop = threading.Event()
+        clock = Clock()
+        later = dns_message("www.netflix.com", [a_record(b"\xc0\x0c", "203.0.113.9")])
+        frames = [frame_for(self.message, src_mac=self.OWN)]
+
+        class Socket:
+            mac = SourceMacTests.OWN
+            calls = 0
+
+            def getsockname(self):
+                return "wlan0", 3, 0, 1, self.mac
+
+            def recvfrom(self, _size):
+                Socket.calls += 1
+                clock.now += 1.0
+                if Socket.calls == 1:
+                    return frames[0], ("wlan0", 3, OUTGOING, 1, self.mac)
+                if Socket.calls == 2:
+                    self.mac = SourceMacTests.OTHER
+                    raise socket.timeout
+                if Socket.calls == 3:
+                    return (frame_for(later, src_mac=SourceMacTests.OTHER),
+                            ("wlan0", 3, OUTGOING, 1, self.mac))
+                stop.set()
+                raise socket.timeout
+
+            def close(self):
+                pass
+
+        watch(self.watcher, Socket, stop, clock=clock)
+        self.watcher.flush()
+
+        self.assertEqual(self.watcher.interface_mac, self.OTHER)
+        sent = {address for call in self.helper.calls for address in call["streaming"]}
+        self.assertEqual(sent, {IPv4Address(self.ADDRESS), IPv4Address("203.0.113.9")})
+
+    def test_dropped_frames_are_logged_now_and_then_without_addresses(self) -> None:
+        clock = Clock()
+        self.watcher = ServiceWatcher(
+            helper_client=self.helper, applied_plan=lambda: plan_payload(STREAMING),
+            clock=clock,
+        )
+        self.watcher.refresh_lists()
+        self.watcher.interface_mac = self.OWN
+        relayed = frame_for(self.message, src_mac=self.OTHER)
+
+        with self.assertLogs("jittersim.networking.dns_watch", "WARNING") as logs:
+            self.watcher.observe(relayed, OUTGOING)
+            self.watcher.observe(relayed, OUTGOING)
+            clock.now += 61.0
+            self.watcher.observe(relayed, OUTGOING)
+
+        self.assertEqual(len(logs.records), 2)
+        # Neither the interface's nor the other station's MAC address is written down.
+        self.assertNotRegex(logs.output[0].lower(), r"[0-9a-f]{2}(:[0-9a-f]{2}){5}")
+
 
 class RedirectFileTests(unittest.TestCase):
     def setUp(self) -> None:

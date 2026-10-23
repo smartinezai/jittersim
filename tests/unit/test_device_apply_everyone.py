@@ -557,6 +557,33 @@ class EveryoneNotRunningTests(EveryoneRunningFixture):
         self.assertEqual(status, 200, result)
         self.assertEqual(self.exceptions(), {AIR_ID, PHONE_ID})
 
+    def test_a_save_during_the_next_ticks_move_stays_refused(self) -> None:
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        self.tick_that_moves_the_air_and_then_fails(scheduler)
+        # The next tick moves the Air again, and another save lands during that move.
+        clients = self.helper.connected_devices()
+        moved_again = [{**clients[0], "ipv4_address": "192.168.50.191"}, clients[1]]
+        scheduler._last_address_check_at = 0.0
+        real_move = self.repository.move_device_addresses
+
+        def move_then_another_save(moves):
+            done = real_move(moves)
+            self.repository.save_profile(Profile(
+                id="slow-test", name="Slow test", upload=Impairment(delay_ms=2_000)))
+            return done
+
+        with patch.object(self.helper, "connected_devices", return_value=moved_again), \
+                patch.object(self.repository, "move_device_addresses",
+                             side_effect=move_then_another_save):
+            self.assertTrue(scheduler.tick(repository=self.repository))
+
+        self.assertEqual(str(self.repository.get_device(AIR_ID).ipv4_address), "192.168.50.191")
+        self.assertIsNone(scheduler.running_plan()[0].configuration_version)
+        status, result = self.apply_to(PHONE, "low")
+        self.assertEqual(status, 409, result)
+        self.assertEqual(self.exceptions(), {AIR_ID})
+
     def test_a_save_after_a_failed_move_tick_stays_refused(self) -> None:
         scheduler = self.use_scheduler()
         self.assertEqual(self.apply_to()[0], 200)
@@ -829,8 +856,10 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         self.assertIn("A reset was recorded meanwhile", result["error"])
         state = self.repository.get_runtime_state()
         self.assertEqual((state.observed_state, state.last_action), ("reset", "reset"))
-        # Nothing counts the put-back plan as running: the next tick repeats the reset.
+        # Nothing counts the put-back plan as running, and the reset is repeated at once
+        # instead of waiting for a tick.
         self.assertIsNone(scheduler.running_plan())
+        self.assertTrue(self.helper.reset_called)
 
     def test_panic_during_the_put_back_is_named_as_panic_not_as_a_reset(self) -> None:
         scheduler = self.use_scheduler()
@@ -846,6 +875,31 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         self.assertEqual(len(calls), 1)
         self.assertIn("Panic", result["error"])
         self.assertNotIn("reset was recorded", result["error"])
+
+    def test_panic_whose_undo_failed_during_the_put_back_is_still_named_as_panic(self) -> None:
+        from jittersim.networking.helper import HelperClientError
+
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        calls = []
+
+        def apply(**arguments):
+            calls.append(arguments["plan"])
+            if len(calls) == 1:
+                raise HelperClientError("simulated helper failure")
+            # Panic lands during the put-back's helper call, and its undo fails: 503.
+            scheduler.halt()
+            self.helper.fail_action = "reset"
+            raise HelperClientError("simulated helper failure")
+
+        with patch.object(self.helper, "apply", side_effect=apply), \
+                self.assertLogs("jittersim.api.server", "ERROR"):
+            status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("Panic", result["error"])
+        self.assertNotIn("keeps trying", result["error"])
 
     def test_a_failed_restore_sends_the_device_back_to_everyone(self) -> None:
         from jittersim.config.storage import StorageError
@@ -888,9 +942,12 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
                 self.assertLogs("jittersim.api.server", "ERROR"):
             status, result = self.apply_to(profile_id="low")
 
-        # The failure is still answered. Storage cannot be written, so the rows stay.
+        # The failure is still answered. Storage cannot be written, so the rows stay, and
+        # the text does not claim that nothing changed.
         self.assertEqual(status, 502)
         self.assertIn("did not start", result["error"])
+        self.assertNotIn("nothing changed", result["error"])
+        self.assertIn("may still be in place", result["error"])
 
     def test_if_putting_it_back_fails_too_the_record_still_says_what_ran(self) -> None:
         self.use_scheduler()

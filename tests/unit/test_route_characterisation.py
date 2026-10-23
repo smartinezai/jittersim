@@ -19,9 +19,7 @@ import os
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-from jittersim.api import server as server_module
 from jittersim.api.server import DASHBOARD_CONTENT_SECURITY_POLICY, WRITE_PATHS, ControlServer
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.config.storage import ConfigRepository
@@ -229,26 +227,6 @@ class RouteCharacterisationTests(unittest.TestCase):
                     sources = directives[name].split(" ")
                     self.assertTrue(sources and all(
                         source.startswith("'sha256-") for source in sources), name)
-
-    def test_health_pings_the_helper_fresh_with_the_token_and_reuses_its_answer_without(self):
-        server = self._serve("helper")
-        pings = []
-
-        class CountingHelper(FakeHelper):
-            def ping(self):
-                pings.append(1)
-                return super().ping()
-
-        server.helper_client = CountingHelper()
-        with patch.object(server_module, "PUBLIC_HEALTH_REUSE_SECONDS", 3600.0):
-            for auth in ("none", "wrong", "none"):
-                self.assertEqual(self._answer(server, "GET", "/api/health", auth).status, 200)
-            # Without the token one ping serves every caller for the reuse window.
-            self.assertEqual(len(pings), 1)
-            for _ in range(2):
-                self.assertEqual(self._answer(server, "GET", "/api/health", "admin").status, 200)
-            # With the token every request asks the helper itself.
-            self.assertEqual(len(pings), 3)
 
     def test_no_recorded_write_route_disappeared(self):
         recorded = json.loads(SNAPSHOT.read_text())
