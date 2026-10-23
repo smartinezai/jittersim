@@ -5,12 +5,20 @@ import unittest
 from ipaddress import IPv4Address
 from unittest.mock import patch
 
-from jittersim.config.models import Device, Profile, WebsitePolicy
+from jittersim.config.models import MAX_GLOBAL_BLOCKED_DOMAINS, Device, Profile, WebsitePolicy
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine import website
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
 from jittersim.engine.website import build_website_filters, resolve_domains
+
+
+def wait_for_renewals() -> None:
+    """Wait for the background lookups that renew expired answers."""
+    with website._resolution_cache_lock:
+        running = list(website._pending.values())
+    for future in running:
+        future.result(timeout=5)
 
 
 def fake_resolver(domain, _port, _family, _kind):
@@ -86,7 +94,50 @@ class WebsiteResolutionTests(unittest.TestCase):
 
             with patch("jittersim.engine.website.time.monotonic", return_value=71.0):
                 resolve_domains(domains=("example.com",))
+                wait_for_renewals()
             self.assertEqual(lookup.call_count, 2)
+
+    def test_an_expired_answer_is_used_at_once_while_it_is_renewed(self) -> None:
+        old = ((None, None, None, None, ("203.0.113.10", 0)),)
+        new = ((None, None, None, None, ("203.0.113.11", 0)),)
+        renewal = threading.Event()
+
+        def slow_new_answer(*arguments):
+            renewal.wait(5)
+            return new
+
+        with patch("jittersim.engine.website.socket.getaddrinfo", return_value=old):
+            with patch("jittersim.engine.website.time.monotonic", return_value=10.0):
+                resolve_domains(domains=("example.com",))
+        with patch("jittersim.engine.website.socket.getaddrinfo", side_effect=slow_new_answer):
+            with patch("jittersim.engine.website.time.monotonic", return_value=71.0):
+                started = time.perf_counter()
+                self.assertEqual(
+                    resolve_domains(domains=("example.com",)), (IPv4Address("203.0.113.10"),)
+                )
+                # The plan did not wait for the renewal.
+                self.assertLess(time.perf_counter() - started, 1.0)
+                renewal.set()
+                wait_for_renewals()
+                self.assertEqual(
+                    resolve_domains(domains=("example.com",)), (IPv4Address("203.0.113.11"),)
+                )
+
+    def test_an_answer_older_than_the_stale_window_is_looked_up_again(self) -> None:
+        old = ((None, None, None, None, ("203.0.113.10", 0)),)
+        new = ((None, None, None, None, ("203.0.113.11", 0)),)
+        with patch("jittersim.engine.website.socket.getaddrinfo", return_value=old):
+            with patch("jittersim.engine.website.time.monotonic", return_value=10.0):
+                resolve_domains(domains=("example.com",))
+        late = 10.0 + website._RESOLUTION_CACHE_SECONDS + website._STALE_SECONDS + 1
+        with patch("jittersim.engine.website.socket.getaddrinfo", return_value=new):
+            with patch("jittersim.engine.website.time.monotonic", return_value=late):
+                self.assertEqual(
+                    resolve_domains(domains=("example.com",)), (IPv4Address("203.0.113.11"),)
+                )
+
+    def test_the_cache_holds_a_full_global_block_list(self) -> None:
+        self.assertGreater(website._MAX_CACHED_DOMAINS, MAX_GLOBAL_BLOCKED_DOMAINS)
 
     def test_default_resolution_cache_has_a_fixed_size(self) -> None:
         result = ((None, None, None, None, ("203.0.113.10", 0)),)

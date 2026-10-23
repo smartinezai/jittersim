@@ -133,16 +133,23 @@ def normalize_mac_address(value: str) -> str:
     return mac_address
 
 
-# A profile's website list and each global domain list hold at most this many names.
+# A profile's website list and the other domain lists hold at most this many names.
 MAX_LISTED_DOMAINS = 100
+# The global block list holds more (measured in
+# docs/implementation-plan-larger-block-list-2026-10-23.md). With these two limits the
+# helper's apply request stays well under its 256 KiB.
+MAX_GLOBAL_BLOCKED_DOMAINS = 2000
+MAX_GLOBAL_BLOCKED_CHARACTERS = 80_000
 
 
-def _normalize_domain_list(values: Tuple[str, ...], field_name: str) -> Tuple[str, ...]:
+def _normalize_domain_list(
+    values: Tuple[str, ...], field_name: str, limit: int = MAX_LISTED_DOMAINS
+) -> Tuple[str, ...]:
     if not isinstance(values, (list, tuple)):
         raise ValidationError(f"{field_name} must be a list")
     normalized = tuple(dict.fromkeys(normalize_domain(value) for value in values))
-    if len(normalized) > MAX_LISTED_DOMAINS:
-        raise ValidationError(f"{field_name} must contain no more than {MAX_LISTED_DOMAINS} domains")
+    if len(normalized) > limit:
+        raise ValidationError(f"{field_name} must contain no more than {limit} domains")
     return normalized
 
 
@@ -925,7 +932,15 @@ class WebsitePolicy:
         if self.mode not in ("unrestricted", "allow_only"):
             raise ValidationError("website policy mode is not supported")
         object.__setattr__(self, "allowed_domains", _normalize_domain_list(self.allowed_domains, "allowed_domains"))
-        object.__setattr__(self, "blocked_domains", _normalize_domain_list(self.blocked_domains, "blocked_domains"))
+        blocked = _normalize_domain_list(
+            self.blocked_domains, "blocked_domains", MAX_GLOBAL_BLOCKED_DOMAINS
+        )
+        if sum(map(len, blocked)) > MAX_GLOBAL_BLOCKED_CHARACTERS:
+            raise ValidationError(
+                "blocked_domains must contain no more than "
+                f"{MAX_GLOBAL_BLOCKED_CHARACTERS} characters in total"
+            )
+        object.__setattr__(self, "blocked_domains", blocked)
 
 
 _OBSERVED_STATES = frozenset(("unknown", "applying", "resetting", "applied", "reset", "error"))

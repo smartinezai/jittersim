@@ -44,11 +44,16 @@ from jittersim.config.models import (
     Schedule,
     ServiceList,
 )
+from jittersim.config.models import MAX_GLOBAL_BLOCKED_DOMAINS
 from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.runtime import PreparedRuntimePlan, RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
 from jittersim.measure import comparison_table
 from jittersim.networking.helper import HelperClientError
+FULL_BLOCK_LIST = (
+    "The global block list can hold %d names. Remove some first." % MAX_GLOBAL_BLOCKED_DOMAINS
+)
+
 from tests.helper_support import OlderHelperService, OldHelperService, captures, serving
 
 
@@ -6305,7 +6310,7 @@ class ControlServerTests(unittest.TestCase):
         self.repository.save_website_policy(replace(policy, blocked_domains=names))
 
     def test_a_full_block_list_says_so_and_stays_as_it_was(self) -> None:
-        self._fill_block_list(98)
+        self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS - 2)
 
         status, _, body = self.server.write_response_for(
             "/api/observations/add-global-block",
@@ -6314,12 +6319,12 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 400)
         self.assertEqual(
-            json.loads(body)["error"], "The global block list can hold 100 names. Remove some first."
+            json.loads(body)["error"], FULL_BLOCK_LIST
         )
-        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), 98)
+        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), MAX_GLOBAL_BLOCKED_DOMAINS - 2)
 
     def test_the_block_list_can_be_filled_to_exactly_the_cap(self) -> None:
-        self._fill_block_list(98)
+        self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS - 2)
 
         status, _, _ = self.server.write_response_for(
             "/api/observations/add-global-block",
@@ -6327,20 +6332,20 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 200)
-        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), 100)
+        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), MAX_GLOBAL_BLOCKED_DOMAINS)
 
     def test_names_already_on_a_full_block_list_do_not_count_again(self) -> None:
-        self._fill_block_list(100)
+        self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS)
 
         status, _, _ = self.server.write_response_for(
             "/api/observations/add-global-block",
-            {"domains": ["listed0.example.com", "listed99.example.com"]},
+            {"domains": ["listed0.example.com", "listed1999.example.com"]},
         )
 
         self.assertEqual(status, 200)
 
     def test_one_more_name_on_a_full_block_list_gets_the_same_message(self) -> None:
-        self._fill_block_list(100)
+        self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS)
 
         status, _, body = self.server.write_response_for(
             "/api/observations/add-global-block", {"domain": "one-too-many.example.com"}
@@ -6348,18 +6353,95 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 400)
         self.assertEqual(
-            json.loads(body)["error"], "The global block list can hold 100 names. Remove some first."
+            json.loads(body)["error"], FULL_BLOCK_LIST
         )
 
     def test_a_full_block_list_can_still_be_shortened(self) -> None:
-        self._fill_block_list(100)
+        self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS)
 
         status, _, _ = self.server.write_response_for(
             "/api/observations/remove-global-block", {"domains": ["listed0.example.com"]}
         )
 
         self.assertEqual(status, 200)
-        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), 99)
+        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), MAX_GLOBAL_BLOCKED_DOMAINS - 1)
+
+    def test_the_block_list_limit_message_names_the_limit(self) -> None:
+        self.assertEqual(MAX_GLOBAL_BLOCKED_DOMAINS, 2000)
+        self.assertEqual(FULL_BLOCK_LIST, "The global block list can hold 2000 names. Remove some first.")
+
+    def test_a_full_block_list_is_saved_through_the_access_rules_form(self) -> None:
+        """The textarea of the Access and rules page sends the whole list in one body."""
+
+        self.server.admin_token = "admin-token"
+        names = ["ads%d.tracker-%d.example.com" % (n, n % 97) for n in range(MAX_GLOBAL_BLOCKED_DOMAINS)]
+        body = json.dumps(
+            {"websites": {"mode": "unrestricted", "allowed_domains": [], "blocked_domains": names}}
+        ).encode()
+        self.assertGreater(len(body), 64 * 1024)  # over the general body limit
+        handler = object.__new__(ControlRequestHandler)
+        handler.server = self.server
+        handler.client_address = ("127.0.0.1", 45000)
+        handler.path = "/api/policies"
+        handler.headers = Message()
+        handler.headers["Authorization"] = "Bearer admin-token"
+        handler.headers["Content-Length"] = str(len(body))
+        handler.rfile = BytesIO(body)
+        response = {}
+        handler._send_response = lambda **values: response.update(values)
+
+        handler.do_POST()
+
+        self.assertEqual(response["status"], 200, response.get("body"))
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, tuple(names))
+
+    def test_a_block_list_the_helper_would_refuse_is_not_saved(self) -> None:
+        """Every site rule makes its own DNS view with the whole global list."""
+
+        from jittersim.config.models import SiteBlock
+
+        devices = []
+        for number in range(9):
+            device = Device(f"view{number}", f"View {number}", f"192.168.50.{120 + number}", "slow")
+            self.repository.save_device(device)
+            devices.append(device)
+        blocks = tuple(
+            SiteBlock(f"rule{number}", f"Rule {number}", (f"site{number}.example.com",),
+                      device_id=device.id)
+            for number, device in enumerate(devices)
+        )
+        self.repository.save_access_policies(None, None, blocks=blocks)
+        self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS - 1)
+        before = self.repository.get_website_policy()
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-global-block", {"domain": "one-more.example.com"}
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            json.loads(body)["error"],
+            "could not add domain to global block list: "
+            "too many distinct device and domain combinations",
+        )
+        self.assertEqual(self.repository.get_website_policy(), before)
+
+        status, _, body = self.server.write_response_for(
+            "/api/policies",
+            {"websites": {"mode": "unrestricted", "allowed_domains": [],
+                          "blocked_domains": list(before.blocked_domains) + ["one-more.example.com"]}},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("too many distinct device and domain combinations", json.loads(body)["error"])
+        self.assertEqual(self.repository.get_website_policy(), before)
+        # A smaller list with the same site rules still saves.
+        status, _, _ = self.server.write_response_for(
+            "/api/policies",
+            {"websites": {"mode": "unrestricted", "allowed_domains": [],
+                          "blocked_domains": list(before.blocked_domains[:100])}},
+        )
+        self.assertEqual(status, 200)
 
     def _fill_profile(self, count: int) -> None:
         from dataclasses import replace

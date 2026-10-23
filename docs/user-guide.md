@@ -276,7 +276,7 @@ See
 - A saved list of **Protected devices** that no profile or profile quota affects.
 - A live upload and download graph with packet rates for assigned devices.
 - MAC address allowlists and denylists.
-- A global blocked-site list.
+- A global blocked-site list of up to 2000 names (80000 characters in all).
 - Profile-specific website lists that allow selected services while blocking
   the rest.
 - Per-device website rules that can change as a progression session advances.
@@ -950,8 +950,13 @@ buttons. A group opened stays open when the page refreshes.
 - **Add all to profile** adds every name of a group to the profile chosen on the
   device card. **Block all** blocks every name. It reads **Block remaining**
   when some are blocked and **Unblock all** when all are. One call changes the
-  whole group or nothing. A call takes at most 64 names and a block list or a
-  profile website list holds 100 names.
+  whole group or nothing. A call takes at most 64 names. The global block list
+  holds 2000 names and a profile website list 100.
+- The global block list also applies to protected devices, by DNS and by
+  address, and to a protected device that uses ad blocking.
+- While JitterSim runs it also blocks up to 4096 addresses that the listed names
+  resolve to. A name keeps its last addresses for up to 10 minutes while they are
+  looked up again.
 - A group of system or content delivery names has no **Block all** because one
   click could cut the device off the internet. Block single names instead.
   **Unblock blocked names** removes blocks from such a group.

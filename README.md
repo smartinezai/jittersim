@@ -13,7 +13,8 @@ test. It is for experiments, not a replacement for your home router.
 - Save different settings for one device or the whole test Wi-Fi, and start a
   single device on its own profile.
 - Schedule changes, run a timer or gradually switch between settings.
-- Control device, website and service access, with data and time limits.
+- Control device, website and service access, with data and time limits. The
+  global block list holds up to 2000 names.
 - Review connected devices and traffic while a test runs. Measure a device's speed before and after a profile.
 - Follow a saved device to its new private Wi-Fi address, with Ask, Automatic and Undo.
 - Choose whether active profiles resume after a router outage.

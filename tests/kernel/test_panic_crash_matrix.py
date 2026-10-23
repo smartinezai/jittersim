@@ -46,16 +46,18 @@ from ipaddress import IPv4Address
 from pathlib import Path
 
 from jittersim.config.models import (
+    MAX_GLOBAL_BLOCKED_DOMAINS,
     AccessOptions,
     Device,
     Impairment,
     MacPolicy,
     Profile,
     SiteBlock,
+    WebsitePolicy,
 )
 from jittersim.engine.access import AccessClient, AccessPlan
 from jittersim.engine.codec import plan_to_payload
-from jittersim.engine.compiler import compile_plan
+from jittersim.engine.compiler import MAX_GLOBAL_BLOCKED_ADDRESSES, compile_plan
 from jittersim.engine.plan import (
     EveryoneElseRule,
     GeneralProfileRule,
@@ -132,7 +134,7 @@ HOUSEHOLD = AccessPlan(
 )
 
 
-def heavy_plan():
+def heavy_plan(*, access=HOUSEHOLD, blocked=(IPv4Address("203.0.113.9"),)):
     """Devices, Everyone else, every service rule, blocks, a protected device, household rules."""
 
     a = IPv4Address(DEVICE_A)
@@ -143,7 +145,7 @@ def heavy_plan():
         profiles=PROFILES,
         protected_mac_addresses=(PROTECTED_MAC,),
         mac_policy=MacPolicy("denylist", (), (DENIED_MAC,)),
-        global_blocked_addresses=(IPv4Address("203.0.113.9"),),
+        global_blocked_addresses=blocked,
         website_filters=(WebsiteFilter(a, None, (IPv4Address("203.0.113.7"),)),),
         blocked_device_addresses=(IPv4Address(DEVICE_C),),
         service_quota_rules=[ServiceQuotaRule(
@@ -157,8 +159,18 @@ def heavy_plan():
             ServiceListRule("router", ("router.example",), 0, HARSH_UP, HARSH_DOWN)],
         everyone_else=EveryoneElseRule(mark=0, upload_impairment=HARSH_UP,
                                        download_impairment=HARSH_DOWN),
-        access=HOUSEHOLD,
+        access=access,
     )
+
+
+def full_block_list_plan():
+    """The heavy plan with the largest global block list and the most blocked addresses."""
+
+    names = tuple(f"ads{n}.tracker-{n % 97}.example.com" for n in range(MAX_GLOBAL_BLOCKED_DOMAINS))
+    # 198.18.0.0/15 is for benchmarks. Every other address, so nft cannot merge ranges.
+    blocked = tuple(IPv4Address(0xC6120000 + 2 * n) for n in range(MAX_GLOBAL_BLOCKED_ADDRESSES))
+    return heavy_plan(access=replace(HOUSEHOLD, websites=WebsitePolicy(blocked_domains=names)),
+                      blocked=blocked)
 
 
 def everyone_plan():
@@ -558,6 +570,37 @@ class PanicCrashMatrixTests(unittest.TestCase):
             if verdict != "clean":
                 failures.append((step, describe(steps[step]), notes))
         self.assertEqual(failures, [])
+
+    def test_panic_and_reset_remove_a_full_global_block_list_in_time(self) -> None:
+        """The largest block list: in the kernel after apply, gone after Panic and Reset."""
+
+        payload = {"action": "apply", "plan": plan_to_payload(full_block_list_plan())}
+        last = MAX_GLOBAL_BLOCKED_DOMAINS - 1
+        last_name = f"ads{last}.tracker-{last % 97}.example.com"
+        for stop in ("normal-access", "reset"):
+            with self.subTest(stop=stop):
+                self.fresh_state()
+                service = self.helper()
+                started = time.monotonic()
+                self.assertTrue(service.handle_payload(payload)["ok"])
+                applied = time.monotonic() - started
+                rules = _in(PI, "nft", "list", "chain", "inet", "jittersim", "forward").stdout
+                self.assertIn("block global website destinations", rules)
+                self.assertEqual(len(re.findall(r"198\.1[89]\.\d+\.\d+", rules)),
+                                 MAX_GLOBAL_BLOCKED_ADDRESSES)
+                answer = _in(CLIENT, "dig", "@8.8.8.8", last_name, "+time=2", "+tries=1",
+                             check=False).stdout
+                self.assertIn("status: NXDOMAIN", answer)
+                started = time.monotonic()
+                self.assertTrue(service.handle_payload({"action": stop})["ok"])
+                took = time.monotonic() - started
+                print(f"MEASURE|full block list|apply {applied:.1f}s|{stop} {took:.1f}s", flush=True)
+                self.assertLess(took, PANIC_ANSWER_SECONDS)
+                if stop == "reset":
+                    # Reset keeps household rules by design: the MAC-blocked client stays out.
+                    self.assertEqual(self.leftovers(household=False), [])
+                    self.helper().handle_payload({"action": "normal-access"})
+                self.assert_normal(f"after {stop} with a full block list")
 
     def test_a_stalled_tc_during_panic_still_releases_within_the_budget(self) -> None:
         payload = {"action": "apply", "plan": plan_to_payload(heavy_plan())}

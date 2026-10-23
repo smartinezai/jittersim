@@ -1,5 +1,6 @@
 """Compile validated configuration into a deterministic network plan."""
 
+import logging
 import re
 from dataclasses import replace
 from ipaddress import IPv4Address
@@ -31,6 +32,7 @@ from .plan import (
 )
 
 
+LOGGER = logging.getLogger(__name__)
 _LIST_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
@@ -45,6 +47,25 @@ MAX_SERVICE_QUOTAS_PER_PLAN = 15
 MAX_SHAPED_MARKS_PER_PLAN = 15
 MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN = 200
 MAX_SERVICE_LIST_DOMAINS_PER_PLAN = 400
+# The addresses of the global block list that a plan blocks, so the helper's apply request
+# stays well under its 256 KiB. The DNS rules still refuse every listed name.
+MAX_GLOBAL_BLOCKED_ADDRESSES = 4096
+# How many addresses the last plan left out, so the same warning is not logged every second.
+_left_out_addresses = 0
+
+
+def _bounded_blocked_addresses(addresses: Sequence[IPv4Address]) -> tuple:
+    global _left_out_addresses
+    ordered = tuple(sorted(set(addresses), key=str))
+    left_out = max(0, len(ordered) - MAX_GLOBAL_BLOCKED_ADDRESSES)
+    if left_out and left_out != _left_out_addresses:
+        LOGGER.warning(
+            "The global block list resolved to %d addresses. Only %d are blocked by address. "
+            "DNS still refuses every listed name while household access rules are on.",
+            len(ordered), MAX_GLOBAL_BLOCKED_ADDRESSES,
+        )
+    _left_out_addresses = left_out
+    return ordered[:MAX_GLOBAL_BLOCKED_ADDRESSES]
 
 
 def compile_plan(
@@ -443,7 +464,7 @@ def compile_plan(
         global_allowed_addresses=None
         if global_allowed_addresses is None
         else tuple(sorted(set(global_allowed_addresses), key=str)),
-        global_blocked_addresses=tuple(sorted(set(global_blocked_addresses), key=str)),
+        global_blocked_addresses=_bounded_blocked_addresses(global_blocked_addresses),
         website_filters=tuple(website_filters),
         blocked_device_addresses=tuple(sorted(set(blocked_device_addresses), key=str)),
         service_quota_rules=normalized_service_rules,
