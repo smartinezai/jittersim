@@ -143,6 +143,8 @@ applying access rules, so run `sudo jittersim access apply` after changing it
 Run `sudo jittersim --help` for the command list. More examples are in the
 [Pi installation and recovery guide](../deploy/raspberry-pi/README.md).
 
+<img src="../docs/screenshots/reset-wifi-name-button.png" alt="The sidebar buttons Check router Wi-Fi, Copy router Wi-Fi to Pi and Reset Wi-Fi name" width="40%" />
+
 Use **Reset Wi-Fi name** in the sidebar (on a phone, in the Controls sheet) or on Router and
 Wi-Fi, or run `sudo jittersim wifi reset` on the Pi.
 It restores the default name `TestNet` and keeps the current password. Confirming the reset
@@ -870,6 +872,10 @@ devices on the Pi's test Wi-Fi. Devices on the router's Wi-Fi are outside this
 list. A client needs a verified connection and an IPv4 address before a profile
 or group can be assigned.
 
+<img src="../docs/screenshots/this-device.png" alt="The Fixture phone row in Connected clients with the green label This device next to its name" width="100%" />
+
+The device you browse with over the test Wi-Fi carries a **This device** label.
+
 Choose a profile beside a client then click **Assign profile** or **Apply
 profile**. Choose an existing group then click **Add to group**. For a client
 without a saved assignment, that group needs a profile (**Profile for this
@@ -1104,6 +1110,8 @@ a device saw. An older helper makes the card ask for an update.
 
 **Test speed** on a connected device in **Devices** compares the device's speed
 before and after a profile.
+
+<img src="../docs/screenshots/device-speed-test-dashboard.png" alt="The speed-test window for Fixture phone with This dashboard selected as the source of the test data, the label Before profile and the Start measuring button" width="100%" />
 
 **From the dashboard (no outside server).** Open the dashboard on the device you
 want to test (it needs dashboard access and the admin token), go to **Devices**

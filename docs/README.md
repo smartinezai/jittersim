@@ -350,8 +350,8 @@ the first plan (September 2026) and is historical too.
 
 ## Screenshots
 
-The README shows the two overview images and the two new feature images. The user guide shows all
-seven. They use sample data from the browser test fixture: no real phone, Pi or home network. The
+The README shows the overview images and the feature images. The user guide shows all ten. They
+use sample data from the browser test fixture: no real phone, Pi or home network. The
 five existing images are unchanged. The two feature images were captured on 2026-10-19 from
 `18c3f3d4` (see
 [ui-overhaul-proposal-2026-10-09.md](ui-overhaul-proposal-2026-10-09.md)):
@@ -372,8 +372,15 @@ five existing images are unchanged. The two feature images were captured on 2026
   selected and one sample suggestion waiting for review.
 - [device-speed-test-controls.png](screenshots/device-speed-test-controls.png): the speed-test
   window for the sample phone before a test starts, with the site, length, label and start button.
+- [device-speed-test-dashboard.png](screenshots/device-speed-test-dashboard.png): the same window with
+  **This dashboard** selected, as it opens on the device itself.
+- [this-device.png](screenshots/this-device.png): the top of the sample phone's row in Connected
+  clients with the **This device** label.
+- [reset-wifi-name-button.png](screenshots/reset-wifi-name-button.png): the sidebar buttons for the
+  router Wi-Fi, with **Reset Wi-Fi name**. The last three were captured on 2026-10-24 with the
+  fixture's phone as the browser's own device.
 
-`python scripts/docs-screenshots.py` retakes all seven images (add `--out DIR` to write somewhere else first).
+`python scripts/docs-screenshots.py` retakes all ten images (add `--out DIR` to write somewhere else first).
 It starts separate local fixtures for the different sample data and drives the pages with Playwright. It needs
 `pip install 'playwright==1.63.0'` and `python -m playwright install chromium`. Commit only the
 images that changed. The two overview images are about 280 KB and 125 KB because PNGs from

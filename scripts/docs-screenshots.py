@@ -31,12 +31,14 @@ PHONE = {"width": 430, "height": 1200}
 TOKEN = "browser-test"  # the fixture's own test token, never a real one
 
 
-def start_fixture(*, seeded=False, address_follow=False, scheduler=False):
+def start_fixture(*, seeded=False, address_follow=False, scheduler=False, wifi_peer=False):
     environment = os.environ.copy()
     environment.update({
         "JITTERSIM_BROWSER_TEST_SEED": "1" if seeded else "0",
         "JITTERSIM_BROWSER_TEST_ADDRESS_FOLLOW": "1" if address_follow else "0",
         "JITTERSIM_BROWSER_TEST_SCHEDULER": "1" if scheduler else "0",
+        # Every browser request then comes from the fixture's phone on the test Wi-Fi.
+        "JITTERSIM_BROWSER_TEST_WIFI_PEER": "1" if wifi_peer else "0",
         "PYTHONPATH": os.pathsep.join(
             part for part in (str(ROOT / "src"), environment.get("PYTHONPATH", "")) if part
         ),
@@ -230,10 +232,65 @@ def speed_test_controls(browser, out):
         stop_fixture(process)
 
 
+def this_device(browser, out):
+    """The browser is the fixture's phone on the test Wi-Fi, so its row says This device and the
+    speed test can run from the dashboard itself."""
+
+    process, port = start_fixture(seeded=True, scheduler=True, wifi_peer=True)
+    try:
+        context = browser.new_context(viewport=DESKTOP)
+        page = context.new_page()
+        base = f"http://127.0.0.1:{port}"
+        page.goto(base)
+
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+
+        def post(path, data):
+            response = page.request.post(base + path, headers=headers, data=data)
+            assert response.ok, (path, response.status, response.text())
+
+        post("/api/dashboard-access/register-self", {"name": "Fixture phone"})
+        post("/api/connected-device-labels", {
+            "mac_address": "02:00:00:00:00:01",
+            "display_name": "Fixture phone",
+            "device_type": "phone",
+        })
+        post("/api/connected-devices/apply-profile", {
+            "ipv4_address": "192.168.50.184",
+            "mac_address": "02:00:00:00:00:01",
+            "profile_id": "normal",
+        })
+        post("/api/apply", {})
+
+        unlock(page)
+        page.locator('[data-page-link="devices"]').first.click()
+        row = page.locator('.connected-row[data-mac-address="02:00:00:00:00:01"]')
+        expect(row.locator(".this-device-badge")).to_have_text("This device")
+        expect(page.locator("#quick-reset-wifi-name")).to_be_enabled()
+        settle(page)
+        # The top of the row: the name with its label, the details and the buttons.
+        box = row.bounding_box()
+        page.screenshot(path=str(out / "this-device.png"), full_page=True, clip={**box, "height": 255})
+        page.locator(".router-wifi-copy").screenshot(path=str(out / "reset-wifi-name-button.png"))
+
+        row.get_by_role("button", name="Test speed of Fixture phone").click()
+        dialog = page.locator("#speed-test-dialog")
+        expect(dialog).to_be_visible()
+        expect(page.locator("#speed-test-provider")).to_have_value("dashboard")
+        expect(page.locator("#speed-test-begin")).to_be_visible()
+        page.locator("#speed-test-label").fill("Before profile")
+        page.locator("#speed-test-label").evaluate("element => element.blur()")
+        settle(page)
+        dialog.screenshot(path=str(out / "device-speed-test-dashboard.png"))
+        context.close()
+    finally:
+        stop_fixture(process)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Retake the screenshots in docs/screenshots.")
     parser.add_argument("--out", type=Path, default=ROOT / "docs" / "screenshots",
-                        help="folder for the seven images (default: docs/screenshots)")
+                        help="folder for the ten images (default: docs/screenshots)")
     out = parser.parse_args().out
     out.mkdir(parents=True, exist_ok=True)
     process, port = start_fixture(seeded=True, scheduler=True)
@@ -245,10 +302,11 @@ def main():
             cards(browser, port, out)
             address_changes(browser, out)
             speed_test_controls(browser, out)
+            this_device(browser, out)
             browser.close()
     finally:
         stop_fixture(process)
-    print("Wrote the seven images in", out)
+    print("Wrote the ten images in", out)
 
 
 if __name__ == "__main__":
