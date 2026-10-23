@@ -2,7 +2,7 @@
 
 **[OWNER]** only you can do it (key passphrase, sudo password, y/N answers). **[EITHER]** anyone can paste it. Every command below was checked against `scripts/release.sh`, `src/jittersim/cli.py` and `src/jittersim/remote_cli.py` on main. The reasons are in the [owner runbook](release-runbook-2026-10-16.md).
 
-Facts on 23 October (main `03fe31d8`): no tag, no GitHub release, `docs/releases/registry.json` reserves nothing, `pyproject.toml` and `__init__.py` say 0.2.0. The release text (Unreleased entries plus [the notes file](release-notes-0.2.0-draft.md)) is 1865 bytes. The script stops above 15000.
+Facts on 23 October (main `2c63434f`): no tag, no GitHub release, `docs/releases/registry.json` reserves nothing, `pyproject.toml` and `__init__.py` say 0.2.0. The release text (Unreleased entries plus [the notes file](release-notes-0.2.0-draft.md)) is 1865 bytes. The script stops above 15000.
 
 ## Before you start (all must be true)
 
@@ -87,4 +87,4 @@ $JITTERSIM remote update check                                      # the Pi ask
 
 **[OWNER] Pi dashboard:** open `https://netlab.local:8080`, Updates, **Check for updates**. On a Pi that runs 0.2.0 it says `Already up to date: the newest release on GitHub (v0.2.0) is not newer than the installed one.` That is the success message: the Pi used its token, downloaded both files and checked the signature. The install button is first used for 0.2.1, because this Pi already ran the exact 0.2.0 package for the acceptance. On a Pi that never installed it, the same button says `Release 0.2.0 (v0.2.0) is staged and ready to install` and **Install update** installs it.
 
-If it stops: `Required main checks are still running` (exit 78): wait a minute and run step 3 again. A failed check names a log: read it, then run step 3 again and only the checks repeat. A half-finished publish continues from the draft when you run step 3 again. Nothing here ever changes the Pi except step 4.
+If it stops: `Required main checks are still running` (exit 78): wait a minute and run step 3 again. A failed check names a log: read it, then run step 3 again and only the checks repeat. A half-finished publish continues from the draft when you run step 3 again.
