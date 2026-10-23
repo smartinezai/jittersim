@@ -857,8 +857,6 @@ def build_summary(
             "jitter_ms")},
         "expected": _impairment_text(setting) if shaped else None,
         "burst_packets": burst_packets,
-        "probes_needed": max(wanted) if wanted else None,
-        "probes_needed_over_max": out_of_reach,
         "shaped": shaped,
         "protected": protected,
         "service_rules": service_rules,

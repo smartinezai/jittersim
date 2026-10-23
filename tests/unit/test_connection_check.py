@@ -288,12 +288,11 @@ def test_a_small_set_loss_cannot_be_told_from_a_healthy_link():
     result = summary(records(100), impairment=setting(loss_percent=3))
     assert metric(result, "loss")["status"] == "inconclusive"
     assert result["verdict"] == "inconclusive"
-    assert result["probes_needed"] is None and result["probes_needed_over_max"] is True
     assert any("More than 300 probes" in note for note in result["notes"])
     result = summary(records(100), impairment=setting(loss_percent=5))
     assert metric(result, "loss")["status"] == "borderline"
     assert result["verdict"] == "borderline"
-    assert result["probes_needed"] == 84
+    assert any("at least 84 probes" in note for note in result["notes"])
 
 
 def test_zero_replies_is_no_answer_unless_the_profile_explains_it():
@@ -517,7 +516,7 @@ def test_a_corruption_only_profile_gets_the_right_guidance():
     loss = metric(result, "loss")
     assert loss["status"] == "inconclusive"
     assert "at least 121 probes" in loss["sentence"]
-    assert result["probes_needed"] == 121
+    assert any("at least 121 probes" in note for note in result["notes"])
     # Seven lost are clearly more than a healthy link, and not "no more loss than a healthy link".
     clear = summary(records(100, lost=range(7)), impairment=setting(corrupt_percent=5))
     assert metric(clear, "loss")["status"] == "matches"

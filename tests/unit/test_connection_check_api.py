@@ -8,6 +8,7 @@ import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from jittersim.api import connection_checks as checks_module
@@ -20,7 +21,7 @@ from jittersim.api.server import WRITE_PATHS, ControlServer
 from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import Impairment
 from jittersim.config.speed_tests import ConnectionCheckStore, SpeedTestStore
-from jittersim.config.storage import ConfigRepository
+from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.connection_check import DEFAULT_PROBES, PROBE_INTERVAL_SECONDS
 from jittersim.engine.plan import (
     GENERAL_QUEUE_ID,
@@ -267,6 +268,14 @@ class StartTests(CheckBase):
         self.assertIn("download queue", body["error"])
         self.assertEqual(self.manager.runs, {})
 
+    def test_a_failed_start_read_opens_no_sender(self) -> None:
+        # The reads that can fail come before the prober, so no socket is left open.
+        with mock.patch.object(self.manager, "_profile_snapshot", side_effect=StorageError("x")):
+            status, _ = self.start()
+        self.assertEqual(status, 500)
+        self.assertEqual([prober for prober in self.probers if not prober.closed], [])
+        self.assertEqual(self.manager.runs, {})
+
     def test_a_device_without_an_address_or_a_sender_is_refused_with_a_reason(self) -> None:
         self.helper.addresses[PHONE] = None
         status, body = self.start()
@@ -308,6 +317,21 @@ class StartTests(CheckBase):
                 self.checks.start({"mac_address": PHONE})
         self.assertEqual(self.manager.active(), [])
         self.assertTrue(self.manager.closed)
+
+
+class TrimTests(CheckBase):
+    def test_each_kind_keeps_its_own_ended_runs(self) -> None:
+        def ended(kind, number):
+            return SimpleNamespace(id=f"{kind}-{number}", kind=kind, state="ended",
+                                   startup_uncertain=False, thread=None)
+
+        self.manager.runs = {run.id: run for run in (
+            [ended("speed", number) for number in range(8)]
+            + [ended("check", number) for number in range(12)])}
+        self.manager._trim()
+        self.assertEqual(sorted(self.manager.runs), sorted(
+            [f"speed-{number}" for number in range(8)]
+            + [f"check-{number}" for number in range(4, 12)]))
 
 
 class ResultTests(CheckBase):
@@ -912,6 +936,17 @@ class StoreTests(unittest.TestCase):
             self.addCleanup(repository.close)
             self.assertEqual(len(ConnectionCheckStore(repository).list()), 2)
             self.assertEqual(SpeedTestStore(repository).list(), [])
+
+    def test_store_errors_name_the_rows_own_kind(self) -> None:
+        repository = ConfigRepository(":memory:")
+        self.addCleanup(repository.close)
+        for store, noun in ((ConnectionCheckStore, "connection check result"),
+                            (SpeedTestStore, "speed test result")):
+            with self.assertRaisesRegex(StorageError, f"^{noun} status is invalid$"):
+                store(repository).save(self.row(status="bogus"))
+            repository._connection.execute(f"DROP TABLE {store.table}")
+            with self.assertRaisesRegex(StorageError, f"^could not read the {noun}$"):
+                store(repository).get(1)
 
     def test_rows_are_bounded_per_device_and_in_total_for_each_table(self) -> None:
         repository = ConfigRepository(":memory:")
