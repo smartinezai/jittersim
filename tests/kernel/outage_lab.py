@@ -301,12 +301,8 @@ class Lab:
                 f"--log-facility={self.directory}/router-dnsmasq.log"]
         if self.router_authoritative:
             argv.append("--dhcp-authoritative")
-        self.router_dnsmasq = self.spawn(ROUTER, argv)
+        self.spawn(ROUTER, argv)
         self._wait_port(ROUTER, "192.168.0.1", 53)
-
-    def stop_router_dhcp(self):
-        self.router_dnsmasq.terminate()
-        self.router_dnsmasq.wait(timeout=5)
 
     def router_fault(self, rule=None):
         """Install one nft rule in the router's forward fault chain, or clear it."""

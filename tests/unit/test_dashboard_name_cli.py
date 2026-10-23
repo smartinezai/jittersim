@@ -39,6 +39,7 @@ class DashboardNameCommandTests(unittest.TestCase):
         install = localname.install_config
 
         def prepare(config, **kwargs):
+            self.budget = kwargs["budget"]
             self.runner(["openssl", "fixture-issue", kwargs["neutral_name"]], kwargs["budget"].limit(60))
             return False, localca.LeafResult(True)
 
@@ -125,6 +126,15 @@ class DashboardNameCommandTests(unittest.TestCase):
         self.assertLess(publisher, dashboard)
         self.assertIn("https://bench.local:8080", out)
         self.assertIn("sign in once", out.lower())
+
+    def test_the_change_has_two_minutes_and_its_own_timeout_message(self) -> None:
+        code, _, err = self.run_cli("set", "bench.local", "--yes")
+
+        self.assertEqual(code, 0, err)
+        self.assertAlmostEqual(self.budget.deadline - self.budget.started, 120, places=3)
+        self.budget.deadline = self.budget.started
+        with self.assertRaisesRegex(updates.UpdateError, "name change exceeded its time allowance"):
+            self.budget.check()
 
     def test_a_failed_certificate_leaves_the_name_unchanged(self) -> None:
         (self.config / "trust.env").write_text("JITTERSIM_DASHBOARD_NAME=netlab.local\n")

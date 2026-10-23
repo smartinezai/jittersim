@@ -99,14 +99,15 @@ class ApiRuntimeIntegrationTests(unittest.TestCase):
         self.start_timer()
         self.post("/api/reset", {})
         self.save_scenario()
-        timers = self.repository.list_timers()
+        timers = self.repository.list_active_timers(now=1_000)
+        self.assertEqual(len(timers), 1)
 
         self.start_scenario(expected=409)
         self.clock.return_value = 1_011
         self.post("/api/apply", {})
 
         self.assertEqual(self.repository.list_scenario_runs(), ())
-        self.assertEqual(self.repository.list_timers(), timers)
+        self.assertEqual(self.repository.list_active_timers(now=1_000), timers)
         self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 300)
 
     def test_scenario_requires_hardware_playback(self):
