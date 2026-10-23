@@ -23,6 +23,8 @@ ROOT_HANDLE = "10:"
 # traffic (the Pi itself, ARP, DHCP and unassigned clients) on a fair queue.
 DEFAULT_CLASS = f"{ROOT_HANDLE}1"
 DASHBOARD_REPLY_MARK = 0x80000000
+# Wi-Fi maps DSCP 2 to best effort like unmarked traffic (its top three bits are 0).
+SPEED_TEST_DSCP = 2
 GENERAL_DOWNLOAD_MARK = 0x40000000
 # Forwarded downloads for everyone else carry this mark until the download hook
 # turns it into their queue mark. The hook sees the client MAC, so protected
@@ -305,6 +307,11 @@ def _render_nft_script(
         'tcp dport 8080 return comment "keep dashboard sign-in reachable"',
         f'add rule inet {PROJECT_TABLE} output oifname "{test_interface}" '
         f'tcp sport 8080 meta mark set {DASHBOARD_REPLY_MARK}',
+        # The dashboard's speed test sends its main part with this DSCP, so that part
+        # alone goes through the device's download queue like any other download.
+        f'add rule inet {PROJECT_TABLE} output oifname "{test_interface}" '
+        f'tcp sport 8080 ip dscp {SPEED_TEST_DSCP:#04x} meta mark set 0 '
+        'comment "shape the dashboard speed test"',
         f'add rule netdev {DOWNLOAD_TABLE} download meta mark {DASHBOARD_REPLY_MARK} '
         'meta mark set 0 return comment "keep local dashboard replies usable"',
         # The browser proxy marks its socket toward the client. Keep that class

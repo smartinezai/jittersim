@@ -14,7 +14,7 @@ test. It is for experiments, not a replacement for your home router.
   single device on its own profile.
 - Schedule changes, run a timer or gradually switch between settings.
 - Control device, website and service access, with data and time limits.
-- Review connected devices and traffic while a test runs. Measure a device's speed before and after a profile.
+- Review connected devices and traffic while a test runs. Measure a device's speed before and after a profile, from the dashboard itself with no outside server.
 - Follow a saved device to its new private Wi-Fi address, with Ask, Automatic and Undo.
 - Choose whether active profiles resume after a router outage.
 - Update the Pi in one step from the dashboard or a terminal with a signed
