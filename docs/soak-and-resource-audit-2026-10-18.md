@@ -24,9 +24,11 @@ Hosted CI is billing-blocked. Nothing here claims a hosted CI pass.
   720 an hour for each data limit, group limit or service quota while its device is quiet.
 - Fixed: the browser proxy and the ad-blocking service loaded `requests` and its TLS stack
   (about 5 MB of Python heap each) only because `jittersim.networking` imports ad blocking.
-- The largest remaining cost is polling: each open dashboard tab makes the helper run about
+- The largest remaining cost was polling: each open dashboard tab made the helper run about
   0.6 network commands a second (`tc`, `nft`, `ip`, `iw`, and `nmcli` on the Router page).
-  The proposals below share these reads between tabs. None of them needs a Panic-pinned file.
+  Fixed in the follow-up PR (proposals 4 to 6 and 9, section "After proposals 4 to 6 and 9"):
+  tabs share one reading and a quiet time quota stops writing. None of it needed a Panic-pinned
+  file.
 - No Panic-pinned file needs a change for anything found here.
 
 ## Method
@@ -209,12 +211,12 @@ scheduler, once a tick), `ping` 1,555 (every health poll), `clients` 816, `traff
 | 1 | Scheduler opens a repository every tick | 1 ms CPU a second on a Mac, schema work 3,600 times an hour | keep one connection, drop it when a tick leaves a write open, close it on stop | fixed |
 | 2 | Quota samplers rewrite unchanged counters | up to 720 journaled SD writes an hour per quota | skip the UPDATE when the counter did not move | fixed |
 | 3 | `requests` loaded in the proxy and the ad-blocking service | about 5 MB of heap each | import it in the fetch child only | fixed |
-| 4 | Each tab's traffic poll runs `nft` and `tc` | 2 commands every 2 s per tab on the Traffic page | share one reading between tabs for 1 s in `ControlServer` (not a pinned file) | proposed |
-| 5 | Each tab's health poll pings the helper | one helper connection and thread every 5 s per tab | share the ping result for 2 s in `ControlServer` | proposed |
-| 6 | Router page polls `/api/uplink` every 5 s and the helper runs `nmcli` | `nmcli` is the costliest command on a Pi (D-Bus round trips) | cache the uplink reading for 15 s, drop the cache on any write | proposed |
+| 4 | Each tab's traffic poll runs `nft` and `tc` | 2 commands every 2 s per tab on the Traffic page | share one reading between tabs for 1 s in `ControlServer` (not a pinned file) | fixed in this PR ([plan](implementation-plan-share-polled-readings-2026-10-23.md)) |
+| 5 | Each tab's health poll pings the helper | one helper connection and thread every 5 s per tab | share the ping result for 2 s in `ControlServer` | fixed in this PR |
+| 6 | Router page polls `/api/uplink` every 5 s and the helper runs `nmcli` | `nmcli` is the costliest command on a Pi (D-Bus round trips) | cache the uplink reading for 15 s, drop the cache on any write | fixed in this PR |
 | 7 | The scheduler asks the helper for the gateway state every tick | one helper connection and thread a second while a plan runs | none: the tick needs it to see a Panic latch at once | left as it is |
 | 8 | Service watch imports the whole helper module for `HelperClient` | 14 MB heap, of which the client needs a small part | move `HelperClient` to its own module (needs a change to `networking/helper.py`, which is pinned) | proposed, pinned |
-| 9 | Time quotas write every 5 s while quiet | 720 commits an hour per enabled time quota | keep `last_sample_at` in memory and write it only with a change of the usage | proposed |
+| 9 | Time quotas write every 5 s while quiet | 720 commits an hour per enabled time quota | keep `last_sample_at` in memory and write it only with a change of the usage | fixed in this PR |
 | 10 | Rollback journal with full sync | every changed commit is 3 or more syncs | WAL with `synchronous = NORMAL`. It needs care: other users read the database (the CLI and the update scripts) and WAL needs write access to the folder for its `-shm` file | proposed, owner decision |
 | 11 | Every request is a new TLS connection (the server speaks HTTP/1.0 and closes after each answer, which keeps a worker per request) | one handshake per poll, 7 a second with 4 tabs; ECDSA keys and session resumption keep it small | measure the handshake share on the Pi with the budget and soak scripts before changing anything | measure first |
 
@@ -225,6 +227,44 @@ from there (two lines), so the approved helper behaves the same. That change nee
 `PANIC_APPROVED_SOURCES` entry after an independent review, and it is not part of this pull
 request.
 
+## After proposals 4 to 6 and 9
+
+Plan: [implementation-plan-share-polled-readings-2026-10-23.md](implementation-plan-share-polled-readings-2026-10-23.md).
+Same harness and machine, seed 1, HTTPS, `origin/main` at `03fe31d8` against the branch that fixes
+proposals 4 to 6 and 9. Both runs passed the judgement (no growth, no server errors, p95 2.7 and
+2.8 ms).
+
+Ten minutes with 9 tabs (`--minutes 10 --browsers 9 --page-seconds 60 --warmup-seconds 60`, owner
+action every 30 s). The tabs move through the 8 pages, so two tabs share a page at any time:
+
+| In 10 minutes | before | after | change |
+| --- | --- | --- | --- |
+| `GET /api/traffic`, `/api/uplink`, `/api/health` requests | 356, 166, 1,115 | 356, 166, 1,117 | the same load |
+| helper `uplink-info` calls | 166 | 40 | -76% |
+| helper `ping` calls | 1,116 | 239 | -79% |
+| helper `traffic-counters` calls (the scheduler's quota samples included) | 435 | 379 | -13% |
+| `nmcli` commands | 166 | 40 | -76% |
+| `nft`, `tc` and `ip` commands | 899, 1,282, 528 | 787, 1,170, 412 | -12%, -9%, -22% |
+| all network commands | 3,224 | 2,768 | -14% |
+| all helper calls | 3,189 | 2,139 | -33% |
+
+Three minutes with 4 tabs on the same page (Traffic, with the Router page's reads), polling only,
+started by a small script that sets the page list of the harness (not committed):
+
+| In 3 minutes | before | after | change |
+| --- | --- | --- | --- |
+| `GET /api/traffic` requests | 359 | 359 | the same load |
+| helper `traffic-counters` calls (the scheduler's samples included) | 400 | 176 | -56% |
+| helper `uplink-info` calls for 148 `/api/uplink` requests | 148 | 12 | -92% |
+| helper `ping` calls for 148 `/api/health` requests | 149 | 73 | -51% |
+| all network commands | 2,150 | 1,006 | -53% |
+
+With one tab the traffic reading is not shared (its poll is 2 s, the window 1 s), the health ping
+is shared when two tabs poll within 2 s of each other, and the uplink drops from a command every
+5 s to one every 15 s. The harness fixture has no time quota, so proposal 9 was counted on its own:
+one enabled time quota of a quiet device, 720 samples (one hour) through the scheduler,
+`rows changed` before 720, after 0.
+
 ## What remains
 
 - A run of several hours on the Pi itself (`python -m tests.soak.harness --minutes 240` from a
@@ -234,6 +274,6 @@ request.
 - The fixture has no traffic counters, no service watch and no ad-blocking daemon, so the
   quota samplers, the DNS watcher and the per-second ad-blocking tick were checked by reading
   the code and by unit tests, not by the soak.
-- Proposals 4 to 6 and 9 change dashboard behaviour that browser journeys check, so they belong
-  in their own pull request with the browser gate.
+- Proposals 4 to 6 and 9 changed dashboard behaviour that browser journeys check, so they went
+  into their own pull request with the browser gate.
 - Retention of old releases under `/var/lib/jittersim-updates` was not part of this audit.

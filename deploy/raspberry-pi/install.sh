@@ -75,10 +75,7 @@ else
 fi
 python3 "$SOURCE_DIR/deploy/raspberry-pi/preflight.py" \
     --uplink "$JITTERSIM_UPLINK" --test-interface "$JITTERSIM_TEST_INTERFACE"
-python3 "$SOURCE_DIR/deploy/raspberry-pi/retire-services.py" --check
-
-# An upgrade clears the saved DNS names once when protected devices exist. Say so before it happens.
-python3 "$SOURCE_DIR/deploy/raspberry-pi/upgrade-notice.py" "$DATA_DIR/jittersim.db" || true
+python3 "$SOURCE_DIR/deploy/raspberry-pi/check-update-idle.py"
 
 existing_unbound=no
 if dpkg-query -W -f='${Status}' unbound 2>/dev/null | grep -q 'install ok installed'; then
@@ -141,7 +138,6 @@ runuser -u jittersim -- "$INSTALL_DIR/.venv/bin/python" -I -c \
 "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/deploy/raspberry-pi/bootstrap-dashboard-access.py"
 # `sudo jittersim normal-access` and `sudo jittersim wifi reset` work when the dashboard is down.
 ln -sf "$INSTALL_DIR/.venv/bin/jittersim" /usr/local/bin/jittersim
-python3 "$INSTALL_DIR/deploy/raspberry-pi/retire-services.py"
 
 if [ ! -s "$CONFIG_DIR/control.env" ]; then
     admin_token=$(openssl rand -hex 32)
