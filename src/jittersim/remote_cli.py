@@ -10,8 +10,9 @@ import argparse
 import json
 import os
 import re
+import secrets
+import stat
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
@@ -996,8 +997,9 @@ def _backup_pull_parser() -> argparse.ArgumentParser:
         "jittersim backup pull",
         "Download the database backup that the dashboard's Download backup button gives and "
         f"save it in a private folder ({BACKUP_FOLDER} unless you give --directory) under a "
-        "new name with the time in it. A file that exists is never replaced and old backups "
-        "are never deleted. The command checks that the answer is a SQLite file and that all of "
+        "new name with the time in it. A folder that other users own or can write in is "
+        "refused. A file that exists is never replaced and old backups are never deleted. "
+        "The command checks that the answer is a SQLite file and that all of "
         "it arrived. It does not check the contents: run PRAGMA quick_check on the copy (the "
         "user guide has the command). The backup holds device names, addresses and observed "
         "domain names, so keep it private. The command runs once. Call it from cron or launchd "
@@ -1007,44 +1009,80 @@ def _backup_pull_parser() -> argparse.ArgumentParser:
     return parser
 
 
-@register("backup pull", _backup_pull_parser)
-def _backup_pull(arguments: argparse.Namespace) -> int:
-    client = _client(arguments)
-    data = client.download(
-        "/api/backup", timeout=BACKUP_TIMEOUT_SECONDS, max_bytes=MAX_BACKUP_BYTES
-    )
-    if not data.startswith(SQLITE_HEADER):
-        raise RemoteError("The dashboard answer was not a database backup.")
-    folder = (arguments.directory or Path(BACKUP_FOLDER)).expanduser().resolve()
-    path = folder / time.strftime("jittersim-backup-%Y%m%dT%H%M%SZ.db", time.gmtime())
+def _open_backup_folder(folder: Path) -> int:
+    """Open the folder and check that exact directory: nobody else may be able to write in it.
+
+    Someone who can write in the folder could swap the temporary file before it is linked.
+    Every later step uses the opened directory, so the check and the use are the same place.
+    """
+
     try:
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=".jittersim-backup-", suffix=".tmp", dir=folder
-        )
+        directory = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError as error:
         raise RemoteError(
             f"The folder {folder} cannot be used: {error.strerror or 'system error'}. "
             "Choose another folder with --directory."
         ) from None
+    info = os.fstat(directory)
+    if info.st_uid != os.geteuid() or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        os.close(directory)
+        raise RemoteError(
+            f"The folder {folder} can be changed by other users, so a backup in it could be "
+            "swapped. Run chmod go-w on it and make sure you own it, or choose another folder "
+            "with --directory."
+        )
+    return directory
+
+
+@register("backup pull", _backup_pull_parser)
+def _backup_pull(arguments: argparse.Namespace) -> int:
+    client = _client(arguments)
+    folder = (arguments.directory or Path(BACKUP_FOLDER)).expanduser().resolve()
+    # A folder that exists is checked before the download. A missing one is made after it.
+    directory = _open_backup_folder(folder) if folder.exists() else None
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        # Publish only a complete file. Linking refuses a destination that appeared meanwhile.
+        data = client.download(
+            "/api/backup", timeout=BACKUP_TIMEOUT_SECONDS, max_bytes=MAX_BACKUP_BYTES
+        )
+        if not data.startswith(SQLITE_HEADER):
+            raise RemoteError("The dashboard answer was not a database backup.")
+        if directory is None:
+            directory = _open_backup_folder(folder)
+        name = time.strftime("jittersim-backup-%Y%m%dT%H%M%SZ.db", time.gmtime())
+        temporary = ".jittersim-backup-" + secrets.token_hex(8) + ".tmp"
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+            dir_fd=directory,
+        )
         try:
-            os.link(temporary, path)
-        except FileExistsError:
-            raise RemoteError(f"{path} already exists. Nothing was replaced. Try again.") from None
-        except OSError as error:
-            raise RemoteError(
-                f"The folder {folder} cannot take the finished backup "
-                f"({error.strerror or 'system error'}). It needs a disk that supports hard "
-                "links, and FAT and exFAT drives do not. Choose another folder with --directory."
-            ) from None
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Publish only a complete file. Linking refuses a destination that appeared meanwhile.
+            try:
+                os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+            except FileExistsError:
+                raise RemoteError(
+                    f"{folder / name} already exists. Nothing was replaced. Try again."
+                ) from None
+            except OSError as error:
+                raise RemoteError(
+                    f"The folder {folder} cannot take the finished backup "
+                    f"({error.strerror or 'system error'}). It needs a disk that supports hard "
+                    "links, and FAT and exFAT drives do not. Choose another folder with "
+                    "--directory."
+                ) from None
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        if directory is not None:
+            os.close(directory)
+    path = folder / name
     if arguments.json:
         _print_json({"path": str(path), "bytes": len(data)})
         return 0

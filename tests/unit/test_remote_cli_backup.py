@@ -219,18 +219,18 @@ def test_a_file_that_appears_before_publication_is_never_replaced(
     dashboard, capsys, tmp_path, monkeypatch
 ):
     real_link = os.link
+    folder = tmp_path / "backups"
     raced_paths = []
 
-    def another_backup_appears(source, destination):
-        assert Path(source).read_bytes() == BACKUP
-        assert _mode(Path(source)) == 0o600
-        Path(destination).write_bytes(b"keep this backup")
-        raced_paths.append(Path(destination))
-        real_link(source, destination)
+    def another_backup_appears(source, destination, **directories):
+        assert (folder / source).read_bytes() == BACKUP
+        assert _mode(folder / source) == 0o600
+        (folder / destination).write_bytes(b"keep this backup")
+        raced_paths.append(folder / destination)
+        real_link(source, destination, **directories)
 
     monkeypatch.setattr("jittersim.remote_cli.os.link", another_backup_appears)
     dashboard.answer("GET", "/api/backup", BACKUP)
-    folder = tmp_path / "backups"
     code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
 
     assert code == 1
@@ -239,55 +239,55 @@ def test_a_file_that_appears_before_publication_is_never_replaced(
     assert raced_paths[0].read_bytes() == b"keep this backup"
 
 
-def test_a_disk_without_hard_links_says_so_and_names_the_folder(
-    dashboard, capsys, tmp_path, monkeypatch
+@pytest.mark.parametrize("mode", [0o777, 0o1777, 0o775, 0o757])
+def test_an_existing_folder_that_others_can_write_in_is_refused_before_the_download(
+    dashboard, capsys, tmp_path, mode
 ):
-    def no_links(source, destination):
-        raise OSError(errno.ENOTSUP, "Operation not supported")
-
-    monkeypatch.setattr("jittersim.remote_cli.os.link", no_links)
     dashboard.answer("GET", "/api/backup", BACKUP)
-    folder = tmp_path / "usb"
+    folder = tmp_path / "shared"
+    folder.mkdir()
+    folder.chmod(mode)
     code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
 
     assert code == 1
-    assert str(folder.resolve()) in err
-    assert "Operation not supported" in err
-    assert "hard links" in err and "exFAT" in err
+    assert f"The folder {folder.resolve()} can be changed by other users" in err
+    assert "chmod go-w" in err and "--directory" in err
+    assert dashboard.requests == []
     assert list(folder.iterdir()) == []
 
 
-def test_a_folder_that_cannot_be_used_is_named(dashboard, capsys, tmp_path):
+@pytest.mark.parametrize("mode", [0o700, 0o755, 0o750])
+def test_an_existing_folder_only_you_can_write_in_is_used(dashboard, capsys, tmp_path, mode):
     dashboard.answer("GET", "/api/backup", BACKUP)
-    not_a_folder = tmp_path / "a-file"
-    not_a_folder.write_text("x")
-    code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(not_a_folder))
+    folder = tmp_path / "mine"
+    folder.mkdir()
+    folder.chmod(mode)
+    code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
 
-    assert code == 1
-    assert f"The folder {not_a_folder.resolve()} cannot be used" in err
-    assert "--directory" in err
+    assert code == 0, err
+    assert [item.read_bytes() for item in folder.iterdir()] == [BACKUP]
+    assert _mode(folder) == mode
 
 
-@pytest.mark.parametrize("target_exists", [True, False])
-def test_a_link_already_at_the_destination_is_never_followed(
-    dashboard, capsys, tmp_path, target_exists
+def test_an_existing_folder_owned_by_someone_else_is_refused(
+    dashboard, capsys, tmp_path, monkeypatch
 ):
     dashboard.answer("GET", "/api/backup", BACKUP)
-    folder = tmp_path / "backups"
-    folder.mkdir()
-    target = tmp_path / "somewhere-else"
-    if target_exists:
-        target.write_bytes(b"not a backup")
-    taken = folder / "jittersim-backup-20261023T120000Z.db"
-    taken.symlink_to(target)
-    stub = types.SimpleNamespace(strftime=lambda *_: taken.name, gmtime=lambda: None)
-    with patch("jittersim.remote_cli.time", stub):
-        code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
+    folder = tmp_path / "theirs"
+    folder.mkdir(mode=0o700)
+    real_fstat = os.fstat
+
+    def owned_by_another_user(descriptor):
+        info = real_fstat(descriptor)
+        return types.SimpleNamespace(st_uid=info.st_uid + 1, st_mode=info.st_mode)
+
+    monkeypatch.setattr("jittersim.remote_cli.os.fstat", owned_by_another_user)
+    code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
 
     assert code == 1
-    assert "already exists" in err
-    assert target.read_bytes() == b"not a backup" if target_exists else not target.exists()
-    assert list(folder.iterdir()) == [taken]
+    assert f"The folder {folder.resolve()} can be changed by other users" in err
+    assert dashboard.requests == []
+    assert list(folder.iterdir()) == []
 
 
 def test_the_help_says_what_the_command_keeps_and_how_to_repeat_it(capsys):
@@ -299,6 +299,7 @@ def test_the_help_says_what_the_command_keeps_and_how_to_repeat_it(capsys):
     assert "never replaced" in text
     assert "keep it private" in text
     assert "old backups are never deleted" in text
+    assert "other users own or can write in is refused" in text
     assert "does not check the contents" in text and "quick_check" in text
     assert "cron or launchd" in text
 

@@ -16,7 +16,7 @@ backup** on **Diagnostics**) and saves the file. It prints the path.
 | --- | --- | --- |
 | Which route | The existing `GET /api/backup`. No new server route. | It already makes a consistent SQLite snapshot and needs the admin token. |
 | Connection and token | The shared `DashboardClient`: the saved `jittersim connect` address, the pinned certificate and the hidden token prompt. | The same checks as every Mac command. A wrong certificate never receives the token. |
-| Folder | `~/jittersim-backups/`, or `--directory FOLDER`. Created with mode 0700 when missing. An existing folder keeps its mode. | The file is the secret, and it is 0600. |
+| Folder | `~/jittersim-backups/`, or `--directory FOLDER`. Created with mode 0700 when missing (after the download). An existing folder is opened with `O_DIRECTORY` and `O_NOFOLLOW` before the download and checked with `fstat` on that open directory: it must belong to the caller and group and others must not be able to write in it (the sticky bit does not excuse it). Otherwise the command stops and names the folder and `chmod go-w`. The temporary file, the link and the cleanup all use the same open directory (`dir_fd`). | Someone who can write in the folder could swap the temporary file between its creation and the link, and so replace the backup with their own file. Using the checked directory for every step means the check and the use are the same place. The file is also 0600. A default folder the command created is 0700 and passes. |
 | File name | `jittersim-backup-YYYYMMDDTHHMMSSZ.db` in UTC. | Sorts by time. Holds no address, name or token. |
 | Overwrite | Never. The answer is written to a hidden temporary file in the same folder (`mkstemp`, mode 0600), synced, and then published with `os.link`, which refuses a name that exists, including a symbolic link. The temporary name is removed at the end. Two pulls in the same second make the second one fail with a message. | A backup must not replace a good one, and a file with a final name is always complete, even after a crash. The price is a disk with hard links: FAT and exFAT fail with a message that names the folder. A kill can leave a hidden `.jittersim-backup-*.tmp` file. |
 | What is saved | Only an answer that starts with the SQLite header, is at most 64 MiB and arrived completely (it has a Content-Length and all of it came, or it is chunked and ended properly). Nothing is created before the download has succeeded. | A captive portal page or a cut download must not become a "backup". The command proves a complete SQLite-looking file, not a sound database: the user guide drill runs `PRAGMA quick_check`. |
@@ -45,13 +45,14 @@ plainly and gives a drill that needs no Pi: pull the backup and run SQLite's
 
 ## Tests
 
-`tests/unit/test_remote_cli_backup.py` (21 cases) uses the fake HTTPS dashboard of the
+`tests/unit/test_remote_cli_backup.py` (25 cases) uses the fake HTTPS dashboard of the
 other remote command tests and a small TLS server that cuts the answer: the saved file
 and its modes, the default folder, `--json`, no overwrite (also a symbolic link at the
 destination), a write, sync or cancel that leaves nothing, a disk without hard links, a
-folder that cannot be used, a refused token, an unreachable Pi, an answer that is not
-a database, over the limit or cut short or without a length, and the `--help` text. The
-shared refusal tests (plain HTTP, wrong certificate, help text) include the command.
+folder that cannot be used, that others can write in or that someone else owns, a refused
+token, an unreachable Pi, an answer that is not a database, over the limit or cut short or
+without a length, and the `--help` text. The shared refusal tests (plain HTTP, wrong
+certificate, help text) include the command.
 
 ## Not done
 
