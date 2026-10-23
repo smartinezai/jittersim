@@ -94,6 +94,23 @@ def test_max_age_zero_always_reads(clock):
     assert read.calls == 3
 
 
+def test_a_slow_read_is_kept_from_its_completion(clock):
+    reading = SharedReading()
+    calls = []
+
+    def slow_read():
+        calls.append(clock.now)
+        clock.now += 8.0
+        return False  # A helper timeout becomes a degraded health answer.
+
+    assert reading.get(slow_read, 1.0) is False
+    assert reading.get(slow_read, 1.0) is False
+    assert len(calls) == 1
+    clock.now += 1.0
+    assert reading.get(slow_read, 1.0) is False
+    assert len(calls) == 2
+
+
 def test_drop_makes_the_kept_result_unusable(clock):
     reading, read = SharedReading(), Reads()
     reading.get(read, 10.0)
