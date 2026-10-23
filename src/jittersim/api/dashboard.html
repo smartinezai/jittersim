@@ -381,6 +381,10 @@
         </label>
         <p class="form-note">Presets fill the form with rough approximations of real networks.
           Nothing is saved until you choose Save profile.</p>
+        <details>
+          <summary>Where the presets come from</summary>
+          <ul id="profile-preset-sources" class="form-note"></ul>
+        </details>
         <div class="fields">
           <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Profile ID help" data-help="A short code that devices and schedules use to find this profile. Saving with an existing ID updates that profile and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read.">?</span></span>
             <input id="profile-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}">
@@ -431,7 +435,7 @@
             <input id="download-bandwidth" type="number" min="1">
           </label>
         </div>
-        <details>
+        <details id="profile-advanced">
           <summary>Randomness, outages and website access</summary>
           <p class="form-note">Choose a relative variation or a value range for each feature. A 200 ms value with 30% variation gives a range of 140 to 260 ms. Ordinary profiles start with their base values and choose new values after the first reroll interval. A reroll interval of 0 keeps their base values fixed. Progressions calculate changing values separately.</p>
           <div class="fields">

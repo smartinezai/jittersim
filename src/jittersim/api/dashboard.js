@@ -8252,32 +8252,59 @@
       element("profile-website-mode").value = profile.website_mode;
       element("profile-website-domains").value = profile.website_domains.join(", ");
       element("profile-website-enabled").value = profile.website_randomness.enabled_probability;
-      element("profile-form").querySelector("details").open = hasAdvancedSettings(profile);
+      element("profile-advanced").open = hasAdvancedSettings(profile);
     }
 
+    // Rough values. Each source says where the numbers come from, and the same text is in
+    // docs/user-guide.md (tests/unit/test_profile_presets.py keeps the two in step).
     const PROFILE_PRESETS = [
       {
+        name: "DSL",
+        source: "Apple Network Link Conditioner DSL preset as a published table lists it " +
+          "(2 Mbit/s and 256 kbit/s, 5 ms each way). The first number of each pair is used " +
+          "for download.",
+        upload: { delay_ms: 5, bandwidth_kbit: 256 },
+        download: { delay_ms: 5, bandwidth_kbit: 2000 }
+      },
+      {
         name: "Good 4G",
+        source: "A rough estimate made for this tool. No published source.",
         upload: { delay_ms: 25, jitter_ms: 5, bandwidth_kbit: 10000 },
         download: { delay_ms: 25, jitter_ms: 5, bandwidth_kbit: 30000 }
       },
       {
         name: "Congested 4G",
+        source: "A rough estimate made for this tool. No published source.",
         upload: { delay_ms: 70, jitter_ms: 40, loss_percent: 1, bandwidth_kbit: 1000 },
         download: { delay_ms: 70, jitter_ms: 40, loss_percent: 1, bandwidth_kbit: 3000 }
       },
       {
         name: "3G",
+        source: "Apple Network Link Conditioner 3G preset as a published table lists it " +
+          "(780 and 330 kbit/s, 100 ms each way), plus 20 ms jitter. The first number of " +
+          "each pair is used for download.",
         upload: { delay_ms: 100, jitter_ms: 20, bandwidth_kbit: 330 },
         download: { delay_ms: 100, jitter_ms: 20, bandwidth_kbit: 780 }
       },
       {
+        name: "Slow 3G (Chrome DevTools)",
+        source: "Chrome DevTools Slow 3G, now called 3G (about 500 kbit/s each way, 400 ms " +
+          "round trip).",
+        upload: { delay_ms: 200, bandwidth_kbit: 500 },
+        download: { delay_ms: 200, bandwidth_kbit: 500 }
+      },
+      {
         name: "EDGE (2G)",
+        source: "Apple Network Link Conditioner Edge preset as a published table lists it " +
+          "(240 and 200 kbit/s, 400 and 440 ms), plus jitter and 1% loss. The first number " +
+          "of each pair is used for download.",
         upload: { delay_ms: 440, jitter_ms: 60, loss_percent: 1, bandwidth_kbit: 200 },
         download: { delay_ms: 400, jitter_ms: 60, loss_percent: 1, bandwidth_kbit: 240 }
       },
       {
         name: "Satellite",
+        source: "A rough estimate made for this tool. Light alone needs about 480 ms for a " +
+          "geostationary round trip, so about 600 ms (300 ms each way) is plausible.",
         upload: {
           delay_ms: 300, jitter_ms: 20, loss_percent: 1, loss_burst_packets: 3,
           bandwidth_kbit: 2000
@@ -8289,11 +8316,13 @@
       },
       {
         name: "Lossy Wi-Fi",
+        source: "A rough estimate made for this tool. No published source.",
         upload: { delay_ms: 5, jitter_ms: 15, loss_percent: 5, loss_burst_packets: 3 },
         download: { delay_ms: 5, jitter_ms: 15, loss_percent: 5, loss_burst_packets: 3 }
       },
       {
         name: "Train tunnel",
+        source: "A rough estimate made for this tool. No published source.",
         upload: {
           delay_ms: 200, jitter_ms: 80, loss_percent: 3, loss_burst_packets: 5, bandwidth_kbit: 500
         },
@@ -8306,6 +8335,9 @@
       },
       {
         name: "Very bad network",
+        source: "Apple Network Link Conditioner Very Bad Network preset as a published table " +
+          "lists it (1 Mbit/s and 500 ms each way, 10% loss), plus 100 ms jitter and loss " +
+          "bursts of 2.",
         upload: {
           delay_ms: 500, jitter_ms: 100, loss_percent: 10, loss_burst_packets: 2,
           bandwidth_kbit: 1000
@@ -8317,6 +8349,8 @@
       },
       {
         name: "Offline",
+        source: "Every packet lost both ways. Apple's Network Link Conditioner calls this " +
+          "100% Loss.",
         upload: { loss_percent: 100 },
         download: { loss_percent: 100 }
       }
@@ -9675,6 +9709,9 @@
       option.value = String(index);
       option.textContent = preset.name;
       element("profile-preset").appendChild(option);
+      const item = document.createElement("li");
+      item.textContent = preset.name + ": " + preset.source;
+      element("profile-preset-sources").appendChild(item);
     });
 
     element("profile-preset").addEventListener("change", (event) => {

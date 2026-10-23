@@ -58,6 +58,7 @@ select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
 .profile-direction .field-label { min-height: 2.75rem; align-items: center; }
 @media (max-width: 900px) { .profile-directions { grid-template-columns: minmax(0, 1fr); } }
 #profile-form > details { background: var(--bg-inset); padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius); }
+#profile-form > details:first-of-type { margin-bottom: 1rem; }
 @media (max-width: 600px) {
   .access-rule-row { align-items: flex-start; flex-direction: column; gap: .5rem; }
   .access-actions button { flex: 1 1 auto; }
