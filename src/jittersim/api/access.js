@@ -148,7 +148,8 @@ function renderAccessDevices() {
       (blocked ? 'Network access blocked' : 'Network access allowed')));
     const button = actionButton((blocked ? 'Allow ' : 'Block ') + (device.name || mac), async () => {
       if (formDrafts.has('policy-form') || formDrafts.has('site-rule-form')) throw new Error('Save or discard unfinished access-rule forms first.');
-      if (!await confirmWorkflow((blocked ? 'Allow' : 'Block') + ' network access for ' + (device.name || mac) + '? This takes effect immediately.')) return;
+      if (!await confirmWorkflow((blocked ? 'Allow' : 'Block') + ' network access for ' + (device.name || mac) + '? This takes effect immediately.' +
+        (!blocked && isThisDevice(mac) ? ' This is the device you are using: its connection will be affected.' : ''))) return;
       await request('/api/access/device', 'POST', {version:accessState.version, mac_address:mac, blocked:!blocked});
       await refresh();
     });

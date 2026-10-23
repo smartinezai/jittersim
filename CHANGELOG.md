@@ -15,4 +15,6 @@ The first signed JitterSim release adds safer updates with a recovery copy and h
 
 Security fixes block UDP source-port 53 traffic from test Wi-Fi clients through the Pi and limit each device to 16 of the browser proxy's 32 connection slots.
 
+- The Connected clients list labels the device you are browsing with as **This device**.
+
 See the [complete development changes](https://github.com/smartinezai/jittersim/blob/main/docs/history/0.2.0-development-changes.md).

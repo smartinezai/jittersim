@@ -57,6 +57,7 @@ a month (for example `2026-09`) was written in that month.
 | [../ROADMAP.md](../ROADMAP.md) | Milestones and known limits |
 | [feature-proposals-2026-10-09.md](feature-proposals-2026-10-09.md) | Thirty researched feature proposals with sizes and risks. They are proposals and not started work |
 | [implementation-plan-follow-address-changes-2026-10-17.md](implementation-plan-follow-address-changes-2026-10-17.md) | Following a device to its new private Wi-Fi address: evidence, scoring, what may move automatically and what stays manual |
+| [implementation-plan-devices-this-device-2026-10-23.md](implementation-plan-devices-this-device-2026-10-23.md) | The "This device" label on the Connected clients row of the device you browse with: how it is matched, what is never trusted and the one Block sentence |
 
 ### Open investigations and reviews
 

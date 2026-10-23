@@ -119,6 +119,7 @@ function applyProfileToDevice() {}
 function connectedControlAction() {}
 function saveConnectedDeviceLabel() {}
 function clearConnectedDeviceLabel() {}
+function isThisDevice() { return false; }
 function editServiceList() {}
 function renderSavedConnectedDeviceLabels() {}
 function renderSavedProfiles() {}
