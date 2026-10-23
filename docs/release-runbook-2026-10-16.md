@@ -15,6 +15,11 @@ Main's pinned `helper.py` and `access.py` changed since: they are now `a955a151.
 `41a0f6f9...`, which the Pi's old list does not hold either, so step 2 is still needed. Use the
 short notes file `docs/release-notes-0.2.0-draft.md` for step 5.
 
+**Status on 23 October 2026.** The commands in order, the y/N answers and the evidence wording are in
+[release-0.2.0-owner-commands.md](release-0.2.0-owner-commands.md). It adds a third ordering trap: the
+Pi checks a release against the Panic list of the update manager it already runs, so a Panic-pinned
+file that changes after the bootstrap needs a new bootstrap before step 5.
+
 ## 0. Facts that decide the order
 
 | Fact | Evidence |
@@ -173,10 +178,10 @@ JITTERSIM_RELEASE_LOCAL_CI=none caffeinate -i scripts/release.sh 0.2.0
   edit the draft first:
   `scripts/release.sh --notes-file docs/release-notes-0.2.0-draft.md 0.2.0`
   (Put it on the same command line as the variable and `caffeinate` above.) The hand-written
-  `## Unreleased` entries of CHANGELOG.md are added above either text, so the two together have to
-  stay under 16 KB: the draft is about 3 KB and the Unreleased part was about 14 KB on 19 October 2026,
-  so it is over by a little. Run `wc -c` on both texts together and shorten the Unreleased entries before
-  the release (`build-release.sh` cuts the end at 16384 bytes).
+  `## Unreleased` entries of CHANGELOG.md are added above that text, and `release.sh` stops when the
+  whole section, with its heading, passes 15000 bytes (`build-release.sh` refuses above 16384). On
+  23 October 2026 the two together are 1865 bytes, because the long list moved to
+  `docs/history/0.2.0-development-changes.md`.
 
 What happens, in order (about 30 to 60 minutes until the first question, longer when other
 agents load the Mac; do not close the tab):
@@ -269,8 +274,8 @@ it continues from the draft and never replaces an uploaded file.
    That is the success message: the Pi used its token, listed the latest release, downloaded
    both files, verified the signature with the trusted key `mac-20261004` and compared the
    release order. `jittersim update check` then shows `Online check token: set`.
-   If the Pi is still on a dev build (you skipped step 6 or restored), the same button says
-   `Release 0.2.0 (v0.2.0) is staged and ready to install` and **Install update** installs it.
+   If the Pi is still on a dev build (you skipped step 6), the same button says
+   `Release 0.2.0 (v0.2.0) is staged and ready to install` and **Install v0.2.0** installs it.
 4. Read the failures like this: `no GitHub token is set` -> step 3; `GitHub refused the token`
    -> expired or wrong token; `GitHub has no release here or this token cannot see the
    repository` -> the token is not for `smartinezai/jittersim` or lacks Contents read;
