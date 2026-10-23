@@ -10,7 +10,7 @@
 set -eu
 
 REPOSITORY=smartinezai/jittersim
-REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 key="$HOME/.ssh/jittersim_release_ed25519"
 home=
 dry_run=no
@@ -248,7 +248,7 @@ check_and_record() {
         if [ ! -x "$state/venv/bin/python" ]; then
             say "Creating the check environment in $state/venv"
             "$(command -v python3.12 || command -v python3)" -m venv "$state/venv"
-            "$state/venv/bin/pip" install -q -e "$src[dev]" 'playwright==1.63.0'
+            "$state/venv/bin/pip" install -q -e "${src}[dev]" 'playwright==1.63.0'
             "$state/venv/bin/python" -m playwright install chromium
         fi
         python="$state/venv/bin/python"
