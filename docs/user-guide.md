@@ -362,7 +362,7 @@ creating a new profile. The
 - A saved list of **Protected devices** that no profile or profile quota affects.
 - A live upload and download graph with packet rates for assigned devices.
 - MAC address allowlists and denylists.
-- A global blocked-site list.
+- A global blocked-site list of up to 2000 names (80000 characters in all).
 - Profile-specific website lists that allow selected services while blocking
   the rest.
 - Per-device website rules that can change as a progression session advances.
@@ -720,6 +720,11 @@ Changes that block their destination or change their selected queue close them.
 Before a code downgrade, change fresh profiles back to saved patterns or restore
 a compatible private configuration backup. Older releases reject the fresh
 pattern setting. Stop profiles and verify normal traffic before replacing code.
+Also shorten the global block list to 100 names. An older release refuses a
+longer list: its dashboard does not start and the test network stays closed.
+Then open it with `sudo jittersim normal-access` over SSH and install the newer
+release again or shorten the list. **Restore previous installation** is not
+affected: it also restores the settings from before the update.
 
 Matching is by destination address. A small service on the Pi reads the DNS
 answers that leave the Pi towards the test Wi-Fi. When an answer names a listed
@@ -1041,8 +1046,17 @@ buttons. A group opened stays open when the page refreshes.
 - **Add all to profile** adds every name of a group to the profile chosen on the
   device card. **Block all** blocks every name. It reads **Block remaining**
   when some are blocked and **Unblock all** when all are. One call changes the
-  whole group or nothing. A call takes at most 64 names and a block list or a
-  profile website list holds 100 names.
+  whole group or nothing. A call takes at most 64 names. The global block list
+  holds 2000 names and a profile website list 100.
+- The global block list also applies to protected devices, by DNS and by
+  address, and to a protected device that uses ad blocking.
+- While JitterSim runs it also blocks up to 4096 addresses that the listed names
+  resolve to. A name keeps its last addresses for up to 10 minutes while they are
+  looked up again. Above 4096 addresses the log says so, and with household
+  access rules off some listed names are then not blocked.
+- Each device or group with its own site rules gets its own copy of the global
+  list in the filtered DNS. With a full list and 100 allowed names, 6 different
+  site-rule combinations fit. A save that needs more is refused and says so.
 - A group of system or content delivery names has no **Block all** because one
   click could cut the device off the internet. Block single names instead.
   **Unblock blocked names** removes blocks from such a group.

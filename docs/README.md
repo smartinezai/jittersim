@@ -176,6 +176,7 @@ are grouped by theme.
 | [Publish the reviewed homepage reference and DNS acceptance](implementation-plan-homepage-delivery-2026-10-02.md) | 2026-10-02 |
 | [Live homepage pairing implementation](implementation-plan-live-homepage-pairing-2026-10-03.md) | 2026-10-03 |
 | [Preserve omitted access-rule sections](implementation-plan-partial-access-rules-2026-10-02.md) | 2026-10-02 |
+| [A larger global block list](implementation-plan-larger-block-list-2026-10-23.md) (also the finding that protected devices are not exempt from it) | 2026-10-23 |
 | [Optional ad blocking for protected devices](implementation-plan-protected-device-ad-blocking-2026-10-03.md) | 2026-10-03 |
 | [Give protected devices dashboard access](implementation-plan-protected-device-dashboard-access-2026-10-04.md) (delivered by PR 92 in PR 136) | 2026-10-04 |
 | [A neutral sign-in page](implementation-plan-sign-in-2026-09.md) | 2026-09 |

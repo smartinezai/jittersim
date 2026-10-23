@@ -89,6 +89,7 @@ from jittersim.config.exemptions import AddressMove, UnaffectedDevice, normalize
 from jittersim.config.payloads import profile_payload
 from jittersim.engine.randomizer import impairment_range_preview
 from jittersim.config.models import (
+    MAX_GLOBAL_BLOCKED_DOMAINS,
     MAX_LISTED_DOMAINS,
     AccessOptions,
     DataLimit,
@@ -142,7 +143,7 @@ from jittersim.config.transfer import (
     settings_to_payload,
 )
 from jittersim.config.workflows import WorkflowStore
-from jittersim.engine.access import build_access_plan
+from jittersim.engine.access import MAX_ACCESS_BYTES, build_access_plan
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import (
     MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
@@ -3032,9 +3033,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             if capacity_error is not None:
                 return capacity_error
         try:
-            self.repository.save_device(device, expected=expected)
+            with self.repository.transaction():
+                self.repository.save_device(device, expected=expected)
+                self._check_access_rules()
         except DeviceConflictError as error:
             return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+        except ValueError as error:
+            return _bad_request("invalid device configuration", error)
         labels_by_mac = self.repository.list_connected_device_labels()
         state = self._device_protection_states().get(device.id)
         return HTTPStatus.OK, "application/json", _json_bytes(
@@ -3596,12 +3601,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             # Check every supplied section above, then write only the sections the
             # request carried. An omitted section keeps its stored value, while an
             # explicit empty section resets just that section.
-            self.repository.save_access_policies(
-                mac_policy if "mac" in payload else None,
-                website_policy if "websites" in payload else None,
-                blocks=blocks, options=options,
-                expected_version=payload.get("version"),
-            )
+            with self.repository.transaction():
+                self.repository.save_access_policies(
+                    mac_policy if "mac" in payload else None,
+                    website_policy if "websites" in payload else None,
+                    blocks=blocks, options=options,
+                    expected_version=payload.get("version"),
+                )
+                self._check_access_rules()
         except DeviceConflictError as error:
             return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
         except (KeyError, TypeError, ValueError) as error:
@@ -4155,15 +4162,17 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             names = _domains_from_payload(payload)
             policy = self.repository.get_website_policy()
             listed = tuple(dict.fromkeys(policy.blocked_domains + names))
-            if len(listed) > MAX_LISTED_DOMAINS:
+            if len(listed) > MAX_GLOBAL_BLOCKED_DOMAINS:
                 return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                     {
                         "error": "The global block list can hold %d names. Remove some first."
-                        % MAX_LISTED_DOMAINS
+                        % MAX_GLOBAL_BLOCKED_DOMAINS
                     }
                 )
             updated = replace(policy, blocked_domains=listed)
-            self.repository.save_website_policy(updated)
+            with self.repository.transaction():
+                self.repository.save_website_policy(updated)
+                self._check_access_rules()
         except (KeyError, TypeError, ValueError, StorageError) as error:
             return _bad_request("could not add domain to global block list", error)
         arguments = {"control_intent": control_intent} if control_intent is not None else {}
@@ -4299,6 +4308,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     {"error": "service list does not exist"}
                 )
             return self._apply_saved_change("deleted_id", list_id)
+
+    def _check_access_rules(self) -> None:
+        """Refuse what the helper would refuse. Call it inside the save transaction.
+
+        Group saves get the same check from _validate_saved_plan, which builds the plan.
+        """
+
+        build_access_plan(self.repository.access_settings())
 
     def _validate_saved_plan(self) -> None:
         # Saving checks structure atomically. Applying resolves live addresses later.
@@ -6913,6 +6930,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                     MAX_IMPORT_BODY_BYTES
                     if path in ("/api/import", "/api/test-sessions/save")
                     else MAX_AD_BLOCKING_BODY_BYTES if path == "/api/ad-blocking"
+                    # The access rules: 2000 blocked names alone are about 63 KiB.
+                    else MAX_ACCESS_BYTES if path == "/api/policies"
                     else (8192 if path.startswith("/api/homepage/") else MAX_JSON_BODY_BYTES)
                 ),
             )

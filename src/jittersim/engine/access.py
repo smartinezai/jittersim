@@ -149,7 +149,11 @@ def access_from_payload(value: object) -> AccessPlan:
         # Equivalent clients share a DNS view. Bound worst-case distinct views too.
         views = {plan.blocked_domains(c.id) for c in clients} | {plan.blocked_domains()}
         if sum(len(view) + len(websites.allowed_domains) for view in views) > MAX_EXPANDED_DOMAINS:
-            raise ValidationError("too many distinct device and domain combinations")
+            raise ValidationError(
+                "too many different device and site rule combinations: each one repeats the "
+                f"blocked and allowed names, {MAX_EXPANDED_DOMAINS} names in all at most. "
+                "Remove blocked names or site rules"
+            )
         return plan
     except (KeyError, TypeError, AttributeError) as error:
         raise ValidationError("invalid access policy") from error

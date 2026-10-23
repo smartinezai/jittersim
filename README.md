@@ -14,7 +14,8 @@ test. It is for experiments, not a replacement for your home router.
 - Save different settings for one device or the whole test Wi-Fi, and start a
   single device on its own profile.
 - Schedule changes, run a timer or gradually switch between settings.
-- Control device, website and service access, with data and time limits.
+- Control device, website and service access, with data and time limits. The
+  global block list holds up to 2000 names.
 - Protect a device from every profile. A protected device opens the dashboard
   with the admin token alone and can have ads blocked.
 - Review connected devices and traffic while a test runs. Measure a device's

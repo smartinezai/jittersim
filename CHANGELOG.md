@@ -9,6 +9,7 @@ the hand-written Unreleased part short.
 
 ## Unreleased
 
+- The global block list holds 2000 names instead of 100. Saving checks the whole household access policy first, and the address lookups renew a long list name by name without stalling a plan.
 - **Test speed** can now run from the dashboard itself, with no outside server: open the dashboard on the device and the Pi sends it test data through its download profile. Upload still needs a speed test site.
 - Open dashboard tabs share one reading of live traffic, the Ethernet details and the helper check, and a quiet time quota no longer writes to the SD card every 5 seconds.
 - Each profile preset now says what it is based on. DSL and Slow 3G (Chrome DevTools) are new presets.
