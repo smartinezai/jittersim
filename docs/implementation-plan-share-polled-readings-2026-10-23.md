@@ -50,6 +50,9 @@ No Panic-pinned file changes (`helper.py`, `access.py`, `panic_guard.py` stay as
 
 ## Staleness, reading by reading
 
+The age of a kept reading counts from the end of the read (PR 191), so a slow read can show
+data that is its own duration older than the window below, for example an `nmcli` that took 3 s.
+
 - Traffic, at most 1 s old. The page draws a rate from two readings and its own clock. With one
   tab nothing is shared (the poll is 2 s). With several tabs the later tab gets a reading up to
   1 s old and the rate can be off by up to half for one sample if the tabs sit at the edge of the
