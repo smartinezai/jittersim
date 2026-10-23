@@ -8,6 +8,9 @@ PR 149 (a device runs its own profile beside Everyone) changed the codec, compil
 storage and dashboard rules after this run. The branch was merged with that main, the codec tests
 were brought up to date and the rows that PR 149 touched were run again. See "After PR 149".
 
+A second round on 2026-10-23 finished the `engine_rules` run and classified the last 30
+`updates.py` survivors. See "Addendum 2026-10-23".
+
 ## What mutation testing is
 
 A mutation tool changes the source a little: a `<` becomes `<=`, a constant moves by one, a
@@ -40,9 +43,7 @@ dependencies. `scripts/mutation-test.py setup` makes it.
   only in the copy.
 - Each module has its own test selection (`MODULES` in the script). mutmut learns which tests reach
   which function and runs only those for each mutant.
-- Every survivor of the closed modules was read, except the 30 `updates.py` survivors that are still
-  unclassified (see Results) and the survivors of the `engine_rules` run, which was not closed.
-  A read survivor is one of four kinds:
+- Every survivor of every module was read. A read survivor is one of four kinds:
   - a real gap: a test or an assertion was written so that the mutant dies;
   - error text: the mutant changes only the words of an error message or the label that a
     validator prints (`"XX...XX"`, upper case, `None`). The report counts these apart. Where a
@@ -66,9 +67,9 @@ dependencies. `scripts/mutation-test.py setup` makes it.
 | `networking/deadlines.py` | 28 | 100.0 / 100.0 | 100.0 / 100.0 | none |
 | `dashboard_rules.py` (rerun, after PR 149) | 1127 | 93.8 / 93.8 | 99.7 / 99.7 | 3 logic |
 | `config/storage.py (row conversion and migrations)` (rerun, after PR 149) | 254 | 61.8 / 78.5 | 86.2 / 95.6 | 10 logic, 25 sql |
-| `updates.py (version, manifest, signature, archive, keys)` | 577 | 75.0 / 80.9 | 94.8 / 94.8 | 30 logic |
+| `updates.py (version, manifest, signature, archive, keys)` | 577 | 75.0 / 80.9 | 96.2 / 96.2 (94.8 before the addendum) | 22 logic, all equivalent |
 | `updates.py (release floor, trust file)` | 37 | 67.6 / 73.5 | 100.0 / 100.0 | none |
-| `engine/schedules, progression, randomizer, eligibility, conditions, scenarios (not closed)` | 1051 | 78.0 / 78.0 | not rerun | the survivors are not closed |
+| `engine/schedules, progression, randomizer, eligibility, conditions, scenarios` (whole run, see the addendum) | 1396 | 79.2 / 79.2 | 96.5 / 96.5 | 49 logic: 14 note wording, 35 equivalent |
 
 The five rows marked "rerun" were measured again on this branch after it was merged with main
 (0b9fe90f, which contains PR 149). "Before" is the first run on 8c3f8171 and the mutant counts
@@ -78,10 +79,9 @@ change those files. Main later changed `updates.py` for the signed update notes,
 the online checks (#111), but not one of the functions that the two `updates` rows mutate (`only`
 in `MODULES`), so those figures still hold. `git diff 8c3f8171 HEAD` is empty for the other three.
 
-`engine/compiler.py` already killed every mutant, so no test was added for it. The `engine_rules` run
-was stopped after 1051 of its 1396 mutants, so its figures are partial. The 30 `updates.py` survivors
-were not all classified: the next run should read `survivors updates` first. Before and after are
-the same mutants (mutmut numbers them per function). After is the same
+`engine/compiler.py` already killed every mutant, so no test was added for it. The first `engine_rules`
+run was stopped after 1051 of its 1396 mutants (78.0 percent). The addendum below ran all 1396.
+Before and after are the same mutants (mutmut numbers them per function). After is the same
 selection plus the new tests. A mutant that the selection never reaches counts as surviving
 ("no tests").
 
@@ -189,23 +189,103 @@ Counts are in the table above. Each group below changes no result.
   (both sides change the same way).
 - `dashboard_rules.py`: `"single": False` is overwritten before it is returned. The default name
   of a general profile is not used without a general profile. `affected[:None]` is the whole list.
-- `updates.py`: see the survivors file of a rerun. The error-text survivors are the words of
-  `UpdateError` messages that were not pinned.
+- `updates.py`: see the addendum. The error-text survivors are the words of `UpdateError` messages
+  that were not pinned.
 
 ## Not covered
 
 - Address-follow scoring. There is no `engine/address_follow.py` on main. The branch
   `feat/follow-address-changes` is not merged.
-- `engine/schedules.py`, `engine/progression.py`, `engine/randomizer.py`,
-  `engine/eligibility.py`, `engine/conditions.py` and `engine/scenarios.py` were run once and
-  the survivors were not closed (the `engine_rules` row). They are the next candidates: the
-  schedule sweep, the profile interpolation and the seeded generator.
 - Decorated functions (mutmut skips them), generators that depend on timing and the Linux
   checks. `stage_release`, `apply_update` and the rest of `updates.py` are too large for
   mutmut: a mutated `updates.py` grows past the 512 KiB that the installer allows for the
   manager, so the functions of the decision logic were run alone and the size limits were
   raised in the copy (not in the product). Two tests that start `updates.py` as a separate
   program cannot run in a mutated copy and are deselected for that run.
+
+## Addendum 2026-10-23: engine rules and update decisions
+
+Run on origin/main 03fe31d8 with mutmut 3.8.0, at most four workers. Two things were finished.
+
+**The engine rules** (`engine/schedules.py`, `conditions.py`, `progression.py`, `randomizer.py`,
+`eligibility.py`, `scenarios.py`). The whole run has 1396 mutants. Before the new tests 1106 were
+killed (79.2 percent, 290 survivors). After, 1347 are killed (96.5 percent, 49 survivors). The
+selection for this module also got `tests/unit/test_helper_snapshot_cache.py`, which already
+held `station_snapshot` (56 of the first survivors were "no tests" only because that file was
+not in the selection).
+
+**The 30 `updates.py` survivors.** 8 were real gaps and are killed: 555 of 577 (96.2 percent). The
+other 22 are equivalent (below).
+
+What the survivors showed:
+
+- The schedule sweep (`next_schedule_change`) was only tested for a device that also had a group
+  schedule. Nothing proved that the schedules of another device, another group or everyone else are
+  ignored, that a turned-off schedule does not hide the ones after it, that seconds in `now` do not
+  shift the boundaries, or that the first pass through a repeated hour counts. A clock change that
+  lay more than one six-hour scan step away was never tested: a mutant that lost the old offset
+  after the first step still passed, and so would have missed the exact second of a window that
+  the clock change starts.
+- The progression between profiles was held for two fields only. Dropping any other field of the
+  profile or of the impairment (reorder, duplicate, bandwidth, every `*_randomness`, the outage and
+  reroll settings, the switch of seed and mode at the end) changed nothing in a test.
+- The seeded generator had no value pinned, so its input could change and every saved seed would
+  have chosen other values. The interval, outage and website draws had no test of the bounds or of
+  which profile field they read.
+- The client eligibility check had no test for a device that is seen at an address that another
+  client also uses, for a missing live list, or for rows of the live list that cannot be read.
+- `trusted_keys` opens the list with `O_NOFOLLOW` after checking it. No test swapped the file for a
+  link in between, so removing the flag passed. No test showed either that the signature reader
+  refuses a stray character in the base64 body, or that the comment of a key may hold `~` (the
+  last printable character).
+
+No mutant showed a real defect in product code, so there is no `expectedFailure` test. One
+observation for the owner: `_applied_feature_value` and `impairment_range_preview` keep a branch
+for fractional places, but every entry of `FEATURE_LIMITS` has 0 places, so that branch never runs
+(8 of the survivors below). It was left alone.
+
+What was added:
+
+- `tests/unit/test_engine_rules.py`: the tests above, one behaviour each. Draws are checked with a
+  small generator that returns fixed numbers and records the bounds it was asked for. The clock
+  tests run in the Europe/Berlin zone on the real 2026 changes.
+- `tests/unit/test_update_decisions.py`: the stray character in a signature, the `~` in a key comment
+  and the list that is swapped for a link after its check.
+- `scripts/mutation-test.py`: `test_helper_snapshot_cache.py` joined the `engine_rules` selection.
+
+Equivalent mutants and the reason for each (ids are mutmut's per-function numbers):
+
+| Function | Ids | Reason |
+| --- | --- | --- |
+| `is_schedule_active` | 6 | A schedule cannot start and end in the same minute (the model refuses it). |
+| `next_schedule_change` | 62 | The same: `end_minute == start_minute` never reaches the sweep. |
+| `next_schedule_change` | 22 | The rank is only compared as 0 against non-zero. |
+| `next_schedule_change` | 42, 43, 49, 50, 71, 72 | A weekly pattern always changes the winner within a week, so the horizon, the days scanned and an event exactly at `now` or at the horizon never decide. A random comparison of 3000 cases against these mutants (shifted clock-change dates included) found no difference. |
+| `next_schedule_change` | 90, 91, 99 | The scan step of 6, 7 or 6 hours and 6 seconds finds the same single clock change, and a bisection bound one second wider finds the same second. |
+| `next_schedule_change` | 126, 128 | The heap then holds extra copies of a schedule and `winner()` discards the inactive ones. |
+| `scenario_position` | 11, 14 | At `elapsed == total` the loop over the steps finds no step and returns `None` anyway. A non-looping elapsed time is below the total, so the modulo changes nothing. |
+| `_applied_feature_value` | 3, 4, 6, 7, 8, 9, 10, 11 | Every feature has 0 places. `round` equals `quantize_value` at 0 places and the other branch never runs. |
+| `impairment_range_preview` | 45, 46 | `step` is `10 ** -0`, which is 1 for any base and sign. |
+| `quantize_value` | 3, 5 | `ROUND_HALF_EVEN` is the default rounding of the decimal context. |
+| `quantize_value` | 10 | Only the exponent of the quantum counts, and `Decimal(2).scaleb(-n)` has the same one as `Decimal(1).scaleb(-n)`. |
+| `seeded_generator` | 10 | `"UTF-8"` is `"utf-8"`. |
+| `seeded_generator` | 17 | The byte order defaults to big endian from Python 3.11. Python 3.9 would fail it. |
+| `station_snapshot` | 48, 49, 54, 55 | They store a copy of the last good list on a helper that has its own memory. The copy is never read for such a helper (the other branch returns first). |
+| `device_protection_states` | 56, 57, 89, 95, 98, 99, 100, 101, 102, 104, 105, 107, 108, 109 | Only the words of the explanatory notes change (the `XX` and case mutants). The tests pin who is protected, who is matched and why a profile waits, not the sentences. |
+| `_check_key_text` | 6, 8, 9 | `KEY_TEXT` already limits the key to 68 base64 characters, so `validate` has nothing to refuse. |
+| `_signature_fields` | 4, 59 | `"ASCII"` is `"ascii"`. |
+| `_signature_fields` | 34 | A third field is read and not used. |
+| `_signature_fields` | 39 | The byte order defaults to big endian from Python 3.11. |
+| `key_fingerprint` | 10 | `rstrip("XX=XX")` would also strip a trailing `X`, but the last base64 character of a 32-byte digest has its two low bits at 0 and `X` has them at 1. |
+| `parse_public_key` | 31 | `character in "XX\n\tXX"` is still true for a newline and a tab. |
+| `parse_public_key` | 73 | A comment of two words has a space in it either way, and the label pattern refuses a space. |
+| `read_manifest` | 13 | `"ASCII"` is `"ascii"`. |
+| `release_floor`, `staged_problem` | 8, 41 | The file name in upper case. The macOS file system does not tell the cases apart. On Linux the tests that write `.jittersim-release.json` fail on it. |
+| `trusted_keys` | 23, 26, 29 | They change only the default when `os.O_NOFOLLOW` does not exist. macOS and Linux have it. |
+| `trusted_keys` | 37, 38 | How much of a file is read before the length check. The refused or accepted result is the same. |
+| `trusted_keys` | 48 | `"ASCII"` is `"ascii"`. |
+| `validate_archive` | 15, 18 | A link, an absolute name and an empty name are refused by the file type check and the top folder check as well. |
+| `validate_archive` | 83 | `dispatcher` is only a destination, and the required set uses the sources. |
 
 ## How to run it again
 

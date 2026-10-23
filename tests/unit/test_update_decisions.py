@@ -396,6 +396,12 @@ def test_odd_characters_are_refused(text):
             text)
 
 
+def test_every_printable_ascii_character_may_be_in_the_comment_of_a_key():
+    comment = "".join(chr(code) for code in range(33, 127))
+
+    assert updates.parse_public_key(f"ssh-ed25519 {KEY} {comment}", label="owner").key == KEY
+
+
 def test_a_key_file_holds_exactly_one_key():
     for text in ("", "# only a note\n", "\n\n", line() + "\n" + line(OTHER_KEY)):
         refuses("the key file must hold exactly one public key", updates.parse_public_key, text)
@@ -550,6 +556,30 @@ def test_a_list_of_65536_bytes_is_read_and_one_more_is_not(config):
             "trust the keys again with trust-key", updates.trusted_keys, config)
 
 
+def test_a_list_that_is_swapped_for_a_link_after_the_check_is_not_read(config, tmp_path,
+                                                                      monkeypatch):
+    path = write_list(config, signer_line())
+    other = tmp_path / "other-list"
+    other.write_text(signer_line(OTHER_KEY, "other"))
+    real = os.lstat
+    swapped = []
+
+    def swap_after_the_check(target, *args, **kwargs):
+        result = real(target, *args, **kwargs)
+        if str(target) == str(path) and not swapped:
+            swapped.append(True)
+            path.unlink()
+            path.symlink_to(other)
+        return result
+
+    monkeypatch.setattr(os, "lstat", swap_after_the_check)
+
+    # The list was a plain file when it was checked. The open must not follow the new link.
+    with pytest.raises(OSError):
+        updates.trusted_keys(config)
+    assert swapped
+
+
 # The saved trust settings
 
 
@@ -648,6 +678,15 @@ def test_a_signature_with_the_wrong_header_footer_or_magic_has_no_fields():
 def test_a_namespace_that_is_not_ascii_has_no_fields():
     assert updates._signature_fields(
         signature_text(namespace="é".encode()).encode()) == (None, None)
+
+
+def test_a_signature_with_a_stray_character_in_its_body_is_not_read():
+    # ssh-keygen and this reader must agree on what a signature is: a stray character that a
+    # forgiving base64 reader would skip makes it unreadable.
+    lines = signature_text().splitlines()
+    lines[1] = lines[1][:10] + "!" + lines[1][10:]
+
+    assert updates._signature_fields("\n".join(lines).encode()) == (None, None)
 
 
 # Deciding who signed
