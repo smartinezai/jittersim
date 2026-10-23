@@ -46,6 +46,9 @@ def expect_ordinary(row):
     expect(row).not_to_have_class(re.compile("protected"))
     expect(row.locator(".protected-badge")).to_have_count(0)
     expect(row.get_by_role("button", name=re.compile("^Protect"))).to_be_enabled()
+    # Each button names its device, so a list of rows does not read out the same name again and again.
+    for pattern in (r"^(Apply|Assign) profile for \S", r"^Add to group for \S", r"^Open device controls for \S"):
+        expect(row.get_by_role("button", name=re.compile(pattern))).to_have_count(1)
     found = controls(row)
     for name in ("profile", "group"):
         expect(found[name], name).to_have_js_property("disabled", False)
