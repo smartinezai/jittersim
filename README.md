@@ -14,6 +14,8 @@ test. It is for experiments, not a replacement for your home router.
   single device on its own profile.
 - Schedule changes, run a timer or gradually switch between settings.
 - Control device, website and service access, with data and time limits.
+- Protect a device from every profile. A protected device opens the dashboard
+  with the admin token alone and can have ads blocked.
 - Review connected devices and traffic while a test runs. Measure a device's speed before and after a profile.
 - Follow a saved device to its new private Wi-Fi address, with Ask, Automatic and Undo.
 - Choose whether active profiles resume after a router outage.
@@ -50,6 +52,19 @@ After installation, verify the SHA-256 fingerprint printed by the installer
 before trusting the dashboard certificate. Then open
 `https://netlab.local:8080` or an IP address covered by the certificate. The
 generated admin token is on the Pi in `/etc/jittersim/control.env`.
+
+## Update the Pi
+
+Open **Updates** on the dashboard, choose **Check for updates** and then the
+install button, which names the new release. Or run `sudo jittersim update` on
+the Pi, or `jittersim remote update now` from a Mac. Each one installs only a
+release signed by a key the Pi trusts, keeps a recovery copy and restores it
+when the health check fails. The Pi needs a read-only GitHub token once
+(`sudo jittersim update set-token`) before it can look for releases. See
+[Update the Pi](docs/user-guide.md#update-the-pi) and
+[Signed releases](deploy/raspberry-pi/README.md#signed-releases).
+
+## More information
 
 The [feature and operations guide](docs/user-guide.md) explains the dashboard,
 network behavior, [known limits](docs/user-guide.md#known-limits) and local
