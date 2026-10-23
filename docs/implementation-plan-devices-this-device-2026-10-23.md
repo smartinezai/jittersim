@@ -37,8 +37,8 @@ row with an equal MAC. No server code, no new route, no new field.
 ## Words and look
 
 The label is the text **This device** in a pill next to the name, in the page's existing green
-pill colours, so it never relies on colour alone. It wraps under the name on a phone. The list is
-not a live region, so a screen reader reads it as part of the row name, not as an announcement.
+pill colours, so it never relies on colour alone. It wraps under the name on a phone. The list
+is not a live region, so nothing is announced when it appears.
 
 ## Tests
 
