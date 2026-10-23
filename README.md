@@ -57,3 +57,6 @@ developer setup. See the [changelog](CHANGELOG.md) for what changed, the
 [release guide](docs/releases/README.md) for publishing a release, the
 [roadmap](ROADMAP.md) for future work, and the
 [documentation index](docs/README.md) for the rest of the guides.
+
+- [Test recipes for mobile apps](docs/test-recipes.md): offline at launch, loss during an upload, high latency and more.
+- [Household recovery card](docs/household-recovery-card.md): one printable page to keep next to the router.

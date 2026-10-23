@@ -9,6 +9,10 @@ the hand-written Unreleased part short.
 
 ## Unreleased
 
+### Added
+
+- Two short guides: test recipes for mobile apps (`docs/test-recipes.md`) and a printable household recovery card (`docs/household-recovery-card.md`).
+
 ### JitterSim 0.2.0
 
 The first signed JitterSim release adds safer updates with a recovery copy and health check, per-device profiles, protected-device dashboard access and router Wi-Fi name following. It also improves accessibility and reliability.
