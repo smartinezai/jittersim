@@ -271,7 +271,7 @@ without a data migration.
 
 * **D1** Probe type: ICMP echo only, reusing `IcmpProber`. No ARP probe (reasons above).
 * **D2** Defaults: 100 probes, 10 per second, 20 to 300 allowed, rate fixed. Chosen so that the
-  default run takes about 12 seconds and can judge a loss of 3 percent or more.
+  default run takes about 12 seconds and can judge a loss of about 5 percent or more.
 * **D3** What is checked: the download side of the profile only. The upload side is not part of
   the check and the window says so.
 * **D4** Confidence: matches inside the 95 percent interval, less or more outside the 99 percent
