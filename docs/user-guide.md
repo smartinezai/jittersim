@@ -271,6 +271,10 @@ See
 
 - Connected-device discovery with current Wi-Fi connection status, IP and MAC
   addresses, signal strength and DHCP names when available.
+- A **This device** label on the connected client you are browsing with. It shows
+  only when you use the dashboard over the Pi's Wi-Fi and the Pi can tell which
+  device that is. The question before blocking that device warns that its
+  connection will be affected.
 - Device type suggestions from local DHCP names plus editable names and types
   stored on the Pi. Categories are phone, tablet, laptop, desktop, TV or
   console, other and unknown. Type labels never change traffic rules.
