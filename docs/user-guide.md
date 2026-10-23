@@ -339,8 +339,9 @@ needs no Pi:
 - An impact check in Diagnostics that shows packet loss and speed limits
   actually happening to each device.
 - A **Test speed** button on each connected device that measures its real speed
-  through the Pi while it runs a public speed test, keeps the results and compares
-  a result before a profile with one after it.
+  through the Pi, from the dashboard itself (no outside server) or while it runs a
+  public speed test, keeps the results and compares a result before a profile with
+  one after it.
 - A **Check connection** button on each connected device that sends a short burst
   of pings from the Pi and compares the loss, round trip, jitter, duplicates and
   order with the profile that applies to the device.
@@ -1062,11 +1063,38 @@ a device saw. An older helper makes the card ask for an update.
 ### Device speed test
 
 **Test speed** on a connected device in **Devices** compares the device's speed
-before and after a profile. The Pi cannot run a speed test as the phone, so:
+before and after a profile.
+
+**From the dashboard (no outside server).** Open the dashboard on the device you
+want to test (it needs dashboard access and the admin token), go to **Devices**
+and choose **Test speed** on that device's own row. **This dashboard** is then
+selected. **Start measuring** makes the Pi send test data to this browser for
+about 12 seconds: first 3 seconds without the profile (what the Pi and its Wi-Fi
+can send right now), then 8 seconds through the device's download profile. The
+browser times both, leaving out the first second of each, and the Pi counts the
+same data in the device's queue. The result shows both and is saved like any
+other. Limits:
+
+- Download only. Uploads to the Pi itself never pass the upload profile, so an
+  upload number would not show the profile. Upload says `Not tested`.
+- The device needs a profile of its own (one with nothing set measures without
+  limits). The Pi's own data does not pass the shared queue of **Same as
+  everyone** or **Everyone else**.
+- When the profile's cap is at or above 90% of what the Pi can send, the result
+  says so instead of judging the cap: a Pi 3B+ sends a few tens of Mbit/s over
+  Wi-Fi, so a higher cap cannot show in this test.
+- One dashboard test runs at a time, a device can be tested again 15 seconds
+  after its last test, and nothing starts while Panic or a router outage keeps
+  profiles stopped.
+- The part through the profile counts toward the device's data limit like any
+  download (at most 64 MiB per test).
+
+**With a speed test site.** Use this for upload, for a shared queue, or from
+another computer. The Pi cannot run a speed test as the phone, so:
 
 <img src="../docs/screenshots/device-speed-test-controls.png" alt="The speed-test window for Fixture phone with Cloudflare selected, a 45 second length, the label Before profile and the Start measuring button" width="100%" />
 
-1. Choose the speed test site (Cloudflare by default, or LibreSpeed), a length
+1. Choose the speed test site (Cloudflare or LibreSpeed), a length
    (45 seconds by default, 15 to 90) and an optional label, then **Start measuring**.
 2. On the device, open the link or scan the QR code and run the test there.
 3. The Pi reads the device's queue counters once per second (the counters the

@@ -220,6 +220,7 @@ are grouped by theme.
 | [Device workflows and repeatable tests](implementation-plan-device-workflows-2026-09.md) | 2026-09 |
 | [Device speed test](implementation-plan-device-speed-test-2026-10-09.md) | 2026-10-09 |
 | [Device speed test review fixes](implementation-plan-device-speed-test-review-fixes-2026-10-14.md) | 2026-10-14 |
+| [Dashboard-served speed test](implementation-plan-dashboard-speed-test-2026-10-23.md) | 2026-10-23 |
 | [Make raw diagnostics reachable from the keyboard](implementation-plan-diagnostics-keyboard-access-2026-10-03.md) | 2026-10-03 |
 | [Diagnostics keyboard request check](implementation-plan-diagnostics-preview-check-2026-10-04.md) | 2026-10-04 |
 | [Finish the coordinated dashboard changes](implementation-plan-final-dashboard-composition-2026-10-04.md) | 2026-10-04 |
