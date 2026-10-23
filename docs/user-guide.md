@@ -487,8 +487,9 @@ sudo jittersim dashboard-access status
 ```
 
 Use your device's current Wi-Fi hardware address. Here `sudo` asks for the
-Pi account password. The helper must be running. The helper refuses `add` and `remove`
-from any user other than root. Entries survive restart,
+Pi account password. The helper must be running. Only root may run `add` and `remove`:
+this stops other Pi programs writing to the saved list directly. It is not a full
+separation, because the dashboard's own user can still change access in other ways. Entries survive restart,
 reboot and upgrades in root-owned `/etc/jittersim/dashboard-access.json`.
 Include this file in private Pi backups. Dashboard SQLite downloads do not
 contain it. The file contains device addresses, optional names and addition

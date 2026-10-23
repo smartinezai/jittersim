@@ -9,8 +9,6 @@ the hand-written Unreleased part short.
 
 ## Unreleased
 
-- The helper now accepts `dashboard-access add` and `remove` only from root (audit A6).
-
 ### JitterSim 0.2.0
 
 The first signed JitterSim release adds safer updates with a recovery copy and health check, per-device profiles, protected-device dashboard access and router Wi-Fi name following. It also improves accessibility and reliability.
