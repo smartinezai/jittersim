@@ -5,7 +5,6 @@ import re
 import shutil
 import sqlite3
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -184,7 +183,7 @@ if __name__ == "__main__":
 ROOT = Path(__file__).resolve().parents[2]
 
 
-class InstallerNoticeTests(unittest.TestCase):
+class UpgradeNotesTests(unittest.TestCase):
     def test_the_readme_explains_the_clearing_in_its_upgrade_notes(self) -> None:
         # The long guide moved to deploy/raspberry-pi/README.md when the main README became a short page.
         readme = " ".join((ROOT / "deploy" / "raspberry-pi" / "README.md").read_text().split())

@@ -1,4 +1,4 @@
-"""Exercise upgrades from the service layout observed on the live Pi."""
+"""Check the installer's update-idle guard and source replacement."""
 
 import importlib.util
 import subprocess
@@ -15,7 +15,7 @@ def load_script(name):
     return module
 
 
-services = load_script("check-update-idle.py")
+idle = load_script("check-update-idle.py")
 release = load_script("replace-source.py")
 
 
@@ -23,7 +23,7 @@ release = load_script("replace-source.py")
 def test_active_or_unreadable_updater_prevents_install(tmp_path, returncode):
     (tmp_path / "jittersim-update.service").touch()
     with pytest.raises(RuntimeError):
-        services.check_update_idle(
+        idle.check_update_idle(
             tmp_path, run=lambda *a, **k: subprocess.CompletedProcess(a, returncode),
         )
 
@@ -31,9 +31,16 @@ def test_active_or_unreadable_updater_prevents_install(tmp_path, returncode):
 @pytest.mark.parametrize("returncode", [3, 4])
 def test_inactive_or_unloaded_updater_allows_upgrade(tmp_path, returncode):
     (tmp_path / "jittersim-update.service").touch()
-    services.check_update_idle(
+    idle.check_update_idle(
         tmp_path, run=lambda *a, **k: subprocess.CompletedProcess(a, returncode),
     )
+
+
+def test_the_installer_checks_the_update_is_idle_before_changing_anything():
+    lines = (Path(__file__).resolve().parents[2] / "deploy/raspberry-pi/install.sh").read_text().splitlines()
+    first = {name: next(i for i, line in enumerate(lines) if name in line)
+             for name in ("check-update-idle.py", "apt-get", "replace-source.py")}
+    assert first["check-update-idle.py"] < first["apt-get"] < first["replace-source.py"]
 
 
 def source_tree(root):
