@@ -42,6 +42,7 @@ a month (for example `2026-09`) was written in that month.
 | [releases/README.md](releases/README.md) | The rules and manual commands behind a release: reserve, build, approve and publish |
 | [../CHANGELOG.md](../CHANGELOG.md) | The notes of every published release and the changes still waiting for the next one (Unreleased) |
 | [release-runbook-2026-10-16.md](release-runbook-2026-10-16.md) | The owner's step by step runbook for the first signed release, v0.2.0: the one-time root install, the GitHub token, the release run, the test on the Pi and the check afterwards. Dated: the facts about the Pi are those of 16 October |
+| [release-0.2.0-owner-commands.md](release-0.2.0-owner-commands.md) | The exact commands the owner runs for v0.2.0, in order, with the y/N answers, the acceptance evidence wording and the checks on GitHub and on the Pi's Updates page. It adds one ordering trap the runbook lacks |
 | [release-checklist-template.md](release-checklist-template.md) | The checklist to copy for each numbered release candidate |
 | [measurements-2026-09.md](measurements-2026-09.md) | Measured effects of the profile presets (dated measurements, still cited by the README) |
 
@@ -89,7 +90,7 @@ a month (for example `2026-09`) was written in that month.
 | Document | Use it for |
 | --- | --- |
 | [releases/registry.json](releases/registry.json) | The live release registry (no version is reserved yet) |
-| [release-notes-0.2.0-draft.md](release-notes-0.2.0-draft.md) | The draft text that `scripts/release.sh --notes-file` takes for the notes of v0.2.0: what a user sees, the upgrade notes and the known limits |
+| [release-notes-0.2.0-draft.md](release-notes-0.2.0-draft.md) | The upgrade notes and known limits of v0.2.0. `scripts/release.sh --notes-file` puts them below the Unreleased entries of CHANGELOG.md, and together they are the release notes. The file name keeps `draft` so older links work |
 | [releases/security-repair-plan-2026-10-03.md](releases/security-repair-plan-2026-10-03.md), [results](releases/security-repair-results-2026-10-03.md) and [verification](releases/verification-2026-10-03.md) | The 3 October release-system repairs and local verification. They are records of that work (historical) |
 
 ## Superseded
