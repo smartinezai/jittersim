@@ -4,6 +4,7 @@ import errno
 import json
 import os
 import re
+import socket
 import stat
 import types
 from pathlib import Path
@@ -12,7 +13,9 @@ from unittest.mock import patch
 import pytest
 
 from jittersim.cli import main
+from jittersim.remote_client import Connection, DashboardClient, RemoteError
 from tests.remote_support import TEST_TOKEN, make_certificate, run
+from tests.unit.test_remote_hardening import tls_server
 
 pytestmark = pytest.mark.usefixtures("remote_environment")
 
@@ -131,6 +134,122 @@ def test_a_backup_over_the_limit_is_not_saved(dashboard, capsys, tmp_path, monke
     assert code == 1
     assert err.strip() == "The dashboard answer was too large."
     assert not folder.exists()
+
+
+def test_a_cut_short_download_never_becomes_a_backup(capsys, tmp_path):
+    certificate, key = make_certificate(tmp_path)
+
+    def cut_short(connection, _stop):
+        connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n"
+                           b"Connection: close\r\n\r\n" + BACKUP)
+        connection.shutdown(socket.SHUT_WR)
+
+    folder = tmp_path / "backups"
+    with tls_server(certificate, key, cut_short) as (url, _requests), \
+            patch("jittersim.remote_client.getpass.getpass", return_value=TEST_TOKEN):
+        code = main(["backup", "pull", "--url", url, "--ca-cert", str(certificate),
+                     "--directory", str(folder)])
+
+    assert code == 1
+    assert "connection to the dashboard failed" in capsys.readouterr().err
+    assert not folder.exists()
+
+
+def test_a_backup_exactly_at_the_limit_is_saved(dashboard, capsys, tmp_path, monkeypatch):
+    monkeypatch.setattr("jittersim.remote_cli.MAX_BACKUP_BYTES", len(BACKUP))
+    dashboard.answer("GET", "/api/backup", BACKUP)
+    folder = tmp_path / "backups"
+    code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
+
+    assert code == 0, err
+    (saved,) = folder.iterdir()
+    assert saved.read_bytes() == BACKUP
+
+
+def test_an_empty_answer_is_not_saved(dashboard, capsys, tmp_path):
+    dashboard.answer("GET", "/api/backup", b"")
+    folder = tmp_path / "backups"
+    code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
+
+    assert code == 1
+    assert "not a database backup" in err
+    assert not folder.exists()
+
+
+def test_a_zero_byte_download_limit_accepts_only_an_empty_answer(dashboard):
+    client = DashboardClient(Connection(dashboard.url, dashboard.certificate), TEST_TOKEN)
+    dashboard.answer("GET", "/api/backup", b"")
+    assert client.download("/api/backup", timeout=2, max_bytes=0) == b""
+    dashboard.answer("GET", "/api/backup", b"x")
+    with pytest.raises(RemoteError, match="too large"):
+        client.download("/api/backup", timeout=2, max_bytes=0)
+
+
+@pytest.mark.parametrize("error", [OSError(errno.ENOSPC, "full disk"), KeyboardInterrupt()])
+def test_a_partial_write_or_cancellation_leaves_no_backup(
+    dashboard, capsys, tmp_path, monkeypatch, error
+):
+    real_fdopen = os.fdopen
+
+    class InterruptedWriter:
+        def __init__(self, descriptor, mode):
+            self.handle = real_fdopen(descriptor, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.handle.close()
+
+        def write(self, data):
+            self.handle.write(data[:20])
+            self.handle.flush()
+            raise error
+
+    monkeypatch.setattr("jittersim.remote_cli.os.fdopen", InterruptedWriter)
+    dashboard.answer("GET", "/api/backup", BACKUP)
+    folder = tmp_path / "backups"
+    code, _, _, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
+
+    assert code == 1
+    assert list(folder.iterdir()) == []
+
+
+def test_a_sync_failure_never_publishes_a_backup(dashboard, capsys, tmp_path, monkeypatch):
+    def fail_sync(_descriptor):
+        raise OSError(errno.EIO, "sync failed")
+
+    monkeypatch.setattr("jittersim.remote_cli.os.fsync", fail_sync)
+    dashboard.answer("GET", "/api/backup", BACKUP)
+    folder = tmp_path / "backups"
+    code, _, _, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
+
+    assert code == 1
+    assert list(folder.iterdir()) == []
+
+
+def test_a_file_that_appears_before_publication_is_never_replaced(
+    dashboard, capsys, tmp_path, monkeypatch
+):
+    real_link = os.link
+    raced_paths = []
+
+    def another_backup_appears(source, destination):
+        assert Path(source).read_bytes() == BACKUP
+        assert _mode(Path(source)) == 0o600
+        Path(destination).write_bytes(b"keep this backup")
+        raced_paths.append(Path(destination))
+        real_link(source, destination)
+
+    monkeypatch.setattr("jittersim.remote_cli.os.link", another_backup_appears)
+    dashboard.answer("GET", "/api/backup", BACKUP)
+    folder = tmp_path / "backups"
+    code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
+
+    assert code == 1
+    assert "already exists" in err
+    assert list(folder.iterdir()) == raced_paths
+    assert raced_paths[0].read_bytes() == b"keep this backup"
 
 
 def test_the_help_says_what_the_command_keeps_and_how_to_repeat_it(capsys):

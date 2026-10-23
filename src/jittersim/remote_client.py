@@ -735,6 +735,11 @@ class DashboardClient:
             with opener.open(request, timeout=seconds) as response:
                 try:
                     answer = _read_bounded(response, limit + 1, deadline)
+                    # read1() can reach EOF while Content-Length still has bytes remaining.
+                    # Do not let a cut-short binary answer become a successful download.
+                    remaining = getattr(response, "length", None)
+                    if len(answer) <= limit and remaining:
+                        raise http.client.IncompleteRead(answer, remaining)
                 except (OSError, ssl.SSLError) as error:
                     if _is_timeout(error):
                         raise _TooSlow() from None

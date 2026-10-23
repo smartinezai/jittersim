@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
@@ -1014,16 +1015,19 @@ def _backup_pull(arguments: argparse.Namespace) -> int:
     folder = (arguments.directory or Path(BACKUP_FOLDER)).expanduser().resolve()
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = folder / time.strftime("jittersim-backup-%Y%m%dT%H%M%SZ.db", time.gmtime())
-    try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        raise RemoteError(f"{path} already exists. Nothing was replaced. Try again.") from None
+    descriptor, temporary = tempfile.mkstemp(prefix=".jittersim-backup-", suffix=".tmp", dir=folder)
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
-    except OSError:
-        path.unlink(missing_ok=True)
-        raise
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Publish only a complete file. Linking refuses a destination that appeared meanwhile.
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            raise RemoteError(f"{path} already exists. Nothing was replaced. Try again.") from None
+    finally:
+        Path(temporary).unlink(missing_ok=True)
     if arguments.json:
         _print_json({"path": str(path), "bytes": len(data)})
         return 0
