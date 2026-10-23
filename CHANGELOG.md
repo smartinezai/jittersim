@@ -10,6 +10,7 @@ the hand-written Unreleased part short.
 ## Unreleased
 
 - **Test speed** can now run from the dashboard itself, with no outside server: open the dashboard on the device and the Pi sends it test data through its download profile. Upload still needs a speed test site.
+- The sidebar has a **Reset Wi-Fi name** button, so the Pi's Wi-Fi name can be restored from any page without opening settings. It uses the same confirmation and the same action as the Router and Wi-Fi page. The restart notice now says that every device on the Pi's Wi-Fi, including the one showing the dashboard, disconnects for a short time, and the page names the network to join again.
 
 ### JitterSim 0.2.0
 

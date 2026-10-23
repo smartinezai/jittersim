@@ -214,7 +214,7 @@ def test_requests_turn_a_network_error_into_a_plain_reconnect_message():
 
 def test_every_restarting_action_announces_the_restart_and_follows_it():
     for handler in ('element("access-point-form").addEventListener("submit"',
-                    'element("reset-wifi-name").addEventListener("click"'):
+                    "async function resetWifiName(event) {"):
         start = SCRIPT.index(handler)
         block = SCRIPT[start: start + 2600]
         assert "WIFI_RESTART_NOTICE" in block, handler
@@ -294,6 +294,8 @@ def test_the_notice_does_not_promise_a_rejoin_when_the_name_or_password_changes(
     notice = re.search(r'const WIFI_RESTART_NOTICE = "([^"]*)"', SOURCE.read_text(encoding="utf-8")).group(1)
     assert "name or password" in notice
     assert "Wi-Fi menu" in notice
+    # Every phone and laptop on the Pi's Wi-Fi drops, not only the one that pressed the button.
+    assert "Every device on it, possibly including this one" in notice
     assert "rejoin on its own" not in notice
 
 
@@ -318,6 +320,34 @@ def test_waiting_after_an_access_point_change_names_the_network_but_never_the_pa
     assert "Wi-Fi menu" in outcome["waiting"][0]
     assert "hunter22" not in outcome["all"]
     assert "rejoin on its own" not in outcome["waiting"][0]
+
+
+@NEEDS_NODE
+def test_waiting_after_a_name_reset_names_the_default_network_and_keeps_the_password():
+    outcome = run_node(
+        PAGE_STUBS
+        + """
+        const replies = [
+          () => { throw lostConnectionError(new TypeError("Load failed")); },
+          () => ({ operation: { id: "a", started_at: 1e12, state: "succeeded", ssid: "TestNet", message: "done" } }),
+          () => ({ operation: { id: "a", started_at: 1e12, state: "succeeded", ssid: "TestNet", message: "done" } }),
+        ];
+        request = async () => replies.shift()();
+        await runWifiChange("/api/access-point/reset-name", {}, () => {}, "TestNet");
+        const waiting = banners.filter((banner) => banner.kind === "working" && /Reconnecting/.test(banner.title));
+        console.log(JSON.stringify({ waiting: waiting.map((banner) => banner.lines.join(" ")) }));
+        """
+    )
+    assert outcome["waiting"] and "Join “TestNet” in the Wi-Fi menu" in outcome["waiting"][0]
+    assert "password did not change" in outcome["waiting"][0]
+
+
+def test_the_sidebar_and_the_settings_page_share_one_name_reset():
+    # A second copy of the call would be a second implementation of the reset.
+    assert SCRIPT.count('"/api/access-point/reset-name"') == 1
+    buttons = function_source("resetWifiButtons")
+    assert '"reset-wifi-name"' in buttons and '"quick-reset-wifi-name"' in buttons
+    assert 'addEventListener("click", resetWifiName)' in SCRIPT
 
 
 @NEEDS_NODE

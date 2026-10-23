@@ -506,7 +506,6 @@ async function speedTestFinished(status, serial = speedTestState.serial) {
   element('speed-test-running').hidden = true;
   element('speed-test-start').hidden = false;
   element('speed-test-results').hidden = false;
-  const result = status.result;
   speedTestSay(speedTestEndMessage(status));
   speedTestFocusTitle();
   await speedTestLoad();

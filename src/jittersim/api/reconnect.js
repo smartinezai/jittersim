@@ -1,7 +1,7 @@
 // Pi Wi-Fi restarts. The Wi-Fi goes down for a few seconds and takes this browser with it,
 // so the page waits for the Pi to answer again and then reads how the change went.
 // This file is sent before anyone has signed in. Keep the product name out of every text here.
-const WIFI_RESTART_NOTICE = "The Pi's Wi-Fi will restart now. This device will lose its connection for up to a minute. If the Wi-Fi name or password changes, this device cannot rejoin by itself: choose the network again in the Wi-Fi menu. This page waits for the Pi and then shows how the change went.";
+const WIFI_RESTART_NOTICE = "The Pi's Wi-Fi will restart now. Every device on it, possibly including this one, will lose its connection for up to a minute. If the Wi-Fi name or password changes, this device cannot rejoin by itself: choose the network again in the Wi-Fi menu. This page waits for the Pi and then shows how the change went.";
 const RECONNECT_STEPS_MS = [1000, 2000, 3000];
 const RECONNECT_LIMIT_MS = 90000;
 const WIFI_RUN_LIMIT_MS = 240000;
@@ -213,6 +213,7 @@ function hideWifiBanner() {
 // One panel for the whole change. It stays until the person dismisses a finished result.
 function showWifiBanner(kind, title, lines, buttons) {
   let banner = document.getElementById("wifi-change-banner");
+  const appearing = !banner || banner.hidden;
   if (!banner) {
     banner = document.createElement("aside");
     banner.id = "wifi-change-banner";
@@ -241,6 +242,8 @@ function showWifiBanner(kind, title, lines, buttons) {
   });
   if (buttons && buttons.length) children.push(actions);
   banner.replaceChildren(...children);
+  // A new banner scrolls into view once. Later updates leave the page where the person put it.
+  if (appearing) banner.scrollIntoView({block: "nearest"});
   // The banner is not a live region. The page's one announcer says it once per change.
   const said = [title].concat(lines || []).join(" ");
   if (said !== lastWifiBannerAnnouncement) {
@@ -305,9 +308,11 @@ async function followStoredWifiChange(identifier, onFinished, context = wifiReco
 }
 
 // Send a change that restarts the Pi's Wi-Fi and follow it. The Pi answers before it restarts.
-async function runWifiChange(path, body, onFinished) {
+// restoredName is the name a reset brings back. It keeps the password.
+async function runWifiChange(path, body, onFinished, restoredName) {
   const submitButton = typeof pendingFormSubmitButton === "undefined" ? null : pendingFormSubmitButton;
-  wifiJoinHint = body && typeof body.ssid === "string" && body.ssid
+  wifiJoinHint = restoredName ? "Join “" + restoredName + "” in the Wi-Fi menu. The password did not change."
+    : body && typeof body.ssid === "string" && body.ssid
     ? "Join “" + body.ssid + "” with the new password you set."
     : null;
   try {

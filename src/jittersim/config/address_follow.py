@@ -42,13 +42,6 @@ AUTOMATIC_GAP_SECONDS = 10 * 60
 PRUNE_SECONDS = 60 * 60
 _last_prune: Optional[int] = None
 
-
-def reset_prune_clock() -> None:
-    """Forget when the last prune ran, so the next check prunes. For tests."""
-
-    global _last_prune
-    _last_prune = None
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS address_follow_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),

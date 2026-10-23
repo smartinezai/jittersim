@@ -367,7 +367,6 @@ function renderDeviceCards() {
   if (!container) return;
   container.replaceChildren();
   devices.forEach(device => {
-    const state = Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id) ? deviceConditions.devices[device.id] : null;
     const card = document.createElement('article');
     card.className = 'device-card';
     card.dataset.key = device.id;
@@ -708,7 +707,6 @@ function focusListInstead(listId) {
 
 let releaseState = null;
 let releasePollAt = 0;
-let releaseStatusRequest = null;
 let autoCheckStagedUpdates = null;
 let knownHealthVersion = null;
 let lastConfirmedInstalledVersion = null;
