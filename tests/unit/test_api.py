@@ -6510,6 +6510,40 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(self.repository.access_settings().site_blocks, before)
         self.assertEqual(len(before), len(devices))
 
+    def test_a_site_rule_can_be_deleted_while_the_rules_are_over_the_limit(self) -> None:
+        self._site_rule_views(8)
+        self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS)  # 9 views: over, and 8 views still are
+
+        status, _, body = self.server.write_response_for(
+            "/api/site-blocks/delete",
+            {"version": self.repository.get_runtime_state().configuration_version, "id": "rule0"},
+        )
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(self.repository.access_settings().site_blocks), 7)
+
+    def test_a_history_restore_the_helper_would_refuse_stores_nothing(self) -> None:
+        from jittersim.config.workflows import WorkflowStore
+
+        self._site_rule_views(8)
+        self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS)  # 9 views: over the limit
+        store = WorkflowStore(self.repository)
+        store.checkpoint("Over the limit")
+        identifier = store.history()[0]["id"]
+        self._fill_block_list(1)
+        before = self.repository.get_website_policy()
+
+        status, _, body = self.server.write_response_for(
+            "/api/history/restore",
+            {"id": identifier,
+             "current_version": self.repository.get_runtime_state().configuration_version},
+        )
+
+        self.assertEqual(status, 400, body)
+        self.assertIn("too many different device and site rule combinations",
+                      json.loads(body)["error"])
+        self.assertEqual(self.repository.get_website_policy(), before)
+
     def test_an_import_the_helper_would_refuse_stores_nothing(self) -> None:
         self._site_rule_views(8)
         self._fill_block_list(MAX_GLOBAL_BLOCKED_DOMAINS)  # 9 views: over the limit

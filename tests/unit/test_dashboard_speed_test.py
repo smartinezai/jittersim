@@ -12,6 +12,7 @@ import pytest
 from jittersim.api.server import DASHBOARD_HTML, run_server
 from jittersim.api.speed_tests import READ_ATTEMPTS, READ_RETRY_SECONDS
 from jittersim.networking.helper import HelperClient
+from jittersim.speed_test import VERDICT_LABELS
 
 SCRIPTS = re.findall(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL)
 DASHBOARD_SCRIPT = SCRIPTS[0]
@@ -333,4 +334,32 @@ def test_the_export_goes_through_request_so_its_errors_and_sign_in_lock_are_the_
         "error": "Sign in again",
         "link": ["device-speed-tests.json", True],
         "status": "Export downloaded.",
+    }
+
+
+@NEEDS_NODE
+def test_a_dashboard_run_does_not_blame_the_internet_for_a_slow_speed():
+    outcome = run_node(
+        stubs_with_nodes() + SPEED_TEST_SCRIPT + """
+(async () => {
+  speedTestState.meta = {verdict_labels: %s};
+  const slow = {download: {verdict: 'below-cap', busy_average_kbit: 1000}};
+  const row = (provider) => speedTestDirection({provider, summary: slow}, 'download')[1];
+  speedTestCompare();
+  pending.shift().resolve({
+    changes: [], warnings: [], baseline: {provider: 'fast-com'}, result: {provider: 'dashboard'},
+    verdicts: {download: {baseline: 'below-cap', result: 'below-cap'},
+               upload: {baseline: null, result: null}}});
+  await tick();
+  const box = nodes['speed-test-comparison'];
+  console.log(JSON.stringify({dashboard: row('dashboard'), site: row('fast-com'),
+    comparison: box.children[1].children[0].textContent}));
+})();
+""" % json.dumps(VERDICT_LABELS))
+
+    assert outcome == {
+        "dashboard": "Slower than the cap: the Pi's Wi-Fi or the device was the limit",
+        "site": VERDICT_LABELS["below-cap"],
+        "comparison": "Download against the cap: before " + VERDICT_LABELS["below-cap"]
+        + "; after " + VERDICT_LABELS["below-cap-dashboard"] + ".",
     }

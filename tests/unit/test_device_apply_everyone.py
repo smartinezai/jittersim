@@ -828,11 +828,10 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         state = self.repository.get_runtime_state()
         self.assertEqual((state.observed_state, state.last_action), ("reset", "reset"))
 
-    def test_a_reset_recorded_during_the_put_back_is_never_undone(self) -> None:
+    def reset_recorded_during_the_put_back(self):
+        """The first apply fails. `jittersim reset` runs while the put-back's helper call does."""
         from jittersim.networking.helper import HelperClientError
 
-        scheduler = self.use_scheduler()
-        self.assertEqual(self.apply_to()[0], 200)
         real = self.helper.apply
         calls = []
 
@@ -841,14 +840,19 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
             if len(calls) == 1:
                 raise HelperClientError("simulated helper failure")
             result = real(**arguments)
-            # `jittersim reset` from another process while the put-back's helper call ran.
             self.repository.update_runtime_state(
                 observed_state="reset", last_action="reset", last_result="success",
                 last_error=None)
             return result
 
-        with patch.object(self.helper, "apply", side_effect=apply), \
-                self.assertLogs("jittersim.api.server", "ERROR"):
+        return patch.object(self.helper, "apply", side_effect=apply), calls
+
+    def test_a_reset_recorded_during_the_put_back_is_never_undone(self) -> None:
+        scheduler = self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        patcher, calls = self.reset_recorded_during_the_put_back()
+
+        with patcher, self.assertLogs("jittersim.api.server", "ERROR"):
             status, result = self.apply_to(PHONE, "low")
 
         self.assertEqual(status, 502)
@@ -860,6 +864,22 @@ class FailedDeviceApplyRecoveryTests(EveryoneRunningFixture):
         # instead of waiting for a tick.
         self.assertIsNone(scheduler.running_plan())
         self.assertTrue(self.helper.reset_called)
+
+    def test_a_failed_repeat_of_the_recorded_reset_is_logged_and_the_answer_stays(self) -> None:
+        from jittersim.networking.helper import HelperClientError
+
+        self.use_scheduler()
+        self.assertEqual(self.apply_to()[0], 200)
+        patcher, _ = self.reset_recorded_during_the_put_back()
+
+        with patcher, patch.object(self.helper, "reset",
+                                   side_effect=HelperClientError("simulated reset failure")), \
+                self.assertLogs("jittersim.api.server", "WARNING") as logs:
+            status, result = self.apply_to(PHONE, "low")
+
+        self.assertEqual(status, 502)
+        self.assertIn("A reset was recorded meanwhile", result["error"])
+        self.assertTrue(any("could not repeat the reset" in line for line in logs.output))
 
     def test_panic_during_the_put_back_is_named_as_panic_not_as_a_reset(self) -> None:
         scheduler = self.use_scheduler()

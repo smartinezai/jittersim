@@ -25,9 +25,11 @@ class FakeConnection:
     def __init__(self):
         self.tos = []
         self.priority = []
+        self.calls = []
         self.timeouts = []
 
     def setsockopt(self, level, name, value):
+        self.calls.append((name, value))
         (self.tos if name == socket.IP_TOS else self.priority).append(value)
 
     def settimeout(self, seconds):
@@ -173,7 +175,10 @@ class StreamTests(DashboardTestBase):
         self.assertEqual(reference.connection.tos, [0, 0])
         self.assertEqual(shaped.connection.tos, [0x08, 0])
         # The TOS sets the socket priority too: it goes back to 0 so both parts share a Wi-Fi class.
+        # The order matters: on Linux a TOS set after the priority would leave priority 2.
         self.assertEqual(shaped.connection.priority, [0])
+        self.assertEqual(shaped.connection.calls,
+                         [(socket.IP_TOS, 0x08), (12, 0), (socket.IP_TOS, 0)])
         for handler in (reference, shaped):
             self.assertEqual(handler.status, 200)
             self.assertTrue(handler.close_connection)
@@ -183,6 +188,13 @@ class StreamTests(DashboardTestBase):
             self.assertTrue(handler.headers_sent["security"])
             self.assertGreater(handler.wfile.written, 0)
         self.assertFalse(self.manager.runs[self.run_id].streaming)
+
+    def test_the_priority_option_falls_back_to_the_linux_value_only_on_linux(self) -> None:
+        # A Python that does not name the option: Linux still resets the priority, others do not.
+        for platform, expected in (("linux", 12), ("darwin", None)):
+            with mock.patch.object(routes, "socket", mock.Mock(spec=[])), \
+                    mock.patch.object(routes, "sys", mock.Mock(platform=platform)):
+                self.assertEqual(routes.socket_priority_option(), expected)
 
     def test_the_time_cap_ends_a_part_and_bounds_the_write_timeout(self) -> None:
         began = time.monotonic()

@@ -62,6 +62,8 @@ VERDICT_LABELS = {
     "at-cap": "Matches the cap",
     "above-cap": "Faster than the cap: the limit did not hold",
     "below-cap": "Slower than the cap: the internet, the Pi's Wi-Fi or the device was the limit",
+    # The dashboard test sends its data from the Pi, so the internet is not in the path.
+    "below-cap-dashboard": "Slower than the cap: the Pi's Wi-Fi or the device was the limit",
     "not-measured": "Not measured on the Pi",
     "service-rules": "Not judged: a service rule sends some traffic through another queue",
     "service-rules-unknown": "Not judged: the active service rules could not be confirmed",
