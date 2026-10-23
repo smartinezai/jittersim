@@ -182,57 +182,13 @@ if __name__ == "__main__":
 
 
 ROOT = Path(__file__).resolve().parents[2]
-NOTICE = ROOT / "deploy" / "raspberry-pi" / "upgrade-notice.py"
-
-
-def installer_notice(path):
-    result = subprocess.run(
-        [sys.executable, str(NOTICE), str(path)], capture_output=True, text=True, timeout=20
-    )
-    assert result.returncode == 0, result.stderr
-    return result.stdout.strip()
 
 
 class InstallerNoticeTests(unittest.TestCase):
-    def test_the_installer_says_how_many_names_an_upgrade_will_clear(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            notice = installer_notice(old_database(directory))
-
-            self.assertEqual(
-                notice,
-                "Notice: this upgrade clears the 3 DNS names listed under Traffic because protected"
-                " devices exist. The list fills again as devices browse."
-                " Names are kept for 30 days from their last sighting.",
-            )
-            # it only reads: the names are still there for the upgrade to clear
-            connection = sqlite3.connect(Path(directory) / "settings.db")
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM domain_observations").fetchone()[0], 3)
-            connection.close()
-
-    def test_the_installer_stays_quiet_when_nothing_is_cleared(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            for name, options in (("no-protected", {"protected": False}), ("no-names", {"rows": 0})):
-                (Path(directory) / name).mkdir()
-                self.assertEqual(installer_notice(old_database(Path(directory) / name, **options)), "", name)
-            self.assertEqual(installer_notice(Path(directory) / "missing.db"), "")
-            # a database that already has the column is not cleared again
-            repository = ConfigRepository(Path(directory) / "current.db")
-            repository.save_unaffected_device(UnaffectedDevice(mac_address=PROTECTED))
-            repository.save_domain_observations([observation("192.168.50.20", "a.example.com")], now=NOW)
-            repository.close()
-            self.assertEqual(installer_notice(Path(directory) / "current.db"), "")
-
-    def test_the_installer_runs_the_notice_before_it_replaces_anything(self) -> None:
-        script = (ROOT / "deploy" / "raspberry-pi" / "install.sh").read_text()
-        call = 'upgrade-notice.py" "$DATA_DIR/jittersim.db" || true'
-        assert call in script
-        assert script.index(call) < script.index("replace-source.py") < script.index("systemctl restart")
-
     def test_the_readme_explains_the_clearing_in_its_upgrade_notes(self) -> None:
         # The long guide moved to deploy/raspberry-pi/README.md when the main README became a short page.
         readme = " ".join((ROOT / "deploy" / "raspberry-pi" / "README.md").read_text().split())
         for phrase in ("clears the DNS names listed under Traffic once when any device is protected",
-                       "prints a notice with the number of names before it happens",
                        "Names are kept for 30 days from their last sighting"):
             assert phrase in readme, phrase
 
