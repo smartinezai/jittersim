@@ -37,7 +37,7 @@ The technical plan review and human feedback are complete. An initial disposable
 - `src/jittersim/networking/renderer.py` returns protected traffic before profile rules run. Ad blocking must not weaken that protection.
 - `src/jittersim/networking/browser_proxy.py` resolves browser destinations through the Pi's resolver. Those requests require a separate coverage decision.
 - `deploy/raspberry-pi/install.sh` configures shared IPv4 access at `192.168.50.1` and disables IPv6 on the access point. It installs `dnsmasq-base`.
-- `deploy/raspberry-pi/jittersim-control-firewall.nft` owns management access restrictions. `retire-services.py` retires the old `jittersim-dns.service` so that name must not be reused accidentally.
+- `deploy/raspberry-pi/jittersim-control-firewall.nft` owns management access restrictions. `retire-services.py` retires the old `jittersim-dns.service` so that name must not be reused accidentally. (Note 2026-10-23: out of date. The retirement list was empty from 2 October and `retire-services.py` was removed in PR 177.)
 - `.github/workflows/wifi-recovery.yml` and `tests/wifi/Dockerfile` provide existing Python, browser and Linux network checks.
 
 These are observations from the local checkout on 3 October 2026. No live Pi configuration was inspected or changed for this proposal.

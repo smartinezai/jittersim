@@ -1207,6 +1207,7 @@ class ControlServerTests(unittest.TestCase):
         self.server.helper_client = QueueHelper()
         with_queues = json.loads(self.server.response_for("/api/traffic")[2])
         self.server.helper_client = FakeHelper()
+        self.server.drop_shared_readings()  # the reading above belongs to the other helper
         without_queues = json.loads(self.server.response_for("/api/traffic")[2])
 
         self.assertEqual(with_queues["queues"]["alice"]["upload_dropped"], 24)
@@ -1231,6 +1232,7 @@ class ControlServerTests(unittest.TestCase):
         self.server.helper_client = EveryoneElseHelper()
         traffic = json.loads(self.server.response_for("/api/traffic")[2])
         self.server.helper_client = FakeHelper()
+        self.server.drop_shared_readings()  # the reading above belongs to the other helper
         without = json.loads(self.server.response_for("/api/traffic")[2])
 
         self.assertEqual(traffic["everyone_else"], flows)

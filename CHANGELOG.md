@@ -9,6 +9,7 @@ the hand-written Unreleased part short.
 
 ## Unreleased
 
+- Open dashboard tabs share one reading of live traffic, the Ethernet details and the helper check, and a quiet time quota no longer writes to the SD card every 5 seconds.
 - The sidebar has a **Reset Wi-Fi name** button, so the Pi's Wi-Fi name can be restored from any page without opening settings. It uses the same confirmation and the same action as the Router and Wi-Fi page. The restart notice now says that every device on the Pi's Wi-Fi, including the one showing the dashboard, disconnects for a short time, and the page names the network to join again.
 - Small accessibility and wording fixes: the Updates page no longer shows "Sign in to read update status." after you sign in, the Router and Wi-Fi page says where to find Copy router Wi-Fi to Pi on a phone, and each button in Connected clients names its device for screen readers.
 
