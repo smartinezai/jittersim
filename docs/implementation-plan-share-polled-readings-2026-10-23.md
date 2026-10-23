@@ -46,7 +46,10 @@ No Panic-pinned file changes (`helper.py`, `access.py`, `panic_guard.py` stay as
 - `GET /api/traffic` keeps everything that is not the helper's counters per request (the
   limits, the reset message, the queue limits). After Reset or Panic the route answers the reset
   message before it reaches the shared reading. `sampled_at` is now the time the helper was
-  read, so a rate computed between two readings uses the right interval.
+  read. The Traffic chart still measures its interval with the browser clock, so with several
+  tabs open one chart point can be about half to one and a half times the true rate, or zero when
+  two polls get the same reading. Nothing can fail because of this (accepted trade-off, found in
+  the review).
 
 ## Staleness, reading by reading
 
