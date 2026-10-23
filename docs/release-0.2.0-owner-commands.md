@@ -2,7 +2,7 @@
 
 **[OWNER]** only you can do it (key passphrase, sudo password, y/N answers). **[EITHER]** anyone can paste it. Every command below was checked against `scripts/release.sh`, `src/jittersim/cli.py` and `src/jittersim/remote_cli.py` on main. The reasons are in the [owner runbook](release-runbook-2026-10-16.md).
 
-Facts on 23 October (main `3afb48d5`): no tag, no GitHub release, `docs/releases/registry.json` reserves nothing, `pyproject.toml` and `__init__.py` say 0.2.0. The release text (Unreleased entries plus [the notes file](release-notes-0.2.0-draft.md)) is 2479 bytes there and changes when either changes. The script stops above 15000 bytes.
+Facts on 23 October (main `89e20962`): no tag, no GitHub release, `docs/releases/registry.json` reserves nothing, `pyproject.toml` and `__init__.py` say 0.2.0. The release text (Unreleased entries plus [the notes file](release-notes-0.2.0-draft.md)) is about 3 KB and changes when either changes. The script stops above 15000 bytes.
 
 ## Before you start (all must be true)
 
@@ -10,6 +10,7 @@ Facts on 23 October (main `3afb48d5`): no tag, no GitHub release, `docs/releases
 2. **Runbook sections 2 and 3 are done.** The Pi runs `0.2.0.dev+<short>` built from origin/main and `jittersim update check` on the Pi says `Online check token: set`.
 3. **The Mac can talk to the dashboard (runbook section 4).** Today `~/.config/jittersim/cli.json` points at a CA file that is gone and there is no `jittersim` command on the Mac. After section 4, `jittersim remote update status` must print the Pi's release. Set `JITTERSIM` to that command, for example `JITTERSIM=$HOME/.venvs/jittersim/bin/jittersim`.
 4. **GitHub login.** `gh api user -q .login` prints `smartinezai`.
+5. **Read the notes you sign.** They go into the package before you test it. If the Known limits sentence "Tested on one Raspberry Pi 3 Model B Plus" will not be true after your acceptance, edit `docs/release-notes-0.2.0-draft.md` and merge it first.
 
 ## The Panic trap and the merge freeze (the runbook only points here)
 
