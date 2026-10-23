@@ -780,13 +780,8 @@ class UpdateTests(unittest.TestCase):
                         # Stable preparation is exercised separately with fixed packages.
                         self.assertFalse((self.root / "staged/deploy/raspberry-pi/release-locks").exists())
                         continue
-                    if script == "retire-services.py":
-                        # It refuses to run while the update service runs and no
-                        # unit waits to be retired. A test below keeps that true.
-                        continue
-                    if script == "upgrade-notice.py":
-                        # It prints a notice for the person who runs the installer. An update
-                        # from the dashboard has no terminal and the Traffic page says it.
+                    if script == "check-update-idle.py":
+                        # It refuses to run while the update service runs.
                         continue
                     if script == "preflight.py" and "--firewall-only" in words:
                         # The installer checks the firewall again after it installed
@@ -856,7 +851,7 @@ class UpdateTests(unittest.TestCase):
         self.assertIn("systemctl restart " + WATCHER, installer)
         self.assertEqual(self.systemctl(self.after_package(commands)), installer)
 
-    def test_the_installer_adds_no_package_or_retired_unit_the_update_cannot_handle(self):
+    def test_the_installer_adds_no_package_the_update_cannot_handle(self):
         packages = [
             word
             for line in installer_lines()
@@ -870,8 +865,6 @@ class UpdateTests(unittest.TestCase):
             "dnsmasq-base iputils-ping iw wpasupplicant nftables openssl python3-venv "
             "tcpdump unbound dnsutils hostapd conntrack avahi-daemon avahi-utils python3-dbus".split(),
         )
-        # Retiring a unit needs its file and enabled state back on a rollback.
-        self.assertIn("\nOBSOLETE_SERVICES = ()\n", (PI / "retire-services.py").read_text())
 
     def fresh(self):
         """Start again on a new Pi inside one test."""
