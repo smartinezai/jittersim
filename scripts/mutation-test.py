@@ -147,7 +147,7 @@ MODULES = {
         "tests": ["tests/unit/test_schedules.py", "tests/unit/test_conditions.py",
                   "tests/unit/test_randomizer.py", "tests/unit/test_random_value_ranges.py",
                   "tests/unit/test_scenarios.py", "tests/unit/test_protected_device_without_mac.py",
-                  "tests/unit/test_engine_rules.py"],
+                  "tests/unit/test_helper_snapshot_cache.py", "tests/unit/test_engine_rules.py"],
     },
     "dashboard_rules": {
         "source": "src/jittersim/dashboard_rules.py",
