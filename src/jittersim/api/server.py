@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import re
-import secrets
 import select
 import signal
 import socket
@@ -114,7 +113,6 @@ from jittersim.config.models import (
     ValidationError,
     WebsitePolicy,
     normalize_domain,
-    normalize_mac_address,
     time_quota_counter_id,
 )
 from jittersim.config.protection import (

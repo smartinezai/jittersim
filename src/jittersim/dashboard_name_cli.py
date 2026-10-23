@@ -3,7 +3,6 @@
 import argparse
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -11,19 +10,6 @@ from jittersim import localca, localname, mdnsname, updates
 
 DASHBOARD_PORT = 8080
 GROUP = "jittersim"
-
-
-class NameBudget:
-    def __init__(self):
-        self.deadline = time.monotonic() + 120
-
-    def check(self):
-        if time.monotonic() >= self.deadline:
-            raise updates.UpdateError("the dashboard name change exceeded its time allowance")
-
-    def limit(self, seconds):
-        self.check()
-        return min(seconds, self.deadline - time.monotonic())
 
 
 def _address(name: str) -> str:
@@ -102,7 +88,8 @@ def main(
     try:
         if ownership is None:
             raise updates.UpdateError("the installed update manager cannot safely own a name change")
-        budget = NameBudget()
+        budget = updates.UpdateBudget(
+            120, "the dashboard name change exceeded its time allowance")
         root = update_root or updates.UPDATE_ROOT
         with ownership(root):
             budget.check()

@@ -26,6 +26,23 @@ What has happened since:
 - PR 111, 121, 149, 151 and 153 are open and touch `dashboard.js`, `workflows.js` or `server.py`.
   PR 141, 143, 146, 147 and 152 have merged.
 
+## Status on 23 October 2026 (measured against main `03fe31d8`)
+
+- Item 7 is done. Removed from the page scripts: `renderProfileTable`, `keepUnaffected`,
+  `removeUnaffected`, `showRuleSection`, the helpers only they used (`describeImpairment`,
+  `describeExtras`, `formatBandwidth`), the unused `savedProfileRandomness` with its reset listener,
+  and the unused `releaseStatusRequest`, a `state` in the device cards and a `result` in the speed
+  test. ESLint `no-unused-vars` over the assembled page now reports only the functions that the two
+  script blocks share (`readOldAdminTools`, `scrollBehavior`, `revealElement`). The CI step that runs
+  ESLint is still open.
+- Item 8 was looked at and left on purpose. The guards (about 50: 42 in `dashboard.js`, 6 in
+  `dashboard-navigation.js`, 3 in `reconnect.js`, 2 in `workflows.js`) name functions or variables of
+  the same page, but about 150 node tests build their page from hand-cut fragments and rely on them.
+  One of them (`typeof successMessage`) checks a parameter and has to stay. Removing them needs stubs in about 11 test preludes,
+  which adds more test lines than it removes. Do it together with one shared test prelude.
+- Item 16: the stale branch is removed from `wifi-recovery.yml`. The rename and the single ruff run are
+  still open.
+
 ## Verdict (5 lines)
 
 1. The product code is not copy-paste bloated (JS duplication 0.26 %, CSS 0 %, Python tests 0.84 %). The vanilla, no-build, inline-CSP dashboard design is defensible for an offline Pi and earns its keep.

@@ -7904,45 +7904,6 @@
 
     const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-    function formatBandwidth(kbit) {
-      if (kbit < 1000) return kbit + " kbit/s";
-      return (kbit / 1000).toFixed(kbit % 1000 ? 1 : 0) + " Mbit/s";
-    }
-
-    function describeImpairment(values) {
-      const parts = [];
-      if (values.delay_ms || values.jitter_ms) {
-        const jitter = values.jitter_ms ? " ± " + values.jitter_ms + " ms" : "";
-        parts.push(values.delay_ms + " ms" + jitter);
-      }
-      if (values.loss_percent) {
-        const bursts = values.loss_burst_packets > 1
-          ? " in bursts of " + values.loss_burst_packets
-          : "";
-        parts.push(values.loss_percent + "% loss" + bursts);
-      }
-      if (values.bandwidth_kbit !== null) parts.push(formatBandwidth(values.bandwidth_kbit));
-      if (values.reorder_percent) parts.push(values.reorder_percent + "% reorder");
-      if (values.duplicate_percent) parts.push(values.duplicate_percent + "% duplicate");
-      if (values.corrupt_percent) parts.push(values.corrupt_percent + "% corrupt");
-      return parts.length ? parts.join(" · ") : "Unchanged";
-    }
-
-    function describeExtras(profile) {
-      const parts = [];
-      if (profile.reroll_interval_seconds) {
-        parts.push("rerolls every " + profile.reroll_interval_seconds + " s");
-      }
-      if (profile.outage_probability) {
-        parts.push(
-          profile.outage_probability + "% outage chance, " +
-          profile.outage_duration_seconds + " s long"
-        );
-      }
-      if (profile.website_mode === "allow_only") parts.push("allows only listed sites");
-      return parts.length ? parts.join(" · ") : "—";
-    }
-
     function hasAdvancedSettings(profile) {
       const advancedImpairment = (values) => Boolean(
         values.reorder_percent || values.duplicate_percent || values.corrupt_percent ||
@@ -8117,28 +8078,6 @@
       return everyoneElseAssigned() || runningScenarios.some((run) => run.everyone_else);
     }
 
-    function renderProfileTable() {
-      renderTable(
-        "profile-table",
-        "No profiles saved yet.",
-        ["Profile", "Upload", "Download", "Extras"],
-        profiles.map((profile) => ({
-          cells: [
-            [profile.name, profile.id],
-            describeImpairment(profile.upload),
-            describeImpairment(profile.download),
-            describeExtras(profile)
-          ],
-          key: profile.id,
-          actions: [
-            ["Edit", () => fillProfileForm(profile)],
-            ["Duplicate", () => duplicateProfile(profile)],
-            ["Delete", (button) => deleteProfile(profile, button)]
-          ]
-        }))
-      );
-    }
-
     const CONDITION_LABELS = { normal: "Normal", degraded: "Degraded", offline: "Offline" };
 
     function conditionCell(state) {
@@ -8296,15 +8235,7 @@
       website_randomness: { variation_percent: 0, enabled_probability: 100 }
     };
 
-    let savedProfileRandomness = DEFAULT_PROFILE_RANDOMNESS;
-
     function fillProfileValues(profile) {
-      savedProfileRandomness = {
-        reroll_interval_randomness: profile.reroll_interval_randomness,
-        outage_duration_randomness: profile.outage_duration_randomness,
-        outage_interval_randomness: profile.outage_interval_randomness,
-        website_randomness: profile.website_randomness
-      };
       fillImpairment("upload", profile.upload);
       fillImpairment("download", profile.download);
       element("profile-seed").value = profile.random_seed === null ? "" : profile.random_seed;
@@ -8968,35 +8899,6 @@
         : message + " It takes effect when the dashboard runs in hardware mode.";
     }
 
-    async function keepUnaffected(macAddress, name, button) {
-      if (button) setButtonBusy(button, true);
-      showMessage("Adding " + macAddress + " to the protected list...", "working");
-      try {
-        const result = await request("/api/unaffected-devices", "POST", {
-          mac_address: macAddress,
-          name: name
-        });
-        refreshAfterSuccess(savedChangeMessage(
-          "Added " + result.unaffected_device.name + " to the protected list.", result
-        ));
-        return true;
-      } catch (error) {
-        showMessage(error.message, "error");
-        return false;
-      } finally {
-        if (button) setButtonBusy(button, false);
-      }
-    }
-
-    function removeUnaffected(macAddress, button) {
-      deleteItem(
-        "/api/unaffected-devices/delete",
-        { mac_address: macAddress },
-        "Removed from the protected list.",
-        button
-      );
-    }
-
     function rerenderConnectedDevices() {
       // Client labels name the everyone-else profile. Leave an open editor alone.
       const container = element("connected-devices");
@@ -9517,10 +9419,6 @@
       if (window.location.hash !== "#" + page) window.history.replaceState(null, "", "#" + page);
     }
 
-    function showRuleSection(name) {
-      showTab(name === "access" ? "access" : "rules");
-    }
-
     function followTabLink(event, name) {
       // A modified click opens the page in a new browser tab instead.
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey ||
@@ -9848,10 +9746,6 @@
       } catch (error) {
         showMessage(error.message, "error");
       }
-    });
-
-    element("profile-form").addEventListener("reset", () => {
-      savedProfileRandomness = DEFAULT_PROFILE_RANDOMNESS;
     });
 
     element("device-cancel-edit").addEventListener("click", () => stopEditing("device"));
