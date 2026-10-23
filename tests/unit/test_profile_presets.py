@@ -38,25 +38,32 @@ def test_every_preset_has_a_source_and_the_user_guide_repeats_it(presets):
 
 
 @pytest.mark.parametrize(
-    "name, upload, download",
+    "name, upload, download, words",
     [
-        # Apple Network Link Conditioner presets as a published table lists them.
-        ("DSL", {"delay_ms": 5, "bandwidth_kbit": 256}, {"delay_ms": 5, "bandwidth_kbit": 2000}),
-        ("3G", {"delay_ms": 100, "bandwidth_kbit": 330}, {"delay_ms": 100, "bandwidth_kbit": 780}),
+        # Apple Network Link Conditioner presets as a published table lists them. The first
+        # number of each pair in the sentence is the download number.
+        ("DSL", {"delay_ms": 5, "bandwidth_kbit": 256}, {"delay_ms": 5, "bandwidth_kbit": 2000},
+         ("(2 Mbit/s and 256 kbit/s, 5 ms each way)",)),
+        ("3G", {"delay_ms": 100, "bandwidth_kbit": 330}, {"delay_ms": 100, "bandwidth_kbit": 780},
+         ("(780 and 330 kbit/s, 100 ms each way)",)),
         ("EDGE (2G)", {"delay_ms": 440, "bandwidth_kbit": 200},
-         {"delay_ms": 400, "bandwidth_kbit": 240}),
+         {"delay_ms": 400, "bandwidth_kbit": 240}, ("(240 and 200 kbit/s, 400 and 440 ms)",)),
         ("Very bad network", {"delay_ms": 500, "loss_percent": 10, "bandwidth_kbit": 1000},
-         {"delay_ms": 500, "loss_percent": 10, "bandwidth_kbit": 1000}),
-        ("Offline", {"loss_percent": 100}, {"loss_percent": 100}),
+         {"delay_ms": 500, "loss_percent": 10, "bandwidth_kbit": 1000},
+         ("(1 Mbit/s and 500 ms each way, 10% loss)",)),
+        ("Offline", {"loss_percent": 100}, {"loss_percent": 100}, ("100% Loss",)),
         # The targets in the Chrome DevTools source: about 500 kbit/s and a 400 ms round trip.
         ("Slow 3G (Chrome DevTools)", {"delay_ms": 200, "bandwidth_kbit": 500},
-         {"delay_ms": 200, "bandwidth_kbit": 500}),
+         {"delay_ms": 200, "bandwidth_kbit": 500}, ("500 kbit/s each way, 400 ms round trip",)),
     ],
 )
-def test_published_numbers_stay_as_published(presets, name, upload, download):
+def test_published_numbers_stay_as_published(presets, name, upload, download, words):
     for published, shown in ((upload, presets[name]["upload"]),
                              (download, presets[name]["download"])):
         assert {key: shown.get(key) for key in published} == published
+    # The sentence people read must carry the same numbers as the fields.
+    for text in words:
+        assert text in presets[name]["source"]
 
 
 def test_the_kernel_measurement_script_uses_the_dashboard_numbers(presets):

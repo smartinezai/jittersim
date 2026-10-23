@@ -475,6 +475,7 @@ def run():
                     expect(page.locator("#download-bandwidth")).to_have_value("2000")
                     expect(page.locator("#profile-advanced")).not_to_have_attribute("open", "")
                     page.get_by_text("Where the presets come from", exact=True).click()
+                    assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
                     presets = page.locator("#profile-preset option").count() - 1
                     expect(page.locator("#profile-preset-sources li")).to_have_count(presets)
                     expect(page.locator("#profile-preset-sources")).to_contain_text(

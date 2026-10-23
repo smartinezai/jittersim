@@ -9,6 +9,7 @@ the hand-written Unreleased part short.
 
 ## Unreleased
 
+- Each profile preset now says what it is based on. DSL and Slow 3G (Chrome DevTools) are new presets.
 - The sidebar has a **Reset Wi-Fi name** button, so the Pi's Wi-Fi name can be restored from any page without opening settings. It uses the same confirmation and the same action as the Router and Wi-Fi page. The restart notice now says that every device on the Pi's Wi-Fi, including the one showing the dashboard, disconnects for a short time, and the page names the network to join again.
 
 ### JitterSim 0.2.0
@@ -20,7 +21,3 @@ Security fixes block UDP source-port 53 traffic from test Wi-Fi clients through 
 - The Connected clients list labels the device you are browsing with as **This device**.
 
 See the [complete development changes](https://github.com/smartinezai/jittersim/blob/main/docs/history/0.2.0-development-changes.md).
-
-### Changed
-
-- Every profile preset now says what it is based on, in the form and in the user guide. Slow 3G (Chrome DevTools) and DSL are new. An 802.11ac Wi-Fi preset is not added: no first-hand source for its numbers was found.

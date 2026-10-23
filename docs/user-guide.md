@@ -254,28 +254,31 @@ is based on here and under **Where the presets come from** in the form:
 
 | Preset | Based on |
 | --- | --- |
-| DSL | Apple Network Link Conditioner DSL preset (2 Mbit/s down, 256 kbit/s up, 5 ms each way). |
+| DSL | Apple Network Link Conditioner DSL preset as a published table lists it (2 Mbit/s and 256 kbit/s, 5 ms each way). The first number of each pair is used for download. |
 | Good 4G | A rough estimate made for this tool. No published source. |
 | Congested 4G | A rough estimate made for this tool. No published source. |
-| 3G | Apple Network Link Conditioner 3G preset (780 kbit/s down, 330 kbit/s up, 100 ms each way), plus 20 ms jitter. |
+| 3G | Apple Network Link Conditioner 3G preset as a published table lists it (780 and 330 kbit/s, 100 ms each way), plus 20 ms jitter. The first number of each pair is used for download. |
 | Slow 3G (Chrome DevTools) | Chrome DevTools Slow 3G, now called 3G (about 500 kbit/s each way, 400 ms round trip). |
-| EDGE (2G) | Apple Network Link Conditioner Edge preset (240 kbit/s down at 400 ms, 200 kbit/s up at 440 ms), plus jitter and 1% loss. |
-| Satellite | A rough estimate made for this tool. Light alone needs about 480 ms for a geostationary round trip, so 600 ms is plausible. |
+| EDGE (2G) | Apple Network Link Conditioner Edge preset as a published table lists it (240 and 200 kbit/s, 400 and 440 ms), plus jitter and 1% loss. The first number of each pair is used for download. |
+| Satellite | A rough estimate made for this tool. Light alone needs about 480 ms for a geostationary round trip, so about 600 ms (300 ms each way) is plausible. |
 | Lossy Wi-Fi | A rough estimate made for this tool. No published source. |
 | Train tunnel | A rough estimate made for this tool. No published source. |
-| Very bad network | Apple Network Link Conditioner Very Bad Network preset (1 Mbit/s and 500 ms each way, 10% loss), plus 100 ms jitter and loss bursts of 2. |
+| Very bad network | Apple Network Link Conditioner Very Bad Network preset as a published table lists it (1 Mbit/s and 500 ms each way, 10% loss), plus 100 ms jitter and loss bursts of 2. |
 | Offline | Every packet lost both ways. Apple's Network Link Conditioner calls this 100% Loss. |
 
 A delay applies in each direction, so a round trip takes both. 3G adds about
 200 ms and Slow 3G about 400 ms. The Apple numbers are those of Network Link
 Conditioner's presets of the same name. They were read on 23 October 2026 from a
 [published table of its presets](https://engineering.countingup.com/network-link-conditioner/)
-and not from the tool itself. Chrome DevTools sets Slow 3G in its
-[source code](https://github.com/ChromeDevTools/devtools-frontend/blob/main/front_end/core/sdk/NetworkManager.ts)
-as about 500 kbit/s and a 400 ms round trip. Inside the browser it applies 400
-kbit/s and 2000 ms of delay for each request to get that feel. JitterSim uses
-the aimed numbers because it delays every packet on a real link. A preset sets
-values only and changes nothing else. The
+and not from the tool itself. That table labels its first column Up. JitterSim
+uses the first number of each pair for download and the second for upload,
+because the first is the larger speed on these links (780 and 330 kbit/s for 3G).
+This reading was not checked in Apple's tool. Chrome DevTools defines Slow 3G in
+the file `front_end/core/sdk/NetworkManager.ts` of its
+[source repository](https://github.com/ChromeDevTools/devtools-frontend) as about
+500 kbit/s and a 400 ms round trip. A preset fills the form with plain values. It
+also clears the seed, the rerolls, the outages, the website rules and the other
+advanced settings, and it sets the Name when you are creating a new profile. The
 [measured effect](measurements-2026-09.md) of four of them is on record.
 
 ### Schedules, timers and randomness

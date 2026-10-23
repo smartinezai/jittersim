@@ -41,7 +41,7 @@ the Sources section. Items are ordered by value against risk.
 3. **Cite and extend the profile presets** (scenario library). Each preset says what it is based on and what to expect, and a few missing ones are added (slow 3G as Chrome DevTools defines it, DSL, an 802.11ac-class Wi-Fi).
    Why: the nine dashboard presets (Good 4G to Offline) are labelled rough approximations. The same name carries different numbers in different tools. EDGE is 473 kbit/s in the Android emulator [7] and 250 kbit/s with 300 ms in Comcast [4]. 3G is 1.6 Mbit/s with 300 ms in WebPageTest [16]. Record the source beside each preset.
    Size S. Household risk low. Helper: no. Depends on: nothing. A "high latency DNS" preset [6] waits for the planned DNS delay.
-   Delivered on 23 October 2026, see [the plan](implementation-plan-preset-sources-2026-10-23.md). Every preset has a source note. Slow 3G (Chrome DevTools) and DSL are added. The 802.11ac-class Wi-Fi preset is not, because no first-hand source for its numbers was found.
+   Delivered on 2026-10-23 in PR 185: [the plan](implementation-plan-preset-sources-2026-10-23.md). Every preset has a source note. Slow 3G (Chrome DevTools) and DSL are added. The 802.11ac-class Wi-Fi preset is not, because no first-hand source for its numbers was found.
 
 4. **A lease the helper enforces itself** (safety). If the dashboard crashes or its scheduler stops, the Pi clears profile effects by itself, so a test can never leave the network degraded.
    Why: the README says the scheduler must keep running and independent expiry is still planned. Chaos Mesh warns that faults cannot be recovered once the controller loses its daemon [11]. Pi-hole and AdGuard Home both end a pause by themselves [17][18].

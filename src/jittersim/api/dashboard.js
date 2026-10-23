@@ -8258,8 +8258,9 @@
     const PROFILE_PRESETS = [
       {
         name: "DSL",
-        source: "Apple Network Link Conditioner DSL preset (2 Mbit/s down, 256 kbit/s up, " +
-          "5 ms each way).",
+        source: "Apple Network Link Conditioner DSL preset as a published table lists it " +
+          "(2 Mbit/s and 256 kbit/s, 5 ms each way). The first number of each pair is used " +
+          "for download.",
         upload: { delay_ms: 5, bandwidth_kbit: 256 },
         download: { delay_ms: 5, bandwidth_kbit: 2000 }
       },
@@ -8277,8 +8278,9 @@
       },
       {
         name: "3G",
-        source: "Apple Network Link Conditioner 3G preset (780 kbit/s down, 330 kbit/s up, " +
-          "100 ms each way), plus 20 ms jitter.",
+        source: "Apple Network Link Conditioner 3G preset as a published table lists it " +
+          "(780 and 330 kbit/s, 100 ms each way), plus 20 ms jitter. The first number of " +
+          "each pair is used for download.",
         upload: { delay_ms: 100, jitter_ms: 20, bandwidth_kbit: 330 },
         download: { delay_ms: 100, jitter_ms: 20, bandwidth_kbit: 780 }
       },
@@ -8291,15 +8293,16 @@
       },
       {
         name: "EDGE (2G)",
-        source: "Apple Network Link Conditioner Edge preset (240 kbit/s down at 400 ms, " +
-          "200 kbit/s up at 440 ms), plus jitter and 1% loss.",
+        source: "Apple Network Link Conditioner Edge preset as a published table lists it " +
+          "(240 and 200 kbit/s, 400 and 440 ms), plus jitter and 1% loss. The first number " +
+          "of each pair is used for download.",
         upload: { delay_ms: 440, jitter_ms: 60, loss_percent: 1, bandwidth_kbit: 200 },
         download: { delay_ms: 400, jitter_ms: 60, loss_percent: 1, bandwidth_kbit: 240 }
       },
       {
         name: "Satellite",
         source: "A rough estimate made for this tool. Light alone needs about 480 ms for a " +
-          "geostationary round trip, so 600 ms is plausible.",
+          "geostationary round trip, so about 600 ms (300 ms each way) is plausible.",
         upload: {
           delay_ms: 300, jitter_ms: 20, loss_percent: 1, loss_burst_packets: 3,
           bandwidth_kbit: 2000
@@ -8330,8 +8333,9 @@
       },
       {
         name: "Very bad network",
-        source: "Apple Network Link Conditioner Very Bad Network preset (1 Mbit/s and 500 ms " +
-          "each way, 10% loss), plus 100 ms jitter and loss bursts of 2.",
+        source: "Apple Network Link Conditioner Very Bad Network preset as a published table " +
+          "lists it (1 Mbit/s and 500 ms each way, 10% loss), plus 100 ms jitter and loss " +
+          "bursts of 2.",
         upload: {
           delay_ms: 500, jitter_ms: 100, loss_percent: 10, loss_burst_packets: 2,
           bandwidth_kbit: 1000
