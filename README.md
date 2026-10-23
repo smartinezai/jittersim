@@ -21,6 +21,7 @@ test. It is for experiments, not a replacement for your home router.
   against the profile.
 - Follow a saved device to its new private Wi-Fi address, with Ask, Automatic and Undo.
 - Choose whether active profiles resume after a router outage.
+- Restore the Pi's test Wi-Fi to its default name with one sidebar button. The page names the network to join again.
 - Update the Pi in one step from the dashboard or a terminal with a signed
   release, a recovery copy and an automatic health check.
 

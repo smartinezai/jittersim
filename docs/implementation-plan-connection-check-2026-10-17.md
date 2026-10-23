@@ -345,7 +345,7 @@ connection_check_results(            -- same columns as speed_test_results
 probe: `probes` (planned, sent, received, lost, loss share and 95 percent range), `rtt` (min, mean,
 median, p95, max, jitter), `duplicates`, `reordered`, `metrics` (the table the window shows: id,
 set value, measured value, status, sentence), `verdict`, `verdict_text`, `notes`, `expected` (the
-applied download impairment), `probes_needed`, `shaped`, `seconds`, `profile_unchanged`,
+applied download impairment), `shaped`, `seconds`, `profile_unchanged`,
 `service_rules`.
 
 ## API (all need the admin token and pass the saved-device check)

@@ -709,8 +709,19 @@
       return "Dashboard access is available.";
     }
 
+    // The Pi names the Wi-Fi device it sees for this browser. Only a Wi-Fi ("test" network) address
+    // counts: the management network can name an Ethernet address that is no row. Only that one
+    // address is compared with the lists. Nothing about other clients is needed for it.
+    let thisDeviceMac = null;
+
+    function isThisDevice(mac) {
+      return !!thisDeviceMac && typeof mac === "string" && mac.toLowerCase() === thisDeviceMac;
+    }
+
     async function loadDashboardAccess() {
       const data = await request("/api/dashboard-access/status", "GET");
+      thisDeviceMac = data.network === "test" && typeof data.mac_address === "string"
+        ? data.mac_address.toLowerCase() : null;
       element("allow-dashboard-device").disabled = !data.can_register;
       element("dashboard-access-status").textContent = data.allowed
         ? accessReason(Array.isArray(data.grants) ? data.grants : [])
@@ -2082,8 +2093,17 @@
       element("reset-button").disabled = networkActionBusy || !helperConfigured;
       element("panic-button").disabled = !helperConfigured;
       element("scan-observations").disabled = !helperConfigured;
-      element("reset-wifi-name").disabled = !helperConfigured || wifiResetPending;
+      resetWifiButtons().forEach((each) => { each.disabled = !helperConfigured || wifiResetPending; });
       updateGeneralProfileControls();
+    }
+
+    // The Router and Wi-Fi page and the sidebar both offer Reset Wi-Fi name. They share one handler.
+    function resetWifiButtons() {
+      return [element("reset-wifi-name"), element("quick-reset-wifi-name")];
+    }
+
+    function settleResetWifiButtons() {
+      resetWifiButtons().forEach((each) => { setButtonBusy(each, false); each.disabled = !helperConfigured; });
     }
 
     function updateGeneralProfileControls() {
@@ -3019,6 +3039,12 @@
         const address = document.createElement("p");
         address.className = "connected-address";
         address.textContent = device.display_name || device.ipv4_address || device.mac_address;
+        if (isThisDevice(device.mac_address)) {
+          const mine = document.createElement("span");
+          mine.className = "count-badge this-device-badge";
+          mine.textContent = "This device";
+          address.append(" ", mine);
+        }
         const metadata = document.createElement("p");
         metadata.className = "connected-meta";
         const metadataParts = [device.ipv4_address || "IP address pending", device.mac_address];
@@ -7428,20 +7454,24 @@
       }
     });
 
-    element("reset-wifi-name").addEventListener("click", async (event) => {
+    async function resetWifiName(event) {
       if (wifiResetPending || wifiChangePending || !helperConfigured) return;
       const button = event.currentTarget;
       const status = element("wifi-reset-status");
       // Held while the question is open so a second click or a Wi-Fi save cannot start beside it.
       wifiResetPending = true;
-      if (!await confirmFromButton(button, "The Pi Wi-Fi goes back to its default name. The password and security type stay the same. " + WIFI_RESTART_NOTICE,
+      const defaultName = brandInfo && brandInfo.default_ssid;
+      if (!await confirmFromButton(button, "The Pi Wi-Fi goes back to its default name" + (defaultName ? ", “" + defaultName + "”" : "") +
+          ". The password and security type stay the same. It also stops the Pi from following the router's Wi-Fi name until the router Wi-Fi is copied again. " + WIFI_RESTART_NOTICE,
           {title: "Restore the Wi-Fi name?", confirmLabel: "Restore name"}) || !helperConfigured) {
         wifiResetPending = false;
-        setButtonBusy(button, false);
-        button.disabled = !helperConfigured;
+        settleResetWifiButtons();
         return;
       }
       status.textContent = "Restoring the Pi Wi-Fi name...";
+      resetWifiButtons().forEach((each) => { each.disabled = true; });
+      // On a phone the Controls sheet would cover the progress banner.
+      setControlsOpen(false, false);
       const submittedDraft = formDrafts.get("access-point-form");
       const submittedSsid = element("access-point-ssid").value;
       const tokenRevision = adminTokenRevision;
@@ -7458,19 +7488,17 @@
           }
           status.textContent = operation ? operation.message : "Check the Pi Wi-Fi settings.";
           showMessage(status.textContent, operation && operation.state === "succeeded" ? "success" : "error");
-        });
+        }, defaultName);
         if (tokenRevision === adminTokenRevision && outcome && outcome.gaveUp) status.textContent = "The Pi has not answered yet. See the note on this page.";
       } catch (error) {
         if (tokenRevision === adminTokenRevision) status.textContent = error.message;
         if (tokenRevision === adminTokenRevision) showMessage(error.message, "error");
       } finally {
         wifiResetPending = false;
-        if (tokenRevision === adminTokenRevision) {
-          setButtonBusy(button, false);
-          button.disabled = !helperConfigured;
-        }
+        if (tokenRevision === adminTokenRevision) settleResetWifiButtons();
       }
-    });
+    }
+    resetWifiButtons().forEach((each) => each.addEventListener("click", resetWifiName));
 
     function renderRouterWifi() {
       const button = element("router-wifi-toggle");

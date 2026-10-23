@@ -9,6 +9,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.a11y_axe import load_engine
 from tests.browser.confirm_dialogs import answer_confirm, cancel_with_escape
 from tests.browser.phone import sidebar_control
 
@@ -33,6 +34,31 @@ def check_neutral_before_sign_in(page, base):
     icon = page.request.get(base + "/favicon.ico")
     assert icon.status == 200 and icon.headers["content-type"] == "image/x-icon"
     assert not NAME.search(" ".join(f"{k}: {v}" for k, v in icon.headers.items()))
+
+
+def check_this_device_is_named(page, width):
+    """The browser's own Wi-Fi device is named in words on its row and in the Block question."""
+
+    page.locator('a[data-page-link="devices"]').first.click()
+    row = page.locator("#connected-devices .connected-row")
+    expect(row).to_have_count(1)
+    badge = row.locator(".connected-address .this-device-badge")
+    expect(badge).to_have_text("This device")
+    assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
+    # The badge says it in words, not by colour. Axe checks that the words are readable.
+    page.evaluate(load_engine()[0])
+    result = page.evaluate("""async () => {
+        const run = await axe.run(document.querySelector('.this-device-badge'),
+                                  {runOnly: ['color-contrast']});
+        return [run.violations.length, run.passes.map((rule) => rule.id)];
+    }""")
+    assert result == [0, ["color-contrast"]], result
+    page.locator('a[data-page-link="access"]').first.click()
+    block = page.locator("#access-device-list").get_by_role("button", name=re.compile("^Block "))
+    block.click()
+    cancel_with_escape(page, block, verb="Continue", text=[
+        "This takes effect immediately.",
+        "This is the device you are using: its connection will be affected."])
 
 
 def run():
@@ -107,6 +133,7 @@ def run():
                     expect(page.locator("#dashboard-access-list")).to_contain_text("Browser Mac")
                     page.screenshot(path=f"test-results/dashboard-access-{width}.png")
                     assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
+                    check_this_device_is_named(page, width)
                     page.locator('[data-page-link="access"]').click()
                     for _ in range(100):
                         if page.evaluate("() => adminToolsPhysicalRead === null"):

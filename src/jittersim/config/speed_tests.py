@@ -103,10 +103,10 @@ def clean_reported(value: Any) -> Dict[str, float]:
     return cleaned
 
 
-def _encoded(value: Dict[str, Any]) -> str:
+def _encoded(value: Dict[str, Any], noun: str) -> str:
     body = json.dumps(value, separators=(",", ":"), sort_keys=True, allow_nan=False)
     if len(body.encode("utf-8")) > MAX_JSON_BYTES:
-        raise StorageError("speed test result is too large")
+        raise StorageError(f"{noun} is too large")
     return body
 
 
@@ -114,6 +114,7 @@ class SpeedTestStore:
     """Read and write speed test rows on the repository's connection and lock."""
 
     table = SPEED_TABLE
+    noun = "speed test result"
 
     def __init__(self, repository):
         self.repository = repository
@@ -121,7 +122,7 @@ class SpeedTestStore:
 
     def save(self, row: Dict[str, Any]) -> Dict[str, Any]:
         if row["status"] not in RESULT_STATUSES:
-            raise StorageError("speed test status is invalid")
+            raise StorageError(f"{self.noun} status is invalid")
         values = (
             int(row["started_at"]),
             int(row["finished_at"]),
@@ -133,9 +134,9 @@ class SpeedTestStore:
             row["provider"],
             row["source"],
             1 if row.get("protected") else 0,
-            _encoded(row.get("profile") or {}),
-            _encoded(row.get("summary") or {}),
-            _encoded(clean_reported(row.get("reported"))),
+            _encoded(row.get("profile") or {}, self.noun),
+            _encoded(row.get("summary") or {}, self.noun),
+            _encoded(clean_reported(row.get("reported")), self.noun),
         )
         with self.repository._lock:
             try:
@@ -161,7 +162,7 @@ class SpeedTestStore:
                 self.repository._commit()
             except sqlite3.Error as error:
                 self.repository._rollback()
-                raise StorageError("could not save the speed test result") from error
+                raise StorageError(f"could not save the {self.noun}") from error
         return self.get(identifier)
 
     def get(self, identifier: int) -> Optional[Dict[str, Any]]:
@@ -171,8 +172,8 @@ class SpeedTestStore:
                     f"SELECT * FROM {self.table} WHERE id = ?", (identifier,)
                 ).fetchone()
         except sqlite3.Error as error:
-            raise StorageError("could not read the speed test result") from error
-        return None if row is None else _result(row)
+            raise StorageError(f"could not read the {self.noun}") from error
+        return None if row is None else _result(row, self.noun)
 
     def list(self, mac_address: Optional[str] = None, *, limit: int = 50) -> List[Dict[str, Any]]:
         try:
@@ -188,15 +189,15 @@ class SpeedTestStore:
                         (mac_address, limit),
                     ).fetchall()
         except sqlite3.Error as error:
-            raise StorageError("could not read the speed test results") from error
+            raise StorageError(f"could not read the {self.noun}s") from error
         results = []
         for row in rows:
             try:
-                results.append(_result(row))
+                results.append(_result(row, self.noun))
             except StorageError:
                 # One damaged row must not hide the others. The keep-newest limits remove it
                 # in the end.
-                LOGGER.warning("skipping a malformed speed test result (id %s)", row["id"])
+                LOGGER.warning("skipping a malformed %s (id %s)", self.noun, row["id"])
         return results
 
     def update(self, identifier: int, *, label=None, reported=None) -> Optional[Dict[str, Any]]:
@@ -207,7 +208,7 @@ class SpeedTestStore:
             values.append(clean_label(label))
         if reported is not None:
             changes.append("reported_json = ?")
-            values.append(_encoded(clean_reported(reported)))
+            values.append(_encoded(clean_reported(reported), self.noun))
         with self.repository._lock:
             if changes:
                 try:
@@ -218,7 +219,7 @@ class SpeedTestStore:
                     self.repository._commit()
                 except sqlite3.Error as error:
                     self.repository._rollback()
-                    raise StorageError("could not update the speed test result") from error
+                    raise StorageError(f"could not update the {self.noun}") from error
                 if cursor.rowcount == 0:
                     return None
             return self.get(identifier)
@@ -232,7 +233,7 @@ class SpeedTestStore:
                 self.repository._commit()
             except sqlite3.Error as error:
                 self.repository._rollback()
-                raise StorageError("could not delete the speed test result") from error
+                raise StorageError(f"could not delete the {self.noun}") from error
         return cursor.rowcount > 0
 
 
@@ -247,9 +248,10 @@ class ConnectionCheckStore(SpeedTestStore):
     """The rows of the connection check: the same columns and bounds, another table."""
 
     table = CHECK_TABLE
+    noun = "connection check result"
 
 
-def _result(row: sqlite3.Row) -> Dict[str, Any]:
+def _result(row: sqlite3.Row, noun: str) -> Dict[str, Any]:
     try:
         return {
             "id": row["id"],
@@ -268,4 +270,4 @@ def _result(row: sqlite3.Row) -> Dict[str, Any]:
             "reported": _object(row["reported_json"]),
         }
     except (IndexError, KeyError, TypeError, ValueError) as error:
-        raise StorageError("stored speed test result is malformed") from error
+        raise StorageError(f"stored {noun} is malformed") from error
