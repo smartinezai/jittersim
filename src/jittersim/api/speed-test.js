@@ -3,7 +3,7 @@
 // connectedRowHooks and everything else lives in one dialog this script makes.
 const speedTestState = {
   dialog: null, device: null, meta: null, run: null, results: [], editing: null,
-  pollTimer: null, serial: 0
+  pollTimer: null, serial: 0, streamController: null
 };
 const speedTestLockClosingDialogs = new WeakSet();
 const SPEED_TEST_FIELDS = {
@@ -243,6 +243,7 @@ function speedTestRestoreFocus() {
 
 function speedTestClearPrivateState() {
   speedTestStopPolling();
+  speedTestAbortDownload();
   speedTestState.serial += 1;
   const dialog = speedTestState.dialog;
   if (dialog) {
@@ -269,6 +270,7 @@ privateDataLockHooks.push(speedTestClearPrivateState);
 async function speedTestOpen(device) {
   const dialog = speedTestDialog();
   speedTestStopPolling();
+  speedTestAbortDownload();
   speedTestState.serial += 1;
   speedTestState.device = device;
   speedTestState.run = null;
@@ -352,21 +354,35 @@ async function speedTestStart() {
   else speedTestSay('Measuring. Open the speed test on the device now.');
 }
 
+function speedTestAbortDownload() {
+  if (speedTestState.streamController) speedTestState.streamController.abort();
+}
+
 async function speedTestPull(run, part, seconds, serial) {
-  // Bytes after the first second (TCP start and the profile's queue filling), timed by the browser.
-  const response = await fetch('/api/speed-tests/download?run=' + encodeURIComponent(run.id) + '&part=' + part, {
-    headers: {Authorization: 'Bearer ' + element('admin-token').value.trim()}, cache: 'no-store'
-  });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || 'The Pi did not send the test data.');
-  }
-  const reader = response.body.getReader();
-  const begin = performance.now();
+  const controller = new AbortController();
+  speedTestState.streamController = controller;
+  let timedOut = false;
+  // A shaped response can lose its headers or stall between chunks. Bound both waits.
+  const timer = window.setTimeout(() => { timedOut = true; controller.abort(); }, (seconds + 2) * 1000);
+  let reader = null;
   let from = null;
   let last = 0;
   let bytes = 0;
   try {
+    const response = await fetch('/api/speed-tests/download?run=' + encodeURIComponent(run.id) + '&part=' + part, {
+      headers: {Authorization: 'Bearer ' + element('admin-token').value.trim()}, cache: 'no-store',
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(error => {
+        if (controller.signal.aborted) throw error;
+        return {};
+      });
+      throw new Error(data.error || 'The Pi did not send the test data.');
+    }
+    reader = response.body.getReader();
+    // Bytes after the first second (TCP start and the profile's queue filling).
+    const begin = performance.now();
     while (serial === speedTestState.serial) {
       const {done, value} = await reader.read();
       const now = performance.now();
@@ -375,9 +391,15 @@ async function speedTestPull(run, part, seconds, serial) {
       if (now - begin >= seconds * 1000) break;
     }
   } catch (error) {
-    // The Pi ends the data when the part's time is up or the test stopped.
+    // A deadline keeps any bytes already measured. An explicit stop ends the caller too.
+    if (controller.signal.aborted && !timedOut) throw error;
+    if (!reader && !timedOut) throw error;
+  } finally {
+    window.clearTimeout(timer);
+    controller.abort();
+    if (reader) reader.cancel().catch(() => {});
+    if (speedTestState.streamController === controller) speedTestState.streamController = null;
   }
-  reader.cancel().catch(() => {});
   return from !== null && last > from ? Math.round(bytes * 8 / (last - from)) : null;
 }
 
@@ -391,6 +413,7 @@ async function speedTestDashboard(run, serial) {
     speedTestSay('Measuring through the profile…');
     browser.download_kbit = await speedTestPull(run, 'shaped', parts.shaped, serial);
   } catch (error) {
+    if (error.name === 'AbortError') return;
     // A part that did not run gives no browser speeds: the result is saved as finished early.
     browser = undefined;
     if (serial === speedTestState.serial) speedTestSay(error.message, 'error');
@@ -471,6 +494,7 @@ async function speedTestEnd(action, extra) {
   if (!run) return;
   const serial = speedTestState.serial;
   speedTestStopPolling();
+  speedTestAbortDownload();
   let status;
   try {
     status = await request('/api/speed-tests/' + action, 'POST', {run_id: run.id, ...extra});
@@ -502,6 +526,7 @@ function speedTestEndMessage(status) {
 
 async function speedTestFinished(status, serial = speedTestState.serial) {
   if (serial !== speedTestState.serial) return;
+  speedTestAbortDownload();
   speedTestState.run = null;
   element('speed-test-running').hidden = true;
   element('speed-test-start').hidden = false;

@@ -460,6 +460,33 @@ def check_dashboard_test(browser):
         assert result["provider"] == "dashboard", result
         browser_speeds = result["summary"]["browser"]
         assert browser_speeds["download_kbit"] and browser_speeds["reference_kbit"], result
+
+        # A lost response header must end on the browser's deadline, even before a reader exists.
+        stalled = []
+        pattern = "**/api/speed-tests/download?run=deadline-fixture&part=shaped"
+
+        def hold_headers(route):
+            stalled.append(route)
+
+        page.route(pattern, hold_headers)
+        try:
+            bounded = page.evaluate("""async () => {
+              let guard;
+              try {
+                const result = await Promise.race([
+                  speedTestPull({id: 'deadline-fixture'}, 'shaped', 0, speedTestState.serial),
+                  new Promise((_, reject) => {
+                    guard = window.setTimeout(() => reject(new Error('Download did not stop')), 10000);
+                  })
+                ]);
+                return {result, released: speedTestState.streamController === null};
+              } finally { window.clearTimeout(guard); }
+            }""")
+            assert len(stalled) == 1, stalled
+            assert bounded == {"result": None, "released": True}, bounded
+        finally:
+            page.unroute(pattern, hold_headers)
+
         assert page.evaluate("document.documentElement.scrollWidth") <= 1441
         assert not errors, errors
         context.close()
