@@ -30,7 +30,7 @@ class SharedReading:
         # Held for a moment to look at or change the fields below, never while reading.
         self._lock = threading.Lock()
         self._era = object()
-        self._kept: Optional[tuple] = None  # (era, when the read began, value)
+        self._kept: Optional[tuple] = None  # (era, when the read completed, value)
         self._flight: Optional[_Flight] = None
 
     def drop(self) -> None:
@@ -49,7 +49,6 @@ class SharedReading:
         if not leader:
             flight.done.wait()
         else:
-            began = time.monotonic()
             try:
                 flight.value = read()
             except BaseException as error:
@@ -57,7 +56,7 @@ class SharedReading:
             finally:
                 with self._lock:
                     if flight.error is None and era is self._era:
-                        self._kept = (era, began, flight.value)
+                        self._kept = (era, time.monotonic(), flight.value)
                     if self._flight is flight:
                         self._flight = None
                 flight.done.set()
