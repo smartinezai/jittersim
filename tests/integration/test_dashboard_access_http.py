@@ -107,22 +107,32 @@ def test_unregistered_token_cannot_read_change_or_download(tmp_path):
 
 
 def test_the_status_names_only_the_requesters_own_wifi_device(tmp_path):
-    # The dashboard marks "This device" from this one field. It comes from the socket peer and
-    # the Pi's own neighbour and station tables, never from a header, and it is the requester's
-    # own MAC only (the answer has no list of other clients).
+    # The dashboard marks "This device" from this answer. It comes from the socket peer and the
+    # Pi's own neighbour and station tables, never from a header, and it is the requester's own
+    # MAC only. A peer on Ethernet can carry a MAC too, so the page uses it only on the "test"
+    # (Wi-Fi) network.
     forged = {"X-Forwarded-For": "192.168.50.99", "Forwarded": "for=192.168.50.99"}
+    ethernet_peer, ethernet_mac = "192.168.0.50", "aa:bb:cc:dd:ee:ff"
+
+    def status(request):
+        status, body = request("/api/dashboard-access/status", **forged)
+        assert status == 200, body
+        return json.loads(body)
+
     with dashboard(tmp_path) as (request, store, applier):
         store.add(MAC, "My Mac")
-        data = json.loads(request("/api/dashboard-access/status", **forged)[1])
+        data = status(request)
         assert data["mac_address"] == MAC and data["network"] == "test"
         assert not {"devices", "clients", "neighbors"} & set(data)
-        # Loopback and the management network match nothing and are not an error.
-        for peer, route in (("127.0.0.1", {"dev": "wlan0"}), ("192.168.0.50", {"dev": "eth0"})):
-            request.server.test_peer = peer
-            applier.route = route
-            status, body = request("/api/dashboard-access/status", **forged)
-            assert status == 200, body
-            assert json.loads(body)["mac_address"] is None, peer
+        request.server.test_peer = "127.0.0.1"
+        data = status(request)
+        assert data["mac_address"] is None and data["network"] == "management"
+        request.server.test_peer = ethernet_peer
+        applier.route = {"dev": "eth0"}
+        applier.neighbors = [{"dst": ethernet_peer, "dev": "eth0", "lladdr": ethernet_mac,
+                              "state": ["REACHABLE"]}]
+        data = status(request)
+        assert data["mac_address"] == ethernet_mac and data["network"] == "management"
 
 
 def test_self_registration_rejects_forgery_and_cross_site_then_unlocks_and_removes(tmp_path):

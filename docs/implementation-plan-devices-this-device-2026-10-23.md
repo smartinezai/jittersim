@@ -18,9 +18,10 @@ row with an equal MAC. No server code, no new route, no new field.
   Wi-Fi address shows the private MAC it uses on this Wi-Fi, in both places. The page reads the
   value at sign-in, so after the phone rejoins with a new private address a reload makes it
   current. A stale value matches no row.
-- **Nothing matches, nothing is shown, no error.** The helper answers `null` on loopback, on the
-  management (Ethernet) network, for a caller routed through a gateway and when the neighbour or
-  station entry is missing or ambiguous. The page then adds no label.
+- **Nothing matches, nothing is shown, no error.** The helper answers `null` on loopback, for a
+  caller routed through a gateway and when the neighbour or station entry is missing or
+  ambiguous. A peer on Ethernet is `network: "management"` and can still carry its Ethernet MAC,
+  so the page uses the MAC only when `network` is `"test"` (Wi-Fi). Otherwise it adds no label.
 - **No header is trusted.** The address comes from the TCP peer, never from `X-Forwarded-For` or
   `Forwarded`. A test sends both forged and still gets the verified MAC (or `null`). A device that
   copies another client's MAC is outside this plan: the Pi's access rules already key on the MAC.
@@ -43,8 +44,10 @@ is not a live region, so nothing is announced when it appears.
 ## Tests
 
 - `tests/integration/test_dashboard_access_http.py`: the status names only the requester's own
-  Wi-Fi MAC, ignores forged headers, and gives `null` for loopback and the management network.
-- `tests/unit/test_dashboard_this_device.py`: the matching function in node.
+  Wi-Fi MAC, ignores forged headers, gives `null` for loopback and shows that an Ethernet peer
+  carries a MAC with `network: "management"`.
+- `tests/unit/test_dashboard_this_device.py`: the matching function and the sign-in read (the
+  MAC counts only on the `"test"` network), in node.
 - `tests/browser/dashboard_access.py` (desktop and phone): the label, an axe contrast check of it
   and the Block sentence. `tests/browser/device_names.py`: no label and no sentence off Wi-Fi.
 

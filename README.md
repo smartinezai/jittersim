@@ -16,7 +16,7 @@ test. It is for experiments, not a replacement for your home router.
 - Control device, website and service access, with data and time limits.
 - Protect a device from every profile. A protected device opens the dashboard
   with the admin token alone and can have ads blocked.
-- Review connected devices and traffic while a test runs. The device you browse with is labelled **This device**. Measure a device's speed before and after a profile.
+- Review connected devices and traffic while a test runs. Measure a device's speed before and after a profile.
 - Follow a saved device to its new private Wi-Fi address, with Ask, Automatic and Undo.
 - Choose whether active profiles resume after a router outage.
 - Update the Pi in one step from the dashboard or a terminal with a signed

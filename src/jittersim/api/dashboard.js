@@ -709,8 +709,9 @@
       return "Dashboard access is available.";
     }
 
-    // The Pi names the Wi-Fi device it sees for this browser (null on the management network). Only
-    // that one address is compared with the lists. Nothing about other clients is needed for it.
+    // The Pi names the Wi-Fi device it sees for this browser. Only a Wi-Fi ("test" network) address
+    // counts: the management network can name an Ethernet address that is no row. Only that one
+    // address is compared with the lists. Nothing about other clients is needed for it.
     let thisDeviceMac = null;
 
     function isThisDevice(mac) {
@@ -719,7 +720,8 @@
 
     async function loadDashboardAccess() {
       const data = await request("/api/dashboard-access/status", "GET");
-      thisDeviceMac = typeof data.mac_address === "string" ? data.mac_address.toLowerCase() : null;
+      thisDeviceMac = data.network === "test" && typeof data.mac_address === "string"
+        ? data.mac_address.toLowerCase() : null;
       element("allow-dashboard-device").disabled = !data.can_register;
       element("dashboard-access-status").textContent = data.allowed
         ? accessReason(Array.isArray(data.grants) ? data.grants : [])

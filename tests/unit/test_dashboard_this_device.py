@@ -1,9 +1,12 @@
 """The page marks "This device" only on the row whose Wi-Fi address the Pi named for this browser.
 
-The function comes from the dashboard exactly as it is served. The browser module
+The functions come from the dashboard exactly as it is served. The browser module
 tests/browser/dashboard_access.py checks the label on the page and tests/integration/
 test_dashboard_access_http.py checks the field the Pi sends.
 """
+
+import json
+import subprocess
 
 import pytest
 
@@ -38,3 +41,33 @@ def test_nothing_matches_when_the_pi_named_no_address():
 def test_a_row_without_an_address_never_matches():
     assert listed_as_this_device(MINE, ["null", "undefined", '""', "42"]) == [
         False, False, False, False]
+
+
+def named_after_sign_in(answer):
+    """thisDeviceMac after loadDashboardAccess read this status answer from the Pi."""
+
+    program = "\n".join([
+        "let thisDeviceMac = null, addressTokenRevision = null, adminTokenRevision = 1;",
+        "const answer = %s;" % json.dumps(answer),
+        "const request = async () => answer;",
+        "const stubs = {};",
+        "const element = (id) => stubs[id] = stubs[id] || {};",
+        "const accessReason = () => '', setDashboardUnlocked = () => {};",
+        "const loadAddressMoves = async () => {};",
+        "async " + function_source("loadDashboardAccess"),
+        "loadDashboardAccess().then(() => console.log(JSON.stringify(thisDeviceMac)));",
+    ])
+    result = subprocess.run([NODE, "-"], input=program, text=True, capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("answer, expected", [
+    ({"network": "test", "mac_address": MINE.upper()}, MINE),
+    # An Ethernet peer can carry its own MAC. Only the Wi-Fi ("test") network counts.
+    ({"network": "management", "mac_address": MINE}, None),
+    ({"network": "test", "mac_address": None}, None),
+    ({"mac_address": MINE}, None),
+])
+def test_only_a_wifi_address_from_the_pi_is_kept_at_sign_in(answer, expected):
+    assert named_after_sign_in({"allowed": True, **answer}) == expected
