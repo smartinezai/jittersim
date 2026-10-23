@@ -7,7 +7,7 @@ Pi's networking code or its libraries. Everything else goes to `jittersim.cli`.
 import sys
 from typing import Optional, Sequence
 
-REMOTE_COMMANDS = ("connect", "profiles", "traffic", "impact")
+REMOTE_COMMANDS = ("connect", "profiles", "traffic", "impact", "backup")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

@@ -586,6 +586,7 @@ def test_json_failures_are_json_on_stdout(dashboard, capsys):
 
 
 @pytest.mark.parametrize("arguments", [["connect", "--help"], ["traffic", "--help"],
+                                       ["backup", "pull", "--help"],
                                        ["wifi", "show", "--help"], ["status", "--json",
                                                                     "--help"]])
 def test_mac_commands_never_load_the_pi_networking_code(arguments):

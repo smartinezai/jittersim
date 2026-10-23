@@ -2,8 +2,9 @@
 
 Thirty proposals from a read of comparable tools and practices. They extend
 [the planned features page](planned-features.md), which keeps the status of
-requested work. Nothing here is started except phase 1 of item 1. Write an
-implementation plan before changing code and keep each item bounded.
+requested work. An item marked Delivered is done. Nothing else here is started
+except phase 1 of item 1. Write an implementation plan before changing code and
+keep each item bounded.
 
 How to read an entry. **Size** is S (days), M (about a week) or L (more).
 **Household risk** is the chance a mistake disturbs the home network. **Helper**
@@ -40,6 +41,7 @@ the Sources section. Items are ordered by value against risk.
 3. **Cite and extend the profile presets** (scenario library). Each preset says what it is based on and what to expect, and a few missing ones are added (slow 3G as Chrome DevTools defines it, DSL, an 802.11ac-class Wi-Fi).
    Why: the nine dashboard presets (Good 4G to Offline) are labelled rough approximations. The same name carries different numbers in different tools. EDGE is 473 kbit/s in the Android emulator [7] and 250 kbit/s with 300 ms in Comcast [4]. 3G is 1.6 Mbit/s with 300 ms in WebPageTest [16]. Record the source beside each preset.
    Size S. Household risk low. Helper: no. Depends on: nothing. A "high latency DNS" preset [6] waits for the planned DNS delay.
+   Delivered on 2026-10-23 in PR 185: [the plan](implementation-plan-preset-sources-2026-10-23.md). Every preset has a source note. Slow 3G (Chrome DevTools) and DSL are added. The 802.11ac-class Wi-Fi preset is not, because no first-hand source for its numbers was found.
 
 4. **A lease the helper enforces itself** (safety). If the dashboard crashes or its scheduler stops, the Pi clears profile effects by itself, so a test can never leave the network degraded.
    Why: the README says the scheduler must keep running and independent expiry is still planned. Chaos Mesh warns that faults cannot be recovered once the controller loses its daemon [11]. Pi-hole and AdGuard Home both end a pause by themselves [17][18].
@@ -86,6 +88,7 @@ the Sources section. Items are ordered by value against risk.
 14. **Pull a backup to the Mac** (reliability). `jittersim backup pull` saves the settings backup to the Mac on demand or on a schedule, and a restore drill proves it works.
    Why: a brown-out or power cut can still damage a Pi's card, so keep an image backup and a spare card [24]. The dashboard only offers a manual download today. A read-only root is a separate spike, because saved data would need its own writable partition [24].
    Size S. Household risk low. Helper: no. Depends on: the existing backup download, Mac command line.
+   Delivered on 23 October 2026, see [the plan](implementation-plan-backup-pull-2026-10-23.md). The command runs once each time. A schedule is a cron or launchd line in the user guide. The database file has no restore command, only manual steps in a runbook.
 
 15. **Prometheus metrics** (observability). A read-only page for Grafana: set against actual loss and speed, queue wait, Pi temperature and throttle flags over days.
    Why: the text format is a plain HTTP page [40] and the Impact check already reads the counters. Token protected and reachable only on the management network.

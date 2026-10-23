@@ -63,9 +63,11 @@ from jittersim.api.connection_checks import (
     write_connection_check,
 )
 from jittersim.api.speed_tests import (
+    SPEED_TEST_DOWNLOAD,
     SPEED_TEST_WRITES,
     SpeedTestManager,
     read_speed_test,
+    stream_download,
     write_speed_test,
 )
 from jittersim.config.adblocking import MAX_STATE_BYTES as MAX_AD_BLOCKING_BODY_BYTES
@@ -87,6 +89,7 @@ from jittersim.config.exemptions import AddressMove, UnaffectedDevice, normalize
 from jittersim.config.payloads import profile_payload
 from jittersim.engine.randomizer import impairment_range_preview
 from jittersim.config.models import (
+    MAX_GLOBAL_BLOCKED_DOMAINS,
     MAX_LISTED_DOMAINS,
     AccessOptions,
     DataLimit,
@@ -140,7 +143,7 @@ from jittersim.config.transfer import (
     settings_to_payload,
 )
 from jittersim.config.workflows import WorkflowStore
-from jittersim.engine.access import build_access_plan
+from jittersim.engine.access import MAX_ACCESS_BYTES, build_access_plan
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import (
     MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
@@ -982,6 +985,7 @@ _SAVED_SETTINGS_WAIT = (
     "saved. Nothing was saved. Choose Start to apply them first, then apply this profile."
 )
 _RESET_KEPT = "A reset was recorded meanwhile, so what ran before was not put back."
+_PANIC_KEPT = "Panic stopped the network meanwhile, so what ran before was not put back."
 _RESET_SAVED_ONLY = {
     "live_applied": False,
     "message": "saved; the network is reset, so choose Start to use it",
@@ -3029,9 +3033,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             if capacity_error is not None:
                 return capacity_error
         try:
-            self.repository.save_device(device, expected=expected)
+            with self.repository.transaction():
+                self.repository.save_device(device, expected=expected)
+                self._check_access_rules()
         except DeviceConflictError as error:
             return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+        except ValueError as error:
+            return _bad_request("invalid device configuration", error)
         labels_by_mac = self.repository.list_connected_device_labels()
         state = self._device_protection_states().get(device.id)
         return HTTPStatus.OK, "application/json", _json_bytes(
@@ -3593,12 +3601,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             # Check every supplied section above, then write only the sections the
             # request carried. An omitted section keeps its stored value, while an
             # explicit empty section resets just that section.
-            self.repository.save_access_policies(
-                mac_policy if "mac" in payload else None,
-                website_policy if "websites" in payload else None,
-                blocks=blocks, options=options,
-                expected_version=payload.get("version"),
-            )
+            with self.repository.transaction():
+                self.repository.save_access_policies(
+                    mac_policy if "mac" in payload else None,
+                    website_policy if "websites" in payload else None,
+                    blocks=blocks, options=options,
+                    expected_version=payload.get("version"),
+                )
+                self._check_access_rules()
         except DeviceConflictError as error:
             return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
         except (KeyError, TypeError, ValueError) as error:
@@ -4152,15 +4162,17 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             names = _domains_from_payload(payload)
             policy = self.repository.get_website_policy()
             listed = tuple(dict.fromkeys(policy.blocked_domains + names))
-            if len(listed) > MAX_LISTED_DOMAINS:
+            if len(listed) > MAX_GLOBAL_BLOCKED_DOMAINS:
                 return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                     {
                         "error": "The global block list can hold %d names. Remove some first."
-                        % MAX_LISTED_DOMAINS
+                        % MAX_GLOBAL_BLOCKED_DOMAINS
                     }
                 )
             updated = replace(policy, blocked_domains=listed)
-            self.repository.save_website_policy(updated)
+            with self.repository.transaction():
+                self.repository.save_website_policy(updated)
+                self._check_access_rules()
         except (KeyError, TypeError, ValueError, StorageError) as error:
             return _bad_request("could not add domain to global block list", error)
         arguments = {"control_intent": control_intent} if control_intent is not None else {}
@@ -4296,6 +4308,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     {"error": "service list does not exist"}
                 )
             return self._apply_saved_change("deleted_id", list_id)
+
+    def _check_access_rules(self) -> None:
+        """Refuse what the helper would refuse. Call it inside the save transaction.
+
+        Group saves get the same check from _validate_saved_plan, which builds the plan.
+        """
+
+        build_access_plan(self.repository.access_settings())
 
     def _validate_saved_plan(self) -> None:
         # Saving checks structure atomically. Applying resolves live addresses later.
@@ -5621,7 +5641,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
     def _start_beside_everyone(self, fields, snapshot, device, general, control_intent,
                                previous_exceptions, ran_before=None, existing=None,
                                versions=()):
-        """Apply Everyone for all and this device's own profile. Everyone is not cleared."""
+        """Apply Everyone for all and this device's own profile. Everyone is not cleared.
+
+        If the helper refuses the plan nothing changes: the device keeps the assignment it
+        had and the plan that ran before is applied again, unless a Panic or a reset was
+        recorded meanwhile. Those are never undone.
+        """
 
         status, content_type, body = self._apply_configuration_locked(
             connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
@@ -5645,6 +5670,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         # and the restore are one step under the Panic fence: a Panic that ended the
         # exceptions is never undone.
         put_back_version = []
+        undo_failed = []
 
         def restore():
             failed = self.repository.get_runtime_state()
@@ -5676,8 +5702,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             except StorageError:
                 LOGGER.exception("could not put back the device assignment after a failed start")
                 # The device keeps the saved choice that failed, so it goes back to Everyone
-                # instead of running that choice beside it.
-                self.repository.restore_everyone_exceptions(previous_exceptions - {device.id})
+                # instead of running that choice beside it. If storage fails again the rows
+                # stay as they are, and the failure is still answered.
+                try:
+                    self.repository.restore_everyone_exceptions(previous_exceptions - {device.id})
+                except StorageError:
+                    LOGGER.exception("could not send the device back to Everyone")
+                    undo_failed.append(True)
             return True
 
         accepted, restored = self._publish_apply(control_intent[0], restore)
@@ -5693,17 +5724,31 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 connected_snapshot=snapshot, sample_usage=False, control_intent=control_intent,
                 keep_exceptions=True, restore_plan=(prepared, rolls),
             )
-            note = (
-                " What ran before was put back."
-                if put_back == HTTPStatus.OK else
-                " " + _RESET_KEPT if put_back == HTTPStatus.CONFLICT else
-                " What ran before could not be put back, so the dashboard keeps trying."
-            )
-        response["error"] = (
+            note = self._put_back_note(put_back, control_intent[0])
+        lead = (
+            "The profile did not start, and the database could not be written to undo it: the "
+            "saved choice for this device may still be in place. "
+            if undo_failed else
             "The profile did not start, so nothing changed: the device keeps what it had and "
-            "Everyone keeps running for every device. " + response.get("error", "") + note
-        ).strip()
+            "Everyone keeps running for every device. "
+        )
+        response["error"] = (lead + response.get("error", "") + note).strip()
         return status, content_type, _json_bytes(response)
+
+    def _put_back_note(self, put_back_status, generation) -> str:
+        """Say how putting back the plan that ran before a failed apply ended.
+
+        A Panic since the apply started wins, whatever the put-back answered: it stops the
+        network and is never undone. Otherwise a 409 means a reset was recorded meanwhile.
+        """
+
+        if self._panic_since(generation):
+            return " " + _PANIC_KEPT
+        if put_back_status == HTTPStatus.OK:
+            return " What ran before was put back."
+        if put_back_status == HTTPStatus.CONFLICT:
+            return " " + _RESET_KEPT
+        return " What ran before could not be put back, so the dashboard keeps trying."
 
     def _start_device_only(self, fields, snapshot, device, control_intent, previous_scope):
         """Start the device-only scope after a Reset. Everything else stays stopped."""
@@ -6034,8 +6079,10 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
         `restore_plan` is the scheduler's running plan from before, with its saved version
         and randomization state: a failed apply puts exactly that back, not what the saved
-        settings say now. With `expected_version` the plan must be built from exactly that
-        saved version, or nothing is applied.
+        settings say now. A Panic or a reset recorded meanwhile, before or during the helper
+        call, is never undone: the answer is 409 and the record stays what it was. With
+        `expected_version` the plan must be built from exactly that saved version, or
+        nothing is applied.
 
         A device-only start is read here, under the shared lock, so a Reset that ran
         while this call waited leaves nothing to start. Start and Apply to everyone cover
@@ -6134,12 +6181,15 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             # yet, so this plan must not install them for other devices.
             return HTTPStatus.CONFLICT, "application/json", _json_bytes({
                 "error": _SAVED_SETTINGS_WAIT})
+        def reset_since_failure():
+            # A reset, for example `jittersim reset`, landed after the failure. A put-back
+            # must never undo it. Called inside the transaction that would write over it.
+            return (restore_plan is not None
+                    and self.repository.get_runtime_state().last_action == "reset")
+
         def mark_applying():
             with self.repository.transaction():
-                if (restore_plan is not None
-                        and self.repository.get_runtime_state().last_action == "reset"):
-                    # A reset, for example `jittersim reset`, landed after the failure. A
-                    # put-back must never undo it.
+                if reset_since_failure():
                     return False
                 self.repository.update_runtime_state(
                     observed_state="applying", last_action=runtime_action, last_result=None,
@@ -6194,12 +6244,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     control_intent=(halts_at_start, control_revision), keep_exceptions=True,
                     restore_plan=ran_before,
                 )
-                failure += (
-                    " What ran before was put back."
-                    if put_back == HTTPStatus.OK else
-                    " " + _RESET_KEPT if put_back == HTTPStatus.CONFLICT else
-                    " What ran before could not be put back, so the dashboard keeps trying."
-                )
+                failure += self._put_back_note(put_back, halts_at_start)
                 state = self.repository.get_runtime_state()
             return (
                 HTTPStatus.BAD_GATEWAY,
@@ -6219,17 +6264,22 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         def publish():
             if result.get("counters_preserved") is not True:
                 self.repository.rebase_quota_counters(now=int(time.time()))
-            # A plan put back after a failure counts as applied only when the saved settings
-            # of now built it. Otherwise unapplied saved settings stay unapplied.
-            observed = (
-                "unknown" if restore_plan is not None and prepared.configuration_version
-                != self.repository.get_runtime_state().configuration_version
-                else "applied"
-            )
-            state = self.repository.update_runtime_state(
-                observed_state=observed, last_action=runtime_action, last_result="success",
-                last_error=None, **applied_keep,
-            )
+            with self.repository.transaction():
+                if reset_since_failure():
+                    # A reset landed during the helper call. It stays the record and the
+                    # plan is not activated.
+                    return None
+                # A plan put back after a failure counts as applied only when the saved
+                # settings of now built it. Otherwise unapplied saved settings stay unapplied.
+                observed = (
+                    "unknown" if restore_plan is not None and prepared.configuration_version
+                    != self.repository.get_runtime_state().configuration_version
+                    else "applied"
+                )
+                state = self.repository.update_runtime_state(
+                    observed_state=observed, last_action=runtime_action, last_result="success",
+                    last_error=None, **applied_keep,
+                )
             if self.scheduler is not None:
                 self.scheduler.activate_plan(repository=self.repository, prepared=prepared,
                                              counters_preserved=result.get("counters_preserved") is True)
@@ -6238,6 +6288,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         accepted, state = self._publish_apply(halts_at_start, publish)
         if not accepted:
             return self._apply_refused(halts_at_start, undo=True)
+        if state is None:
+            # The put-back plan may be live on the helper: repeat the reset now instead of
+            # waiting for a tick.
+            try:
+                self.helper_client.reset()
+            except HelperClientError:
+                LOGGER.warning("could not repeat the reset recorded meanwhile", exc_info=True)
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": _RESET_KEPT})
         return (
             HTTPStatus.OK,
             "application/json",
@@ -6688,8 +6746,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             if path not in ("/api/dashboard-access/status", "/api/dashboard-access/moves"
                             ) and not self._check_device_access():
                 return
+            if path == SPEED_TEST_DOWNLOAD:
+                stream_download(self)
+                return
         try:
-            if path == "/api/dashboard-access/moves":
+            if path == "/api/speed-tests":
+                # The page offers the dashboard test only on the device's own browser.
+                status, content_type, body = read_speed_test(
+                    self.server, path, parsed_path.query, peer=self.client_address[0])
+            elif path == "/api/dashboard-access/moves":
                 identity = self.server.dashboard_access(self.client_address[0])
                 status, content_type, body = (HTTPStatus.OK, "application/json",
                                               _json_bytes(self.server.address_move_offer(identity)))
@@ -6865,6 +6930,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                     MAX_IMPORT_BODY_BYTES
                     if path in ("/api/import", "/api/test-sessions/save")
                     else MAX_AD_BLOCKING_BODY_BYTES if path == "/api/ad-blocking"
+                    # The access rules: 2000 blocked names alone are about 63 KiB.
+                    else MAX_ACCESS_BYTES if path == "/api/policies"
                     else (8192 if path.startswith("/api/homepage/") else MAX_JSON_BODY_BYTES)
                 ),
             )
@@ -6897,6 +6964,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             elif path == "/api/history/restore":
                 status, content_type, body = self.server.history_restore_for_peer(
                     payload, self.client_address[0])
+            elif path in SPEED_TEST_WRITES:
+                # A dashboard test starts only from the tested device's own browser.
+                status, content_type, body = write_speed_test(
+                    self.server, path, payload, peer=self.client_address[0])
             elif path.startswith("/api/dashboard-access/"):
                 register = path.endswith("/register-self")
                 if set(payload) - ({"name"} if register else {"mac_address"}):
@@ -7002,6 +7073,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self.connection.settimeout(RESPONSE_SEND_TIMEOUT_SECONDS)
         super().send_response(code, message)
 
+    def send_security_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        # Another site cannot keep a handle on a dashboard window it opened, nor
+        # embed a dashboard answer in its own page (security audit 2026-10-18, A4).
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+
     def _send_response(
         self,
         *,
@@ -7034,13 +7114,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", cache_control)
         for name, value in page_headers.items():
             self.send_header(name, value)
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Referrer-Policy", "no-referrer")
-        # Another site cannot keep a handle on a dashboard window it opened, nor
-        # embed a dashboard answer in its own page (security audit 2026-10-18, A4).
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
-        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_security_headers()
         if content_type.startswith("text/html"):
             self.send_header("Content-Security-Policy", DASHBOARD_CONTENT_SECURITY_POLICY)
         for name, value in (headers or {}).items():

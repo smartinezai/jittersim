@@ -1,5 +1,6 @@
 """Compile validated configuration into a deterministic network plan."""
 
+import logging
 import re
 from dataclasses import replace
 from ipaddress import IPv4Address
@@ -31,6 +32,7 @@ from .plan import (
 )
 
 
+LOGGER = logging.getLogger(__name__)
 _LIST_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
@@ -45,6 +47,27 @@ MAX_SERVICE_QUOTAS_PER_PLAN = 15
 MAX_SHAPED_MARKS_PER_PLAN = 15
 MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN = 200
 MAX_SERVICE_LIST_DOMAINS_PER_PLAN = 400
+# The addresses of the global block list that a plan blocks, so the helper's apply request
+# stays well under its 256 KiB. The DNS rules still refuse every listed name.
+MAX_GLOBAL_BLOCKED_ADDRESSES = 4096
+# Whether the warning below was logged. Logged again only after the list fit once more.
+_address_cap_logged = False
+
+
+def _bounded_blocked_addresses(addresses: Sequence[IPv4Address]) -> tuple:
+    """The numerically lowest MAX_GLOBAL_BLOCKED_ADDRESSES addresses, in text order."""
+
+    global _address_cap_logged
+    ordered = sorted(set(addresses), key=int)
+    over = len(ordered) > MAX_GLOBAL_BLOCKED_ADDRESSES
+    if over and not _address_cap_logged:
+        LOGGER.warning(
+            "The global block list resolved to %d addresses. Only %d are blocked by address. "
+            "DNS still refuses every listed name while household access rules are on.",
+            len(ordered), MAX_GLOBAL_BLOCKED_ADDRESSES,
+        )
+    _address_cap_logged = over
+    return tuple(sorted(ordered[:MAX_GLOBAL_BLOCKED_ADDRESSES], key=str))
 
 
 def compile_plan(
@@ -443,7 +466,7 @@ def compile_plan(
         global_allowed_addresses=None
         if global_allowed_addresses is None
         else tuple(sorted(set(global_allowed_addresses), key=str)),
-        global_blocked_addresses=tuple(sorted(set(global_blocked_addresses), key=str)),
+        global_blocked_addresses=_bounded_blocked_addresses(global_blocked_addresses),
         website_filters=tuple(website_filters),
         blocked_device_addresses=tuple(sorted(set(blocked_device_addresses), key=str)),
         service_quota_rules=normalized_service_rules,

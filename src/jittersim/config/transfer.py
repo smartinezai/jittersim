@@ -213,8 +213,10 @@ def check_settings(
     profile_ids = {profile.id for profile in settings.profiles}
     device_ids = {device.id for device in settings.devices}
     group_ids = {group.id for group in settings.groups}
-    from jittersim.engine.access import validate_blocks
+    from jittersim.engine.access import build_access_plan, validate_blocks
     validate_blocks(settings.site_blocks, device_ids, group_ids)
+    # Refuse what the helper would refuse, for example too many DNS views.
+    build_access_plan(settings)
 
     def require_profile(owner: str, profile_id: str) -> None:
         if profile_id not in profile_ids:

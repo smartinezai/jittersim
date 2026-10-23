@@ -128,8 +128,9 @@ new tickets. The archived list retains all details and proposed fixes.
 
 ## Open fixes
 
-Open on 19 October 2026. The open pull requests (161 and 170, both drafts) and their
-states are in the [roadmap](../ROADMAP.md).
+Open on 19 October 2026, with the items of 23 October added at the end of this list. PR 161 and 170
+have merged since. The pull requests that are still open and their states are in the
+[roadmap](../ROADMAP.md) and on GitHub.
 
 - Two owner decisions from the review of PR 138 ([review results](review-results-carry-forward-2026-10-16.md)).
   The recommended default applies until the owner decides.
@@ -171,6 +172,48 @@ states are in the [roadmap](../ROADMAP.md).
   (zizmor 13, pip-audit 21, shellcheck 16 on 17 October) that never gate. The two overengineering
   reviews list further removals ([backend](review-overengineering-backend.md) and
   [front end and tests](review-overengineering-frontend-tests.md)).
+- Dashboard QA sweep of 23 October 2026 (main `3afb48d5`, 601 controls pressed at 1440 and 375 px, no
+  uncaught error or failed request). Four S3 findings were fixed in PR 204. Left open:
+  - **S2, keyboard focus is dropped to the page after Start or Reset network.** Both buttons are disabled
+    while the action runs (`setActionBusy`, `dashboard.js` about 6042) and nothing gives focus back, so the next
+    Tab starts at "Skip to main content". The same happens after confirming **Reset Wi-Fi name** on a phone.
+    Panic keeps focus. Fix: in `setActionBusy(false)`, if focus is on the body and the button had it when the
+    action began, focus the button again. It touches the code that drives Panic-adjacent buttons.
+  - S3: the phone bar cuts "Router Wi-Fi · read only" at 375 px and below (`phone.css` about 104, needs a shorter
+    label or two lines). The sidebar needs a scroll in short or landscape windows (the quick **Reset Wi-Fi name**
+    button is 4 px under the fold at 1366x768). `#connection-notice` is an `aside role="status"` toggled with
+    `hidden`. The group select text "Create a group on th..." is cut (tests pin the wording). The "Update
+    available" pill wraps to two lines in the desktop nav (a shorter text fixes it). On a phone the Allow
+    button sits under the Credentials sheet. The help icons are 20x20 px, under the 24 px minimum of WCAG 2.2.
+    The Schedules form wraps its End field alone at 1366x768. Panic is behind the backdrop while a window is open
+    (by design, Close and Escape work).
+  - Triage of the Codex dark-theme findings: the scrolling page-link row at 375 px is intended
+    (`phone.css`, pinned by `test_every_page_link_stays_in_one_row_that_scrolls_inside_itself`). Axe reports
+    `skip-link` on seven pages at 375 px because the scrolled-away page links look like hidden skip links. It
+    is a known false positive that predates these pull requests and `a11y_axe.py` only observes, so reviewers
+    should not report it again. The "Token accepted. Diagnostics loaded." toast covering content at 375 px is
+    intended (it leaves after 6 seconds and has Dismiss). Optional polish: skip it for the automatic sign-in on
+    page load.
+- Follow-ups of PR 189 (dashboard speed test, review of its fix round): no test asserts that `SO_PRIORITY 0` is set
+  after `IP_TOS` (swapping them leaves priority 2 on Linux and all tests pass), so record one ordered list of
+  calls. `SO_PRIORITY = getattr(socket, "SO_PRIORITY", None)` turns the fix off silently when Python does not
+  expose the constant, so fall back to 12 on Linux. A script with the admin token can park several workers
+  for 1 second each while the first part streams, so allow one waiter per run. The dashboard test still shows
+  the label "Slower than the cap: the internet, the Pi's Wi-Fi or the device was the limit", but the internet
+  is not in that path. The brcmfmac behaviour of the priority reset is not yet checked on a Pi.
+- Follow-ups of PR 188 (2000-name block list, from the reviews and the measurements): `/api/site-blocks/delete`
+  runs the whole access check although a delete cannot add combinations, so on a database that is already over
+  the limit a delete is refused (run the check only for add and replace). There is no test for
+  `/api/history/restore` over the limit. Renewals queue up to 24 lookups, so a new name can wait seconds
+  behind them on a slow DNS server (cap queued renewals at 8). A failed renewal caches an empty answer for 60
+  seconds and drops good addresses (keep the old addresses when a lookup raises). `wait_for_room` should return
+  False after shutdown, which PR 201 needs. Measured at 2000 names of 29 characters: the `/api/access` answer
+  grows from 9.9 KB to 135 to 179 KB and is polled every 5 seconds (leave the names out of the poll), compiling
+  a plan takes 9.3 ms instead of 0.7 ms on a Mac (about ten times that on a Pi 3B+, cache the plan by
+  configuration version), and the 4096-address cap shows only in a log line.
+- Review notes left by PR 187: the branch that swallows a helper reset error on the 409 path
+  (`server.py` about 6277) has no test, so add one that raises `HelperClientError` and expects the 502 answer
+  and one warning. `dns_watch.py` line 333 is 105 characters (limit 100, CI does not select that rule).
 
 ## Observed accessibility improvements
 

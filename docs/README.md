@@ -45,6 +45,7 @@ a month (for example `2026-09`) was written in that month.
 | [../CHANGELOG.md](../CHANGELOG.md) | The notes of every published release and the changes still waiting for the next one (Unreleased) |
 | [release-runbook-2026-10-16.md](release-runbook-2026-10-16.md) | The owner's step by step runbook for the first signed release, v0.2.0: the one-time root install, the GitHub token, the release run, the test on the Pi and the check afterwards. Dated: the facts about the Pi are those of 16 October |
 | [release-0.2.0-owner-commands.md](release-0.2.0-owner-commands.md) | The exact commands, answers and evidence wording the owner uses for v0.2.0, with the Panic trap and the merge freeze |
+| [owner-acceptance-card-2026-10-24.md](owner-acceptance-card-2026-10-24.md) | One short card for the owner's physical acceptance of v0.2.0 on the Pi: safety first, the install, six checks, the recovery choice and the six evidence answers |
 | [release-checklist-template.md](release-checklist-template.md) | The checklist to copy for each numbered release candidate |
 | [measurements-2026-09.md](measurements-2026-09.md) | Measured effects of the profile presets (dated measurements, still cited by the README) |
 
@@ -56,7 +57,9 @@ a month (for example `2026-09`) was written in that month.
 | [planned-fixes.md](planned-fixes.md) | Known problems and what changed since the last tested candidate |
 | [../ROADMAP.md](../ROADMAP.md) | Milestones and known limits |
 | [feature-proposals-2026-10-09.md](feature-proposals-2026-10-09.md) | Thirty researched feature proposals with sizes and risks. They are proposals and not started work |
+| [implementation-plan-preset-sources-2026-10-23.md](implementation-plan-preset-sources-2026-10-23.md) | Citing the profile presets: where each number comes from, the two new presets and why there is no 802.11ac one |
 | [implementation-plan-follow-address-changes-2026-10-17.md](implementation-plan-follow-address-changes-2026-10-17.md) | Following a device to its new private Wi-Fi address: evidence, scoring, what may move automatically and what stays manual |
+| [implementation-plan-backup-pull-2026-10-23.md](implementation-plan-backup-pull-2026-10-23.md) | `jittersim backup pull`: the route, the folder, the file rules, the limits and what restore means today |
 | [implementation-plan-devices-this-device-2026-10-23.md](implementation-plan-devices-this-device-2026-10-23.md) | The "This device" label on the Connected clients row of the device you browse with: how it is matched, what is never trusted and the one Block sentence |
 
 ### Open investigations and reviews
@@ -173,6 +176,7 @@ are grouped by theme.
 | [Publish the reviewed homepage reference and DNS acceptance](implementation-plan-homepage-delivery-2026-10-02.md) | 2026-10-02 |
 | [Live homepage pairing implementation](implementation-plan-live-homepage-pairing-2026-10-03.md) | 2026-10-03 |
 | [Preserve omitted access-rule sections](implementation-plan-partial-access-rules-2026-10-02.md) | 2026-10-02 |
+| [A larger global block list](implementation-plan-larger-block-list-2026-10-23.md) (also the finding that protected devices are not exempt from it) | 2026-10-23 |
 | [Optional ad blocking for protected devices](implementation-plan-protected-device-ad-blocking-2026-10-03.md) | 2026-10-03 |
 | [Give protected devices dashboard access](implementation-plan-protected-device-dashboard-access-2026-10-04.md) (delivered by PR 92 in PR 136) | 2026-10-04 |
 | [A neutral sign-in page](implementation-plan-sign-in-2026-09.md) | 2026-09 |
@@ -218,6 +222,7 @@ are grouped by theme.
 | [Device workflows and repeatable tests](implementation-plan-device-workflows-2026-09.md) | 2026-09 |
 | [Device speed test](implementation-plan-device-speed-test-2026-10-09.md) | 2026-10-09 |
 | [Device speed test review fixes](implementation-plan-device-speed-test-review-fixes-2026-10-14.md) | 2026-10-14 |
+| [Dashboard-served speed test](implementation-plan-dashboard-speed-test-2026-10-23.md) | 2026-10-23 |
 | [Make raw diagnostics reachable from the keyboard](implementation-plan-diagnostics-keyboard-access-2026-10-03.md) | 2026-10-03 |
 | [Diagnostics keyboard request check](implementation-plan-diagnostics-preview-check-2026-10-04.md) | 2026-10-04 |
 | [Finish the coordinated dashboard changes](implementation-plan-final-dashboard-composition-2026-10-04.md) | 2026-10-04 |

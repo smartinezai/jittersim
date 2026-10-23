@@ -3,7 +3,7 @@
 // connectedRowHooks and everything else lives in one dialog this script makes.
 const speedTestState = {
   dialog: null, device: null, meta: null, run: null, results: [], editing: null,
-  pollTimer: null, serial: 0
+  pollTimer: null, serial: 0, streamController: null
 };
 const speedTestLockClosingDialogs = new WeakSet();
 const SPEED_TEST_FIELDS = {
@@ -15,6 +15,8 @@ const SPEED_TEST_FIELDS = {
   upload_peak_kbit: ['Upload, peak', 'kbit'],
   rtt_median_ms: ['Round trip Pi to device, median', 'ms'],
   loss_percent: ['Echo loss Pi to device', '%'],
+  browser_download_kbit: ['This browser: download through the profile', 'kbit'],
+  browser_reference_kbit: ['This browser: Pi top speed (not shaped)', 'kbit'],
   reported_download_mbit: ['Device page: download', 'Mbit'],
   reported_upload_mbit: ['Device page: upload', 'Mbit'],
   reported_latency_ms: ['Device page: latency', 'ms'],
@@ -133,13 +135,16 @@ function speedTestDialog() {
 
   const start = speedTestNode('section', null, 'speed-test-start');
   start.id = 'speed-test-start';
-  start.append(speedTestNode('p', 'Start a measurement on the Pi, then run the speed test on the device itself. ' +
-    'The Pi counts what goes through this device\'s queues once per second.', 'speed-test-help'));
-  const providerLabel = speedTestNode('label', 'Speed test site');
+  start.append(speedTestNode('p', 'With this dashboard the Pi sends test data to this browser. With a site, run the ' +
+    'speed test on the device itself. The Pi counts what goes through this device\'s queues once per second.', 'speed-test-help'));
+  const providerLabel = speedTestNode('label', 'Where the test data comes from');
   const provider = speedTestNode('select');
   provider.id = 'speed-test-provider';
   providerLabel.append(provider);
   const durationLabel = speedTestNode('label', 'Length in seconds');
+  durationLabel.id = 'speed-test-duration-label';
+  // The dashboard test has fixed parts, so only a speed test site needs a length.
+  provider.addEventListener('change', () => { durationLabel.hidden = provider.value === 'dashboard'; });
   const duration = speedTestNode('input');
   duration.id = 'speed-test-duration';
   duration.type = 'number';
@@ -238,6 +243,7 @@ function speedTestRestoreFocus() {
 
 function speedTestClearPrivateState() {
   speedTestStopPolling();
+  speedTestAbortDownload();
   speedTestState.serial += 1;
   const dialog = speedTestState.dialog;
   if (dialog) {
@@ -264,6 +270,7 @@ privateDataLockHooks.push(speedTestClearPrivateState);
 async function speedTestOpen(device) {
   const dialog = speedTestDialog();
   speedTestStopPolling();
+  speedTestAbortDownload();
   speedTestState.serial += 1;
   speedTestState.device = device;
   speedTestState.run = null;
@@ -279,6 +286,12 @@ async function speedTestOpen(device) {
   if (!dialog.open) dialog.showModal();
   speedTestFocusTitle();
   await speedTestLoad();
+  // The dashboard test only works in the tested device's own browser.
+  const select = element('speed-test-provider');
+  const meta = speedTestState.meta;
+  if (!meta || speedTestState.device !== device) return;
+  select.value = device.ipv4_address && device.ipv4_address === meta.browser_address ? 'dashboard' : meta.default_provider;
+  element('speed-test-duration-label').hidden = select.value === 'dashboard';
 }
 
 function speedTestClearResults() {
@@ -299,8 +312,8 @@ async function speedTestLoad() {
   speedTestState.meta = data;
   const select = element('speed-test-provider');
   if (!select.options.length) {
+    select.append(new Option('This dashboard (download only, no outside site)', 'dashboard'));
     data.providers.forEach((provider) => select.append(new Option(provider.name, provider.id)));
-    select.value = data.default_provider;
   }
   const duration = element('speed-test-duration');
   duration.min = String(data.limits.min_seconds);
@@ -319,7 +332,8 @@ async function speedTestStart() {
   const serial = speedTestState.serial;
   const field = element('speed-test-duration');
   const typed = field.value.trim();
-  if (!/^\d+$/.test(typed)) {
+  const dashboard = element('speed-test-provider').value === 'dashboard';
+  if (!dashboard && !/^\d+$/.test(typed)) {
     // A length such as 45.5 used to be swapped for the default without a word.
     const limits = speedTestState.meta && speedTestState.meta.limits;
     field.focus();
@@ -329,14 +343,84 @@ async function speedTestStart() {
   const run = await request('/api/speed-tests/start', 'POST', {
     mac_address: device.mac_address,
     provider: element('speed-test-provider').value,
-    duration_seconds: Number(typed),
+    duration_seconds: dashboard ? undefined : Number(typed),
     label: element('speed-test-label').value
   });
   if (serial !== speedTestState.serial) return;
   speedTestState.run = run;
   speedTestShowRunning(run);
-  speedTestSay('Measuring. Open the speed test on the device now.');
   speedTestPoll();
+  if (dashboard) speedTestDashboard(run, serial);
+  else speedTestSay('Measuring. Open the speed test on the device now.');
+}
+
+function speedTestAbortDownload() {
+  if (speedTestState.streamController) speedTestState.streamController.abort();
+}
+
+async function speedTestPull(run, part, seconds, serial) {
+  const controller = new AbortController();
+  speedTestState.streamController = controller;
+  let timedOut = false;
+  // A shaped response can lose its headers or stall between chunks. Bound both waits.
+  const timer = window.setTimeout(() => { timedOut = true; controller.abort(); }, (seconds + 2) * 1000);
+  let reader = null;
+  let from = null;
+  let last = 0;
+  let bytes = 0;
+  try {
+    const response = await fetch('/api/speed-tests/download?run=' + encodeURIComponent(run.id) + '&part=' + part, {
+      headers: {Authorization: 'Bearer ' + element('admin-token').value.trim()}, cache: 'no-store',
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(error => {
+        if (controller.signal.aborted) throw error;
+        return {};
+      });
+      throw new Error(data.error || 'The Pi did not send the test data.');
+    }
+    reader = response.body.getReader();
+    // Bytes after the first second (TCP start and the profile's queue filling).
+    const begin = performance.now();
+    while (serial === speedTestState.serial) {
+      const {done, value} = await reader.read();
+      const now = performance.now();
+      if (done) break;
+      if (from !== null) { bytes += value.length; last = now; } else if (now - begin >= 1000) from = now;
+      if (now - begin >= seconds * 1000) break;
+    }
+  } catch (error) {
+    // A deadline keeps any bytes already measured. An explicit stop ends the caller too.
+    if (controller.signal.aborted && !timedOut) throw error;
+    if (!reader && !timedOut) throw error;
+  } finally {
+    window.clearTimeout(timer);
+    controller.abort();
+    if (reader) reader.cancel().catch(() => {});
+    if (speedTestState.streamController === controller) speedTestState.streamController = null;
+  }
+  return from !== null && last > from ? Math.round(bytes * 8 / (last - from)) : null;
+}
+
+async function speedTestDashboard(run, serial) {
+  const parts = speedTestState.meta.limits.dashboard_parts;
+  let browser = {reference_kbit: null, download_kbit: null};
+  try {
+    speedTestSay('Measuring what the Pi can send without the profile…');
+    browser.reference_kbit = await speedTestPull(run, 'reference', parts.reference, serial);
+    if (serial !== speedTestState.serial) return;
+    speedTestSay('Measuring through the profile…');
+    browser.download_kbit = await speedTestPull(run, 'shaped', parts.shaped, serial);
+  } catch (error) {
+    if (error.name === 'AbortError') return;
+    // A part that did not run gives no browser speeds: the result is saved as finished early.
+    browser = undefined;
+    if (serial === speedTestState.serial) speedTestSay(error.message, 'error');
+  }
+  if (serial !== speedTestState.serial || speedTestState.run !== run) return;
+  try { await speedTestEnd('finish', browser && {browser}); }
+  catch (error) { if (serial === speedTestState.serial) speedTestSay(error.message, 'error'); }
 }
 
 function speedTestShowRunning(run) {
@@ -344,8 +428,15 @@ function speedTestShowRunning(run) {
   element('speed-test-start').hidden = true;
   element('speed-test-results').hidden = true;
   element('speed-test-running').hidden = false;
-  const provider = speedTestProvider(run.provider);
   const open = element('speed-test-open');
+  if (run.provider === 'dashboard') {
+    open.replaceChildren('Keep this window open. The Pi sends test data to this browser for about 12 seconds. Upload is not tested: uploads to the Pi itself are not shaped.');
+    element('speed-test-qr-box').replaceChildren();
+    speedTestRenderRunning(run);
+    speedTestFocusTitle();
+    return;
+  }
+  const provider = speedTestProvider(run.provider);
   const link = speedTestNode('a', provider.url);
   link.href = provider.url;
   link.target = '_blank';
@@ -398,14 +489,15 @@ async function speedTestPoll() {
   speedTestFinishedOrSay(status, serial);
 }
 
-async function speedTestEnd(action) {
+async function speedTestEnd(action, extra) {
   const run = speedTestState.run;
   if (!run) return;
   const serial = speedTestState.serial;
   speedTestStopPolling();
+  speedTestAbortDownload();
   let status;
   try {
-    status = await request('/api/speed-tests/' + action, 'POST', {run_id: run.id});
+    status = await request('/api/speed-tests/' + action, 'POST', {run_id: run.id, ...extra});
   } catch (error) {
     // The window moved on (another device, or a newer run here): this answer is about the past.
     if (serial !== speedTestState.serial || speedTestState.run !== run) return;
@@ -434,6 +526,7 @@ function speedTestEndMessage(status) {
 
 async function speedTestFinished(status, serial = speedTestState.serial) {
   if (serial !== speedTestState.serial) return;
+  speedTestAbortDownload();
   speedTestState.run = null;
   element('speed-test-running').hidden = true;
   element('speed-test-start').hidden = false;
@@ -457,9 +550,12 @@ async function speedTestFinishedOrSay(status, serial) {
 
 function speedTestDirection(result, direction) {
   const values = (result.summary || {})[direction] || {};
-  if (values.verdict === 'not-measured') return ['Not measured', ''];
   const labels = speedTestState.meta.verdict_labels;
-  return [speedTestRate(values.busy_average_kbit), labels[values.verdict] || ''];
+  if (values.verdict === 'not-measured') return ['Not measured', ''];
+  if (values.verdict === 'not-tested') return ['Not tested', labels[values.verdict]];
+  const browser = direction === 'download' && (result.summary.browser || {}).download_kbit;
+  return [speedTestRate(values.busy_average_kbit),
+    [labels[values.verdict] || '', browser ? 'this browser: ' + speedTestRate(browser) : ''].filter(Boolean).join(' · ')];
 }
 
 function speedTestRenderHistory(results) {

@@ -254,3 +254,13 @@ console.log(JSON.stringify({gets,installed:element('update-installed').textConte
     assert actual["gets"]==2
     assert actual["installed"]=="1.0.0"
     assert "not confirmed" in actual["outcome"]
+
+
+def test_signing_in_again_leaves_no_sign_in_text_on_the_save_status_line():
+    # That line answers a save. Locking set it to the sign-in text and nothing cleared it on the next sign-in.
+    actual=run("""
+element('online-setting-status').textContent='Saved.';
+privateDataLockHooks.forEach(hook=>hook());
+console.log(JSON.stringify({save:element('online-setting-status').textContent,check:element('online-check-status').textContent}));
+""")
+    assert actual=={"save":"","check":"Sign in to read update status."}

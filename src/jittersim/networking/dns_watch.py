@@ -1,26 +1,33 @@
 """Learn service list destinations from the DNS answers clients receive.
 
 The Pi's DNS server answers every lookup from the test Wi-Fi. This watcher
-reads those answers from the test interface and tells the privileged helper
-which addresses belong to the hostnames of the applied service lists. Matching
-by the answers a client actually got covers content networks that hand
-different addresses to different resolvers.
+reads the UDP frames from port 53 that leave the test interface and tells the
+privileged helper which addresses belong to the hostnames of the applied
+service lists. Matching by the answers a client actually got covers content
+networks that hand different addresses to different resolvers.
 
-Only frames the Pi sent out of the test interface count. Leaving is not enough
-on its own, because the Pi also forwards frames that it did not make:
+A frame that leaves the test interface is not always an answer the Pi made. The
+Pi also forwards frames that it did not make, and the watcher can only look at
+the frame itself. So it narrows the frames down and relies on the firewall for
+the rest:
 
-- Answers that a client asked another DNS server for. That server can say
-  anything (security audit 2026-10-18, finding A1). So an answer counts only
-  when it comes from the Pi's own resolver address, or while household DNS
-  rules send every test Wi-Fi lookup through the Pi's resolver and drop direct
-  DNS. Only then does every answer that the Pi makes come from that resolver.
+- The source MAC address must be the interface's own address. A frame that
+  another station sent and the access point relayed on the air (possible while
+  client isolation is off) keeps that station's address and does not count.
+- Answers that a client asked another DNS server for leave with that server's
+  source IP address, and that server can say anything (security audit
+  2026-10-18, finding A1). So an answer counts only when its source IP address
+  is the Pi's own resolver address, or while household DNS rules send every
+  test Wi-Fi lookup through the Pi's resolver and drop direct DNS. Then every
+  source IP address counts, because a redirected answer leaves with the address
+  the client asked.
 - A packet that a client sends from UDP port 53 to itself or to another device
-  through the Pi. It leaves the test interface like a forwarded answer, with
-  a source address the client picks, and this watcher cannot tell it from one
-  (while household DNS rules are on, every source counts). The forward chain of
-  the management firewall drops every packet that comes in from the test
-  interface with source port 53 (jittersim-control-firewall.nft, follow-up F1
-  of the same audit), and this watcher relies on that rule.
+  through the Pi is routed. It leaves with the Pi's MAC address and a source IP
+  address the client picks, so this watcher cannot tell it from a forwarded
+  answer. The forward chain of the management firewall drops every packet that
+  comes in from the test interface with source port 53
+  (jittersim-control-firewall.nft, follow-up F1 of the same audit), and this
+  watcher relies on that rule.
 
 Known limit: while household DNS rules are off, a device that asks a DNS server
 of its own choice (a fixed address such as 8.8.8.8) teaches the Pi nothing,
@@ -258,6 +265,11 @@ class ServiceWatcher:
         # Whether every test Wi-Fi lookup goes through the Pi's resolver right now.
         self._dns_redirected = dns_redirected
         self._resolver_address = resolver_address
+        # The test interface's own MAC address, set by `watch()` when it opens the socket
+        # and read again at every plan check. None until then: only the source IP address
+        # is checked.
+        self.interface_mac: Optional[bytes] = None
+        self._last_mac_drop_logged = float("-inf")
         self._clock = clock
         self._matcher = ServiceMatcher(())
         self._lists: Tuple = ()
@@ -303,11 +315,22 @@ class ServiceWatcher:
             del self._sent[key]
 
     def observe(self, frame: bytes, packet_type: int) -> None:
-        """Note the listed addresses in one frame the Pi sent to the test network."""
+        """Note the listed addresses in one frame that left the test interface.
+
+        A frame that fails the source checks (see the module docstring) is ignored.
+        """
 
         if packet_type != PACKET_OUTGOING or not self._matcher:
             return
         if frame[:6] in self._protected:
+            return
+        if self.interface_mac is not None and frame[6:12] != self.interface_mac:
+            now = self._clock()
+            if now - self._last_mac_drop_logged >= LOG_ERROR_EVERY_SECONDS:
+                self._last_mac_drop_logged = now
+                # No addresses in the log. If this repeats and the Pi's own answers are
+                # missing, the interface address changed and the next plan check follows it.
+                LOGGER.warning("ignored a DNS answer sent from another MAC address than the interface's")
             return
         if not self._trusted_source(frame):
             return
@@ -330,14 +353,15 @@ class ServiceWatcher:
                 pending.popitem(last=False)
 
     def _trusted_source(self, frame: bytes) -> bool:
-        """Whether the Pi's own resolver sent this answer.
+        """Whether the source IP address of this frame may carry an answer of the Pi's resolver.
 
         Without household DNS rules a client may ask any DNS server, and the Pi
         forwards that server's answer out of the test interface like its own. With
         them, direct DNS is dropped and a redirected answer leaves with the address
-        the client asked, so then every source counts. A packet a client sends
-        from port 53 through the Pi never gets here: the management firewall
-        drops it (see the module docstring).
+        the client asked, so then every source IP address passes. This reads only the
+        address in the frame. A packet a client sends from port 53 through the Pi
+        with a forged source is stopped by the management firewall, not here (see
+        the module docstring).
         """
 
         source = frame_source(frame)
@@ -382,7 +406,10 @@ class ServiceWatcher:
 
 
 def open_dns_socket(interface: str) -> socket.socket:
-    """Open a packet socket that the kernel filters down to DNS answers."""
+    """Open a packet socket that the kernel filters down to IPv4 UDP frames from port 53.
+
+    The filter cannot tell a DNS answer from other traffic on that port. The parser does.
+    """
 
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
     try:
@@ -420,6 +447,8 @@ def watch(
             continue
         next_flush = next_plan_check = clock()
         try:
+            # The Pi's own frames leave with this address as their source MAC address.
+            watcher.interface_mac = sock.getsockname()[4] or None
             while not stop.is_set():
                 try:
                     frame, address = sock.recvfrom(4096)
@@ -430,6 +459,8 @@ def watch(
                 now = clock()
                 if now >= next_plan_check:
                     watcher.refresh_lists()
+                    # The address can change while the socket stays open.
+                    watcher.interface_mac = sock.getsockname()[4] or None
                     next_plan_check = now + PLAN_CHECK_SECONDS
                 if now >= next_flush:
                     watcher.flush()

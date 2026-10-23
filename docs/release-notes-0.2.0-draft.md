@@ -4,6 +4,7 @@
 - Before **Check for updates** works, save the trusted release signing key and a read-only GitHub token on the Pi. See [Signed releases](https://github.com/smartinezai/jittersim/blob/main/deploy/raspberry-pi/README.md#signed-releases).
 - **Restore previous installation** brings back the settings saved at that time, including the protected-device list. A device you stopped protecting since then may be protected again, and so may open the dashboard again. Remove it again. A saved dashboard access grant you removed stays removed.
 - After a restore the Pi still remembers the newest release it installed, so the same package cannot be installed again. Only a newer release can.
+- Before you go back to an older release by hand, shorten the global block list to 100 names. An older release refuses a longer list: its dashboard does not start and the test network can stay closed until you install the newer release again. Over SSH, `sudo jittersim normal-access` opens the network. **Restore previous installation** is not affected. See [Changing patterns](https://github.com/smartinezai/jittersim/blob/main/docs/user-guide.md#changing-patterns).
 - After a rollback from this release to an older development build, if the status says the upload intake could not be removed, press **Panic** and reboot the Pi if it is still there.
 
 ## Known limits

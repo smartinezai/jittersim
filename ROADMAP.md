@@ -538,10 +538,13 @@ milestones above is one of these:
   connection plan) and the website list modes of the [planned features](docs/planned-features.md).
 - Planned work in progress: the open draft pull requests on GitHub.
 - Delivered on 23 October 2026: the **This device** label (PR 181), the **Reset Wi-Fi name**
-  button in the sidebar (PR 182) and **Check connection** (PR 161 and 186). Requested and not in
-  main yet (see [planned features](docs/planned-features.md)): a speed test that runs from the
-  dashboard alone, a global block list larger than 100 names and protected devices that the
-  global block list does not affect. After v0.2.0: a dashboard redesign with components.
+  button in the sidebar (PR 182), **Check connection** (PR 161, 186 and 207), a speed test that
+  runs from the dashboard itself, download only (PR 189), a global block list of 2000 names and
+  80000 characters (PR 188), the preset sources with Slow 3G and DSL (PR 185) and
+  `jittersim backup pull` (PR 179). Requested and not in main yet (see
+  [planned features](docs/planned-features.md)): protected devices that the global block list
+  does not affect, which needs the Panic-pinned `access.py` and waits until after v0.2.0. After
+  v0.2.0: a dashboard redesign with components.
 - The v0.2.0 release itself (Milestone 12), described below.
 
 Hosted CI cannot start jobs (billing limit). Every pull request is gated by

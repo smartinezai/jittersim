@@ -144,3 +144,13 @@ def test_the_token_hint_does_not_promise_a_command_the_setup_notes_do_not_have()
     hint = re.search(r'adminTokenHelp\.textContent =(.*?);\n', DASHBOARD_HTML, re.DOTALL).group(1)
     assert "ssh" not in hint.lower()
     assert "setup notes" in hint and "stored on the Pi" in hint
+
+
+def test_the_router_page_does_not_send_a_phone_to_a_left_panel_it_does_not_have():
+    # On a phone the Copy button sits in the Controls sheet. The sidebar is the same place on a desktop.
+    assert "left panel" not in DASHBOARD_HTML
+    assert "Copy router Wi-Fi to Pi in the sidebar (on a phone, open Controls first)" in DASHBOARD_HTML
+
+
+def test_the_traffic_legend_is_a_named_group_because_a_plain_div_cannot_carry_a_label():
+    assert '<div class="traffic-legend" role="group" aria-label="Graph legend">' in DASHBOARD_HTML
