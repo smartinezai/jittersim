@@ -27,6 +27,7 @@ from tests.browser.forms_support import (
     run_journey,
     unlock,
 )
+from tests.browser.schedule_form_layout import check_schedule_layout
 
 ALL_DAYS = [0, 1, 2, 3, 4, 5, 6]
 DEFAULT_DAYS = ["true", "true", "true", "true", "true", "false", "false"]
@@ -79,6 +80,8 @@ def check_schedule_form(page, base, width):
     expect(page.locator("#schedule-enabled")).to_be_checked()
     expect(page.locator("#schedule-clock")).to_contain_text("Schedule times use the Pi clock:")
     no_overflow(page, width)
+    if width == 1440:
+        check_schedule_layout(page)
 
     # A valid schedule is saved, listed and still there after a reload.
     fill_schedule(page, "work", target=f"device:{DEVICE}")
