@@ -654,7 +654,7 @@ def _print_name(row: Dict[str, Any], indent: str) -> None:
         pieces.append(row["label_text"])
     pieces.append(row["queries"])
     if row["blocked"]:
-        pieces.append("Blocked")
+        pieces.append("On global block list")
     if row["seen_with_text"]:
         pieces.append(row["seen_with_text"])
     _out(indent + "  ".join(str(piece) for piece in pieces))

@@ -383,7 +383,8 @@ def group_blocked_text(group: Dict[str, Any]) -> str:
     )
     if blocked == 0:
         return ""
-    return "All blocked" if blocked == len(group["names"]) else str(blocked) + " blocked"
+    return ("All on global block list" if blocked == len(group["names"])
+            else str(blocked) + " on global block list")
 
 
 def group_categories_uniform(group: Dict[str, Any]) -> bool:

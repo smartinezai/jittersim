@@ -154,6 +154,50 @@ def check_device_collapse(browser, base, width, evidence):
         context.close()
 
 
+def check_membership_labels(browser, base, width, evidence):
+    context = browser.new_context(viewport={"width": width, "height": 900})
+    try:
+        page = context.new_page()
+        authenticate(page, base)
+        page.wait_for_function("() => !dashboardRefresh")
+        def membership_response(route):
+            response = route.fetch()
+            data = response.json()
+            for device in data["devices"]:
+                for name in device["domains"]:
+                    name["globally_blocked"] = any(part in name["domain"] for part in (
+                        "netflix.com", "nflxvideo.net", "whatsapp.net"))
+            route.fulfill(response=response, json=data)
+
+        page.route("**/api/observations", membership_response)
+        page.evaluate("() => loadObservations()")
+        card = page.locator('.observation-device').filter(has_text='192.168.50.124').first
+        group = card.locator('.observation-group').filter(has_text='Netflix')
+        badge = group.locator('.observation-group-toggle .observation-badge')
+        expect(badge).to_have_text('All on global block list')
+        expect(group.locator('.observation-group-block-button')).to_have_text('Unblock all')
+        expect(group.locator('.observation-group-toggle .observation-domain-count')).to_have_text(
+            '43 queries')
+        single = card.locator('.observation-domain').filter(has_text='mmx-ds.cdn.whatsapp.net')
+        expect(single.locator('.observation-badge')).to_have_text('On global block list')
+        expect(single.get_by_role('button', name='Unblock mmx-ds.cdn.whatsapp.net', exact=True)).to_be_visible()
+        expect(page.locator('#observation-note')).to_contain_text('not successful website requests')
+        expect(page.locator('#observation-note')).to_contain_text('not whether a query or request was blocked')
+        for check_width in (width, 320) if width == 390 else (width,):
+            page.set_viewport_size({"width": check_width, "height": 900})
+            card.screenshot(path=f'test-results/discovery-membership-{check_width}.png')
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), check_width
+            assert badge.evaluate("""badge => {
+                const count = badge.closest('.observation-group-toggle')
+                    .querySelector('.observation-domain-count').getBoundingClientRect();
+                const box = badge.getBoundingClientRect();
+                return box.right <= count.left || box.bottom <= count.top || box.top >= count.bottom;
+            }"""), f'membership badge overlaps query count at {check_width}px'
+        evidence.append(f'membership labels at {width}px: exact list membership, unchanged counts and actions')
+    finally:
+        context.close()
+
+
 def check_actions(browser, base, kind, width, evidence):
     context = browser.new_context(viewport={"width": width, "height": 1000 if width > 768 else 844})
     context.set_default_timeout(15000)
@@ -313,7 +357,9 @@ def run(*, cases=("single", "group"), widths=(1920, 390)):
             try:
                 evidence = []
                 for width in widths:
+                    check_membership_labels(browser, f"http://127.0.0.1:{port}", width, evidence)
                     check_device_collapse(browser, f"http://127.0.0.1:{port}", width, evidence)
+                for width in widths:
                     for kind in cases:
                         check_actions(browser, f"http://127.0.0.1:{port}", kind, width, evidence)
                 print(json.dumps(
