@@ -34,11 +34,11 @@ def start_fixture():
         return process, int(process.stdout.readline().strip())
 
 
-def traffic_response(general_active):
+def traffic_response(general_active, low_rate=False):
     """Return deterministic counters that produce six separated chart lines."""
     elapsed = max(0.0, time.monotonic() - STARTED)
-    upload_bytes = int(elapsed * 30_000_000 / 8)
-    download_bytes = int(elapsed * 40_000_000 / 8)
+    upload_bytes = int(elapsed * (200_000 if low_rate else 30_000_000) / 8)
+    download_bytes = int(elapsed * (2_000_000 if low_rate else 40_000_000) / 8)
     return {
         "available": True,
         "sampled_at": time.time(),
@@ -77,7 +77,7 @@ def choose_plot_point(page, rate_mbit):
           const height = box.height;
           const bottom = height - 34;
           const top = 16;
-          const y = bottom - (bottom - top) * rate / 100;
+          const y = bottom - (bottom - top) * rate / trafficAxisMaximum(trafficSamples);
           return {x: box.width - 16, y: y, ratio: pixelRatio};
         }""",
         {"box": box, "rate": rate_mbit},
@@ -96,7 +96,7 @@ def is_traffic_poll(url):
     return urlsplit(url).path == "/api/traffic"
 
 
-def prepare_page(browser, base, width, dpr, general_active, touch=False):
+def prepare_page(browser, base, width, dpr, general_active, touch=False, low_rate=False):
     context = browser.new_context(
         viewport={"width": width, "height": 900},
         device_scale_factor=dpr,
@@ -129,7 +129,7 @@ def prepare_page(browser, base, width, dpr, general_active, touch=False):
             "state": {"observed_state": "applied"},
         }))
     page.route("**/api/traffic", lambda route: route.fulfill(
-        json=traffic_response(general_active)
+        json=traffic_response(general_active, low_rate)
     ))
 
     def post(path, data):
@@ -314,6 +314,49 @@ def check_chart(browser, base, width, dpr, general_active, touch=False):
         context.close()
 
 
+def check_low_rate_chart(browser, base, width):
+    context, page, requests, errors = prepare_page(
+        browser, base, width, 1, True, low_rate=True
+    )
+    try:
+        expect(page.locator("#traffic-offscale")).to_contain_text("ISP download plan: 100.00 Mbit/s")
+        assert page.evaluate("trafficSamples.at(-1).download / trafficAxisMaximum(trafficSamples)") >= 0.1
+        latest = page.locator("#traffic-latest-rates")
+        expect(latest).to_contain_text("Latest interval at the Pi")
+        expect(page.locator(".traffic-samples")).not_to_have_attribute("open", "")
+        page.locator(".traffic-samples summary").click()
+        expect(page.locator("#traffic-sample-rows tr").first).to_be_visible()
+        assert page.locator("#traffic-sample-rows tr").count() <= 30
+        assert page.locator("#traffic-sample-rows").evaluate(
+            "node => !node.closest('[aria-live], [role=status], [role=alert]')"
+        )
+        pause = page.locator("#traffic-pause")
+        pause.click()
+        expect(pause).to_have_text("Resume sampling")
+        expect(pause).to_have_attribute("aria-pressed", "true")
+        sample_text = page.locator("#traffic-sample-rows").inner_text()
+        count = sum(is_traffic_poll(url) for _, url in requests)
+        page.wait_for_timeout(5100)
+        assert sum(is_traffic_poll(url) for _, url in requests) == count
+        assert page.locator("#traffic-sample-rows").inner_text() == sample_text
+        page.locator('a[data-page-link="profiles"]').click()
+        page.locator('a[data-page-link="traffic"]').click()
+        expect(pause).to_have_attribute("aria-pressed", "true")
+        assert sum(is_traffic_poll(url) for _, url in requests) == count
+        assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
+        page.locator(".traffic-chart-wrap").screenshot(path=f"test-results/traffic-axis-{width}.png")
+        with page.expect_response(lambda response: is_traffic_poll(response.url)):
+            pause.click()
+        expect(pause).to_have_attribute("aria-pressed", "false")
+        # The first post-pause response is a fresh baseline, never an interval across the pause.
+        expect(page.locator("#traffic-sample-rows tr")).to_have_count(0)
+        expect(page.locator("#traffic-status")).to_contain_text("Collecting the first sample")
+        expect(latest).to_contain_text("Latest interval at the Pi", timeout=7000)
+        assert not errors, errors
+    finally:
+        context.close()
+
+
 def run():
     Path("test-results").mkdir(exist_ok=True)
     process, port = start_fixture()
@@ -329,6 +372,8 @@ def run():
                     (375, 3, True, False), (375, 3, True, True)
                 ):
                     check_chart(browser, base, width, dpr, active, touch)
+                for width in (1440, 375):
+                    check_low_rate_chart(browser, base, width)
             finally:
                 browser.close()
         print("Traffic chart interaction passed at desktop, phone and high-density sizes.")

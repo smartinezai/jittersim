@@ -395,7 +395,7 @@
     .device-empty { margin: 0; color: var(--tx-muted); }
     .connected-card { margin-top: 1rem; }
     .traffic-card { margin-top: 1rem; }
-    .traffic-controls { display: grid; grid-template-columns: minmax(14rem, 0.75fr) minmax(0, 1.5fr); align-items: end; gap: 1rem; margin-top: 1rem; }
+    .traffic-controls { display: grid; grid-template-columns: minmax(14rem, 0.75fr) auto minmax(0, 1.5fr); align-items: end; gap: 1rem; margin-top: 1rem; }
     .traffic-controls label { max-width: 24rem; }
     .traffic-status { margin: 0; color: var(--tx-muted); font-size: 0.82rem; }
     .traffic-rate-form { display: flex; flex-wrap: wrap; align-items: end; gap: 0.75rem; margin-top: 0.85rem; padding: 0.75rem; border: 1px solid var(--bd-subtle); border-radius: 0.6rem; background: var(--bg-inset); }
@@ -410,6 +410,12 @@
     .traffic-metric strong { display: block; margin-top: 0.25rem; color: var(--tx-strong); font-size: 1.05rem; overflow-wrap: anywhere; }
     .traffic-chart-wrap { margin-top: 1rem; padding: 0.65rem; border: 1px solid var(--bd-subtle); border-radius: 0.65rem; background: var(--bg-field); }
     #traffic-chart { display: block; width: 100%; height: 16rem; }
+    .traffic-offscale { margin: 0; padding-bottom: 0.5rem; color: var(--tx-strong); font-size: 0.88rem; overflow-wrap: anywhere; }
+    .traffic-samples { margin-top: 0.65rem; font-size: 0.88rem; }
+    .traffic-samples summary { cursor: pointer; padding-block: 0.65rem; }
+    .traffic-samples table { width: 100%; table-layout: fixed; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    .traffic-samples caption { text-align: left; color: var(--tx-muted); padding-block: 0.5rem; }
+    .traffic-samples th, .traffic-samples td { padding: 0.5rem 0.25rem; text-align: left; overflow-wrap: anywhere; border-bottom: 1px solid var(--bd-subtle); }
     .traffic-legend { display: flex; flex-wrap: wrap; gap: 0.8rem 1rem; margin-top: 0.65rem; color: var(--tx-muted); font-size: 0.78rem; }
     .traffic-legend button { display: inline-flex; align-items: center; gap: 0.4rem; margin: 0; padding: 0.4rem; min-width: 0; max-width: 100%; text-align: left; color: var(--tx); background: transparent; border: 1px solid transparent; }
     .traffic-legend button.traffic-highlighted { border-color: var(--tx-muted); color: var(--tx-strong); }

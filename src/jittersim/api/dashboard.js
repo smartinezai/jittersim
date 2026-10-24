@@ -1280,6 +1280,10 @@
 
     let trafficSamplingAllowed = false;
 
+    let trafficPausedAt = null;
+
+    let trafficSamplingRevision = 0;
+
     let previousTrafficSample = null;
 
     let trafficSamples = [];
@@ -1333,14 +1337,20 @@
         "traffic-drop-rate",
         "traffic-queued"
       ].forEach((id) => { element(id).textContent = "—"; });
+      updateTrafficText();
+      element("traffic-offscale").textContent = "";
+      element("traffic-offscale").hidden = true;
       drawTrafficChart();
     }
 
     function stopTrafficSampling(message) {
       latestTrafficReading = null;
       trafficSamplingAllowed = false;
+      trafficPausedAt = null;
+      trafficSamplingRevision += 1;
+      updateTrafficPauseButton();
       clearTrafficTimer();
-      resetTrafficHistory();
+      resetTrafficView();
       element("traffic-status").textContent = message;
     }
 
@@ -1462,6 +1472,15 @@
       return prefix + " " + direction + " limit";
     }
 
+    function trafficAxisMaximum(samples) {
+      const values = samples.flatMap((sample) => [sample.upload, sample.download])
+        .filter((value) => Number.isFinite(value) && value >= 0);
+      const target = Math.max(0.1, Math.max(0, ...values) * 1.2);
+      const magnitude = Math.pow(10, Math.floor(Math.log10(target)));
+      const step = [1, 2, 5, 10].find((value) => value * magnitude >= target);
+      return step * magnitude;
+    }
+
     function trafficSeriesGeometry(samples, references, plot, scaleMax, now, scope) {
       return TRAFFIC_SERIES.map((definition) => {
         const series = { ...definition, label: trafficSeriesName(definition, scope), points: [], segments: [] };
@@ -1498,7 +1517,13 @@
           series.segments.push({ from: { ...point, x: plot.left }, to: point });
         }
         return series;
-      }).filter((series) => series.points.length);
+      }).filter((series) => series.points.length).map((series, index) => {
+        const latest = series.points[series.points.length - 1];
+        if (series.step && latest.value > scaleMax) {
+          series.marker = { ...latest, x: plot.right - 8 - index * 14, y: plot.top + 4 };
+        }
+        return series;
+      });
     }
 
     function trafficSegmentDistance(pointer, segment) {
@@ -1517,6 +1542,10 @@
           pointer.y < plot.top - 8 || pointer.y > plot.bottom + 8) return [];
       const hits = series.map((line) => {
         let best = { field: line.field, distance: Infinity, point: null };
+        if (line.marker) {
+          best = { field: line.field, distance: Math.hypot(pointer.x - line.marker.x,
+            pointer.y - line.marker.y), point: line.marker };
+        }
         line.points.forEach((point) => {
           const distance = Math.hypot(pointer.x - point.x, pointer.y - point.y);
           if (distance < best.distance) best = { field: line.field, distance: distance, point: point };
@@ -1548,6 +1577,53 @@
         : "recorded " + trafficAge(point.time, now);
       const current = Number.isFinite(latestTrafficReferences[series.field]) ? "" : " · no current limit";
       return series.label + ": " + value + " · " + kind + " · " + age + current;
+    }
+
+    function updateTrafficText() {
+      const latest = trafficSamples[trafficSamples.length - 1];
+      element("traffic-latest-rates").textContent = latest
+        ? "Latest interval at the Pi: upload " + formatTrafficRate(latest.upload) +
+          ", download " + formatTrafficRate(latest.download) + "."
+        : "Waiting for a measured traffic interval.";
+      const rows = trafficSamples.slice(-TRAFFIC_MAX_POINTS).reverse().map((sample) => {
+        const row = document.createElement("tr");
+        const interval = document.createElement("th");
+        interval.scope = "row";
+        interval.textContent = sample.intervalSeconds.toFixed(1) + " s ending " +
+          new Date(sample.recordedAt).toLocaleTimeString();
+        row.appendChild(interval);
+        [sample.upload, sample.download].forEach((value) => {
+          const cell = document.createElement("td");
+          cell.textContent = formatTrafficRate(value);
+          row.appendChild(cell);
+        });
+        return row;
+      });
+      element("traffic-sample-rows").replaceChildren(...rows);
+    }
+
+    function updateTrafficPauseButton() {
+      const button = element("traffic-pause");
+      button.disabled = !trafficSamplingAllowed;
+      button.textContent = trafficPausedAt === null ? "Pause sampling" : "Resume sampling";
+      button.setAttribute("aria-pressed", String(trafficPausedAt !== null));
+    }
+
+    function toggleTrafficSampling() {
+      if (!trafficSamplingAllowed) return;
+      trafficSamplingRevision += 1;
+      clearTrafficTimer();
+      if (trafficPausedAt === null) {
+        trafficPausedAt = performance.now();
+        element("traffic-status").textContent = "Sampling paused. Resume starts a fresh graph.";
+        drawTrafficChart();
+      } else {
+        trafficPausedAt = null;
+        resetTrafficHistory();
+        element("traffic-status").textContent = "Resuming live traffic sampling...";
+        pollTraffic().then(scheduleTrafficPoll);
+      }
+      updateTrafficPauseButton();
     }
 
     function drawTrafficKey(canvas, series, pixelRatio) {
@@ -1648,12 +1724,9 @@
       if (!context) return;
       context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
       context.clearRect(0, 0, bounds.width, bounds.height);
-      const now = performance.now();
+      const now = trafficPausedAt === null ? performance.now() : trafficPausedAt;
       const visibleSamples = trafficSamples.filter((sample) => now - sample.time <= TRAFFIC_WINDOW_MS);
-      const graphValues = visibleSamples.flatMap((sample) => TRAFFIC_SERIES.map((series) => sample[series.field]))
-        .filter((value) => Number.isFinite(value));
-      graphValues.push(...Object.values(latestTrafficReferences).filter((value) => Number.isFinite(value)));
-      const scaleMax = Math.pow(10, Math.ceil(Math.log10(Math.max(0.1, ...graphValues))));
+      const scaleMax = trafficAxisMaximum(visibleSamples);
       context.font = "12px system-ui, sans-serif";
       const tickLabels = [0, 1, 2, 3, 4].map((tick) => formatTrafficRate(scaleMax * tick / 4));
       const labelWidth = Math.max(...tickLabels.map((label) => context.measureText(label).width));
@@ -1679,9 +1752,16 @@
         context.fillStyle = "#91a8c1";
         context.textAlign = fraction === 0 ? "left" : fraction === 1 ? "right" : "center";
         context.textBaseline = "alphabetic";
-        context.fillText(fraction === 1 ? "now" : "−" + Math.round((1 - fraction) * TRAFFIC_WINDOW_MS / 1000) + "s", x, bounds.height - 8);
+        context.fillText(fraction === 1 ? (trafficPausedAt === null ? "now" : "paused") : "−" + Math.round((1 - fraction) * TRAFFIC_WINDOW_MS / 1000) + "s", x, bounds.height - 8);
       });
       const series = trafficSeriesGeometry(visibleSamples, latestTrafficReferences, plot, scaleMax, now, trafficProfileScope);
+      const offscale = series.filter((line) => line.marker);
+      const offscaleText = offscale.length ? "Above chart: " + offscale.map((line) =>
+        line.label + ": " + formatTrafficRate(line.marker.value) +
+        (Number.isFinite(latestTrafficReferences[line.field]) ? "" : " (previous reference)")).join(" · ") + "." : "";
+      const offscaleLabel = element("traffic-offscale");
+      if (offscaleLabel.textContent !== offscaleText) offscaleLabel.textContent = offscaleText;
+      offscaleLabel.hidden = !offscale.length;
       const present = new Set(series.map((line) => line.field));
       ["legend", "pinned"].forEach((key) => {
         if (!present.has(trafficInspection[key])) trafficInspection[key] = null;
@@ -1731,6 +1811,10 @@
         context.lineJoin = "round";
         context.lineCap = "round";
         context.setLineDash(line.dash);
+        context.save();
+        context.beginPath();
+        context.rect(plot.left, plot.top, plotWidth, plotHeight);
+        context.clip();
         context.beginPath();
         line.segments.forEach((segment) => {
           context.moveTo(segment.from.x, segment.from.y);
@@ -1745,6 +1829,17 @@
           context.fillStyle = context.strokeStyle;
           context.fill();
         });
+        context.restore();
+        if (line.marker) {
+          const marker = line.marker;
+          context.beginPath();
+          context.moveTo(marker.x, plot.top);
+          context.lineTo(marker.x - 4, plot.top + 8);
+          context.lineTo(marker.x + 4, plot.top + 8);
+          context.closePath();
+          context.fillStyle = context.strokeStyle;
+          context.fill();
+        }
       });
       context.globalAlpha = 1;
       context.setLineDash([]);
@@ -1812,7 +1907,7 @@
 
     function scheduleTrafficPoll() {
       clearTrafficTimer();
-      if (!trafficSamplingAllowed || !trafficGraphShown()) return;
+      if (!trafficSamplingAllowed || trafficPausedAt !== null || !trafficGraphShown()) return;
       trafficPollTimer = window.setTimeout(async () => {
         trafficPollTimer = null;
         try {
@@ -1859,13 +1954,15 @@
     const TRAFFIC_FAILURES_BEFORE_CLEARING = 3;
 
     async function pollTraffic() {
-      if (trafficRequestInFlight || !trafficSamplingAllowed || !trafficGraphShown()) return;
+      if (trafficRequestInFlight || !trafficSamplingAllowed || trafficPausedAt !== null || !trafficGraphShown()) return;
       const revision = adminTokenRevision;
+      const samplingRevision = trafficSamplingRevision;
       trafficRequestInFlight = true;
       try {
         const data = await readTraffic(0);
         trafficFailures = 0;
-        if (revision !== adminTokenRevision || !adminTokenVerified || !trafficSamplingAllowed) return;
+        if (revision !== adminTokenRevision || !adminTokenVerified || !trafficSamplingAllowed ||
+            samplingRevision !== trafficSamplingRevision || trafficPausedAt !== null) return;
         if (!data.available) {
           stopTrafficSampling(data.message || "Live traffic counters are unavailable in this mode.");
           return;
@@ -1900,6 +1997,8 @@
             const downloadPackets = Math.max(0, totals.download_packets - previousTrafficSample.totals.download_packets) / elapsedSeconds;
             trafficSamples.push({
               time: sampledAt,
+              recordedAt: Date.now(),
+              intervalSeconds: elapsedSeconds,
               upload: upload,
               download: download,
               ...latestTrafficReferences
@@ -1921,9 +2020,11 @@
           element("traffic-status").textContent = "Collecting the first sample...";
         }
         previousTrafficSample = { time: sampledAt, totals: totals, queues: queueTotals };
+        updateTrafficText();
         drawTrafficChart();
       } catch (error) {
-        if (revision !== adminTokenRevision || !adminTokenVerified || !trafficSamplingAllowed) return;
+        if (revision !== adminTokenRevision || !adminTokenVerified || !trafficSamplingAllowed ||
+            samplingRevision !== trafficSamplingRevision || trafficPausedAt !== null) return;
         if (error.status === 401) {
           resetTrafficHistory();
           stopTrafficSampling("The admin token was rejected. Check it again to restart live traffic sampling.");
@@ -1945,6 +2046,8 @@
 
     async function startTrafficSampling() {
       trafficSamplingAllowed = true;
+      updateTrafficPauseButton();
+      if (trafficPausedAt !== null) return;
       trafficFailures = 0;
       clearTrafficTimer();
       resetTrafficHistory();
@@ -1960,7 +2063,7 @@
 
     // Called when the page changes or the tab is hidden or shown.
     function syncTrafficSampling() {
-      if (!trafficSamplingAllowed) return;
+      if (!trafficSamplingAllowed || trafficPausedAt !== null) return;
       if (!trafficGraphShown()) {
         if (trafficPollTimer === null && previousTrafficSample === null) return;
         clearTrafficTimer();
@@ -7223,6 +7326,8 @@
       element("traffic-status").textContent = "Changing the device view...";
       pollTraffic();
     });
+
+    element("traffic-pause").addEventListener("click", toggleTrafficSampling);
 
     setupTrafficChartInspection();
 

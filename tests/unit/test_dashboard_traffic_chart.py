@@ -8,6 +8,7 @@ import subprocess
 import pytest
 
 from jittersim.api.server import DASHBOARD_HTML
+from tests.dashboard_script import function_source
 
 SCRIPT = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
 DEFINITIONS = SCRIPT[
@@ -169,3 +170,134 @@ def test_pointer_redraws_share_one_pending_frame():
         "const before = requests; callback(); requestTrafficChartDraw();"
         "console.log(JSON.stringify({before,requests,draws}));"
     ) == {"before": 1, "requests": 2, "draws": 1}
+
+
+@pytest.mark.parametrize(("peak", "maximum"), [
+    (0, 0.1), (0.08, 0.1), (0.1, 0.2), (0.2, 0.5),
+    (2, 5), (4, 5), (5, 10), (40, 50), (100, 200),
+])
+def test_data_axis_uses_one_two_five_steps_with_headroom(peak, maximum):
+    assert run_chart(
+        "console.log(JSON.stringify(trafficAxisMaximum([{upload:0,download:"
+        + json.dumps(peak) + "}])));"
+    ) == maximum
+
+
+def test_fast_references_do_not_flatten_slow_measured_traffic():
+    result = run_chart(
+        "const samples = [{time:60000,upload:0.2,download:2,isp_download:100}];"
+        "const maximum = trafficAxisMaximum(samples);"
+        "const lines = trafficSeriesGeometry(samples,{}," + PLOT + ",maximum,60000,'device');"
+        "const reference = lines.find(line=>line.field==='isp_download');"
+        "const hit = trafficLineHits(lines,reference.marker," + PLOT + ")[0];"
+        "console.log(JSON.stringify({maximum,fill:2/maximum,marker:reference.marker.value,"
+        "hit:hit.point.value,above:reference.points[0].y<0}));"
+    )
+    assert result == {"maximum": 5, "fill": 0.4, "marker": 100, "hit": 100, "above": True}
+
+
+def test_missing_measurements_use_the_minimum_axis():
+    assert run_chart(
+        "console.log(JSON.stringify(trafficAxisMaximum([{upload:null,download:undefined,"
+        "isp_download:100,profile_upload:200}])));"
+    ) == 0.1
+
+
+def test_an_in_range_limit_keeps_its_real_line_without_a_marker():
+    assert run_chart(
+        "const line = trafficSeriesGeometry([],{isp_download:5}," + PLOT
+        + ",5,60000,'device')[0];console.log(JSON.stringify({marker:!!line.marker,"
+        "y:line.points[0].y,value:line.points[0].value}));"
+    ) == {"marker": False, "y": 0, "value": 5}
+
+
+DOM = """
+const nodes = {};
+function element(id) {
+  return nodes[id] || (nodes[id] = {textContent:'',setAttribute(key,value){this[key]=value;},
+    replaceChildren(...children){this.children=children;}});
+}
+const document = {createElement(tag){return {tag,children:[],appendChild(child){this.children.push(child);}};}};
+"""
+
+
+def test_sample_text_is_bounded_newest_first_and_preserves_zero_rates():
+    assert run_chart(
+        DOM + "const TRAFFIC_MAX_POINTS=30;"
+        "const trafficSamples=Array.from({length:40},(_,i)=>({recordedAt:1000*i,"
+        "intervalSeconds:2,upload:i,download:0}));"
+        "updateTrafficText();"
+        "console.log(JSON.stringify({rows:nodes['traffic-sample-rows'].children.length,"
+        "first:nodes['traffic-sample-rows'].children[0].children[1].textContent,"
+        "last:nodes['traffic-sample-rows'].children[29].children[1].textContent,"
+        "zero:nodes['traffic-sample-rows'].children[0].children[2].textContent,"
+        "latest:nodes['traffic-latest-rates'].textContent}));"
+    ) == {"rows": 30, "first": "39.00 Mbit/s", "last": "10.00 Mbit/s",
+          "zero": "0.0 kbit/s", "latest": "Latest interval at the Pi: upload 39.00 Mbit/s, download 0.0 kbit/s."}
+
+
+def test_pause_freezes_history_and_resume_clears_the_counter_baseline():
+    assert run_chart(
+        DOM + "let trafficPausedAt=null;let trafficSamplingAllowed=true;"
+        "let trafficSamplingRevision=0;let previousTrafficSample={time:1};"
+        "let trafficSamples=[{time:1}];let timersCleared=0;let draws=0;let reads=0;"
+        "const performance={now:()=>2000};"
+        "function clearTrafficTimer(){timersCleared++;}"
+        "function drawTrafficChart(){draws++;}"
+        "function resetTrafficHistory(){trafficSamples=[];previousTrafficSample=null;}"
+        "async function pollTraffic(){reads++;}function scheduleTrafficPoll(){}"
+        "toggleTrafficSampling();const paused={at:trafficPausedAt,reads,"
+        "samples:trafficSamples.length,pressed:nodes['traffic-pause']['aria-pressed']};"
+        "toggleTrafficSampling();console.log(JSON.stringify({paused,reads,"
+        "samples:trafficSamples.length,baseline:previousTrafficSample,"
+        "pressed:nodes['traffic-pause']['aria-pressed'],timersCleared}));"
+    ) == {"paused": {"at": 2000, "reads": 0, "samples": 1, "pressed": "true"},
+          "reads": 1, "samples": 0, "baseline": None, "pressed": "false", "timersCleared": 2}
+
+
+def test_paused_sampling_stays_quiet_on_visibility_and_page_changes():
+    sources = "\n".join(("async " if name in {"pollTraffic", "startTrafficSampling"} else "")
+                        + function_source(name) for name in (
+        "pollTraffic", "scheduleTrafficPoll", "syncTrafficSampling", "startTrafficSampling"
+    ))
+    assert run_chart(
+        DOM + "let trafficPausedAt=20;let trafficSamplingAllowed=true;"
+        "let trafficRequestInFlight=false;let trafficFailures=0;let calls=0;"
+        "function trafficGraphShown(){return true;}"
+        "function clearTrafficTimer(){}const window={setTimeout(){calls++;}};"
+        "function readTraffic(){calls++;}function resetTrafficHistory(){calls++;}"
+        + sources + "\n(async()=>{await pollTraffic();scheduleTrafficPoll();"
+        "syncTrafficSampling();await startTrafficSampling();"
+        "console.log(JSON.stringify(calls));})();"
+    ) == 0
+
+
+@pytest.mark.parametrize("reject", [False, True])
+def test_a_response_from_before_pause_cannot_modify_the_snapshot(reject):
+    assert run_chart(
+        "let trafficPausedAt=null;let trafficSamplingAllowed=true;"
+        "let trafficRequestInFlight=false;let trafficFailures=0;"
+        "let adminTokenRevision=1;let adminTokenVerified=true;let trafficSamplingRevision=0;"
+        "function trafficGraphShown(){return true;}let finish;"
+        "function readTraffic(){return new Promise((resolve,reject)=>{finish="
+        + ("reject" if reject else "resolve") + ";});}"
+        + "async " + function_source("pollTraffic")
+        + "\n(async()=>{const pending=pollTraffic();trafficSamplingRevision++;"
+        "trafficPausedAt=2000;finish(" + ("new Error('offline')" if reject else "{}") + ");"
+        "await pending;console.log(JSON.stringify({inFlight:trafficRequestInFlight,failures:trafficFailures}));})();"
+    ) == {"inFlight": False, "failures": 0}
+
+
+
+def test_reset_clears_sample_text_and_offscale_text_even_when_canvas_is_hidden():
+    assert run_chart(
+        DOM + "const TRAFFIC_MAX_POINTS=30;let previousTrafficSample={time:1};"
+        "let trafficSamples=[{time:1}];function drawTrafficChart(){}"
+        "element('traffic-offscale').textContent='Old device limit';"
+        + function_source("resetTrafficHistory")
+        + "resetTrafficHistory();console.log(JSON.stringify({"
+        "rows:nodes['traffic-sample-rows'].children.length,"
+        "offscale:nodes['traffic-offscale'].textContent,hidden:nodes['traffic-offscale'].hidden,"
+        "latest:nodes['traffic-latest-rates'].textContent,baseline:previousTrafficSample}));"
+    ) == {"rows": 0, "offscale": "", "hidden": True,
+          "latest": "Waiting for a measured traffic interval.", "baseline": None}

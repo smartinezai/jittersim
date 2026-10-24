@@ -1253,6 +1253,7 @@
           <option value="@all">All assigned devices</option>
         </select>
       </label>
+      <button id="traffic-pause" type="button" aria-pressed="false" disabled>Pause sampling</button>
       <p id="traffic-status" class="traffic-status">Check the admin token to start live traffic sampling.</p>
     </div>
     <form id="traffic-rate-form" class="traffic-rate-form">
@@ -1279,7 +1280,8 @@
       </div>
     </div>
     <div class="traffic-chart-wrap">
-      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at the Pi with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
+      <p id="traffic-offscale" class="traffic-offscale" hidden></p>
+      <canvas id="traffic-chart" aria-describedby="traffic-latest-rates traffic-offscale" width="900" height="320" role="img" aria-label="Live upload and download rates at the Pi with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
       <div class="traffic-legend" role="group" aria-label="Graph legend">
         <button type="button" data-traffic-series="upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
         <button type="button" data-traffic-series="download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
@@ -1288,6 +1290,15 @@
         <button type="button" id="traffic-profile-upload-legend" data-traffic-series="profile_upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
         <button type="button" id="traffic-profile-download-legend" data-traffic-series="profile_download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
       </div>
+      <p id="traffic-latest-rates" class="traffic-chart-detail">Waiting for a measured traffic interval.</p>
+      <details class="traffic-samples">
+        <summary>Last 30 rate samples</summary>
+        <table>
+          <caption>Measured intervals at the Pi before its queues. Pausing keeps this snapshot. Resume starts a fresh graph.</caption>
+          <thead><tr><th scope="col">Interval</th><th scope="col">Upload</th><th scope="col">Download</th></tr></thead>
+          <tbody id="traffic-sample-rows"></tbody>
+        </table>
+      </details>
       <p id="traffic-chart-detail" class="traffic-chart-detail">Hover a line or focus its legend label to inspect it. Click or tap a label to keep it highlighted. Escape clears the highlight.</p>
     </div>
     <p id="traffic-profile-status" class="traffic-profile-status">Select one device to show its applied default queue limits.</p>
