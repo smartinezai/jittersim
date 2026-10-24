@@ -24,7 +24,7 @@ def served_functions():
         + block("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
         + block("let helperConfigured =", "let profiles =")
         + block("const PI_NOT_ANSWERING", "const adminTokenHelp =")
-        + block("async function checkAdminToken()", "async function refresh(")
+        + block("async function checkAdminToken(", "async function refresh(")
         + block(
             'element("check-admin-token").addEventListener("click",',
             'element("traffic-rate-form").addEventListener("submit",',
@@ -46,10 +46,14 @@ const assert = require("node:assert/strict");
 const nodes = new Map();
 const messages = [];
 const documentListeners = new Map();
+const phoneLayout = {matches:false};
 const timers = new Map();
 let timerSerial = 0;
 const document = {hidden: false, activeElement: null, documentElement: {style: {setProperty() {}}},
-                  addEventListener(type, callback) {documentListeners.set(type, callback)}, getElementById: (id) => element(id)};
+                  addEventListener(type, callback) {documentListeners.set(type, callback)},
+                  removeEventListener(type, callback) {
+                    if (documentListeners.get(type) === callback) documentListeners.delete(type);
+                  }, getElementById: (id) => element(id)};
 const storage = new Map();
 let storageBroken = false;
 const blocked = () => {if (storageBroken) throw new Error("storage blocked")};
@@ -76,13 +80,14 @@ let network = async () => ({ok: true, json: async () => ({result: {ssid: "Fixtur
 function element(id) {
   if (!nodes.has(id)) nodes.set(id, {
     id, value: "", textContent: "", className: "", disabled: false, checked: false,
-    hidden: id === "credentials-panel", isConnected: true,
+    hidden: id === "credentials-panel", isConnected: true, rects: true,
     attributes: new Map(), listeners: new Map(),
     setAttribute(key, value) {this.attributes.set(key, value)},
     removeAttribute(key) {this.attributes.delete(key)},
     getAttribute(key) {return this.attributes.get(key)},
     addEventListener(kind, callback) {this.listeners.set(kind, callback)},
     dispatchEvent(event) {this.listeners.get(event.type)?.(event)},
+    getClientRects() {return this.isConnected && !this.hidden && this.rects ? [{}] : []},
     focus() {document.activeElement = this}, scrollIntoView() {}
   });
   return nodes.get(id);
@@ -332,6 +337,31 @@ CASES = {
       assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
     """,
 
+    "closing_credentials_returns_to_controls_when_opener_is_hidden": r"""
+      const opener = element("open-admin-credentials");
+      openCredentials("admin", opener);
+      opener.rects = false;
+      closeCredentials();
+      assert.equal(element("credentials-panel").hidden, true);
+      assert.equal(document.activeElement, element("controls-toggle"));
+      assert.equal(opener.getAttribute("aria-expanded"), "false");
+    """,
+    "closing_credentials_returns_to_controls_when_opener_is_removed": r"""
+      const opener = element("open-admin-credentials");
+      openCredentials("admin", opener);
+      opener.isConnected = false;
+      closeCredentials();
+      assert.equal(document.activeElement, element("controls-toggle"));
+    """,
+    "closing_credentials_does_not_focus_a_hidden_fallback": r"""
+      const opener = element("open-admin-credentials");
+      openCredentials("admin", opener);
+      opener.rects = false;
+      element("controls-toggle").hidden = true;
+      closeCredentials();
+      assert.notEqual(document.activeElement, opener);
+      assert.notEqual(document.activeElement, element("controls-toggle"));
+    """,
     "panel_and_token_edits": r"""
       const opener = element("open-admin-credentials");
       enter("admin-token", "fixture token");
@@ -1210,7 +1240,7 @@ def test_diagnostics_failures_report_their_http_status():
     script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
     real = script[
         script.index("let adminToolsPhysicalRead =") : script.index(
-            "async function checkAdminToken()"
+            "async function checkAdminToken("
         )
     ]
     program = (

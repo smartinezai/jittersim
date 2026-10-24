@@ -200,6 +200,16 @@ def run():
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 sign_in(page, base)
+                # Dismiss only the expected sign-in acknowledgement before hit testing.
+                # Unexpected notifications remain visible and fail these assertions.
+                toast = page.locator("#toast")
+                if toast.is_visible():
+                    expect(toast).to_have_class("toast success")
+                    expect(page.locator("#toast-message")).to_have_text(
+                        "Token accepted. Diagnostics loaded."
+                    )
+                    page.locator("#toast-dismiss").click()
+                expect(toast).to_be_hidden()
                 for stress, css in STRESSES:
                     set_font_stress(page, css)
                     for width, height in WINDOWS:

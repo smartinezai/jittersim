@@ -41,7 +41,8 @@ def run():
                     page.locator("#admin-token").fill("browser-test")
                     page.locator("#check-admin-token").click()
                     expect(page.locator("#token-check-status")).to_contain_text("Allow this device")
-                    page.locator("#close-credentials").click()
+                    if page.locator("#credentials-panel").is_visible():
+                        page.locator("#close-credentials").click()
 
                     prompt = page.locator("#address-move-card")
                     expect(prompt).to_be_visible()
@@ -64,7 +65,8 @@ def run():
                     page.locator("#admin-token").fill("browser-test")
                     page.locator("#check-admin-token").click()
                     expect(prompt).to_be_visible()
-                    page.locator("#close-credentials").click()
+                    if page.locator("#credentials-panel").is_visible():
+                        page.locator("#close-credentials").click()
 
                     # A refused move shows the reason and keeps the prompt.
                     page.route("**/api/dashboard-access/move", lambda route: route.fulfill(

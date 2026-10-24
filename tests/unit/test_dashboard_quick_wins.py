@@ -107,7 +107,8 @@ def test_no_edit_scroll_animates_for_a_person_who_asked_for_less_motion():
 def test_the_hints_point_at_the_profiles_page():
     assert "Create a group below" not in DASHBOARD_HTML
     assert "Create a saved profile below" not in DASHBOARD_HTML
-    assert '"Create a group on the Profiles page"' in DASHBOARD_HTML
+    assert '"Create a group on the Profiles page."' in DASHBOARD_HTML
+    assert 'groups.length ? "Choose group..." : "No groups"' in DASHBOARD_HTML
 
 
 def test_no_label_a_screen_reader_reads_still_says_re_apply():

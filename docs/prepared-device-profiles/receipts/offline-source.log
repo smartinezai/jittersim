@@ -1,0 +1,49 @@
+..................F..................................................... [ 75%]
+....F..................                                                  [100%]
+=================================== FAILURES ===================================
+_________________ test_save_is_inert_cas_and_never_calls_apply _________________
+
+    def test_save_is_inert_cas_and_never_calls_apply():
+        sources = ["let preparedBusy=false, adminTokenVerified=true, preparedEdit={mac_address:'" + MAC + "',revision:8};",
+                   "const nodes={'prepared-mac':{value:'forged'},'prepared-name':{value:'Name'},'prepared-profile':{value:'slow'},'prepared-save':{}};",
+                   "const element=id=>nodes[id]; const preparedOwner=()=>({}); const preparedCurrent=()=>true;",
+                   "const invalidatePreparedReview=()=>{},setButtonBusy=()=>{},setPreparedFormBusy=()=>{},resetPreparedForm=()=>{},preparedMessage=()=>{};",
+                   "let calls=[]; const request=async(...args)=>calls.push(args); const loadPreparedChoices=async()=>{};",
+                   "async " + function_source("savePreparedChoice")]
+>       calls = run_async(sources, "savePreparedChoice({preventDefault(){}}).then(()=>calls)")
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_dashboard_prepared_devices.py:78: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sources = ["let preparedBusy=false, adminTokenVerified=true, preparedEdit={mac_address:'02:00:00:00:00:01',revision:8};", "const...ve"), false);\n          if (saved && preparedCurrent(owner)) await loadPreparedChoices();\n        }\n      }\n    }']
+expression = 'savePreparedChoice({preventDefault(){}}).then(()=>calls)'
+
+    def run_async(sources, expression):
+        program = "\n".join(sources) + "\n(async()=>{ console.log(JSON.stringify(await (" + expression + "))); })().catch(e=>{console.error(e);process.exit(1)});"
+        result = subprocess.run([NODE, "-"], input=program, text=True, capture_output=True, timeout=20)
+>       assert result.returncode == 0, result.stderr
+E       AssertionError: ReferenceError: adminTokenRevision is not defined
+E             at savePreparedChoice ([stdin]:28:29)
+E             at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+E             at async [stdin]:34:40
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['/opt/homebrew/bin/node', '-'], returncode=1, stdout='', stderr='ReferenceError: adminTokenRevi...29)\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at async [stdin]:34:40\n').returncode
+
+tests/unit/test_dashboard_prepared_devices.py:67: AssertionError
+__________________ test_an_unmapped_file_selects_every_module __________________
+
+    def test_an_unmapped_file_selects_every_module():
+        everything = [script_value("JOURNEYS_MODULE")] + script_array("PI_BROWSER_MODULES")
+>       assert selected("src/jittersim/api/dashboard.js") == everything
+E       AssertionError: assert ['prepared_devices'] == ['journeys', ..._access', ...]
+E         
+E         At index 0 diff: 'prepared_devices' != 'journeys'
+E         Right contains 36 more items, first extra item: 'wifi_recovery'
+E         Use -v to get more diff
+
+tests/unit/test_local_ci.py:204: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_dashboard_prepared_devices.py::test_save_is_inert_cas_and_never_calls_apply
+FAILED tests/unit/test_local_ci.py::test_an_unmapped_file_selects_every_module

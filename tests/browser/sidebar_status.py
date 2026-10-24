@@ -9,6 +9,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.live_regions import speakers
+from tests.browser.notification_wrapping import check_notification_wrapping
 from tests.browser.phone import (
     close_controls,
     is_phone,
@@ -46,11 +47,10 @@ def devices_line(page):
 
 
 def show_status(page):
-    """On a phone the full status block opens from the one line strip in the header."""
+    """The full status block opens from the visible strip in either layout."""
 
-    if is_phone(page):
-        expect(page.locator("#status-strip")).to_be_visible()
-        open_status(page)
+    expect(page.locator("#status-strip")).to_be_visible()
+    open_status(page)
 
 
 def wait_for_automatic_token_check(page):
@@ -76,8 +76,10 @@ def check_one_message(page, width, height):
     box = toast.bounding_box()
     assert box["width"] <= 22 * 16 + 1, box
     assert box["x"] >= 0 and box["y"] >= 0 and box["x"] + box["width"] <= width, box
-    if not is_phone(page):
-        assert height - (box["y"] + box["height"]) <= 17, box
+    bar = page.locator(".safety-bar").bounding_box()
+    gap = bar["y"] - (box["y"] + box["height"])
+    assert 0 <= gap <= 17, ("toast must stay just above the safety bar", box, bar)
+    assert bar["y"] + bar["height"] <= height + 0.5, bar
     expect(toast.get_by_role("button", name="Dismiss message")).to_be_visible()
     expect(toast).to_be_hidden(timeout=9000)
 
@@ -221,6 +223,9 @@ def check_width(browser, width, height):
         page.reload()
         wait_for_automatic_token_check(page)
         check_one_message(page, width, height)
+        if width == 1920:
+            check_notification_wrapping(page)
+        show_status(page)
 
         # signed in with nothing applied yet
         expect(status).to_be_visible()

@@ -18,7 +18,9 @@ CSS = re.sub(
     r"/\*.*?\*/", "", re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1),
     flags=re.DOTALL,
 )
-PHONE = re.search(r"@media \(max-width: 48rem\) \{(.*?)\n\}", CSS, re.DOTALL).group(1)
+PHONE = re.search(
+    r"@media \(max-width: 48rem\), \(max-height: 36rem\) \{(.*?)\n\}", CSS, re.DOTALL
+).group(1)
 SCRIPTS = re.findall(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL)
 SECOND_SCRIPT = SCRIPTS[1]
 NEEDS_NODE = pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
@@ -70,10 +72,11 @@ def block_of(class_name):
 
 def test_the_phone_rules_come_after_the_earlier_narrow_screen_rules():
     style = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
-    assert style.index(".field-tooltip {") < style.index("@media (max-width: 48rem) {")
-    # The stacked sidebar with wrapped page chips is gone.
-    assert ".sidebar-nav ul { display: flex; flex-wrap: wrap" not in style
-    assert ".sidebar { position: static" not in style
+    assert style.index(".field-tooltip {") < style.index(
+        "@media (max-width: 48rem), (max-height: 36rem) {"
+    )
+    # Compact screens retain one scrolling row even when desktop links wrap.
+    assert "wrap" not in phone(".sidebar-nav ul").get("flex-wrap", "")
 
 
 def test_the_bar_is_pinned_to_the_bottom_with_panic_and_the_router_status():
@@ -87,8 +90,9 @@ def test_the_bar_is_pinned_to_the_bottom_with_panic_and_the_router_status():
         assert f'id="{element_id}"' in markup, element_id
     for element_id in ("sync-router-ap", "apply-button", "open-admin-credentials"):
         assert f'id="{element_id}"' not in markup, element_id
-    # Desktop keeps the sidebar: the wrapper gives up its box there.
-    assert declarations(CSS.replace(PHONE, ""))[".safety-bar"]["display"] == "contents"
+    # Both layouts retain one emergency control and the same read-only router value.
+    assert HTML.count('id="panic-button"') == 1
+    assert HTML.count('id="router-wifi-toggle"') == 1
 
 
 def test_the_controls_toggle_sits_at_the_end_of_the_bar():
@@ -223,12 +227,12 @@ def test_scrolling_honours_reduced_motion():
     assert all("scrollBehavior()" in found or found.startswith("reduceMotion ?") for found in smooth), smooth
 
 
-def test_the_desktop_page_list_gives_room_to_the_footer_on_a_short_window():
-    desktop = re.findall(r"@media \(min-width: 48\.01rem\) \{(.*?)\n    \}", CSS, re.DOTALL)
-    rules = declarations("".join(desktop))
-    assert rules[".sidebar-nav"] == {"min-height": "7rem", "overflow-y": "auto"}
-    # The focus ring stays inside the list that clips it.
-    assert rules[".sidebar-nav a:focus-visible"]["outline-offset"] == "-2px"
+def test_navigation_no_longer_reserves_a_scrolling_desktop_rail():
+    # The navigation is a page-level landmark. Its controls keep the same ids across layouts.
+    assert 'class="sidebar-nav" aria-label="Sections"' in HTML
+    assert 'min-height: 7rem; overflow-y: auto' not in CSS
+    for element_id in ("controls-toggle", "sidebar-controls", "panic-button"):
+        assert HTML.count(f'id="{element_id}"') == 1
 
 
 # Behaviour in node
@@ -297,6 +301,9 @@ const sections = PAGES.map((page) => body.add(new Node("page-" + page, {
   dataset: {page}, box: {top: 660, bottom: 1400, left: 0, right: 390, width: 390, height: 740},
   matches: (s) => s === "[data-page]"
 })));
+const heading = body.add(new Node("page-heading", {
+  box: {top: 600, bottom: 635, left: 0, right: 900, width: 900, height: 35}
+}));
 const sidebar = body.add(new Node("sidebar", {matches: (s) => s === ".sidebar"}));
 const controlsToggle = sidebar.add(new Node("controls-toggle", {matches: (s) => s === "button"}));
 const controlsSheet = sidebar.add(new Node("sidebar-controls", {matches: (s) => s === "#sidebar-controls"}));
@@ -305,6 +312,10 @@ const panic = bar.add(new Node("panic-button", {matches: (s) => s === "button" |
 const select = controlsSheet.add(new Node("active-profile-select", {disabled: true,
   matches: (s) => s === "select, button"}));
 const apply = controlsSheet.add(new Node("apply-button", {matches: (s) => s === "select, button"}));
+const utilities = controlsSheet.add(new Node("utilities",
+  {matches: (s) => s === ".control-utilities"}));
+const utility = utilities.add(new Node("refresh-router-wifi",
+  {matches: (s) => s === "select, button"}));
 const panel = body.add(new Node("credentials-panel",
   {matches: (s) => s === "#credentials-panel, #toast, dialog, .field-tooltip"}));
 const content = body.add(new Node("content", {matches: () => false}));
@@ -397,13 +408,13 @@ def test_a_page_link_on_a_phone_shows_and_focuses_the_page_start():
 
 
 @NEEDS_NODE
-def test_a_page_link_on_a_wide_window_scrolls_to_the_top_as_before():
+def test_a_page_link_on_a_wide_window_focuses_the_section_and_keeps_its_heading_visible():
     result = run_node(
         "phoneLayout.matches = false;\n"
         "showPage('traffic', true); showPage('profiles', false);\n"
         "console.log(JSON.stringify({scrolls, focused}));"
     )
-    assert result == {"scrolls": [{"top": 0}], "focused": []}
+    assert result == {"scrolls": [{"top": 892, "behavior": "auto"}], "focused": ["page-traffic"]}
 
 
 @NEEDS_NODE
@@ -456,6 +467,33 @@ def test_opening_the_sheet_moves_focus_to_its_first_control_and_closing_returns_
     assert result["opened"] == [True, "true"]
     assert result["focused"] == ["apply-button", "controls-toggle"]
     assert result["open"] is False and result["expanded"] == "false"
+
+
+@NEEDS_NODE
+def test_desktop_utilities_focus_the_first_usable_utility_and_return_to_controls():
+    result = run_node(
+        "phoneLayout.matches = false;\n"
+        "setControlsOpen(true, true);\n"
+        "const suppressToast = body.classes.has('phone-controls-open');\n"
+        "setControlsOpen(false, true);\n"
+        "console.log(JSON.stringify({focused, suppressToast, "
+        "expanded: controlsToggle.attributes['aria-expanded'], "
+        "closed: !body.classes.has('phone-controls-open')}));"
+    )
+    assert result == {
+        "focused": ["refresh-router-wifi", "controls-toggle"],
+        "expanded": "false", "suppressToast": True, "closed": True,
+    }
+
+
+@NEEDS_NODE
+def test_horizontal_navigation_hint_works_on_desktop_too():
+    result = run_node(
+        "phoneLayout.matches = false; row.scrollLeft = 100;\n"
+        "row.clientWidth = 900; row.scrollWidth = 1400;\n"
+        "syncNavHint(); console.log(JSON.stringify(Object.keys(nav.attributes).sort()));"
+    )
+    assert result == ["data-more-after", "data-more-before"]
 
 
 @NEEDS_NODE

@@ -56,7 +56,9 @@ function connCheckDialog() {
   start.append(speedTestNode('p',
     'The Pi sends small ping packets to this device and counts the answers. It compares the loss, ' +
     'round trip, jitter, duplicates and order with the profile the Pi applied to the device. ' +
-    'Only the download side of a profile can be checked this way: use Test speed for the upload. ' +
+    'Only the download side of a profile can be checked this way. For upload, choose Test speed, ' +
+    'select an external speed-test site under Where the test data comes from and run the test on the actual test device. ' +
+    'This dashboard tests download only. ' +
     'Wake the device first (turn on the screen), because a sleeping phone answers slowly.', 'speed-test-help'));
   const probesLabel = speedTestNode('label', 'Number of probes (10 per second)');
   const probes = speedTestNode('input');

@@ -8,6 +8,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.page_polling import advance, read_port, start_fixture, watch
+from tests.browser.phone import sidebar_control
 
 TOKEN = "browser-test"
 
@@ -176,9 +177,7 @@ def run():
                 page.evaluate("void loadOnlineStatus()")
                 page.wait_for_timeout(50)
                 assert held
-                if width < 700:
-                    page.locator("#controls-toggle").click()
-                page.locator("#open-admin-credentials").click()
+                sidebar_control(page, "#open-admin-credentials").click()
                 page.locator("#admin-token").fill("replacement-fixture-token")
                 held[0].abort()
                 page.wait_for_timeout(100)

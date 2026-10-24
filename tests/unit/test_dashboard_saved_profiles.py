@@ -532,6 +532,34 @@ def test_fill_then_read_returns_the_original_profile():
 
 
 @NEEDS_NODE
+def test_clearing_saved_values_survives_a_second_edit_without_resetting_hidden_randomness():
+    original = as_json(every_field_set_profile())
+    body = SUBMIT + start_editing(original) + """
+        element('upload-bandwidth').value = '';
+        element('profile-seed').value = '';
+        element('upload-loss').value = '0';
+        element('download-corrupt').value = '0';
+        element('profile-homepage-chance').value = '0';
+        element('profile-outage-probability').value = '0';
+        element('profile-website-mode').value = 'unrestricted';
+        element('profile-website-domains').value = '';
+        await submit();
+        const saved = sent[0][2];
+        startEditingProfile(saved);
+        element('profile-name').value = 'Renamed after clearing';
+        await submit();
+        console.log(JSON.stringify(sent.map(call => call[2])));
+    """
+    first, second = run_node(body)
+    expected = dict(original, random_seed=None, homepage_bounce_percent=0,
+                    outage_probability=0, website_mode='unrestricted', website_domains=[])
+    expected['upload'] = dict(original['upload'], bandwidth_kbit=None, loss_percent=0)
+    expected['download'] = dict(original['download'], corrupt_percent=0)
+    assert first == expected
+    assert second == dict(expected, name='Renamed after clearing')
+
+
+@NEEDS_NODE
 def test_fresh_mode_round_trip_clears_the_saved_seed():
     profile = as_json(Profile("fresh", "Fresh", random_mode="fresh"))
     body = (

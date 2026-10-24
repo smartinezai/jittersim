@@ -40,12 +40,18 @@ def run():
                     errors = []
                     page.on("pageerror", lambda error: errors.append(str(error)))
                     page.goto(f"http://127.0.0.1:{port}")
-                    sidebar_control(page, "#open-admin-credentials").click()
                     token = page.locator("#admin-token")
+                    credentials = page.locator("#credentials-panel")
+
+                    def open_credentials():
+                        if credentials.is_hidden():
+                            sidebar_control(page, "#open-admin-credentials").click()
+                        expect(credentials).to_be_visible()
 
                     registered = False
 
                     def sign_in():
+                        open_credentials()
                         token.fill("browser-test")
                         page.locator("#check-admin-token").click()
                         expect(page.locator("#token-check-status")).to_contain_text(
@@ -65,9 +71,11 @@ def run():
                         assert "02:00:00" not in page.locator("#address-type-note").text_content()
 
                     sign_in()
+                    open_credentials()
                     page.locator("#clear-admin-token").click()
                     cleared()
                     sign_in()
+                    open_credentials()
                     token.fill("wrong-token")
                     cleared()
                     page.locator("#check-admin-token").click()
@@ -75,12 +83,13 @@ def run():
                     cleared()
                     sign_in()
 
-                    page.locator("#close-credentials").click()
+                    if credentials.is_visible():
+                        page.locator("#close-credentials").click()
                     page.locator("#allow-dashboard-device").click()
                     expect(page.locator("#private-dashboard")).to_be_visible()
                     page.wait_for_function("() => adminTokenVerified && !adminTokenChecking")
                     registered = True
-                    sidebar_control(page, "#open-admin-credentials").click()
+                    open_credentials()
                     # An obsolete error must not hide a newly accepted offer.
                     held = []
 
@@ -99,6 +108,7 @@ def run():
                             break
                         page.wait_for_timeout(20)
                     assert held
+                    open_credentials()
                     token.fill("another-token")
                     sign_in()
                     held[0].fulfill(
@@ -119,6 +129,7 @@ def run():
                             break
                         page.wait_for_timeout(20)
                     assert held
+                    open_credentials()
                     page.locator("#clear-admin-token").click()
                     held[0].fulfill(
                         status=200,
@@ -148,7 +159,8 @@ def run():
                     cleared()
                     page.unroute("**/api/dashboard-access/moves")
                     sign_in()
-                    page.locator("#close-credentials").click()
+                    if credentials.is_visible():
+                        page.locator("#close-credentials").click()
                     # A completed old write must not show private text or recheck new credentials.
                     held.clear()
                     page.route("**/api/dashboard-access/move", lambda route: held.append(route))
@@ -158,7 +170,7 @@ def run():
                             break
                         page.wait_for_timeout(20)
                     assert len(held) == 1
-                    sidebar_control(page, "#open-admin-credentials").click()
+                    open_credentials()
                     page.locator("#clear-admin-token").click()
                     held[0].fulfill(
                         status=200,

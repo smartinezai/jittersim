@@ -11,6 +11,33 @@ exact release head. The official Python 3.9, 3.11 and 3.13 matrix remains
 outside the current evidence. Physical acceptance, signing, publication and
 installation remain separate. Hosted CI is billing-blocked. See [local CI](local-ci.md).
 
+## Delivery snapshot on 24 October 2026
+
+[Release PR 239](https://github.com/smartinezai/jittersim/pull/239) merged as
+`3f5499a9`. The signed v0.2.0 package is prepared with sequence `1792860082`.
+Its archive signature and recorded hashes were verified. The three signed local
+checks passed on the identical tree before merge. Hosted jobs did not execute
+because of billing. This does not establish a published or installed release.
+The owner still needs a fresh checked backup, installation of that exact package,
+physical acceptance and publication. Main remains reserved while the owner
+completes backup, installation, physical acceptance and publication. Follow the
+[owner commands](release-0.2.0-owner-commands.md).
+
+The isolated post-release source includes reviewed heading, token and router
+error improvements, name display filtering and shared in-flight access reads.
+Its receipts do not transfer to the release package. A separate Operate redesign
+is implemented and undergoing final desktop and phone fixture checks. It keeps
+the existing browser implementation without adding a component framework.
+Real-phone, Safari and network acceptance remain separate.
+
+[PR 209](https://github.com/smartinezai/jittersim/pull/209) now has completed full
+Python 3.11 and retained Python 3.13 unit rows on exact head `96836d05`, each with
+8616 passed and 155 skipped. They are not a complete platform matrix for current
+main. Its merge still waits for first publication. The owner approved D4's
+data-scaled traffic axis in [PR 237](https://github.com/smartinezai/jittersim/pull/237).
+That product-choice hold is resolved, while review, applicable checks and the
+release freeze still apply. The chart is not part of the current release package.
+
 ## Changes after the 4 October candidate (9 to 19 October 2026)
 
 - Router Wi-Fi writes are permanently refused by the Pi helper and the dashboard
@@ -131,7 +158,9 @@ new tickets. The archived list retains all details and proposed fixes.
 
 Open against reviewed source composition `309be4d7` on 24 October 2026. PR 161,
 PR 170 and their review follow-ups are merged. PR 175 is held until v0.2.0 is
-installed; the PR 209 Docker test-harness follow-up is held until publication.
+installed; the PR 209 Docker test-harness follow-up is held until publication. Its missing
+Python 3.11 row is now complete on `96836d05`, as recorded above. Local testing
+is not blocked by the publication hold.
 Their states are in the [roadmap](../ROADMAP.md) and on GitHub.
 
 - Two owner decisions from the review of PR 138 ([review results](review-results-carry-forward-2026-10-16.md)).

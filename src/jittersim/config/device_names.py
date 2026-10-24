@@ -5,9 +5,9 @@ from typing import Optional
 
 UNKNOWN_DEVICE_NAME = "Unknown device"
 _AUTOMATIC_NAME = re.compile(r"^Client [0-9]{1,3}(?:\.[0-9]{1,3}){3}$")
-# Control characters (C0 and DEL) and the bidirectional controls that can make a
+# Control characters (C0, DEL and C1) and the bidirectional controls that can make a
 # name read as something else on screen. Emoji and accents are not listed.
-_HIDDEN_CHARACTERS = re.compile("[\x00-\x1f\x7f‎‏‪-‮⁦-⁩]")
+_HIDDEN_CHARACTERS = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 
 
 def _text(value: object) -> str:

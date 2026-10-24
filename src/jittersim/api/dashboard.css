@@ -235,7 +235,15 @@
       color: var(--tx-on-raised);
       box-shadow: 0 0.9rem 2rem rgba(0, 0, 0, 0.4);
     }
-    #toast-message { max-height: calc(40vh - 2rem); overflow-y: auto; overscroll-behavior: contain; }
+    #toast-message { overflow-wrap: anywhere; max-height: calc(40vh - 2rem); overflow-y: auto; overscroll-behavior: contain; }
+    @media (max-width: 30rem) {
+      #toast-message {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        /* Reserve the 2.75rem control row, .75rem gap, 1.4rem padding and two borders. */
+        max-height: max(1.5em, calc(40vh - 4.9rem - 2px));
+      }
+    }
     .toast[hidden] { display: none; }
     .toast.success { border-color: var(--ok-border); border-left-color: var(--ok); background: var(--ok-bg); }
     .toast.error { border-color: var(--bad-border); border-left-color: var(--bad); background: var(--bad-bg); }
@@ -395,7 +403,7 @@
     .device-empty { margin: 0; color: var(--tx-muted); }
     .connected-card { margin-top: 1rem; }
     .traffic-card { margin-top: 1rem; }
-    .traffic-controls { display: grid; grid-template-columns: minmax(14rem, 0.75fr) minmax(0, 1.5fr); align-items: end; gap: 1rem; margin-top: 1rem; }
+    .traffic-controls { display: grid; grid-template-columns: minmax(14rem, 0.75fr) auto minmax(0, 1.5fr); align-items: end; gap: 1rem; margin-top: 1rem; }
     .traffic-controls label { max-width: 24rem; }
     .traffic-status { margin: 0; color: var(--tx-muted); font-size: 0.82rem; }
     .traffic-rate-form { display: flex; flex-wrap: wrap; align-items: end; gap: 0.75rem; margin-top: 0.85rem; padding: 0.75rem; border: 1px solid var(--bd-subtle); border-radius: 0.6rem; background: var(--bg-inset); }
@@ -410,6 +418,12 @@
     .traffic-metric strong { display: block; margin-top: 0.25rem; color: var(--tx-strong); font-size: 1.05rem; overflow-wrap: anywhere; }
     .traffic-chart-wrap { margin-top: 1rem; padding: 0.65rem; border: 1px solid var(--bd-subtle); border-radius: 0.65rem; background: var(--bg-field); }
     #traffic-chart { display: block; width: 100%; height: 16rem; }
+    .traffic-offscale { margin: 0; padding-bottom: 0.5rem; color: var(--tx-strong); font-size: 0.88rem; overflow-wrap: anywhere; }
+    .traffic-samples { margin-top: 0.65rem; font-size: 0.88rem; }
+    .traffic-samples summary { cursor: pointer; padding-block: 0.65rem; }
+    .traffic-samples table { width: 100%; table-layout: fixed; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    .traffic-samples caption { text-align: left; color: var(--tx-muted); padding-block: 0.5rem; }
+    .traffic-samples th, .traffic-samples td { padding: 0.5rem 0.25rem; text-align: left; overflow-wrap: anywhere; border-bottom: 1px solid var(--bd-subtle); }
     .traffic-legend { display: flex; flex-wrap: wrap; gap: 0.8rem 1rem; margin-top: 0.65rem; color: var(--tx-muted); font-size: 0.78rem; }
     .traffic-legend button { display: inline-flex; align-items: center; gap: 0.4rem; margin: 0; padding: 0.4rem; min-width: 0; max-width: 100%; text-align: left; color: var(--tx); background: transparent; border: 1px solid transparent; }
     .traffic-legend button.traffic-highlighted { border-color: var(--tx-muted); color: var(--tx-strong); }
@@ -583,7 +597,29 @@
       grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
       align-items: start;
     }
+    #schedule-form .fields { grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
     label { display: grid; align-content: start; gap: 0.3rem; color: var(--tx); font-size: 0.88rem; }
+    .profile-field-reset { display: grid; gap: 0.3rem; min-width: 0; }
+    .profile-field-reset[hidden] { display: none; }
+    .profile-field-reset > label { min-width: 0; }
+    .profile-field-reset-controls {
+      display: grid; grid-template-columns: minmax(0, 1fr) 44px;
+      align-items: start; gap: 0.3rem 6px;
+    }
+    .profile-field-reset-controls > :is(input, select, textarea) { grid-column: 1; grid-row: 1; }
+    .profile-field-reset-controls > .field-error { grid-column: 1 / -1; }
+    .profile-field-reset-controls > button {
+      grid-column: 2; grid-row: 1; width: 44px; height: 44px; min-height: 44px;
+      margin: 0; padding: 10px; color: var(--tx-soft); background: var(--bg-field);
+    }
+    .profile-field-reset-controls > button svg {
+      display: block; width: 20px; height: 20px; fill: none;
+      stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .randomness-field > .profile-field-reset { margin-bottom: 12px; }
+    @media (min-width: 701px) {
+      .profile-field-reset > label > .field-label .help-icon::after { right: 0; width: auto; }
+    }
     .group-members { min-width: 0; margin: 1.2rem 0; padding: 0; border: 0; }
     .group-members legend { color: var(--tx); font-weight: 600; }
     .group-device-list { max-height: 22rem; overflow-y: auto; margin-top: 0.65rem; }
@@ -656,7 +692,7 @@
       background: var(--sidebar-bg); border-right: 1px solid var(--line);
     }
     .sidebar-brand { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.6rem; }
-    .sidebar-brand h1 { margin: 0; font-size: 1.4rem; }
+    .sidebar-brand #brand-title { margin: 0; font-size: 1.4rem; font-weight: 700; letter-spacing: -0.04em; }
     .sidebar-brand .badge { display: inline-block; margin: 0; padding: 0.2rem 0.55rem; }
     .sidebar-nav ul { display: grid; gap: 0.2rem; margin: 0; padding: 0; list-style: none; }
     .sidebar-nav a {
@@ -763,42 +799,6 @@
       text-align: left;
       overflow-wrap: anywhere;
       box-shadow: 0 0.6rem 1.2rem rgba(0, 0, 0, 0.35);
-    }
-    /* A short window needs the room for the footer so that Panic and the router switch and the
-       copy buttons stay in view. The sidebar lists nine pages and on a laptop or a full HD screen
-       the list would push them below the fold. Up to 1000px of height the links share a compact
-       row of 24px (the smallest comfortable target) and the footer uses tighter gaps. Wider Linux
-       fonts wrap the mode badge and the status lines so the footer needs this margin there. */
-    @media (min-width: 48.01rem) and (max-height: 1000px) {
-      .sidebar { gap: 0.5rem; padding-block: 0.65rem; }
-      .sidebar-brand h1 { font-size: 1.2rem; }
-      .sidebar-brand .badge { padding: 0.2rem 0.45rem; font-size: 0.72rem; }
-      .sidebar-nav ul { gap: 0; }
-      .sidebar-nav a { min-height: 1.5rem; padding-block: 0.22rem; font-size: 0.88rem; line-height: 1.2; }
-      .sidebar-status { padding-block: 0.25rem; }
-      .sidebar-footer, .sidebar-operate, .sidebar-actions { gap: 0.35rem; }
-      .sidebar .router-wifi-control { padding-block: 0.25rem; }
-      .active-profile { gap: 0.2rem; }
-      .active-profile select { padding-block: 0.3rem; }
-      .sidebar .active-profile button { min-height: 2.2rem; padding-block: 0.3rem; }
-    }
-    /* The label wraps to two lines in the narrow sidebar. Both labels need the same room so the
-       buttons below do not jump when it changes. */
-    @media (min-width: 48.01rem) {
-      .sidebar .sidebar-actions #apply-button { min-height: 4.1rem; min-height: calc(2lh + 1.24rem + 2px); }
-    }
-    /* With the Active profile control the column is taller than a laptop window. Then the page
-       list gives up room first and scrolls inside itself (four and a half links stay in view so
-       the cut one shows that it scrolls) so that Panic
-       and the router switch and both copy buttons stay where they were. On a taller window
-       nothing scrolls. */
-    @media (min-width: 48.01rem) {
-      .sidebar-nav { min-height: 7rem; overflow-y: auto; }
-      .sidebar-nav a:focus-visible { outline-offset: -2px; }
-      .sidebar-nav[data-more-after] {
-        -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.25rem), transparent);
-        mask-image: linear-gradient(to bottom, #000 calc(100% - 1.25rem), transparent);
-      }
     }
     @media (max-width: 700px) {
       .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 1rem; width: calc(100vw - 2rem); }
@@ -954,5 +954,5 @@
     .update-badge {
       display: inline-flex; align-items: center; margin-left: 0.4rem; padding: 0.1rem 0.42rem;
       border: 1px solid var(--bd-info); border-radius: 999px; background: var(--bg-info);
-      color: var(--tx-info); font-size: 0.68rem; font-weight: 600;
+      color: var(--tx-info); font-size: 0.68rem; font-weight: 600; white-space: nowrap;
     }

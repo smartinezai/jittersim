@@ -28,6 +28,10 @@
     </p>
     <h3>Admin token</h3>
     <form id="admin-token-form" autocomplete="on">
+    <div id="admin-token-errors" class="form-error" tabindex="-1" aria-labelledby="admin-token-errors-title" hidden>
+      <p id="admin-token-errors-title">Token check failed</p>
+      <ul><li><a id="admin-token-error-link" href="#admin-token"></a></li></ul>
+    </div>
     <!-- A name next to the password lets the Mac Keychain and password managers keep the token. -->
     <input class="visually-hidden" type="text" name="username" value="dashboard" autocomplete="username" tabindex="-1" aria-hidden="true">
     <label>Admin token
@@ -58,6 +62,10 @@
     </details>
     <div id="router-credentials">
     <h3>Router password</h3>
+    <div id="router-password-errors" class="form-error" tabindex="-1" aria-labelledby="router-password-errors-title" hidden>
+      <p id="router-password-errors-title">Router password check failed</p>
+      <ul><li><a id="router-password-error-link" href="#router-admin-password"></a></li></ul>
+    </div>
     <label>Router admin password
       <input id="router-admin-password" type="password" autocomplete="off" placeholder="Password for 192.168.0.1" aria-describedby="credential-router-status">
     </label>
@@ -78,8 +86,12 @@
   <div class="app">
   <aside class="sidebar" id="brand-sidebar" aria-label="Network lab">
     <div class="sidebar-brand">
-      <h1 id="brand-title">Network lab</h1>
+      <p id="brand-title">Network lab</p>
       <span id="mode-badge" class="badge pending">Checking mode...</span>
+    </div>
+    <div class="sidebar-version">
+      <p id="sidebar-version" class="sidebar-version-text">Version unknown</p>
+      <a id="sidebar-update-link" class="sidebar-update-link" href="#updates" hidden></a>
     </div>
     <nav class="sidebar-nav" aria-label="Sections">
       <ul>
@@ -148,28 +160,28 @@
             <span id="router-wifi-toggle" class="router-wifi-value" data-unknown="true">Unknown</span>
           </div>
         </div>
+      </div>
+      <div class="control-utilities" role="group" aria-label="Network utilities">
+        <h2 class="utilities-heading">Network utilities</h2>
         <div class="router-wifi-copy">
           <button id="refresh-router-wifi" type="button">Check router Wi-Fi</button>
           <button id="sync-router-ap" class="primary" type="button" aria-describedby="router-action-message" disabled>Copy router Wi-Fi to Pi</button>
           <p id="router-action-message" class="router-wifi-status"></p>
           <button id="quick-reset-wifi-name" type="button" disabled>Reset Wi-Fi name</button>
         </div>
-      </div>
-      <div class="sidebar-version">
-        <p id="sidebar-version" class="sidebar-version-text">Version unknown</p>
-        <a id="sidebar-update-link" class="sidebar-update-link" href="#updates" hidden></a>
-      </div>
-      <div class="sidebar-credentials">
-        <button id="open-admin-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
-          <span>Admin token</span><span id="admin-credential-state" class="credential-state">Needed</span>
-        </button>
-        <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
-          <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
-        </button>
+        <div class="sidebar-credentials">
+          <button id="open-admin-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
+            <span>Admin token</span><span id="admin-credential-state" class="credential-state">Needed</span>
+          </button>
+          <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
+            <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
+          </button>
+        </div>
       </div>
     </div>
   </aside>
   <main class="content" id="content" tabindex="-1">
+    <h1 id="page-heading" class="page-heading">Sign in</h1>
   <section class="notice address-move" id="address-move-card" aria-label="New address for one of your devices" hidden>
     <p id="address-move-text" role="status"></p>
     <label>Which device was it?
@@ -285,6 +297,28 @@
       Refreshes every 5 seconds once the admin token is accepted.
     </p>
     <div id="connected-devices" class="connected-list">Enter the admin token and choose Check token to view connected devices.</div>
+  </section>
+  <section class="card" id="prepared-card" aria-labelledby="prepared-title">
+    <h2 id="prepared-title" tabindex="-1">Prepared device profiles</h2>
+    <p class="form-note">Save a profile choice for a Wi-Fi MAC address. Saving does not change the network. Use checks for that exact address on the Pi’s Wi-Fi. This does not establish physical identity or protect the device.</p>
+    <form id="prepared-form">
+      <div class="fields">
+        <label>Wi-Fi MAC address<input id="prepared-mac" required maxlength="17" autocomplete="off" spellcheck="false" pattern="(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}" placeholder="02:00:00:00:00:01"></label>
+        <label>Display name (optional)<input id="prepared-name" maxlength="80" autocomplete="off"></label>
+        <label>Saved profile<select id="prepared-profile" required><option value="">Choose a saved profile</option></select></label>
+      </div>
+      <div class="action-buttons"><button id="prepared-save" type="submit">Save choice</button><button id="prepared-cancel" type="button" hidden>Cancel edit</button></div>
+    </form>
+    <div class="action-buttons"><button id="prepared-refresh" type="button">Refresh prepared choices</button><button id="prepared-previous" type="button" disabled>Previous</button><button id="prepared-next" type="button" disabled>Next</button></div>
+    <p id="prepared-note" class="form-note">Check the admin token to view prepared choices.</p>
+    <div id="prepared-list" class="connected-list"></div>
+    <section id="prepared-review" aria-labelledby="prepared-review-title" hidden>
+      <h3 id="prepared-review-title" tabindex="-1">Review prepared profile</h3>
+      <p id="prepared-review-summary"></p>
+      <details><summary>Complete current profile settings</summary><pre id="prepared-settings"></pre></details>
+      <p class="form-note">Review has not checked the live device. Use verifies a fresh, reachable client with this exact MAC. Private or changed addresses are not matched.</p>
+      <button id="prepared-use" type="button">Use profile for this MAC</button>
+    </section>
   </section>
   <section class="card" data-collapse="open">
       <div class="section-heading"><h2>Saved devices</h2><p>Assigned test clients and their current conditions</p></div>
@@ -1253,6 +1287,7 @@
           <option value="@all">All assigned devices</option>
         </select>
       </label>
+      <button id="traffic-pause" type="button" aria-pressed="false" disabled>Pause sampling</button>
       <p id="traffic-status" class="traffic-status">Check the admin token to start live traffic sampling.</p>
     </div>
     <form id="traffic-rate-form" class="traffic-rate-form">
@@ -1279,7 +1314,8 @@
       </div>
     </div>
     <div class="traffic-chart-wrap">
-      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at the Pi with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
+      <p id="traffic-offscale" class="traffic-offscale" hidden></p>
+      <canvas id="traffic-chart" aria-describedby="traffic-latest-rates traffic-offscale" width="900" height="320" role="img" aria-label="Live upload and download rates at the Pi with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
       <div class="traffic-legend" role="group" aria-label="Graph legend">
         <button type="button" data-traffic-series="upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
         <button type="button" data-traffic-series="download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
@@ -1288,6 +1324,15 @@
         <button type="button" id="traffic-profile-upload-legend" data-traffic-series="profile_upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
         <button type="button" id="traffic-profile-download-legend" data-traffic-series="profile_download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
       </div>
+      <p id="traffic-latest-rates" class="traffic-chart-detail">Waiting for a measured traffic interval.</p>
+      <details class="traffic-samples">
+        <summary>Last 30 rate samples</summary>
+        <table>
+          <caption>Measured intervals at the Pi before its queues. Pausing keeps this snapshot. Resume starts a fresh graph.</caption>
+          <thead><tr><th scope="col">Interval</th><th scope="col">Upload</th><th scope="col">Download</th></tr></thead>
+          <tbody id="traffic-sample-rows"></tbody>
+        </table>
+      </details>
       <p id="traffic-chart-detail" class="traffic-chart-detail">Hover a line or focus its legend label to inspect it. Click or tap a label to keep it highlighted. Escape clears the highlight.</p>
     </div>
     <p id="traffic-profile-status" class="traffic-profile-status">Select one device to show its applied default queue limits.</p>
@@ -1307,6 +1352,7 @@
       </div>
     </div>
     <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits. Counts are DNS queries observed, not successful website requests. Protected devices never appear here. Optional ad blocking checks domain names without saving history. Block globally also blocks every name under a name (example.com also blocks www.example.com) while household access rules are on. On global block list and Unblock show exact saved entries, not whether a query or request was blocked.</p>
+    <p id="observation-scan-summary" class="observation-note">Saved results refresh automatically.</p>
     <div id="observations" class="observation-list">No observations yet.</div>
   </section>
     <section class="card analytics-card" data-collapse="closed">
@@ -1439,9 +1485,10 @@
                 <textarea id="website-allowlist" placeholder="example.com"></textarea>
               </label>
               <label>Global blocked domains (comma separated)
-                <textarea id="website-blocklist" placeholder="ads.example.com"></textarea>
+                <textarea id="website-blocklist" placeholder="ads.example.com" aria-describedby="website-blocklist-limit"></textarea>
               </label>
             </div>
+            <p id="website-blocklist-limit" class="policy-note">While impairment runs, the global block list blocks up to 4096 resolved addresses. With household access rules on, DNS still refuses every listed name. With those rules off, some listed sites may remain reachable above this limit.</p>
           </div>
         </div>
         <p class="policy-note">Website rules use resolved IPv4 destinations and are best effort. VPNs, encrypted DNS and direct IP connections can bypass them.</p>

@@ -9,8 +9,58 @@ import pytest
 
 from jittersim.api.server import DASHBOARD_HTML
 
-
 CASES = {
+    "manual_navigation_closes_utilities_and_keeps_unloaded_brand_neutral": """
+      showPage("devices", false);
+      assert.deepEqual(controlChanges, []);
+      assert.deepEqual(focusedPages, []);
+      showPage("profiles", true);
+      assert.deepEqual(controlChanges, [[false, false]]);
+      assert.deepEqual(focusedPages, ["profiles"]);
+      assert.equal(document.title, "Sign in");
+    """,
+    "main_heading_follows_navigation_and_authentication": """
+      applyBrand(false);
+      assert.equal(element("page-heading").textContent, "Sign in");
+      showPage("traffic", true);
+      assert.equal(element("page-heading").textContent, "Sign in");
+      adminTokenVerified = true;
+      request = async () => brand; await loadBrand();
+      assert.equal(element("page-heading").textContent, "Traffic");
+      for (const [id, label] of Object.entries(labels)) {
+        showPage(id, false);
+        assert.equal(element("page-heading").textContent, label);
+      }
+      window.location.hash = "#profiles"; followLocation();
+      assert.equal(element("page-heading").textContent, "Profiles");
+      showTab("setup");
+      assert.equal(element("page-heading").textContent, "Router and Wi-Fi");
+      adminTokenVerified = false; applyBrand(false);
+      assert.equal(element("page-heading").textContent, "Sign in");
+      showPage("diagnostics", true);
+      assert.equal(element("page-heading").textContent, "Sign in");
+      assert.deepEqual(historyWrites, [["replace", "#router"]]);
+    """,
+    "main_heading_ignores_late_brand_reply_after_logout": """
+      const pending = deferred(); request = () => pending.promise;
+      const loading = loadBrand();
+      adminTokenVerified = false; applyBrand(false);
+      showPage("updates", true);
+      pending.resolve(brand); await loading;
+      assert.equal(element("page-heading").textContent, "Sign in");
+      assert.equal(document.title, "Sign in");
+      assert.equal(brandInfo, null);
+    """,
+    "main_heading_has_neutral_fallback_and_uses_plain_text": """
+      request = async () => brand; await loadBrand();
+      document.body.dataset.section = "unknown";
+      updatePageTitle(true);
+      assert.equal(element("page-heading").textContent, "Sign in");
+      element("page-router").setAttribute("aria-label", "<b>Router</b>");
+      showPage("router", false);
+      assert.equal(element("page-heading").textContent, "<b>Router</b>");
+      assert.equal(element("page-heading").innerHTML, undefined);
+    """,
     "navigation_preserves_cleared_ssid_and_brand_state": """
       request = async () => brand; await loadBrand();
       showPage("router", true);
@@ -206,6 +256,9 @@ def test_brand_reply_ownership(case):
         replaceState(state,title,hash){historyWrites.push(["replace",hash]);window.location.hash=hash}
       }};
       const phoneLayout = {matches:false};
+      const controlChanges = [], focusedPages = [];
+      function setControlsOpen(open, moveFocus) { controlChanges.push([open, moveFocus]); }
+      function showPageStart(id) { focusedPages.push(id); scrolls.push(["page", id]); }
       function revealNavLink() {}
       const brand = {name:"JitterSim", command:"jittersim", default_ssid:"JitterSim"};
       let request;

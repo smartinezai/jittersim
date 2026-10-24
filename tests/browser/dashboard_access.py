@@ -64,6 +64,111 @@ def check_this_device_is_named(page, width):
         "This is the device you are using: its connection will be affected."])
 
 
+def check_token_form_errors(page):
+    """Keep failures actionable without losing credentials or background focus."""
+
+    token = page.locator("#admin-token")
+    summary = page.locator("#admin-token-errors")
+    link = page.locator("#admin-token-error-link")
+    status = page.locator("#token-check-status")
+    remember = page.locator("#remember-admin-token")
+    duration = page.locator("#remember-admin-duration")
+    check = page.locator("#check-admin-token")
+
+    def kept():
+        expect(token).to_have_value("wrong-token")
+        expect(remember).to_be_checked()
+        expect(duration).to_have_value("168")
+        expect(page.locator("#allow-dashboard-device")).to_be_disabled()
+
+    def failure(message, invalid):
+        expect(summary).to_be_visible()
+        expect(status).to_contain_text(message)
+        expect(link).to_have_text(status.inner_text())
+        expect(token).to_have_attribute("aria-describedby", "token-check-status")
+        if invalid:
+            expect(token).to_have_attribute("aria-invalid", "true")
+        else:
+            expect(token).not_to_have_attribute("aria-invalid", "true")
+        expect(check).to_be_enabled()
+        kept()
+
+    token.fill("wrong-token")
+    remember.check()
+    duration.select_option("168")
+    with page.expect_response(lambda response:
+                              urlsplit(response.url).path == "/api/dashboard-access/status") as reply:
+        check.click()
+    assert reply.value.status == 401
+    failure("failed", True)
+    expect(summary).to_be_focused()
+    expect(link).to_have_attribute("href", "#admin-token")
+    link.click()
+    expect(token).to_be_focused()
+
+    access_route = "**/api/dashboard-access/status"
+    for code, body, message in (
+        (503, {"error": "Fixture service unavailable"}, "Fixture service unavailable"),
+        (409, {"error": "Fixture helper busy", "code": "helper-busy"},
+         "Device verification is busy"),
+    ):
+        def reject(route):
+            route.fulfill(status=code, content_type="application/json", body=json.dumps(body))
+
+        page.route(access_route, reject)
+        try:
+            check.click()
+            failure(message, False)
+            expect(summary).to_be_focused()
+        finally:
+            page.unroute(access_route, reject)
+
+    # Hold health probes until the offline assertions finish. Releasing them exercises the
+    # actual automatic token retry while focus belongs to a control outside the token form.
+    outage = {"offline": True}
+
+    def interrupted_access(route):
+        if outage["offline"]:
+            route.abort("connectionfailed")
+        else:
+            route.fulfill(status=503, content_type="application/json",
+                          body='{"error":"Fixture automatic retry unavailable"}')
+
+    def interrupted_health(route):
+        route.abort("connectionfailed")
+
+    page.route(access_route, interrupted_access)
+    page.route("**/api/health", interrupted_health)
+    try:
+        check.click()
+        failure("Your token is kept and checked again", False)
+        expect(summary).to_be_focused()
+        elsewhere = page.locator("#close-credentials")
+        elsewhere.focus()
+        outage["offline"] = False
+        page.unroute("**/api/health", interrupted_health)
+        failure("Fixture automatic retry unavailable", False)
+        expect(elsewhere).to_be_focused()
+    finally:
+        page.unroute(access_route, interrupted_access)
+        page.unroute("**/api/health", interrupted_health)
+
+    # Restore the original journey choice before phone acceptance closes Credentials.
+    remember.uncheck()
+    duration.select_option("24")
+    token.fill("browser-test")
+    expect(summary).to_be_hidden()
+    expect(token).not_to_have_attribute("aria-invalid", "true")
+    expect(link).to_be_empty()
+    check.click()
+    expect(status).to_contain_text("Allow this device")
+    expect(summary).to_be_hidden()
+    expect(token).not_to_have_attribute("aria-invalid", "true")
+    expect(token).to_have_value("browser-test")
+    expect(remember).not_to_be_checked()
+    expect(duration).to_have_value("24")
+
+
 def run():
     environment = {**os.environ, "JITTERSIM_BROWSER_TEST_WIFI_PEER": "1"}
     process = subprocess.Popen([sys.executable, "-m", "tests.browser.fixture"],
@@ -99,20 +204,18 @@ def run():
                     expect(page.locator("#private-dashboard")).to_be_hidden()
                     expect(page.locator("#open-router-credentials")).to_be_hidden()
                     page.locator("#open-admin-credentials").click()
-                    page.locator("#admin-token").fill("wrong-token")
-                    page.locator("#check-admin-token").click()
-                    expect(page.locator("#token-check-status")).to_contain_text("failed")
-                    expect(page.locator("#allow-dashboard-device")).to_be_disabled()
-                    page.locator("#admin-token").fill("browser-test")
-                    page.locator("#check-admin-token").click()
-                    expect(page.locator("#token-check-status")).to_contain_text("Allow this device")
+                    check_token_form_errors(page)
                     # The status line is silent, so the toast says it and the working message is gone.
                     expect(page.locator("#toast-message")).to_have_text("Token accepted. Choose Allow this device.")
                     expect(page.locator("#allow-dashboard-device")).to_be_enabled()
                     expect(page.locator("#private-dashboard")).to_be_hidden()
                     assert not any(url.endswith("/api/devices") for url in requested)
                     assert not any("/api/updates" in url or "/api/update-preferences" in url for url in requested)
-                    page.locator("#close-credentials").click()
+                    if width <= 768:
+                        expect(page.locator("#credentials-panel")).to_be_hidden()
+                        expect(page.locator("#allow-dashboard-device")).to_be_focused()
+                    else:
+                        page.locator("#close-credentials").click()
                     page.route("**/api/dashboard-access/register-self", lambda route: route.fulfill(
                         status=503, content_type="application/json", body='{"error":"Cannot save fixture access"}'))
                     page.locator("#allow-dashboard-device").click()

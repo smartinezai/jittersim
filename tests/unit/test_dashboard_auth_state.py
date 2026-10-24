@@ -23,7 +23,7 @@ def run_token_case(checks):
     functions = block("const privateDataPanelIds =", "function setDashboardUnlocked(")
     functions += block("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
     functions += block("function clearAdminToolsUi()", "async function loadRandomWebsiteAnalytics(")
-    functions += block("async function checkAdminToken()", "async function refresh(")
+    functions += block("async function checkAdminToken(", "async function refresh(")
     listener = block(
         'element("admin-token").addEventListener("input",',
         'element("traffic-device").addEventListener("change",',
@@ -36,6 +36,7 @@ def run_token_case(checks):
       let randomWebsiteAnalyticsRequestVersion = 0;
       let adminTokenVerified = false;
       let adminTokenRevision = 0;
+      let preparedLoaded = false, preparedBusy = false;
       let messageSerial = 0;  // showMessage is stubbed here so nothing else ever speaks
       let adminTokenChecking = false;
       let adminTokenRejected = false;
@@ -75,6 +76,7 @@ def run_token_case(checks):
       }
       async function loadTrafficSettings() {}
       async function startTrafficSampling() {}
+      async function loadPreparedChoices() {preparedLoaded = true;}
     """
     result = subprocess.run(
         [node, "-"],

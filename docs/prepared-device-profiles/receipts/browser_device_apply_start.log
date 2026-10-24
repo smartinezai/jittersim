@@ -1,0 +1,5 @@
+$ /Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/prepared-profiles-worktree/.venv-local-ci-3.12/bin/python -m tests.browser.device_apply_start
+# started 2026-10-24 21:21:10 +0200
+dashboard response status=404
+Device apply-and-start acceptance passed at desktop and phone widths.
+# finished with status 0 after 2.4 seconds

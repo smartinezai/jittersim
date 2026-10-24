@@ -1,0 +1,64 @@
+{
+  "frozen_source_commit": "df1816dd5926015a6f01c597dfe69515e21b25d2",
+  "source_tree": "6c5e5a6589fe272c5a39950174c5eff7ff41bbad",
+  "assembled_page_sha256": "7265984cf2176a5c11f86e7e1bd50fef64f604a40e84241d92d0429d51960ce1",
+  "inputs": [
+    "63c1d84e357ee175b83b7617f0e45ca2571f6786",
+    "066d011b564ffcdd3c7e6f29797d9b463884d882"
+  ],
+  "measured": {
+    "page_bytes": 889865,
+    "page_gzip6_bytes": 193768,
+    "page_lines": 17548,
+    "markup_bytes": 114435,
+    "markup_lines": 1528,
+    "css_bytes": 104882,
+    "css_gzip6_bytes": 21403,
+    "css_lines": 1658,
+    "js_bytes": 670500,
+    "js_lines": 14365,
+    "element_ids": 571,
+    "distinct_colors": 148,
+    "color_occurrences": 178,
+    "distinct_font_sizes": 28,
+    "distinct_margin_values": 33,
+    "distinct_padding_values": 70,
+    "distinct_gap_values": 32,
+    "distinct_z_indexes": 8,
+    "distinct_border_radii": 21,
+    "distinct_media_queries": 15,
+    "important_declarations": 13,
+    "root_rules": 5,
+    "aria_live_in_markup": 0,
+    "aria_live_flip_sites": 0,
+    "inline_event_handler_attributes": 0,
+    "inline_style_attributes": 0,
+    "window_confirm_calls": 0
+  },
+  "metadata_correction": {
+    "recorded.js_bytes": {
+      "before": 655740,
+      "after": 670500,
+      "authority": "Main coordinator explicit owner-policy confirmation, 24 October 2026"
+    }
+  },
+  "strict_fields": [
+    "aria_live_flip_sites",
+    "aria_live_in_markup",
+    "important_declarations",
+    "inline_event_handler_attributes",
+    "inline_style_attributes",
+    "root_rules",
+    "window_confirm_calls"
+  ],
+  "strict_values": {
+    "aria_live_flip_sites": 0,
+    "aria_live_in_markup": 0,
+    "important_declarations": 13,
+    "inline_event_handler_attributes": 0,
+    "inline_style_attributes": 0,
+    "root_rules": 5,
+    "window_confirm_calls": 0
+  },
+  "tolerance_percent": 2
+}

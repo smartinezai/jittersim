@@ -1,0 +1,30 @@
+[
+  {
+    "file": "dialog-and-help-check.txt",
+    "sha256": "70ae0265516c4243e2446332e9ef057c4ad415448aee22d91aa053ed49e55c1f",
+    "origin": "task-12/mobile-review-evidence/diagnostic-corrected.log",
+    "source_commit": "bb98e4d767974e70e03da9011b52d56e206aa38b",
+    "data": "Synthetic local fixture; no reset/delete accepted"
+  },
+  {
+    "file": "dialog-delete-375.png",
+    "sha256": "1fd0501b7e52ef322951a1f287eae5eaf8e5def5bee925faf63b3a2d2daf02a8",
+    "origin": "task-12/mobile-review-evidence/dialog-delete-375.png",
+    "source_commit": "bb98e4d767974e70e03da9011b52d56e206aa38b",
+    "data": "Synthetic local fixture; no reset/delete accepted"
+  },
+  {
+    "file": "dialog-reset-320-top.png",
+    "sha256": "67eba13bf3ec228573f2233466b913ce80eb2ef5af7b7f920ffa2f15e7ecaf66",
+    "origin": "task-12/mobile-review-evidence/dialog-reset-320-top.png",
+    "source_commit": "bb98e4d767974e70e03da9011b52d56e206aa38b",
+    "data": "Synthetic local fixture; no reset/delete accepted"
+  },
+  {
+    "file": "long-dialog-scroll.txt",
+    "sha256": "f853379e05346fca69b2904ae5dc141f984873622ff7449a370883533dc00502",
+    "origin": "task-12/mobile-review-evidence/dialog-scroll.log",
+    "source_commit": "bb98e4d767974e70e03da9011b52d56e206aa38b",
+    "data": "Synthetic local fixture; no reset/delete accepted"
+  }
+]

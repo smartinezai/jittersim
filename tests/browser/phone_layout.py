@@ -1,4 +1,4 @@
-"""Use the dashboard on phone-sized windows and check that laptop windows keep the sidebar.
+"""Use the dashboard on phone-sized windows and verify the full-width desktop shell.
 
 On a phone the sidebar is a short header (the name, the mode, one row of page links and one line
 of status). Panic and the router Wi-Fi status sit in a bar pinned to the bottom of the window and
@@ -16,7 +16,14 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
-from tests.browser.phone import assert_router_status_is_read_only, close_controls, open_controls, open_status, sidebar_control
+from tests.browser.landscape_safety import check_landscape_safety
+from tests.browser.phone import (
+    assert_router_status_is_read_only,
+    close_controls,
+    open_controls,
+    open_status,
+    sidebar_control,
+)
 
 PHONES = ((390, 844), (360, 640), (320, 568))
 DESKTOPS = ((1280, 800), (1920, 1000))
@@ -41,13 +48,14 @@ SHEET_CONTROLS = (
 )
 
 
-def start_fixture():
+def start_fixture(wifi_peer=False):
     # a scheduler like a real install so that the general profile shows as active
     process = subprocess.Popen(
         [sys.executable, "-m", "tests.browser.fixture"],
         stdout=subprocess.PIPE,
         text=True,
-        env={**os.environ, "JITTERSIM_BROWSER_TEST_SCHEDULER": "1"},
+        env={**os.environ, "JITTERSIM_BROWSER_TEST_SCHEDULER": "1",
+             "JITTERSIM_BROWSER_TEST_WIFI_PEER": "1" if wifi_peer else "0"},
     )
     with selectors.DefaultSelector() as selector:
         selector.register(process.stdout, selectors.EVENT_READ)
@@ -201,6 +209,56 @@ def sign_in(page, base):
     expect(page.locator("#message")).to_contain_text("Token accepted. Diagnostics loaded.")
 
 
+def check_phone_enrolment(browser):
+    """An accepted token leaves the next Allow action reachable on an unregistered phone."""
+
+    for stress, css in STRESSES:
+        for width, height in PHONES:
+            # Each case starts without a saved grant. The ordinary layout fixture uses the
+            # management network and signs in without the separate Allow step.
+            process, port = start_fixture(wifi_peer=True)
+            context = browser.new_context(viewport={"width": width, "height": height})
+            try:
+                page = context.new_page()
+                errors = []
+                page.on("pageerror", lambda error: errors.append(str(error)))
+                page.goto(f"http://127.0.0.1:{port}")
+                set_font_stress(page, css)
+                what = f"enrolment {width}x{height} {stress}"
+                expect(page.locator("#private-dashboard")).to_be_hidden()
+                page.locator("#open-admin-credentials").click()
+                expect(page.locator("#credentials-panel")).to_be_visible()
+                page.locator("#admin-token").fill("browser-test")
+                page.locator("#check-admin-token").click()
+                expect(page.locator("#token-check-status")).to_contain_text("Allow this device")
+                expect(page.locator("#private-dashboard")).to_be_hidden()
+                allow = page.locator("#allow-dashboard-device")
+                expect(allow).to_be_enabled()
+                # Do not close Credentials, force the click or hide any covering element.
+                # Scrolling may bring the target into view but cannot dismiss a fixed sheet.
+                allow.scroll_into_view_if_needed()
+                inside_window(page, "#allow-dashboard-device", what)
+                assert allow.evaluate("""node => {
+                    const box = node.getBoundingClientRect();
+                    const hit = document.elementFromPoint(
+                        box.left + box.width / 2, box.top + box.height / 2);
+                    return hit === node || node.contains(hit);
+                }"""), (what, "Allow this device is covered after token acceptance")
+                allow.click(trial=True, timeout=2000)
+                with page.expect_response(lambda response:
+                        response.url.endswith("/api/dashboard-access/register-self") and
+                        response.request.method == "POST") as registration:
+                    allow.click()
+                assert registration.value.ok, (what, registration.value.status)
+                expect(page.locator("#private-dashboard")).to_be_visible()
+                assert not errors, (what, errors)
+                print(f"{what}: Allow receives the click and dashboard access is granted")
+            finally:
+                context.close()
+                process.terminate()
+                process.wait(timeout=10)
+
+
 def check_first_screen(page, what):
     """Page content starts on the first screen and the bar with Panic is in view."""
 
@@ -315,7 +373,7 @@ def check_sheet(page, what):
     expect(page.locator("#apply-button")).to_be_hidden()
     # A tap outside the sheet closes it too.
     open_controls(page)
-    page.locator(".sidebar-brand h1").click()
+    page.locator("#brand-title").click()
     expect(toggle).to_have_attribute("aria-expanded", "false")
 
 
@@ -402,36 +460,58 @@ def check_phone(page, base, width, height, stress, css, first):
 
 
 def check_desktop(page, width, height):
-    """A laptop or desktop window keeps the sidebar with nothing of the phone layout."""
+    """The full-width header leaves navigation visible and reserves a separate safety bar."""
 
     page.set_viewport_size({"width": width, "height": height})
+    close_controls(page)
     page.locator('[data-page-link="devices"]').click()
-    page.evaluate("document.querySelector('.sidebar').scrollTo(0, 0)")
-    for selector in ("#controls-toggle", "#status-strip"):
-        expect(page.locator(selector)).to_be_hidden()
-    pinned = page.evaluate(
-        """() => Array.from(document.querySelectorAll('body *'))
-            .filter((node) => ['fixed', 'sticky'].includes(getComputedStyle(node).position))
-            .filter((node) => !node.closest('#toast, #credentials-panel'))
-            .filter((node) => !node.hidden && node.getClientRects().length)
-            .map((node) => node.className || node.id || node.tagName)"""
-    )
-    assert pinned == ["sidebar"], pinned
-    sidebar = box(page, ".sidebar")
-    assert sidebar["x"] == 0 and sidebar["width"] < 300, sidebar
-    for selector in ("#active-profile-select", "#apply-button", "#reset-button", "#apply-summary"):
+    page.evaluate("window.scrollTo(0, 0)")
+    header = box(page, ".sidebar")
+    assert abs(header["x"]) <= 0.5 and abs(header["width"] - width) <= 1, header
+    for name in PAGES:
+        link = page.locator(f'[data-page-link="{name}"]')
+        expect(link).to_be_in_viewport(ratio=1)
+        assert link.get_attribute("href") == "#" + name
+    for selector in (
+        "#active-profile-select", "#active-profile-button", "#apply-button", "#reset-button",
+    ):
         expect(page.locator(selector)).to_be_visible()
-    order = [box(page, selector)["y"] for selector in
-             ("#active-profile-select", "#active-profile-button", "#apply-button", "#reset-button",
-              "#panic-button", "#router-wifi-toggle", "#sync-router-ap")]
-    assert order == sorted(order), order
-    # The whole status, Panic and copy button on a laptop screen, not a sliver of them.
-    for selector in ("#router-wifi-toggle", "#panic-button", "#sync-router-ap"):
-        expect(page.locator(selector)).to_be_in_viewport(ratio=1)
-    scrolled = page.evaluate("document.querySelector('.sidebar').scrollTop")
-    assert scrolled == 0, scrolled
+    no_sideways_overflow(page, f"{width}x{height} desktop header")
+
+    # The secondary surface starts closed and keeps focus and emergency actions available.
+    expect(page.locator("#controls-toggle")).to_be_visible()
+    expect(page.locator(".control-utilities")).to_be_hidden()
+    open_controls(page)
+    assert page.evaluate("""() => {
+        const active = document.activeElement;
+        return !!active && !active.disabled && !!active.closest('.control-utilities');
+    }""")
+    for selector in (
+        "#open-admin-credentials", "#open-router-credentials", "#quick-reset-wifi-name",
+    ):
+        page.locator(selector).scroll_into_view_if_needed()
+        clear_of_the_bar(page, selector, f"{width}x{height} utilities")
+    inside_window(page, "#panic-button", f"{width}x{height} utilities")
+    page.keyboard.press("Escape")
+    expect(page.locator("#controls-toggle")).to_be_focused()
+    expect(page.locator(".control-utilities")).to_be_hidden()
+    open_controls(page)
+    page.locator("#brand-title").click()
+    expect(page.locator("#controls-toggle")).to_have_attribute("aria-expanded", "false")
+    expect(page.locator(".control-utilities")).to_be_hidden()
+
+    page.locator('[data-page-link="schedules"]').click()
+    expect(page.locator("#page-schedules")).to_be_focused()
+    page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+    for selector in ("#router-wifi-toggle", "#panic-button", "#controls-toggle"):
+        inside_window(page, selector, f"{width}x{height} longest page")
+    assert_router_status_is_read_only(page)
+    no_sideways_overflow(page, f"{width}x{height} longest page")
+    page.locator('[data-page-link="devices"]').click()
+    page.evaluate("window.scrollTo(0, 0)")
     page.screenshot(path=f"test-results/phone-layout-desktop-{width}x{height}.png")
-    print(f"{width}x{height}: switch {measure(page)['switch']} panic {measure(page)['panic']}")
+    measured = measure(page)
+    print(f"{width}x{height}: header {header}, status {measured['switch']} panic {measured['panic']}")
 
 
 def run():
@@ -444,6 +524,7 @@ def run():
                 executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE")
             )
             try:
+                check_phone_enrolment(browser)
                 context = browser.new_context(viewport={"width": 390, "height": 844})
                 page = context.new_page()
                 errors = []
@@ -460,12 +541,16 @@ def run():
                 assert page.evaluate("scrollBehavior()") == "auto"
                 page.emulate_media(reduced_motion="no-preference")
                 assert page.evaluate("scrollBehavior()") == "smooth"
-                for width, height in DESKTOPS:
-                    check_desktop(page, width, height)
+                for _, css in STRESSES:
+                    set_font_stress(page, css)
+                    for width, height in DESKTOPS:
+                        check_desktop(page, width, height)
+                set_font_stress(page, "")
                 assert not errors, errors
                 context.close()
+                check_landscape_safety(browser, base)
                 print("Phone layout acceptance passed at 390x844, 360x640 and 320x568"
-                      " with desktop windows unchanged.")
+                      " and the full-width desktop shell, including wide fonts.")
             finally:
                 browser.close()
     finally:

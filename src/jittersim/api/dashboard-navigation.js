@@ -15,9 +15,9 @@
       return fallback !== "closed";
     }
 
-    // The phone layout of phone.css: a short header, a bar pinned to the bottom of the window
+    // The compact layout of phone.css: a short header, a bar pinned to the bottom of the window
     // with Panic and the router Wi-Fi switch and the rest of the sidebar footer in a sheet.
-    const phoneLayout = window.matchMedia("(max-width: 48rem)");
+    const phoneLayout = window.matchMedia("(max-width: 48rem), (max-height: 36rem)");
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
     // A smooth scroll only when the reader has not asked for less motion.
@@ -42,8 +42,10 @@
         window.scrollTo(0, 0);
         return;
       }
+      const heading = document.getElementById("page-heading");
+      const anchor = !phoneLayout.matches && heading ? heading : section;
       window.scrollTo({
-        top: pageStartTop(section.getBoundingClientRect().top, window.scrollY, 8), behavior: "auto"
+        top: pageStartTop(anchor.getBoundingClientRect().top, window.scrollY, 8), behavior: "auto"
       });
       section.focus({ preventScroll: true });
     }
@@ -51,9 +53,7 @@
     function syncNavHint() {
       const nav = document.querySelector(".sidebar-nav");
       const row = nav.querySelector("ul");
-      const more = phoneLayout.matches
-        ? moreToShow(row.scrollLeft, row.clientWidth, row.scrollWidth)
-        : moreToShow(nav.scrollTop, nav.clientHeight, nav.scrollHeight);
+      const more = moreToShow(row.scrollLeft, row.clientWidth, row.scrollWidth);
       nav.toggleAttribute("data-more-before", more.before);
       nav.toggleAttribute("data-more-after", more.after);
     }
@@ -91,11 +91,12 @@
     function setControlsOpen(open, moveFocus) {
       const wasOpen = controlsOpen();
       sidebar.classList.toggle("controls-open", open);
-      document.body.classList.toggle("phone-controls-open", phoneLayout.matches && open);
+      document.body.classList.toggle("phone-controls-open", open);
       controlsToggle.setAttribute("aria-expanded", String(open));
       if (!moveFocus) return;
       if (open) {
-        const first = Array.from(controlsSheet.querySelectorAll("select, button"))
+        const focusRoot = phoneLayout.matches ? controlsSheet : document.querySelector(".control-utilities");
+        const first = Array.from(focusRoot.querySelectorAll("select, button"))
           .find((node) => !node.disabled && !node.closest(".safety-bar") && node.getClientRects().length);
         if (first) first.focus({ preventScroll: true });
       } else if (wasOpen) {
@@ -146,13 +147,9 @@
       document.body.dataset.section = id;
       if (typeof updatePageTitle === "function") updatePageTitle(adminTokenVerified);
       if (userInitiated) {
-        // On a phone the header stays above the page so the page start is shown and focused.
-        if (phoneLayout.matches) {
-          setControlsOpen(false, false);
-          showPageStart(id);
-        } else {
-          window.scrollTo(0, 0);
-        }
+        // The full-width navigation hands focus to the selected page at every size.
+        setControlsOpen(false, false);
+        showPageStart(id);
       }
       revealNavLink(id);
       // A chart drawn while its page was hidden has no size, so draw it again.
@@ -264,9 +261,19 @@
     document.addEventListener("focusin", (event) => {
       if (controlsOpen() && !keepsControlsOpen(event.target)) setControlsOpen(false, false);
     });
+    // A resize can hide the focused footer control. Keep the keyboard on its sheet toggle.
+    document.addEventListener("focusout", (event) => {
+      if (phoneLayout.matches && !event.relatedTarget && controlsSheet.contains(event.target) &&
+          !event.target.getClientRects().length && !controlsToggle.disabled &&
+          controlsToggle.getClientRects().length) controlsToggle.focus({ preventScroll: true });
+    });
     const leavePhoneLayout = () => {
       if (!phoneLayout.matches) {
+        const focused = document.activeElement;
         setControlsOpen(false, false);
+        if (focused && controlsSheet.contains(focused) && !focused.getClientRects().length) {
+          controlsToggle.focus({ preventScroll: true });
+        }
         setStatusOpen(false);
       }
       revealNavLink(document.body.dataset.section);

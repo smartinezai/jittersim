@@ -152,6 +152,111 @@ def api_calls(requests, path):
     return [item for item in requests if item["url"].endswith(path)]
 
 
+def check_router_form_errors(page, requests):
+    """Associate local check failures with the password without losing the person's input."""
+
+    sidebar_control(page, "#open-router-credentials").click()
+    password = page.locator("#router-admin-password")
+    remember = page.locator("#remember-router-password")
+    check = page.locator("#check-router-password")
+    summary = page.locator("#router-password-errors")
+    link = page.locator("#router-password-error-link")
+    status = page.locator("#credential-router-status")
+    remember.check()
+
+    def clean():
+        expect(summary).to_be_hidden()
+        expect(link).to_be_empty()
+        expect(password).not_to_have_attribute("aria-invalid", "true")
+
+    def failure(message, invalid, value):
+        expect(summary).to_be_visible()
+        expect(status).to_contain_text(message)
+        expect(link).to_have_text(status.inner_text())
+        expect(link).to_have_attribute("href", "#router-admin-password")
+        expect(password).to_have_attribute("aria-describedby", "credential-router-status")
+        if invalid:
+            expect(password).to_have_attribute("aria-invalid", "true")
+        else:
+            expect(password).not_to_have_attribute("aria-invalid", "true")
+        expect(password).to_have_value(value)
+        expect(remember).to_be_checked()
+        expect(check).to_be_enabled()
+        expect(summary).to_be_focused()
+        link.click()
+        expect(password).to_be_focused()
+
+    before = len(api_calls(requests, CHECK_PATH))
+    check.click()
+    failure("Enter the router admin password first", True, "")
+    assert len(api_calls(requests, CHECK_PATH)) == before
+    password.fill("fixture-rejected-password")
+    clean()
+    route_path = "**" + CHECK_PATH
+    for code, message, invalid in (
+        (502, "Router login failed. Check the router admin password.", True),
+        (502, "Could not contact the router", False),
+        (503, "Fixture router service unavailable", False),
+    ):
+        def reject(route):
+            route.fulfill(status=code, json={"error": message})
+
+        page.route(route_path, reject)
+        try:
+            check.click()
+            failure(message, invalid, "fixture-rejected-password")
+            if invalid:
+                before = len(api_calls(requests, CHECK_PATH))
+                check.click()
+                failure("Change it before trying again", True, "fixture-rejected-password")
+                assert len(api_calls(requests, CHECK_PATH)) == before
+                password.fill("fixture-edited-password")
+                clean()
+                password.fill("fixture-rejected-password")
+        finally:
+            page.unroute(route_path, reject)
+
+    # Hold the next permitted reply to observe cleanup before a successful check finishes.
+    held = []
+
+    def hold(route):
+        held.append(route)
+
+    page.route(route_path, hold)
+    try:
+        check.click()
+        expect(check).to_be_disabled()
+        clean()
+        for _ in range(100):
+            if held:
+                break
+            page.wait_for_timeout(50)
+        assert len(held) == 1
+        held[0].fulfill(json={"result": {"ok": True}})
+        expect(status).to_contain_text("Router password accepted")
+        expect(check).to_be_enabled()
+        clean()
+        expect(password).to_have_value("fixture-rejected-password")
+        expect(remember).to_be_checked()
+    finally:
+        page.unroute(route_path, hold)
+
+    # Restore the original journey's empty, unremembered password before its real fixture check.
+    page.locator("#clear-router-password").click()
+    clean()
+    expect(password).to_have_value("")
+    expect(password).to_be_focused()
+    expect(remember).to_be_checked()
+    check.click()
+    failure("Enter the router admin password first", True, "")
+    page.locator("#clear-router-password").click()
+    clean()
+    expect(password).to_be_focused()
+    expect(remember).to_be_checked()
+    remember.uncheck()
+    page.locator("#close-credentials").click()
+
+
 def check_again_is_refused_with_a_wait(page, requests, responses):
     """A second Check password right after the first is answered with a wait by the Pi."""
 
@@ -252,6 +357,7 @@ def run_width(browser, base, width, height):
     assert api_calls(requests, PREVIEW_PATH) == []
     page.locator("#close-credentials").click()
 
+    check_router_form_errors(page, requests)
     enter_router_password(page)
     check_again_is_refused_with_a_wait(page, requests, responses)
     expect(button).to_be_enabled()

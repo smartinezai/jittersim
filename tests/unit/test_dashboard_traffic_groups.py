@@ -673,13 +673,16 @@ class FakeElement {
   get childNodes() { return this.children; }
 }
 const document = { createElement: (tag) => new FakeElement(tag) };
-const elements = { observations: new FakeElement("div"), "observation-count": new FakeElement("span") };
+const elements = { observations: new FakeElement("div"), "observation-count": new FakeElement("span"),
+  "observation-scan-summary": new FakeElement("p") };
 function element(id) { return elements[id]; }
 let profiles = [];
 let observedDomainsByDevice = {};
 let observedNames = new Set();
 const openObservationGroups = new Set();
 const collapsedObservationDevices = new Set();
+let observationListKeys = null;
+let latestObservationScan = null;
 const observationProfileChoice = new Map();
 const calls = [];
 const confirmations = [];

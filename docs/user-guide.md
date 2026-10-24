@@ -18,11 +18,12 @@ Stable versions use tested signed packages with owner approval. See the
 ## See it in action
 
 <div align="center">
-  <img src="../docs/screenshots/experience-overview-desktop.png" alt="The Devices page with the sidebar controls Start, Reset network, Panic and Reset Wi-Fi name, and the Everyone and Address changes cards" width="68%" />
-  <img src="../docs/screenshots/experience-overview-phone.png" alt="The Devices page on a phone-sized screen: the status line, the Everyone and Address changes cards and a bar with Panic, the router Wi-Fi status and Controls" width="27%" />
+  <img src="dashboard-operate-redesign/screenshots/desktop-devices.png" alt="The desktop Devices page with full-width page links, Active profile, Start and Reset network below the header, and a persistent bottom bar with Panic, router Wi-Fi status and Controls" width="68%" />
+  <img src="dashboard-operate-redesign/screenshots/phone-devices.png" alt="The phone Devices page with a sideways-scrolling row of page links, an expandable status line and a persistent bottom bar with Panic, read-only router Wi-Fi status and Controls" width="27%" />
 </div>
 
-*Screenshots use sample data. No real phone, Pi or home network is shown.*
+*Screenshots use synthetic sample data. No real phone, Pi or home network is shown;
+they are not evidence of physical network behavior.*
 
 The dashboard lets you choose a test profile for a device, start a timer,
 then see which profile is active. Press **Normal access** to stop profiles,
@@ -64,8 +65,9 @@ Choose the install button, which names the staged release (for example
 and stays off while nothing can be installed. The confirmation names the signer.
 The previous installation and its settings are backed up first. If the Pi's
 health check fails after installation, it tries to restore that backup by
-itself, and **Restore previous installation** goes back on purpose. The sidebar
-shows **Update available** while a release is staged.
+itself, and **Restore previous installation** goes back on purpose. The header
+shows the installed version and an update link naming the staged release; the
+**Updates** page link shows **Update available** while a release is staged.
 
 Under **Settings** on the same page, **Check automatically every day** and
 **Install automatically** are both off until you turn them on. Turning on
@@ -143,10 +145,10 @@ applying access rules, so run `sudo jittersim access apply` after changing it
 Run `sudo jittersim --help` for the command list. More examples are in the
 [Pi installation and recovery guide](../deploy/raspberry-pi/README.md).
 
-<img src="../docs/screenshots/reset-wifi-name-button.png" alt="The sidebar buttons Check router Wi-Fi, Copy router Wi-Fi to Pi and Reset Wi-Fi name" width="40%" />
+<img src="dashboard-operate-redesign/screenshots/desktop-utilities.png" alt="The desktop Controls panel with Check router Wi-Fi, Copy router Wi-Fi to Pi, Reset Wi-Fi name, Admin token and Router password above the persistent safety bar" width="100%" />
 
-Use **Reset Wi-Fi name** in the sidebar (on a phone, in the Controls sheet) or on Router and
-Wi-Fi, or run `sudo jittersim wifi reset` on the Pi.
+Open **Controls** and choose **Reset Wi-Fi name**, use the action on **Router and
+Wi-Fi**, or run `sudo jittersim wifi reset` on the Pi.
 It restores the default name `TestNet` and keeps the current password. Confirming the reset
 restarts test Wi-Fi, so every device on it, and the one showing the dashboard if it is on that
 Wi-Fi, loses its connection for a short time. The page says which network to join again and shows when the Pi
@@ -409,29 +411,33 @@ bytes.
 
 ### Pi and router controls
 
-The left sidebar, visible on every page, shows **Router Wi-Fi · read only**.
-On a phone it sits in the bar at the bottom of the screen next to **Panic**.
-It shows the router's confirmed On or Off state and the last check time. The
-switch is always disabled. JitterSim does not turn the router's Wi-Fi on or
-off. The Pi's helper refuses router Wi-Fi changes before it contacts the
-router. Use the router's own button or settings page for that.
-Enter the router admin password then choose **Check router Wi-Fi** for a
-fresh status. Remembering the password or opening the page does not start
-automatic router checks. The Pi spaces router sign-ins apart: after a right
+The dashboard uses the full window width, with page links across the top. On
+a desktop, **Active profile**, **Start** and **Reset network** sit in a compact
+row below the page links. **Panic**, the read-only **Router Wi-Fi** status and
+**Controls** stay in a bar at the bottom of every page, on desktop and phone.
+The router status shows its confirmed On or Off state and the last check time,
+or an unknown or unavailable state. It is a text status, not an on/off control.
+JitterSim does not turn the router's Wi-Fi on or off. The Pi's helper refuses
+router Wi-Fi changes before it contacts the router. Use the router's own button or settings page for that.
+Open **Controls** for **Check router Wi-Fi**, **Copy router Wi-Fi to Pi**,
+**Reset Wi-Fi name**, **Admin token** and **Router password**. Enter the router
+admin password then choose **Check router Wi-Fi** for a fresh status. Remembering
+the password or opening the page does not start automatic router checks. The Pi spaces router sign-ins apart: after a right
 password a check can run again 15 seconds later and after a wrong one 30
 seconds later. A check pressed too soon is refused and the router is not
 contacted. An unavailable status says so instead of guessing.
 Keep the Pi connected by Ethernet when copying router Wi-Fi.
 
-Under the switch **Copy router Wi-Fi to Pi** applies the router's Wi-Fi name,
+Under **Controls**, **Copy router Wi-Fi to Pi** applies the router's Wi-Fi name,
 password and security together to the Pi's test network. Its progress and
-result appear beside the button on every page. Without a router password the
-button opens the **Router password** panel. A rejected password disables the
+result appear beside the button, available from every page. Without a router
+password the button opens the **Router password** panel. A rejected password disables the
 button until the password changes. Test clients disconnect while the Pi Wi-Fi
 restarts so keep a separate management connection. The copy action keeps the
 Wi-Fi password out of the page and clipboard.
 
-The sidebar also shows a short status block once the admin token is accepted.
+Once the admin token is accepted, the header shows a short status strip.
+Click or tap it to open the full status block on desktop or phone.
 Its first line starts with **Everyone:** and names the profile for Everyone with
 `active`, `paused` or `saved, not applied`. It says `Everyone: none` when no
 profile is chosen. The next line says how many connected devices are affected
@@ -464,7 +470,7 @@ A device asking for a WPA, WPA2 or WPA3 password needs the Wi-Fi password for
 that network. After copying router Wi-Fi this is the router's Wi-Fi password.
 It is different from the router administration password and dashboard token.
 
-Use **Reset Wi-Fi name** in the sidebar or on the **Router and Wi-Fi** page, or run
+Use **Reset Wi-Fi name** under **Controls** or on the **Router and Wi-Fi** page, or run
 `sudo jittersim wifi reset` on the Pi, to restore the default name `TestNet`.
 Both keep the current password and security type. The action restarts Wi-Fi and disconnects
 test clients. Add `--yes` to confirm without an interactive prompt. The console
@@ -820,15 +826,16 @@ keyboard reaches on every page.
 
 ### On a phone
 
-Up to a width of 768 pixels the dashboard uses a phone layout. The top of the
-page shows the name, the mode, every page in one row that scrolls sideways and
+At widths up to 768 pixels, or in a short window up to 576 pixels tall, the
+dashboard uses a compact layout. The top of the page shows the name, the mode,
+the version, every page in one row that scrolls sideways within the header, and
 one line of status. Tap the status line to open the full status block. A page
 link shows the start of that page. **Panic** and the read-only **Router Wi-Fi**
 status stay in a bar at the bottom of the screen on every page. **Controls** in that
 bar opens a sheet with **Active profile**, **Start**,
 **Reset network**, the status and message lines, **Check router Wi-Fi**,
-**Copy router Wi-Fi to Pi** and the **Admin token** and **Router password**
-buttons. Tap outside the sheet or press
+**Copy router Wi-Fi to Pi**, **Reset Wi-Fi name** and the **Admin token** and
+**Router password** buttons. Tap outside the sheet or press
 Escape to close it. Buttons, fields and the page links are at least 44 pixels
 tall.
 
@@ -856,14 +863,32 @@ limit and combined affected traffic rather than an individual device limit.
 Random changes apply to the network together. Their choices are not added to
 the per-device random website history.
 
-**Stop for everyone** (or **Stop** in the sidebar) resumes the saved device
-rules that are current at that moment. While the network is reset, Stop only
+**Stop for everyone** (or **Stop** under **Active profile**) resumes the saved
+device rules that are current at that moment. While the network is reset, Stop only
 removes the selection and starts nothing. **Panic** or **Reset network** turns
 all profiles off while keeping the selection. **Apply to all** or **Start**
 resumes it. A restart repeats the last Start or Reset unless a saved change
 cleared that record. Then JitterSim is not running until you choose **Start** or
 **Reset network**. Protected clients remain protected through reconnects and IP
 changes.
+
+### Prepared device profiles
+
+On **Devices**, **Prepared device profiles** saves a profile choice for a manually
+entered Wi-Fi MAC address, with an optional display name. Saving, editing or deleting
+a prepared choice does not change active network settings. Choices are paged in
+sets of 20; **Refresh prepared choices** reloads saved records.
+
+Choose **Review** to see the current profile settings, configuration version and
+pending revision. **Use profile for this MAC** is a separate confirmed action. The
+Pi then checks for a fresh, reachable client with that exact MAC on its test Wi-Fi;
+a matching name or a different private address is insufficient. A successful review
+does not establish a live match. Prepared protection records cannot be activated here.
+
+After a conflict or lost response, check saved and running settings, refresh and
+review again before another Use. The prepared choice remains after Use; saved and
+live results are reported separately. Real network behaviour still needs hardware
+verification.
 
 ### Connected clients and protected devices
 
@@ -951,8 +976,8 @@ has three choices:
   (new private address ...). Move its settings?" with the evidence in plain
   words. **Yes** moves the profile, the name and, for a protected device, its
   protection after a confirmation. **No** hides it for a day. **Not this
-  device** hides it for 90 days. The sidebar shows a line while a suggestion
-  waits.
+  device** hides it for 90 days. The expanded status block shows a line while a
+  suggestion waits.
 - **Automatic**: moves only the profile and the name, and only on strong
   evidence (the same distinctive device name plus the same IP address or a
   join right after the old address left). A protected device is never moved
@@ -1399,8 +1424,8 @@ router is power-cycled.
   traffic.
 - **Hardware mode** uses the Pi helper to apply the saved plan.
 
-Choose **Admin token** in the sidebar, enter the token and click **Check token**
-to load diagnostics. Dashboard actions show when they start and whether they
+Choose **Admin token** under **Controls** (or in the sign-in header), enter the
+token and click **Check token** to load diagnostics. Dashboard actions show when they start and whether they
 worked, without requiring you to scroll to the status area.
 
 For a Vodafone TG3442DE, the dashboard can read the primary Wi-Fi status and

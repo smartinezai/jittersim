@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import copy
 import gzip
 import hashlib
 import html
@@ -55,6 +56,10 @@ from jittersim.api.address_follow import (
     write_address_follow,
 )
 from jittersim.api.shared_reading import SharedReading
+from jittersim.api.pending_devices import (
+    PENDING_WRITES, current_pending_profile, pending_target, pending_use_request,
+    read_pending, write_pending,
+)
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.api.connection_checks import (
     CHECK_WRITES,
@@ -307,7 +312,8 @@ RELEASE_UPLOAD_HEADER = "X-Jittersim-Archive-Bytes"
 # dashboard serves one request at a time so a slow sender cannot hold it for longer.
 RELEASE_UPLOAD_SECONDS = 120.0
 WRITE_PATHS = (WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/preview"}
-               | {RELEASE_UPLOAD_PATH} | SPEED_TEST_WRITES | ADDRESS_FOLLOW_WRITES | CHECK_WRITES)
+               | {RELEASE_UPLOAD_PATH} | SPEED_TEST_WRITES | ADDRESS_FOLLOW_WRITES | CHECK_WRITES
+               | PENDING_WRITES)
 ACTION_PATHS = frozenset(
     ("/api/apply", "/api/reset", "/api/observations/scan", "/api/update-preferences",
      "/api/access-point/reset-name", "/api/updates/check-online", "/api/updates/retry")
@@ -1027,6 +1033,13 @@ class _PendingConnection:
     buffer: bytearray = field(default_factory=bytearray)
 
 
+@dataclass
+class _DeviceAccessFlight:
+    done: threading.Event = field(default_factory=threading.Event)
+    value: Optional[Dict[str, Any]] = None
+    error: Optional[BaseException] = None
+
+
 _RESET_REQUESTS_LOCK = threading.Lock()
 
 # The GET paths ControlServer.response_for answers itself, each with the method that
@@ -1125,6 +1138,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         self._traffic_reading = SharedReading()
         self._uplink_reading = SharedReading()
         self._shared_readings = (self._health_reading, self._traffic_reading, self._uplink_reading)
+        # Identity answers are shared only while unfinished, never kept for a later request.
+        self._device_access_lock = threading.Lock()
+        self._device_access_flights: Dict[str, _DeviceAccessFlight] = {}
         # The connection check shares the speed test manager's run table, limits and shutdown.
         self._connection_check_manager = ConnectionCheckManager(self._speed_test_manager)
         # Protection-derived dashboard access: the last confirmed sync with the root helper.
@@ -1490,6 +1506,50 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     "can_register": False, "mac_address": None}
         if self.helper_client is None:
             raise HelperClientError("Device verification needs the Pi networking helper.")
+        changing = operation not in ("status", "list", "emergency-status")
+        if changing:
+            self._drop_device_access_flights()
+        try:
+            return self._read_dashboard_access(peer, operation, values)
+        finally:
+            if changing:
+                self._drop_device_access_flights()
+
+    def _drop_device_access_flights(self) -> None:
+        # Clearing changes which reads a new caller may join. Existing callers keep
+        # their own flight until it completes, as an unshared request would.
+        with self._device_access_lock:
+            self._device_access_flights.clear()
+
+    def _shared_device_access(self, peer: str) -> Dict[str, Any]:
+        with self._device_access_lock:
+            flight = self._device_access_flights.get(peer)
+            leader = flight is None
+            if leader and len(self._device_access_flights) < MAX_DASHBOARD_WORKERS:
+                flight = self._device_access_flights[peer] = _DeviceAccessFlight()
+        if flight is None:
+            # Capacity is already bounded by HTTP workers. Other callers do not
+            # grow the table or evict a read that somebody is waiting for.
+            return self._read_checked_access("status", peer, {})
+        if leader:
+            try:
+                flight.value = self._read_checked_access("status", peer, {})
+            except BaseException as error:
+                flight.error = error
+            finally:
+                with self._device_access_lock:
+                    if self._device_access_flights.get(peer) is flight:
+                        del self._device_access_flights[peer]
+                    flight.done.set()
+        elif not flight.done.wait(timeout=getattr(self.helper_client, "timeout_seconds",
+                                                self.request_timeout_seconds)):
+            raise HelperClientError("Device verification is busy. Try again.", reason="helper-busy")
+        if flight.error is not None:
+            raise flight.error
+        return copy.deepcopy(flight.value)
+
+    def _read_dashboard_access(self, peer: str, operation: str,
+                               values: Dict[str, Any]) -> Dict[str, Any]:
         result = self._checked_access(operation, peer, values)
         if operation == "emergency-status":
             # Panic and Reset never wait for the routine protection retry.
@@ -1551,6 +1611,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         return self.bounded_repository(min(EMERGENCY_REPOSITORY_WAIT_SECONDS, max(0.0, remaining)))
 
     def _checked_access(self, operation: str, peer: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        if operation == "status" and not values and scope_remaining() is None:
+            return self._shared_device_access(peer)
+        return self._read_checked_access(operation, peer, values)
+
+    def _read_checked_access(self, operation: str, peer: str,
+                             values: Dict[str, Any]) -> Dict[str, Any]:
         result = self.helper_client.dashboard_access(operation, peer=peer, **values)
         if (type(result.get("allowed")) is not bool or type(result.get("can_register")) is not bool
                 or result.get("network") not in ("test", "management")):
@@ -1610,6 +1676,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     return ordinary(targets)
         if sync is None or not self._protected_access_lock.acquire(blocking=blocking):
             return self.protected_access_status()
+        self._drop_device_access_flights()
         try:
             self._protected_access_attempted = time.monotonic()
             result = None
@@ -1654,6 +1721,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 LOGGER.warning("dashboard access for protected devices is not confirmed")
             return self.protected_access_status()
         finally:
+            self._drop_device_access_flights()
             self._protected_access_lock.release()
 
     def reconcile_protected_access(self) -> Dict[str, Any]:
@@ -1907,6 +1975,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
 
+        pending = read_pending(self.repository, path, query)
+        if pending is not None:
+            return pending
         access_response = read_access_api(self, path, query)
         if access_response is not None:
             return access_response
@@ -2693,6 +2764,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
     def _tracked_write_response_for(self, path: str, payload: Dict[str, Any],
                                     before_replace=None) -> Tuple[int, str, bytes]:
+        pending = write_pending(self.repository, path, payload)
+        if pending is not None:
+            return pending
         if path == "/api/profiles/ranges":
             return self._write_response_for(path, payload)
         # A speed test only reads counters and saves its own rows, so it never waits for an apply.
@@ -4389,7 +4463,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         compile_stored_plan(repository=self.repository)
 
     def _verify_selected_client(self, device: Device, snapshot: dict) -> None:
-        if not snapshot["association_status_available"] or not any(
+        # A recent cached list keeps running profiles steady but cannot authorize a new save.
+        if snapshot.get("stale") or not snapshot["association_status_available"] or not any(
             client["association_verified"]
             and client["ipv4_address"] == str(device.ipv4_address)
             and client["mac_address"] == device.mac_address
@@ -5514,7 +5589,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             if self._reset_requests != resets_at_entry[0]:
                 return overtaken
             try:
+                pending_use = pending_use_request(payload)
                 snapshot = station_snapshot(self.helper_client)
+                if pending_use is not None:
+                    pending = current_pending_profile(self.repository, pending_use)
+                    payload = {**pending_target(snapshot, pending.mac_address),
+                               "profile_id": pending.profile_id}
                 device, existing = _connected_device_from_payload(
                     payload,
                     self.repository,
@@ -5582,6 +5662,18 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
                 def save():
                     with self.repository.transaction():
+                        if pending_use is not None:
+                            current_pending = current_pending_profile(self.repository, pending_use)
+                            if current_pending.profile_id != device.profile_id:
+                                raise ValueError("Pending profile changed. Refresh its review.")
+                            if self._reset_requests != resets_at_entry[0]:
+                                raise ValueError("Reset or Panic ran during pending Apply. Nothing was saved.")
+                            current_device, current_existing = _connected_device_from_payload(
+                                payload, self.repository,
+                                hostname=_snapshot_hostname(snapshot, payload.get("mac_address")),
+                            )
+                            if (current_device, current_existing) != (device, existing):
+                                raise ValueError("Saved device changed. Refresh the pending review.")
                         version = self.repository.get_runtime_state().configuration_version
                         if ran_before is not None and version != ran_before[0].configuration_version:
                             # Another process saved settings after the check above.

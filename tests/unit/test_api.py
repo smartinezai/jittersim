@@ -359,9 +359,9 @@ def local_time_zone(name: str):
 # The cards every page holds, in order. A card outside the pages is the
 # dashboard-access card that the token flow shows first.
 EXPECTED_PAGE_HEADINGS = {
-    None: ["Credentials", "Dashboard access"],
+    None: ["Credentials", "Network utilities", "Dashboard access"],
     "page-devices": [
-        "Getting started", "Everyone", "Address changes", "Connected clients", "Saved devices",
+        "Getting started", "Everyone", "Address changes", "Connected clients", "Prepared device profiles", "Saved devices",
         "Everyone else", "Protected devices",
     ],
     "page-profiles": ["Saved profiles", "Save profile", "Assign a device", "Group devices"],
@@ -3090,17 +3090,19 @@ class ControlServerTests(unittest.TestCase):
         harness = (
             "const TRAFFIC_WINDOW_MS = 60000;\n"
             "const trafficSamples = [];\n"
+            "const trafficPausedAt = null;\n"
             + re.search(r"const TRAFFIC_SERIES = \[.*?\n    \];", script, re.S).group(0)
             + "\nconst trafficProfileScope = 'device';\n"
             "const trafficInspection = {pointer:null,legend:null,pinned:null};\n"
             "const TRAFFIC_INSPECTION_HELP = 'Inspect a line';\n"
             "const document = {querySelectorAll: () => []};\n"
-            # An ISP plan of 100 Mbit/s sets the scale to 100 Mbit/s.
+            # Keep the known ISP reference while the chart derives its data scale.
             "const latestTrafficReferences = {isp_download: 100};\n"
             "const drawn = [];\n"
             "const context = {\n"
             "  setTransform() {}, clearRect() {}, beginPath() {}, moveTo() {},\n"
             "  lineTo() {}, stroke() {}, setLineDash() {}, arc() {}, fill() {},\n"
+            "  save() {}, restore() {}, rect() {}, clip() {}, closePath() {},\n"
             "  measureText(text) { return {width: 7 * text.length}; },\n"
             "  fillText(text, x) { drawn.push({text, x, align: this.textAlign}); },\n"
             "};\n"
@@ -3109,11 +3111,13 @@ class ControlServerTests(unittest.TestCase):
             "                    getContext: () => context},\n"
             "  'traffic-device': {value: 'all'},\n"
             "  'traffic-chart-detail': {},\n"
+            "  'traffic-offscale': {},\n"
             "};\n"
             "const element = (id) => elements[id];\n"
             "const window = {devicePixelRatio: 1};\n"
             + function("formatTrafficRate")
             + function("trafficSeriesName")
+            + function("trafficAxisMaximum")
             + function("trafficSeriesGeometry")
             + function("trafficSegmentDistance")
             + function("trafficLineHits")
@@ -4563,7 +4567,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
         self.assertIn(
             'element("check-admin-token").addEventListener("click", async () => {\n'
-            "      await checkAdminToken();\n",
+            "      await checkAdminToken(true);\n",
             DASHBOARD_HTML,
         )
         self.assertIn('id="action-announcer" class="action-announcer" role="status"', DASHBOARD_HTML)

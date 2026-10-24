@@ -462,6 +462,7 @@
       const page = name && document.getElementById("page-" + document.body.dataset.section);
       const label = page && page.getAttribute("aria-label");
       document.title = name ? (label ? label + " · " : "") + name : "Sign in";
+      element("page-heading").textContent = label || "Sign in";
     }
 
     function applyBrand(signedIn) {
@@ -969,7 +970,9 @@
       ["open-admin-credentials", "open-router-credentials", "open-router-credentials-inline"].forEach((id) => {
         element(id).setAttribute("aria-expanded", "false");
       });
-      if (credentialOpener && credentialOpener.isConnected) credentialOpener.focus({preventScroll: true});
+      const returnTo = credentialOpener && credentialOpener.isConnected && credentialOpener.getClientRects().length
+        ? credentialOpener : element("controls-toggle");
+      if (returnTo.getClientRects().length) returnTo.focus({preventScroll: true});
     }
 
     function updateCredentialViewport() {
@@ -1009,6 +1012,7 @@
     });
 
     element("router-admin-password").addEventListener("input", () => {
+      setRouterPasswordError();
       routerPasswordRevision += 1;
       routerWifiEnabled = null;
       routerWifiCheckedAt = null;
@@ -1018,7 +1022,12 @@
       routerWifiRemoteChanging = false;
       routerPasswordVerified = false;
       routerPasswordRejected = false;
-      if (!routerActionPending) element("router-action-message").textContent = "";
+      if (!routerActionPending) {
+        element("router-action-message").textContent = "";
+        element("credential-router-status").textContent = element("router-admin-password").value
+          ? "Password changed. Choose Check password to sign in to the router."
+          : "Enter the router admin password and choose Check password.";
+      }
       updateCredentialStatus();
     });
 
@@ -1262,6 +1271,18 @@
     const collapsedObservationDevices = new Set();
 
     const observationProfileChoice = new Map();
+    let observationListKeys = null;
+    let latestObservationScan = null;
+    let observationViewRevision = 0;
+    let observationReadRevision = 0;
+    privateDataLockHooks.push(() => {
+      observationViewRevision += 1;
+      observationReadRevision += 1;
+      observationListKeys = null;
+      latestObservationScan = null;
+      element("observation-scan-summary").textContent = "Saved results refresh automatically.";
+      document.querySelectorAll(".observation-new-name, .observation-new-group").forEach((node) => node.remove());
+    });
 
     let randomWebsiteAnalyticsRequestVersion = 0;
 
@@ -1280,6 +1301,10 @@
     let trafficRequestInFlight = false;
 
     let trafficSamplingAllowed = false;
+
+    let trafficPausedAt = null;
+
+    let trafficSamplingRevision = 0;
 
     let previousTrafficSample = null;
 
@@ -1334,14 +1359,20 @@
         "traffic-drop-rate",
         "traffic-queued"
       ].forEach((id) => { element(id).textContent = "—"; });
+      updateTrafficText();
+      element("traffic-offscale").textContent = "";
+      element("traffic-offscale").hidden = true;
       drawTrafficChart();
     }
 
     function stopTrafficSampling(message) {
       latestTrafficReading = null;
       trafficSamplingAllowed = false;
+      trafficPausedAt = null;
+      trafficSamplingRevision += 1;
+      updateTrafficPauseButton();
       clearTrafficTimer();
-      resetTrafficHistory();
+      resetTrafficView();
       element("traffic-status").textContent = message;
     }
 
@@ -1463,6 +1494,15 @@
       return prefix + " " + direction + " limit";
     }
 
+    function trafficAxisMaximum(samples) {
+      const values = samples.flatMap((sample) => [sample.upload, sample.download])
+        .filter((value) => Number.isFinite(value) && value >= 0);
+      const target = Math.max(0.1, Math.max(0, ...values) * 1.2);
+      const magnitude = Math.pow(10, Math.floor(Math.log10(target)));
+      const step = [1, 2, 5, 10].find((value) => value * magnitude >= target);
+      return step * magnitude;
+    }
+
     function trafficSeriesGeometry(samples, references, plot, scaleMax, now, scope) {
       return TRAFFIC_SERIES.map((definition) => {
         const series = { ...definition, label: trafficSeriesName(definition, scope), points: [], segments: [] };
@@ -1499,7 +1539,13 @@
           series.segments.push({ from: { ...point, x: plot.left }, to: point });
         }
         return series;
-      }).filter((series) => series.points.length);
+      }).filter((series) => series.points.length).map((series, index) => {
+        const latest = series.points[series.points.length - 1];
+        if (series.step && latest.value > scaleMax) {
+          series.marker = { ...latest, x: plot.right - 8 - index * 14, y: plot.top + 4 };
+        }
+        return series;
+      });
     }
 
     function trafficSegmentDistance(pointer, segment) {
@@ -1518,6 +1564,10 @@
           pointer.y < plot.top - 8 || pointer.y > plot.bottom + 8) return [];
       const hits = series.map((line) => {
         let best = { field: line.field, distance: Infinity, point: null };
+        if (line.marker) {
+          best = { field: line.field, distance: Math.hypot(pointer.x - line.marker.x,
+            pointer.y - line.marker.y), point: line.marker };
+        }
         line.points.forEach((point) => {
           const distance = Math.hypot(pointer.x - point.x, pointer.y - point.y);
           if (distance < best.distance) best = { field: line.field, distance: distance, point: point };
@@ -1549,6 +1599,53 @@
         : "recorded " + trafficAge(point.time, now);
       const current = Number.isFinite(latestTrafficReferences[series.field]) ? "" : " · no current limit";
       return series.label + ": " + value + " · " + kind + " · " + age + current;
+    }
+
+    function updateTrafficText() {
+      const latest = trafficSamples[trafficSamples.length - 1];
+      element("traffic-latest-rates").textContent = latest
+        ? "Latest interval at the Pi: upload " + formatTrafficRate(latest.upload) +
+          ", download " + formatTrafficRate(latest.download) + "."
+        : "Waiting for a measured traffic interval.";
+      const rows = trafficSamples.slice(-TRAFFIC_MAX_POINTS).reverse().map((sample) => {
+        const row = document.createElement("tr");
+        const interval = document.createElement("th");
+        interval.scope = "row";
+        interval.textContent = sample.intervalSeconds.toFixed(1) + " s ending " +
+          new Date(sample.recordedAt).toLocaleTimeString();
+        row.appendChild(interval);
+        [sample.upload, sample.download].forEach((value) => {
+          const cell = document.createElement("td");
+          cell.textContent = formatTrafficRate(value);
+          row.appendChild(cell);
+        });
+        return row;
+      });
+      element("traffic-sample-rows").replaceChildren(...rows);
+    }
+
+    function updateTrafficPauseButton() {
+      const button = element("traffic-pause");
+      button.disabled = !trafficSamplingAllowed;
+      button.textContent = trafficPausedAt === null ? "Pause sampling" : "Resume sampling";
+      button.setAttribute("aria-pressed", String(trafficPausedAt !== null));
+    }
+
+    function toggleTrafficSampling() {
+      if (!trafficSamplingAllowed) return;
+      trafficSamplingRevision += 1;
+      clearTrafficTimer();
+      if (trafficPausedAt === null) {
+        trafficPausedAt = performance.now();
+        element("traffic-status").textContent = "Sampling paused. Resume starts a fresh graph.";
+        drawTrafficChart();
+      } else {
+        trafficPausedAt = null;
+        resetTrafficHistory();
+        element("traffic-status").textContent = "Resuming live traffic sampling...";
+        pollTraffic().then(scheduleTrafficPoll);
+      }
+      updateTrafficPauseButton();
     }
 
     function drawTrafficKey(canvas, series, pixelRatio) {
@@ -1649,12 +1746,9 @@
       if (!context) return;
       context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
       context.clearRect(0, 0, bounds.width, bounds.height);
-      const now = performance.now();
+      const now = trafficPausedAt === null ? performance.now() : trafficPausedAt;
       const visibleSamples = trafficSamples.filter((sample) => now - sample.time <= TRAFFIC_WINDOW_MS);
-      const graphValues = visibleSamples.flatMap((sample) => TRAFFIC_SERIES.map((series) => sample[series.field]))
-        .filter((value) => Number.isFinite(value));
-      graphValues.push(...Object.values(latestTrafficReferences).filter((value) => Number.isFinite(value)));
-      const scaleMax = Math.pow(10, Math.ceil(Math.log10(Math.max(0.1, ...graphValues))));
+      const scaleMax = trafficAxisMaximum(visibleSamples);
       context.font = "12px system-ui, sans-serif";
       const tickLabels = [0, 1, 2, 3, 4].map((tick) => formatTrafficRate(scaleMax * tick / 4));
       const labelWidth = Math.max(...tickLabels.map((label) => context.measureText(label).width));
@@ -1680,9 +1774,16 @@
         context.fillStyle = "#91a8c1";
         context.textAlign = fraction === 0 ? "left" : fraction === 1 ? "right" : "center";
         context.textBaseline = "alphabetic";
-        context.fillText(fraction === 1 ? "now" : "−" + Math.round((1 - fraction) * TRAFFIC_WINDOW_MS / 1000) + "s", x, bounds.height - 8);
+        context.fillText(fraction === 1 ? (trafficPausedAt === null ? "now" : "paused") : "−" + Math.round((1 - fraction) * TRAFFIC_WINDOW_MS / 1000) + "s", x, bounds.height - 8);
       });
       const series = trafficSeriesGeometry(visibleSamples, latestTrafficReferences, plot, scaleMax, now, trafficProfileScope);
+      const offscale = series.filter((line) => line.marker);
+      const offscaleText = offscale.length ? "Above chart: " + offscale.map((line) =>
+        line.label + ": " + formatTrafficRate(line.marker.value) +
+        (Number.isFinite(latestTrafficReferences[line.field]) ? "" : " (previous reference)")).join(" · ") + "." : "";
+      const offscaleLabel = element("traffic-offscale");
+      if (offscaleLabel.textContent !== offscaleText) offscaleLabel.textContent = offscaleText;
+      offscaleLabel.hidden = !offscale.length;
       const present = new Set(series.map((line) => line.field));
       ["legend", "pinned"].forEach((key) => {
         if (!present.has(trafficInspection[key])) trafficInspection[key] = null;
@@ -1732,6 +1833,10 @@
         context.lineJoin = "round";
         context.lineCap = "round";
         context.setLineDash(line.dash);
+        context.save();
+        context.beginPath();
+        context.rect(plot.left, plot.top, plotWidth, plotHeight);
+        context.clip();
         context.beginPath();
         line.segments.forEach((segment) => {
           context.moveTo(segment.from.x, segment.from.y);
@@ -1746,6 +1851,17 @@
           context.fillStyle = context.strokeStyle;
           context.fill();
         });
+        context.restore();
+        if (line.marker) {
+          const marker = line.marker;
+          context.beginPath();
+          context.moveTo(marker.x, plot.top);
+          context.lineTo(marker.x - 4, plot.top + 8);
+          context.lineTo(marker.x + 4, plot.top + 8);
+          context.closePath();
+          context.fillStyle = context.strokeStyle;
+          context.fill();
+        }
       });
       context.globalAlpha = 1;
       context.setLineDash([]);
@@ -1813,7 +1929,7 @@
 
     function scheduleTrafficPoll() {
       clearTrafficTimer();
-      if (!trafficSamplingAllowed || !trafficGraphShown()) return;
+      if (!trafficSamplingAllowed || trafficPausedAt !== null || !trafficGraphShown()) return;
       trafficPollTimer = window.setTimeout(async () => {
         trafficPollTimer = null;
         try {
@@ -1860,13 +1976,21 @@
     const TRAFFIC_FAILURES_BEFORE_CLEARING = 3;
 
     async function pollTraffic() {
-      if (trafficRequestInFlight || !trafficSamplingAllowed || !trafficGraphShown()) return;
+      if (trafficRequestInFlight || !trafficSamplingAllowed || trafficPausedAt !== null || !trafficGraphShown()) return;
       const revision = adminTokenRevision;
+      const samplingRevision = trafficSamplingRevision;
       trafficRequestInFlight = true;
       try {
+        // A fresh graph must not use a workspace reading started before Resume.
+        if (!previousTrafficSample && trafficReadingInFlight) {
+          await trafficReadingInFlight.catch(() => null);
+          if (revision !== adminTokenRevision || !adminTokenVerified || !trafficSamplingAllowed ||
+              samplingRevision !== trafficSamplingRevision || trafficPausedAt !== null) return;
+        }
         const data = await readTraffic(0);
         trafficFailures = 0;
-        if (revision !== adminTokenRevision || !adminTokenVerified || !trafficSamplingAllowed) return;
+        if (revision !== adminTokenRevision || !adminTokenVerified || !trafficSamplingAllowed ||
+            samplingRevision !== trafficSamplingRevision || trafficPausedAt !== null) return;
         if (!data.available) {
           stopTrafficSampling(data.message || "Live traffic counters are unavailable in this mode.");
           return;
@@ -1886,27 +2010,41 @@
           element("traffic-status").textContent = "No counters yet. Assign a profile and choose Start.";
           return;
         }
-        const sampledAt = performance.now();
+        const receivedAt = performance.now();
+        const sampledAt = data.sampled_at;
+        if (!Number.isFinite(sampledAt)) {
+          resetTrafficHistory();
+          element("traffic-status").textContent = "Traffic sample time is unavailable. Waiting for fresh counters.";
+          return;
+        }
         if (previousTrafficSample) {
-          const elapsedSeconds = (sampledAt - previousTrafficSample.time) / 1000;
+          const elapsedSeconds = sampledAt - previousTrafficSample.sampledAt;
           const fields = Object.keys(totals);
           const countersReset = fields.some((field) => totals[field] < previousTrafficSample.totals[field]);
-          if (countersReset || elapsedSeconds <= 0) {
+          if (countersReset || elapsedSeconds < 0) {
             resetTrafficHistory();
-            element("traffic-status").textContent = "Counters changed. Starting a fresh graph...";
+            element("traffic-status").textContent = countersReset
+              ? "Counters changed. Starting a fresh graph..."
+              : "Sample time changed. Starting a fresh graph...";
+          } else if (elapsedSeconds === 0) {
+            element("traffic-status").textContent = "Waiting for a new traffic sample. Last rates are kept.";
+            drawTrafficChart();
+            return;
           } else {
             const upload = Math.max(0, totals.upload_bytes - previousTrafficSample.totals.upload_bytes) * 8 / elapsedSeconds / 1000000;
             const download = Math.max(0, totals.download_bytes - previousTrafficSample.totals.download_bytes) * 8 / elapsedSeconds / 1000000;
             const uploadPackets = Math.max(0, totals.upload_packets - previousTrafficSample.totals.upload_packets) / elapsedSeconds;
             const downloadPackets = Math.max(0, totals.download_packets - previousTrafficSample.totals.download_packets) / elapsedSeconds;
             trafficSamples.push({
-              time: sampledAt,
+              time: receivedAt,
+              recordedAt: sampledAt * 1000,
+              intervalSeconds: elapsedSeconds,
               upload: upload,
               download: download,
               ...latestTrafficReferences
             });
             trafficSamples = trafficSamples
-              .filter((sample) => sampledAt - sample.time <= TRAFFIC_WINDOW_MS)
+              .filter((sample) => receivedAt - sample.time <= TRAFFIC_WINDOW_MS)
               .slice(-TRAFFIC_MAX_POINTS);
             element("traffic-upload-rate").textContent = formatTrafficRate(upload);
             element("traffic-download-rate").textContent = formatTrafficRate(download);
@@ -1921,10 +2059,12 @@
         } else {
           element("traffic-status").textContent = "Collecting the first sample...";
         }
-        previousTrafficSample = { time: sampledAt, totals: totals, queues: queueTotals };
+        previousTrafficSample = { time: receivedAt, sampledAt: sampledAt, totals: totals, queues: queueTotals };
+        updateTrafficText();
         drawTrafficChart();
       } catch (error) {
-        if (revision !== adminTokenRevision || !adminTokenVerified || !trafficSamplingAllowed) return;
+        if (revision !== adminTokenRevision || !adminTokenVerified || !trafficSamplingAllowed ||
+            samplingRevision !== trafficSamplingRevision || trafficPausedAt !== null) return;
         if (error.status === 401) {
           resetTrafficHistory();
           stopTrafficSampling("The admin token was rejected. Check it again to restart live traffic sampling.");
@@ -1946,6 +2086,8 @@
 
     async function startTrafficSampling() {
       trafficSamplingAllowed = true;
+      updateTrafficPauseButton();
+      if (trafficPausedAt !== null) return;
       trafficFailures = 0;
       clearTrafficTimer();
       resetTrafficHistory();
@@ -1961,7 +2103,7 @@
 
     // Called when the page changes or the tab is hidden or shown.
     function syncTrafficSampling() {
-      if (!trafficSamplingAllowed) return;
+      if (!trafficSamplingAllowed || trafficPausedAt !== null) return;
       if (!trafficGraphShown()) {
         if (trafficPollTimer === null && previousTrafficSample === null) return;
         clearTrafficTimer();
@@ -1978,13 +2120,17 @@
 
     function refreshAfterSuccess(message) {
       showMessage(message, "success");
+      const notice = messageSerial;
+      const revision = adminTokenRevision;
       const written = Array.from(recentWrites);
       recentWrites.clear();
       refresh(readsAfterWrites(written)).then(() => {
+        if (revision !== adminTokenRevision) return;
         if (adminTokenVerified && helperConfigured && !trafficSamplingAllowed) {
           return startTrafficSampling();
         }
       }).catch((error) => {
+        if (notice !== messageSerial || revision !== adminTokenRevision) return;
         showMessage(message + " Dashboard refresh failed: " + error.message, "error");
       });
     }
@@ -3173,7 +3319,15 @@
         groupSelect.setAttribute("aria-label", "Group for " + (device.display_name || device.mac_address));
         const groupPlaceholder = document.createElement("option");
         groupPlaceholder.value = "";
-        groupPlaceholder.textContent = groups.length ? "Choose group..." : "Create a group on the Profiles page";
+        groupPlaceholder.textContent = groups.length ? "Choose group..." : "No groups";
+        if (!groups.length) {
+          const groupHelp = document.createElement("p");
+          groupHelp.id = "connected-group-help-" + device.mac_address;
+          groupHelp.className = "form-note";
+          groupHelp.textContent = "Create a group on the Profiles page.";
+          groupSelect.setAttribute("aria-describedby", groupHelp.id);
+          details.appendChild(groupHelp);
+        }
         groupSelect.appendChild(groupPlaceholder);
         groups.forEach((group) => {
           const option = document.createElement("option");
@@ -4095,12 +4249,42 @@
       };
     }
 
+    function observationNameKey(address, domain) {
+      return address + "|" + domain;
+    }
+
+    function newObservationScanKeys(before, captured) {
+      if (before === null || !Array.isArray(captured)) return null;
+      return new Set(captured.map((item) => observationNameKey(item.ipv4_address, item.domain))
+        .filter((key) => !before.has(key)));
+    }
+
+    function observationNameIsNew(address, domain) {
+      return Boolean(latestObservationScan && latestObservationScan.keys &&
+        latestObservationScan.keys.has(observationNameKey(address, domain)));
+    }
+
+    function newDisplayedObservationCount() {
+      if (observationListKeys === null || !latestObservationScan || latestObservationScan.keys === null) return null;
+      return Array.from(observationListKeys).filter((key) => latestObservationScan.keys.has(key)).length;
+    }
+
     function renderObservations(data) {
       const container = element("observations");
       const count = element("observation-count");
       const focusedDevice = document.activeElement && document.activeElement.dataset.observationDevice;
       observedDomainsByDevice = {};
       observedNames = new Set();
+      observationListKeys = data.available ? new Set((data.devices || []).flatMap((device) =>
+        (device.domains || []).map((item) => observationNameKey(device.ipv4_address, item.domain)))) : null;
+      const summary = element("observation-scan-summary");
+      const added = newDisplayedObservationCount();
+      summary.textContent = "Saved results refresh automatically. New to list compares the latest successful scan " +
+        "with the list shown when it started.";
+      if (latestObservationScan) {
+        summary.textContent += added === null ? " Latest successful scan: new-name comparison unavailable." :
+          " Latest successful scan: " + added + (added === 1 ? " displayed name" : " displayed names") + " new to list.";
+      }
       container.replaceChildren();
       if (!data.available) {
         count.textContent = "Unavailable";
@@ -4224,6 +4408,12 @@
           badge.className = "observation-badge";
           badge.textContent = "On global block list";
           host.append(hostName, badge);
+          if (observationNameIsNew(device.ipv4_address, observation.domain)) {
+            const added = document.createElement("span");
+            added.className = "observation-category observation-new-name";
+            added.textContent = "New to list";
+            host.appendChild(added);
+          }
           domain.appendChild(host);
           const hintLine = document.createElement("div");
           hintLine.className = "observation-hint-line";
@@ -4331,6 +4521,14 @@
           const groupBadge = document.createElement("span");
           groupBadge.className = "observation-badge";
           meta.append(nameCount, groupBadge);
+          const addedCount = group.names.filter((item) => observationNameIsNew(
+            device.ipv4_address, item.domain)).length;
+          if (addedCount > 0) {
+            const added = document.createElement("span");
+            added.className = "observation-category observation-new-group";
+            added.textContent = addedCount + " new to list";
+            meta.appendChild(added);
+          }
           title.append(groupName, meta);
           const totalQueries = document.createElement("span");
           totalQueries.className = "observation-domain-count";
@@ -4520,13 +4718,22 @@
       }
     }
 
-    async function loadObservations() {
+    async function loadObservations(afterScan = false) {
+      if (observationRequestInFlight && !afterScan) return false;
+      const reading = ++observationReadRevision;
+      const revision = observationViewRevision;
+      let available = false;
       try {
-        renderObservations(await request("/api/observations", "GET"));
+        const data = await request("/api/observations", "GET");
+        if (revision !== observationViewRevision || reading !== observationReadRevision) return false;
+        renderObservations(data);
+        available = Boolean(data.available);
       } catch (error) {
+        if (revision !== observationViewRevision || reading !== observationReadRevision) return false;
         renderObservations({ available: false, devices: [], message: error.message });
       }
       renderServiceListObserved();
+      return available;
     }
 
     function formatQuotaBytes(bytes) {
@@ -5257,19 +5464,28 @@
     async function scanObservations() {
       if (!helperConfigured || observationRequestInFlight) return;
       observationRequestInFlight = true;
+      observationReadRevision += 1;
+      const revision = observationViewRevision;
+      const before = observationListKeys === null ? null : new Set(observationListKeys);
       const scanButton = element("scan-observations");
       setButtonBusy(scanButton, true);
       scanButton.textContent = "Scanning...";
       showMessage("Sampling DNS queries from the test network...", "working");
       try {
         const result = await request("/api/observations/scan", "POST", {});
+        if (revision !== observationViewRevision) return;
+        latestObservationScan = { keys: newObservationScanKeys(before, result.observations) };
+        await loadObservations(true);
+        if (revision !== observationViewRevision) return;
+        const added = newDisplayedObservationCount();
+        const comparison = added === null ? "New-name comparison unavailable." :
+          added + (added === 1 ? " displayed name" : " displayed names") + " new to list.";
         showMessage(
-          "Traffic scan complete: " + result.captured_observations + " domain observations captured.",
+          "Traffic scan complete: " + result.captured_observations + " domain observations captured. " + comparison,
           "success"
         );
-        loadObservations();
       } catch (error) {
-        showMessage(error.message, "error");
+        if (revision === observationViewRevision) showMessage(error.message, "error");
       } finally {
         observationRequestInFlight = false;
         scanButton.disabled = !helperConfigured;
@@ -5884,15 +6100,16 @@
     // the dashboard under the second. A call during a check waits for it, then checks once for every
     // caller. A check of an older token is already dead (it drops whatever it finds), so the first
     // call after a token edit does not wait for it, even when it hangs.
-    async function checkAdminToken() {
+    async function checkAdminToken(focusAllow = false) {
       if (!adminTokenCheckRunning || adminTokenCheckRevision !== adminTokenRevision) {
-        return startAdminTokenCheck();
+        return startAdminTokenCheck(focusAllow);
       }
+      adminTokenCheckNextFocusAllow = adminTokenCheckNextFocusAllow || focusAllow;
       if (!adminTokenCheckNext) {
         const queued = adminTokenCheckRunning.catch(() => {}).then(() => {
           // A check that started at once for a newer token has taken this one's place.
           if (adminTokenCheckNext !== queued) return adminTokenCheckRunning;
-          return startAdminTokenCheck();
+          return startAdminTokenCheck(adminTokenCheckNextFocusAllow);
         });
         adminTokenCheckNext = queued;
       }
@@ -5902,21 +6119,39 @@
     let adminTokenCheckRunning = null;
     let adminTokenCheckRevision = -1;
     let adminTokenCheckNext = null;
+    let adminTokenCheckNextFocusAllow = false;
 
-    function startAdminTokenCheck() {
+    function setAdminTokenError(message = "", invalid = false, focus = false) {
+      const field = element("admin-token");
+      const summary = element("admin-token-errors");
+      const form = element("admin-token-form");
+      element("admin-token-error-link").textContent = message;
+      summary.hidden = !message;
+      if (invalid) field.setAttribute("aria-invalid", "true");
+      else field.removeAttribute("aria-invalid");
+      // Background recovery must not take focus from another task.
+      if (message && focus && (form.contains?.(document.activeElement) || document.activeElement === document.body)) {
+        summary.focus();
+      }
+    }
+
+    function startAdminTokenCheck(focusAllow) {
       adminTokenCheckNext = null;
+      adminTokenCheckNextFocusAllow = false;
       adminTokenCheckRevision = adminTokenRevision;
-      const run = runAdminTokenCheck().finally(() => {
+      const run = runAdminTokenCheck(focusAllow).finally(() => {
         if (adminTokenCheckRunning === run) adminTokenCheckRunning = null;
       });
       adminTokenCheckRunning = run;
       return run;
     }
 
-    async function runAdminTokenCheck() {
+    async function runAdminTokenCheck(focusAllow) {
       const button = element("check-admin-token");
       const status = element("token-check-status");
       const tokenRevision = adminTokenRevision;
+      const focusError = Boolean(element("admin-token-form").contains?.(document.activeElement));
+      setAdminTokenError();
       setDashboardUnlocked(false);
       element("allow-dashboard-device").disabled = true;
       if (!element("admin-token").value.trim()) {
@@ -5927,6 +6162,7 @@
         showMessage("Enter the admin token first.", "error");
         updateCredentialStatus();
         openCredentials("admin");
+        setAdminTokenError(status.textContent, true, focusError);
         return;
       }
       adminTokenChecking = true;
@@ -5935,6 +6171,17 @@
       adminTokenVerified = false;
       updateCredentialStatus();
       setPrivateDataPanels("Checking the admin token...", "Checking...");
+      const tokenField = element("admin-token");
+      const credentials = element("credentials-panel");
+      let keepAllowFocus = focusAllow && phoneLayout.matches && !credentials.hidden &&
+        [button, tokenField].includes(document.activeElement);
+      const stopAllowFocus = (event) => {
+        if (event.target !== button && event.target !== tokenField) keepAllowFocus = false;
+      };
+      if (keepAllowFocus) {
+        document.addEventListener("focusin", stopAllowFocus, true);
+        document.addEventListener("pointerdown", stopAllowFocus, true);
+      }
       button.disabled = true;
       button.setAttribute("aria-busy", "true");
       button.textContent = "Checking...";
@@ -5952,6 +6199,12 @@
           status.className = "token-check-status success";
           // The status line is not read out. The toast says it and replaces the working message.
           showMessage(status.textContent, "info");
+          if (access.can_register && keepAllowFocus && !credentials.hidden) {
+            closeCredentials();
+            const allow = element("allow-dashboard-device");
+            allow.scrollIntoView({block: "center", inline: "nearest"});
+            allow.focus({preventScroll: true});
+          }
           return;
         }
         let result = await loadAdminTools();
@@ -5998,6 +6251,7 @@
         }
         status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
         status.className = "token-check-status " + (result.ok ? "success" : "error");
+        if (!result.ok) setAdminTokenError(status.textContent, adminTokenRefused, focusError);
         // The dashboard unlocks while the check is still loading, so the person can save
         // something before it ends. A success text must not replace that newer message.
         // The token status above always shows the result, and a failure always shows.
@@ -6020,9 +6274,14 @@
           : helperBusy ? "Device verification is busy. Your token is kept. Choose Check token to try again."
           : "Token check failed: " + error.message;
         status.className = "token-check-status " + (helperBusy ? "" : "error");
+        setAdminTokenError(status.textContent, adminTokenRefused, focusError);
         showMessage(status.textContent, connectionLost || helperBusy ? "info" : "error");
         if (connectionLost && typeof recheckTokenWhenPiAnswers === "function") recheckTokenWhenPiAnswers();
       } finally {
+        if (focusAllow) {
+          document.removeEventListener("focusin", stopAllowFocus, true);
+          document.removeEventListener("pointerdown", stopAllowFocus, true);
+        }
         if (tokenRevision !== adminTokenRevision) return;
         button.disabled = false;
         button.removeAttribute("aria-busy");
@@ -6100,6 +6359,7 @@
           (focused === applyButton || focused === resetButton) && !focused.disabled) {
         actionReturnFocus = {button: focused, revision: adminTokenRevision};
       }
+      if (busy && typeof invalidatePreparedReview === "function") invalidatePreparedReview();
       if (busy) runningActions.add(path);
       else runningActions.delete(path);
       busy = runningActions.size > 0;
@@ -6487,6 +6747,64 @@
         if (isCurrent()) button.disabled = false;
       }
     });
+
+    function resetProfileField(field) {
+      if (field.disabled || field.readOnly) return;
+      field.value = field.tagName === "SELECT"
+        ? (Array.from(field.options).find((option) => option.defaultSelected) || field.options[0]).value
+        : field.defaultValue;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    function setupProfileFieldResets() {
+      const form = element("profile-form");
+      const controls = [];
+      form.querySelectorAll("input, select, textarea").forEach((field) => {
+        if (["profile-id", "profile-name", "profile-preset"].includes(field.id)) return;
+        const label = field.closest("label");
+        if (!label) return;
+        const name = label.cloneNode(true);
+        name.querySelectorAll("input, select, textarea, .help-icon").forEach((node) => node.remove());
+        const direction = field.id.startsWith("upload-") ? "Upload "
+          : field.id.startsWith("download-") ? "Download " : "";
+        const feature = field.id.match(/^(?:upload|download)-(\w+)-random-/);
+        const title = "Reset " + direction + (feature ? feature[1] + " " : "") +
+          name.textContent.trim().replace(/\s+/g, " ") + " to default";
+        const wrapper = document.createElement("div");
+        wrapper.className = "profile-field-reset";
+        label.before(wrapper);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.resetField = field.id;
+        button.setAttribute("aria-label", title);
+        button.title = title;
+        const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        icon.setAttribute("viewBox", "0 0 24 24");
+        icon.setAttribute("aria-hidden", "true");
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", "M3 10a9 9 0 1 1 2.6 8.4M3 4v6h6");
+        icon.appendChild(path);
+        button.appendChild(icon);
+        button.addEventListener("click", () => resetProfileField(field));
+        const controlRow = document.createElement("div");
+        controlRow.className = "profile-field-reset-controls";
+        label.htmlFor = field.id;
+        controlRow.append(field, button);
+        wrapper.append(label, controlRow);
+        controls.push({ field, label, wrapper, button });
+      });
+      const sync = () => controls.forEach(({ field, label, wrapper, button }) => {
+        const disabled = field.disabled || field.readOnly;
+        if (button.disabled !== disabled) button.disabled = disabled;
+        if (wrapper.hidden !== label.hidden) wrapper.hidden = label.hidden;
+      });
+      sync();
+      // Existing range controls toggle disabled fields and hidden labels after edits and resets.
+      new MutationObserver(sync).observe(form, {
+        subtree: true, attributes: true, attributeFilter: ["disabled", "readonly", "hidden"]
+      });
+    }
 
     function profileFormPayload(base) {
       const keep = (field) => base
@@ -7187,12 +7505,16 @@
     // Only this button starts a new 24 hours for a remembered token. The check when the page
     // restores a saved token and the other buttons call checkAdminToken directly.
     element("check-admin-token").addEventListener("click", async () => {
-      await checkAdminToken();
+      await checkAdminToken(true);
       syncRememberedCredentials("admin");
     });
     // Enter in the field presses the Check token button, which runs the check above. The form
     // itself never leaves the page.
     element("admin-token-form").addEventListener("submit", (event) => event.preventDefault());
+    element("admin-token-error-link").addEventListener("click", (event) => {
+      event.preventDefault();
+      element("admin-token").focus();
+    });
     // A pasted token is checked straight away. Typing it is checked with the button.
     element("admin-token").addEventListener("paste", () => {
       window.setTimeout(() => {
@@ -7223,6 +7545,7 @@
     });
 
     element("admin-token").addEventListener("input", () => {
+      setAdminTokenError();
       adminTokenRevision += 1;
       if (typeof cancelWifiRecovery === "function") cancelWifiRecovery();
       adminTokenChecking = false;
@@ -7248,6 +7571,8 @@
       element("traffic-status").textContent = "Changing the device view...";
       pollTraffic();
     });
+
+    element("traffic-pause").addEventListener("click", toggleTrafficSampling);
 
     setupTrafficChartInspection();
 
@@ -7801,21 +8126,41 @@
       return error.status === 502 && /^Router login failed/.test(error.message);
     }
 
+    function setRouterPasswordError(message = "", invalid = false, focus = false) {
+      const field = element("router-admin-password");
+      const summary = element("router-password-errors");
+      const controls = element("router-credentials");
+      element("router-password-error-link").textContent = message;
+      summary.hidden = !message;
+      if (invalid) field.setAttribute("aria-invalid", "true");
+      else field.removeAttribute("aria-invalid");
+      if (message && focus && (controls.contains?.(document.activeElement) || document.activeElement === document.body)) {
+        summary.focus();
+      }
+    }
+
     async function checkRouterPassword() {
       if (routerActionPending || routerPasswordChecking) return;
       const button = element("check-router-password");
       const status = element("credential-router-status");
       if (!requireAdminToken(button)) return;
       const passwordRevision = routerPasswordRevision;
+      const tokenRevision = adminTokenRevision;
+      const focusError = Boolean(element("router-credentials").contains?.(document.activeElement));
       const password = element("router-admin-password").value;
       if (!password) {
         status.textContent = "Enter the router admin password first.";
         showMessage(status.textContent, "error");
         openCredentials("router", button);
+        setRouterPasswordError(status.textContent, true, focusError);
         return;
       }
-      if (routerPasswordBlocked(button)) return;
+      if (routerPasswordBlocked(button)) {
+        setRouterPasswordError(status.textContent, routerPasswordRejected, focusError);
+        return;
+      }
       if (routerCheckWaiting()) return;
+      setRouterPasswordError();
       const wasVerified = routerPasswordVerified;
       routerPasswordChecking = true;
       routerPasswordVerified = false;
@@ -7828,14 +8173,14 @@
       showMessage("Checking the router password...", "working");
       try {
         await routerRequest("/api/router/check", { admin_password: password });
-        if (passwordRevision !== routerPasswordRevision) return;
+        if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) return;
         routerPasswordVerified = true;
         // Only Check password calls this so a remembered password gets a new 24 hours.
         syncRememberedCredentials("router");
         status.textContent = "Router password accepted. Nothing on the router was changed.";
         showMessage(status.textContent, "success");
       } catch (error) {
-        if (passwordRevision !== routerPasswordRevision) return;
+        if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) return;
         const tooSoon = error.status === 429 && error.retryAfter > 0;
         routerPasswordRejected = isRouterLoginFailure(error);
         if (tooSoon) {
@@ -7844,6 +8189,7 @@
           routerCheckWaitUntil = Date.now() + Math.ceil(error.retryAfter) * 1000;
         }
         status.textContent = error.message;
+        setRouterPasswordError(status.textContent, routerPasswordRejected, focusError);
         showMessage(error.message, tooSoon ? "info" : "error");
       } finally {
         routerPasswordChecking = false;
@@ -7855,6 +8201,10 @@
       }
     }
 
+    element("router-password-error-link").addEventListener("click", (event) => {
+      event.preventDefault();
+      element("router-admin-password").focus();
+    });
     element("check-router-password").addEventListener("click", checkRouterPassword);
     element("refresh-router-wifi").addEventListener("click", pollRouterWifi);
 
@@ -9619,6 +9969,7 @@
       // A save elsewhere leaves them as they were. The first visit to either page reads them.
       if (!wanted("adminTools", loadAdminTools)) adminToolsStale = true;
       if (wanted("profiles", null)) await loadPrivateDataPanel("profiles-json", loadProfiles);
+      if (!preparedLoaded && !preparedBusy && currentPage() === "devices") await loadPreparedChoices();
       if (wanted("health", loadHealth)) await loadHealth();
       if (wanted("observations", loadObservations)) await loadObservations();
       // Device and group names are needed by the schedule list and the device table.
@@ -9750,6 +10101,8 @@
     }
 
     function startDashboard() {
+      // Extra scripts install field help before startup and still need the original wrapped labels.
+      setupProfileFieldResets();
       // The admin token gates everything else, so only the public health check
       // and the remembered credentials run before Check token. The restore runs
       // at once so that a token typed meanwhile is never touched.
@@ -9990,5 +10343,294 @@
     savedDevicesHooks.push(followSavedDevices);
 
     groupsLoadedHooks.push(renderTargetMenus);
+
+    // Prepared choices are private storage, never a connected-device observation.
+    let preparedRows = [], preparedPage = 0, preparedEdit = null, preparedReview = null;
+    let preparedEpoch = 0, preparedListSerial = 0, preparedReviewSerial = 0;
+    let preparedLoaded = false, preparedBusy = false, preparedDialog = null, preparedOperation = null;
+
+    function beginPreparedOperation() {
+      const operation = {};
+      preparedOperation = operation;
+      preparedBusy = true;
+      return operation;
+    }
+    function finishPreparedOperation(operation, button) {
+      if (preparedOperation !== operation) return false;
+      preparedOperation = null;
+      preparedBusy = false;
+      setButtonBusy(button, false);
+      setPreparedFormBusy(false);
+      return true;
+    }
+    function preparedOwner() {
+      return {token: adminTokenRevision, epoch: preparedEpoch, intent: actionIntentRevision};
+    }
+    function preparedCurrent(owner) {
+      return adminTokenVerified && owner.token === adminTokenRevision &&
+        owner.epoch === preparedEpoch && owner.intent === actionIntentRevision && currentPage() === "devices";
+    }
+    function invalidatePreparedReview() {
+      preparedReviewSerial += 1;
+      preparedReview = null;
+      element("prepared-review").hidden = true;
+      element("prepared-review-summary").textContent = "";
+      element("prepared-settings").textContent = "";
+      if (preparedDialog && preparedDialog.open) preparedDialog.close("cancel");
+      preparedDialog = null;
+    }
+    function setPreparedFormBusy(busy) {
+      element("prepared-form").querySelectorAll("input, select, button").forEach((control) => { control.disabled = busy; });
+    }
+    function resetPreparedForm() {
+      preparedEdit = null;
+      element("prepared-form").reset();
+      element("prepared-mac").readOnly = false;
+      element("prepared-cancel").hidden = true;
+      element("prepared-save").textContent = "Save choice";
+    }
+    function clearPreparedPrivate() {
+      preparedEpoch += 1;
+      preparedListSerial += 1;
+      preparedRows = [];
+      preparedPage = 0;
+      preparedLoaded = false;
+      preparedBusy = false;
+      preparedOperation = null;
+      if (typeof clearDraft === "function") clearDraft("prepared-form");
+      setPreparedFormBusy(false);
+      invalidatePreparedReview();
+      resetPreparedForm();
+      element("prepared-profile").replaceChildren(new Option("Choose a saved profile", ""));
+      element("prepared-list").replaceChildren();
+      element("prepared-note").textContent = "Check the admin token to view prepared choices.";
+      element("prepared-previous").disabled = element("prepared-next").disabled = true;
+      element("prepared-save").disabled = false;
+    }
+    function preparedUsePayload(review) {
+      const row = review && review.pending_device;
+      if (!row || row.action !== "profile" || !review.profile || row.profile_id !== review.profile.id ||
+          !/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(row.mac_address) ||
+          !Number.isSafeInteger(row.revision) || row.revision < 1 ||
+          !Number.isSafeInteger(review.configuration_version) || review.configuration_version < 0) {
+        throw new Error("Review is incomplete or its revision cannot be represented safely. Refresh and review again.");
+      }
+      return {pending_mac: row.mac_address, expected_pending_revision: row.revision,
+        expected_configuration_version: review.configuration_version};
+    }
+    function preparedMessage(message, error = false) {
+      element("prepared-note").textContent = message;
+      showMessage(message, error ? "error" : "success");
+    }
+    async function preparedConfirm(button, message, options) {
+      const pending = confirmFromButton(button, message, options);
+      preparedDialog = document.querySelector("dialog.workflow-confirm[open]");
+      try { return await pending; }
+      finally { preparedDialog = null; }
+    }
+    function renderPreparedRows() {
+      const list = element("prepared-list");
+      list.replaceChildren();
+      preparedPage = Math.min(preparedPage, Math.max(0, Math.ceil(preparedRows.length / 20) - 1));
+      const start = preparedPage * 20;
+      element("prepared-note").textContent = preparedRows.length
+        ? "Prepared choices " + (start + 1) + "–" + Math.min(start + 20, preparedRows.length) + " of " + preparedRows.length
+        : "No prepared choices. Saving a choice will not change the network.";
+      element("prepared-previous").disabled = preparedPage === 0;
+      element("prepared-next").disabled = start + 20 >= preparedRows.length;
+      preparedRows.slice(start, start + 20).forEach((row) => {
+        const line = textNode("div", "", "connected-row");
+        line.dataset.preparedMac = row.mac_address;
+        line.append(textNode("p", (row.display_name || row.mac_address) + " · " + row.mac_address + " · " +
+          (row.action === "profile" ? "Prepared profile: " + profileName(row.profile_id) : "Prepared protection — use unavailable") +
+          " · revision " + row.revision));
+        const actions = textNode("div", "", "row-actions");
+        const add = (label, call) => {
+          const button = textNode("button", label);
+          button.type = "button";
+          button.setAttribute("aria-label", label + " prepared choice for " + row.mac_address);
+          button.addEventListener("click", () => { if (!preparedBusy) call(button); });
+          actions.append(button);
+        };
+        if (row.action === "profile") {
+          add("Edit", () => {
+            invalidatePreparedReview();
+            preparedEdit = row;
+            element("prepared-mac").value = row.mac_address;
+            element("prepared-mac").readOnly = true;
+            element("prepared-name").value = row.display_name || "";
+            element("prepared-profile").value = row.profile_id;
+            element("prepared-cancel").hidden = false;
+            element("prepared-save").textContent = "Save edited choice";
+            element("prepared-name").focus();
+          });
+          add("Review", (button) => reviewPreparedChoice(row, button));
+        }
+        add("Delete", (button) => deletePreparedChoice(row, button));
+        line.append(actions); list.append(line);
+      });
+    }
+    async function loadPreparedChoices() {
+      if (!adminTokenVerified || currentPage() !== "devices" || preparedBusy) return;
+      invalidatePreparedReview();
+      const owner = preparedOwner(), serial = ++preparedListSerial;
+      element("prepared-note").textContent = "Loading prepared choices…";
+      try {
+        const result = await request("/api/pending-devices", "GET", undefined,
+          {isResponseCurrent: () => preparedCurrent(owner) && serial === preparedListSerial});
+        if (!preparedCurrent(owner) || serial !== preparedListSerial) return;
+        if (!Array.isArray(result.pending_devices) || result.pending_devices.length > 256) throw new Error("Invalid prepared choice list.");
+        preparedRows = result.pending_devices;
+        preparedLoaded = true;
+        renderPreparedRows();
+      } catch (error) {
+        if (preparedCurrent(owner) && serial === preparedListSerial) {
+          element("prepared-list").replaceChildren();
+          preparedRows = [];
+          preparedMessage("Could not load prepared choices. Refresh to try again. " + error.message, true);
+        }
+      }
+    }
+    async function savePreparedChoice(event) {
+      event.preventDefault();
+      if (preparedBusy || !adminTokenVerified) return;
+      invalidatePreparedReview();
+      const owner = preparedOwner(), edit = preparedEdit;
+      const payload = {mac_address: element("prepared-mac").value.trim().toLowerCase(), action: "profile",
+        profile_id: element("prepared-profile").value, display_name: element("prepared-name").value};
+      if (edit) {
+        if (!Number.isSafeInteger(edit.revision) || edit.revision < 1) { preparedMessage("Refresh before editing this revision.", true); return; }
+        payload.mac_address = edit.mac_address; payload.expected_revision = edit.revision;
+      }
+      let saved = false;
+      const operation = beginPreparedOperation();
+      setPreparedFormBusy(true); setButtonBusy(element("prepared-save"), true);
+      try {
+        await request("/api/pending-devices", "POST", payload, {isResponseCurrent: () => preparedCurrent(owner)});
+        if (!preparedCurrent(owner)) return;
+        resetPreparedForm();
+        saved = true;
+        preparedMessage("Choice prepared. No network settings changed.");
+      } catch (error) {
+        if (preparedCurrent(owner)) preparedMessage(error.message + " Refresh saved choices before trying again; a lost response can leave the result unknown.", true);
+      } finally {
+        if (finishPreparedOperation(operation, element("prepared-save")) && saved && preparedCurrent(owner)) {
+          await loadPreparedChoices();
+        }
+      }
+    }
+    async function deletePreparedChoice(row, button) {
+      invalidatePreparedReview();
+      const owner = preparedOwner();
+      if (!Number.isSafeInteger(row.revision) || row.revision < 1) { preparedMessage("Refresh before deleting this revision.", true); return; }
+      const operation = beginPreparedOperation();
+      try {
+        if (!await preparedConfirm(button, "Delete the prepared choice for " + row.mac_address + "? Active settings stay unchanged.",
+          {title: "Delete prepared choice", confirmLabel: "Delete choice", danger: true}) || !preparedCurrent(owner)) return;
+        await request("/api/pending-devices/delete", "POST", {mac_address: row.mac_address, expected_revision: row.revision},
+          {isResponseCurrent: () => preparedCurrent(owner)});
+        if (!preparedCurrent(owner)) return;
+        preparedMessage("Prepared choice deleted. Active settings stay unchanged.");
+        await loadPreparedAfterWrite();
+        if (preparedCurrent(owner)) element("prepared-title").focus();
+      } catch (error) {
+        if (preparedCurrent(owner)) preparedMessage(error.message + " Refresh before trying again; the saved result may be unknown.", true);
+      } finally {
+        finishPreparedOperation(operation, button);
+      }
+    }
+    async function loadPreparedAfterWrite() {
+      preparedBusy = false;
+      await loadPreparedChoices();
+    }
+    async function reviewPreparedChoice(row, button) {
+      invalidatePreparedReview();
+      const owner = preparedOwner(), serial = preparedReviewSerial;
+      const requestOwner = {};
+      button.preparedReviewOwner = requestOwner;
+      setButtonBusy(button, true);
+      try {
+        const review = await request("/api/pending-devices/review?mac=" + encodeURIComponent(row.mac_address), "GET", undefined,
+          {isResponseCurrent: () => preparedCurrent(owner) && serial === preparedReviewSerial});
+        if (!preparedCurrent(owner) || serial !== preparedReviewSerial) return;
+        const payload = preparedUsePayload(review);
+        if (payload.pending_mac !== row.mac_address || payload.expected_pending_revision !== row.revision || review.profile.id !== row.profile_id) {
+          throw new Error("Prepared choice changed. Refresh and review again.");
+        }
+        preparedReview = review;
+        element("prepared-review-summary").textContent = (review.pending_device.display_name || row.mac_address) + " · " + row.mac_address +
+          " · " + review.profile.name + " (" + review.profile.id + ") · " + profileSummary(review.profile) +
+          " · configuration version " + review.configuration_version + " · pending revision " + row.revision +
+          " · prepared " + formatUtcDay(review.pending_device.saved_at);
+        element("prepared-settings").textContent = JSON.stringify(review.profile, null, 2);
+        element("prepared-review").hidden = false;
+        element("prepared-use").disabled = !helperConfigured || networkActionBusy;
+        element("prepared-review-title").focus();
+      } catch (error) {
+        if (preparedCurrent(owner) && serial === preparedReviewSerial) preparedMessage(error.message, true);
+      } finally {
+        if (button.preparedReviewOwner === requestOwner) {
+          delete button.preparedReviewOwner;
+          if (adminTokenVerified && owner.token === adminTokenRevision && button.isConnected) setButtonBusy(button, false);
+        }
+      }
+    }
+    async function usePreparedChoice() {
+      if (preparedBusy || networkActionBusy || !helperConfigured || !preparedReview) return;
+      const review = preparedReview, owner = preparedOwner(), button = element("prepared-use");
+      const serial = preparedReviewSerial;
+      const current = () => preparedCurrent(owner) && serial === preparedReviewSerial && preparedReview === review;
+      const operation = beginPreparedOperation();
+      try {
+        const payload = preparedUsePayload(review);
+        const allow = review.profile.website_mode === "allow_only" ? " This profile blocks every site outside its allow list." : "";
+        if (!await preparedConfirm(button, "Use " + review.profile.name + " for MAC " + payload.pending_mac + "?" + allow +
+          " The server checks its current Wi-Fi identity before saving and starting the profile.",
+          {title: "Use prepared profile", confirmLabel: "Use profile"}) || !current()) return;
+        invalidatePreparedReview();
+        const intent = ++actionIntentRevision;
+        const appliedCurrent = () => adminTokenVerified && owner.token === adminTokenRevision &&
+          owner.epoch === preparedEpoch && intent === actionIntentRevision && currentPage() === "devices";
+        setActionBusy(true, "/api/apply");
+        try {
+          const result = await request("/api/connected-devices/apply-profile", "POST", payload, {isResponseCurrent: appliedCurrent});
+          if (!appliedCurrent()) return;
+          const outcome = (result.message || (result.live_applied === true ? "Profile saved and applied." : "Profile saved; live application was not confirmed.")) +
+            (result.warning ? " " + result.warning : "") + " Prepared choice retained.";
+          element("prepared-note").textContent = outcome;
+          refreshAfterSuccess(outcome);
+        } catch (error) {
+          if (appliedCurrent()) preparedMessage(error.message + " Check saved and running settings; the result may be unknown. Refresh and review again before another Use.", true);
+        } finally {
+          setActionBusy(false, "/api/apply");
+        }
+      } catch (error) { if (preparedCurrent(owner)) preparedMessage(error.message, true); }
+      finally {
+        finishPreparedOperation(operation, button);
+      }
+    }
+    privateDataLockHooks.push(clearPreparedPrivate);
+    profilesLoadedHooks.push(() => {
+      invalidatePreparedReview();
+      const select = element("prepared-profile"), selected = select.value;
+      select.replaceChildren(new Option("Choose a saved profile", ""));
+      profiles.forEach((profile) => select.add(new Option(profileOptionLabels(profiles).get(profile.id), profile.id)));
+      select.value = selected;
+    });
+    runtimeStateHooks.push((state) => {
+      if (preparedReview && state.configuration_version !== undefined &&
+          state.configuration_version !== preparedReview.configuration_version) invalidatePreparedReview();
+    });
+    new MutationObserver(() => {
+      if (currentPage() !== "devices") { preparedEpoch += 1; invalidatePreparedReview(); preparedBusy = false; preparedOperation = null; setPreparedFormBusy(false); }
+      else if (adminTokenVerified && !preparedLoaded) loadPreparedChoices();
+    }).observe(document.body, {attributes: true, attributeFilter: ["data-section"]});
+    element("prepared-form").addEventListener("submit", savePreparedChoice);
+    element("prepared-form").addEventListener("input", invalidatePreparedReview);
+    element("prepared-refresh").addEventListener("click", loadPreparedChoices);
+    element("prepared-cancel").addEventListener("click", () => { if (!preparedBusy) { resetPreparedForm(); element("prepared-mac").focus(); } });
+    element("prepared-previous").addEventListener("click", () => { if (!preparedBusy) { preparedPage -= 1; invalidatePreparedReview(); renderPreparedRows(); } });
+    element("prepared-next").addEventListener("click", () => { if (!preparedBusy) { preparedPage += 1; invalidatePreparedReview(); renderPreparedRows(); } });
+    element("prepared-use").addEventListener("click", usePreparedChoice);
 
     startDashboard();

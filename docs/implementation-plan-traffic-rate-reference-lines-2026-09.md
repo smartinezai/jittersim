@@ -155,3 +155,17 @@ available in this work session. After installing the update, confirm on the
 Pi that a selected test device shows its active default-queue cap beside the
 ISP reference. Treat that graph as configured limits plus traffic measured at
 the Pi, not as proof of the device's achieved speed.
+
+
+## Data scale follow-up, 24 October 2026
+
+The chart now uses measured upload and download samples to choose a 1-2-5 axis
+ceiling with 20 percent headroom and a 0.1 Mbit/s floor. Configured limits do
+not stretch the axis. References above the axis retain their real values in
+an above-chart label and a top-edge marker. Their legend inspection remains
+available. In-range reference portions remain visible inside the plot.
+
+The latest measured interval also appears as text with a collapsed table of
+at most 30 intervals. The table refreshes with two-second samples without a
+live region. Pause keeps a frozen snapshot and stops graph sampling. Resume
+starts a fresh graph and counter baseline so no rate spans the pause.

@@ -2,7 +2,7 @@
 
 from playwright.sync_api import expect
 
-from tests.browser.phone import open_controls
+from tests.browser.phone import open_controls, sidebar_control
 
 
 def check_draft_navigation(page):
@@ -145,7 +145,7 @@ def check_draft_navigation(page):
         assert len(writes) == before, writes
         page.locator("#test-session-notes").fill("Private unfinished notes")
         expect(notes_review).to_be_visible()
-        page.locator("#open-admin-credentials").click()
+        sidebar_control(page, "#open-admin-credentials").click()
         page.locator("#check-admin-token").click()
         expect(page.locator("#private-dashboard")).to_be_visible()
         expect(notes_review).to_be_visible()

@@ -16,6 +16,7 @@ import sys
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.phone import sidebar_control
 from tests.browser.route_support import keep_interception_on
 
 TOKEN = "browser-test"
@@ -421,7 +422,7 @@ def check_long_idle_is_quiet(page, seconds=130):
 
     page.set_viewport_size({"width": 1440, "height": 1000})
     page.locator('[data-page-link="devices"]').click()
-    page.locator("#open-admin-credentials").click()
+    sidebar_control(page, "#open-admin-credentials").click()
     page.locator("#remember-admin-token").check()
     expect(page.locator("#remember-admin-token-note")).to_contain_text("Remembered until")
     page.locator("#close-credentials").click()

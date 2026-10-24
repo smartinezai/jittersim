@@ -1,0 +1,132 @@
+{
+  "browser": "Chromium1243 / Playwright1.63.0",
+  "viewports": {
+    "1440": [
+      1440,
+      1000
+    ],
+    "320": [
+      320,
+      568
+    ],
+    "375": [
+      375,
+      812
+    ],
+    "390": [
+      390,
+      844
+    ]
+  },
+  "large_text": "320 uses existing CSP-hashed fixture style:112.5% root / Verdana; verified18px",
+  "files": [
+    {
+      "file": "prepared-1440-card.png",
+      "sha256": "4c6c4c4e528bf2231ad45e825e8fd717b31ea1844fd9fa917abb506208b1031b",
+      "bytes": 91408,
+      "viewport_width": 1440,
+      "source": "synthetic local browser fixture; no physical traffic evidence",
+      "capture": "979b6a4cbf5fa7637765742c6c4f415064fb5068",
+      "notes": "Known asserted success message explicitly dismissed; unchanged product UI"
+    },
+    {
+      "file": "prepared-1440-with-toast.png",
+      "sha256": "aa6cb4a3a9cdf4839718d40dc483acc7a90e6140aa79ebf9289a177117b05d68",
+      "bytes": 168986,
+      "viewport_width": 1440,
+      "source": "synthetic local browser fixture; no physical traffic evidence",
+      "capture": "ade2477c earlier passing run",
+      "notes": "Original notification-visible state"
+    },
+    {
+      "file": "prepared-1440.png",
+      "sha256": "632f534e2c329c383fedfe87fda86e72a7b6d83e426c3dee0def11a21cd7c721",
+      "bytes": 155607,
+      "viewport_width": 1440,
+      "source": "synthetic local browser fixture; no physical traffic evidence",
+      "capture": "979b6a4cbf5fa7637765742c6c4f415064fb5068",
+      "notes": "Known asserted success message explicitly dismissed; unchanged product UI"
+    },
+    {
+      "file": "prepared-320-card.png",
+      "sha256": "3e619a56f519ba99d6e1ad11545b1ad75431bdbca7b8aa5cd5def11622f62ce0",
+      "bytes": 130251,
+      "viewport_width": 320,
+      "source": "synthetic local browser fixture; no physical traffic evidence",
+      "capture": "979b6a4cbf5fa7637765742c6c4f415064fb5068",
+      "notes": "Known asserted success message explicitly dismissed; unchanged product UI"
+    },
+    {
+      "file": "prepared-320-with-toast.png",
+      "sha256": "e6a2fdce2acc1e88cf39460cdd296ad376601001e4cad3e89151933cf49d31d0",
+      "bytes": 60039,
+      "viewport_width": 320,
+      "source": "synthetic local browser fixture; no physical traffic evidence",
+      "capture": "ade2477c earlier passing run",
+      "notes": "Original notification-visible state"
+    },
+    {
+      "file": "prepared-320.png",
+      "sha256": "9bb7db6256c9856040cf6176a9580e03065881c87e70ed8cdf4c81145a8a2cb9",
+      "bytes": 54864,
+      "viewport_width": 320,
+      "source": "synthetic local browser fixture; no physical traffic evidence",
+      "capture": "979b6a4cbf5fa7637765742c6c4f415064fb5068",
+      "notes": "Known asserted success message explicitly dismissed; unchanged product UI"
+    },
+    {
+      "file": "prepared-375-card.png",
+      "sha256": "41900866500809809022af0482829f30f28314ca734555eb86a9447a9046c971",
+      "bytes": 98455,
+      "viewport_width": 375,
+      "source": "synthetic local browser fixture; no physical traffic evidence",
+      "capture": "979b6a4cbf5fa7637765742c6c4f415064fb5068",
+      "notes": "Known asserted success message explicitly dismissed; unchanged product UI"
+    },
+    {
+      "file": "prepared-375-with-toast.png",
+      "sha256": "13d10277a67a9b3969c1408118c82dd6345e733aaf27e2051b2d8daa127dc97b",
+      "bytes": 76271,
+      "viewport_width": 375,
+      "source": "synthetic local browser fixture; no physical traffic evidence",
+      "capture": "ade2477c earlier passing run",
+      "notes": "Original notification-visible state"
+    },
+    {
+      "file": "prepared-375.png",
+      "sha256": "f182ef81bab042b229711ad6cbea5d260b5b6c1c006423bbed08b2a032001daf",
+      "bytes": 73193,
+      "viewport_width": 375,
+      "source": "synthetic local browser fixture; no physical traffic evidence",
+      "capture": "979b6a4cbf5fa7637765742c6c4f415064fb5068",
+      "notes": "Known asserted success message explicitly dismissed; unchanged product UI"
+    },
+    {
+      "file": "prepared-390-card.png",
+      "sha256": "2cbe13bfd5c6ea66cec628293515a64b3532c9f4841d8c64d545164c293c7bab",
+      "bytes": 98477,
+      "viewport_width": 390,
+      "source": "synthetic local browser fixture; no physical traffic evidence",
+      "capture": "979b6a4cbf5fa7637765742c6c4f415064fb5068",
+      "notes": "Known asserted success message explicitly dismissed; unchanged product UI"
+    },
+    {
+      "file": "prepared-390-with-toast.png",
+      "sha256": "a01b584d3767bb71bd66a585dab457641128eb5a8a8073385d86aec736ef40b6",
+      "bytes": 81009,
+      "viewport_width": 390,
+      "source": "synthetic local browser fixture; no physical traffic evidence",
+      "capture": "ade2477c earlier passing run",
+      "notes": "Original notification-visible state"
+    },
+    {
+      "file": "prepared-390.png",
+      "sha256": "c5877cc308ba62b9ab9cc9a7bd5f463f6a216ee0f62d8d7ca67b247af181dbc6",
+      "bytes": 77754,
+      "viewport_width": 390,
+      "source": "synthetic local browser fixture; no physical traffic evidence",
+      "capture": "979b6a4cbf5fa7637765742c6c4f415064fb5068",
+      "notes": "Known asserted success message explicitly dismissed; unchanged product UI"
+    }
+  ]
+}

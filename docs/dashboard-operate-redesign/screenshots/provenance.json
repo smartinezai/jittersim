@@ -1,0 +1,37 @@
+[
+  {
+    "file": "desktop-devices.png",
+    "sha256": "076269dfaba8b395f81658ea584b551c6196391190ec63e06b924bc3258f082a",
+    "origin": "redesign-gui-worktree/test-results/local-ci-20261024-191545/gui-baseline/devices-1440-dark.png",
+    "data": "Synthetic disposable test fixtures; not physical Pi/router or traffic evidence",
+    "source_equivalent_to": "df1816dd5926015a6f01c597dfe69515e21b25d2"
+  },
+  {
+    "file": "phone-devices.png",
+    "sha256": "eab8528ddcc65f26955de793cdc436f059961084994f637b9da0d7241cc125b3",
+    "origin": "redesign-gui-worktree/test-results/local-ci-20261024-191545/gui-baseline/devices-375-dark.png",
+    "data": "Synthetic disposable test fixtures; not physical Pi/router or traffic evidence",
+    "source_equivalent_to": "df1816dd5926015a6f01c597dfe69515e21b25d2"
+  },
+  {
+    "file": "desktop-traffic.png",
+    "sha256": "3a087c7b68f81bc38ba2e8f672fda2a2ea5d33f3b3c022e708426a47f8ec3099",
+    "origin": "redesign-gui-worktree/test-results/local-ci-20261024-191545/gui-baseline/traffic-1440-dark.png",
+    "data": "Synthetic disposable test fixtures; not physical Pi/router or traffic evidence",
+    "source_equivalent_to": "df1816dd5926015a6f01c597dfe69515e21b25d2"
+  },
+  {
+    "file": "phone-320-large-font.png",
+    "sha256": "02b67ea3bd6d7fec4c3c700bc2e6e83ef69510ac5c835b9bcdf286c4657e4738",
+    "origin": "redesign-worktree/test-results/phone-320x568.png",
+    "data": "Synthetic disposable test fixtures; not physical Pi/router or traffic evidence",
+    "source_equivalent_to": "df1816dd5926015a6f01c597dfe69515e21b25d2"
+  },
+  {
+    "file": "desktop-utilities.png",
+    "sha256": "9db1ebc96dd80cb4931fe4aeb8a7a44fa2df39c2ee3bda47d72ef7b8ea7afc2a",
+    "origin": "redesign-worktree/test-results/operate-utilities-1440.png",
+    "data": "Synthetic disposable test fixtures; not physical Pi/router or traffic evidence",
+    "source_equivalent_to": "df1816dd5926015a6f01c597dfe69515e21b25d2"
+  }
+]
