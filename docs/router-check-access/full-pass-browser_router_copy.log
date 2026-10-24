@@ -1,0 +1,8 @@
+$ /Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/.venv-local-ci-3.12/bin/python -m tests.browser.router_copy
+# started 2026-10-25 00:04:54 +0200
+dashboard response status=429
+The router Wi-Fi copy works but is not remembered for the next boot.
+dashboard response status=429
+The router Wi-Fi copy works but is not remembered for the next boot.
+Router Wi-Fi import acceptance passed at desktop and 375px widths.
+# finished with status 0 after 25.2 seconds

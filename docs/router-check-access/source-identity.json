@@ -1,0 +1,52 @@
+{
+  "tested_head": "5b943e91aad102c8d66278e741c2b062a9c40ba6",
+  "src_tree": "06fb22f85c07e53be43f61230f9d9c5bdc98b9cf",
+  "page_sha256": "f00ac7944e2fbb4979c1385b134e7837009357fce1e268ccc549e0ab35d3a6a1",
+  "measured": {
+    "page_bytes": 917248,
+    "page_gzip6_bytes": 199455,
+    "page_lines": 18015,
+    "markup_bytes": 117801,
+    "markup_lines": 1563,
+    "css_bytes": 106389,
+    "css_gzip6_bytes": 21720,
+    "css_lines": 1677,
+    "js_bytes": 693010,
+    "js_lines": 14778,
+    "element_ids": 595,
+    "distinct_colors": 148,
+    "color_occurrences": 178,
+    "distinct_font_sizes": 28,
+    "distinct_margin_values": 33,
+    "distinct_padding_values": 72,
+    "distinct_gap_values": 32,
+    "distinct_z_indexes": 8,
+    "distinct_border_radii": 21,
+    "distinct_media_queries": 15,
+    "important_declarations": 13,
+    "root_rules": 5,
+    "aria_live_in_markup": 0,
+    "aria_live_flip_sites": 0,
+    "inline_event_handler_attributes": 0,
+    "inline_style_attributes": 0,
+    "window_confirm_calls": 0
+  },
+  "strict": {
+    "aria_live_flip_sites": 0,
+    "aria_live_in_markup": 0,
+    "important_declarations": 13,
+    "inline_event_handler_attributes": 0,
+    "inline_style_attributes": 0,
+    "root_rules": 5,
+    "window_confirm_calls": 0
+  },
+  "budget_failures": [],
+  "fixture_baseline_src": "c9a3d18030d2e2b33b551073ae2dbedad996da37",
+  "base_src": "e5b0db78e6b8c091b1574e2db498668e44db776e",
+  "captures": {
+    "check-375.png": "bbb69b80dad53a2e7f429f3a8c1213aef1136d03e621682a19063d4e52aa6346",
+    "check-320.png": "ffd01532faffe4b417abd97a06bfa4f7827935397a6ac55c203831f670d16001",
+    "check-1440.png": "38410f2decc229d5cfb39d912ea87a8bb1cbbb928cdb130150b5ed212608ff96"
+  },
+  "context": "Synthetic fake router; Chromium1243 / Playwright1.63.0. Sample read replies only, no live router or owner credentials."
+}

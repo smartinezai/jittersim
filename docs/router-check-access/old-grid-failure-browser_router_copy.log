@@ -1,0 +1,15 @@
+$ /Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/.venv-local-ci-3.12/bin/python -m tests.browser.router_copy
+# started 2026-10-25 00:01:01 +0200
+dashboard response status=429
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/tests/browser/router_copy.py", line 580, in <module>
+    run()
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/tests/browser/router_copy.py", line 570, in run
+    run_width(browser, f"http://127.0.0.1:{port}", width, height)
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/tests/browser/router_copy.py", line 374, in run_width
+    assert abs(action["x"] - row["x"]) <= 1
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+# finished with status 1 after 3.7 seconds
