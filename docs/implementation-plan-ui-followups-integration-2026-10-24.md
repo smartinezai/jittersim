@@ -35,3 +35,7 @@ This task combines existing changes. It adds no new endpoint, stored data, netwo
 ## Review state
 
 The coordinator approved this exact composition scope under the existing explicit authorization for ongoing implementation. The initial plan was created before merges. The owner resolved the profile budget approval hold with “Approve the six measured records”. On 24 October 2026 the coordinator authorized adding the completed new discovery head and current main. Current main aa561623 is under the owner delivery freeze. This broad UI composition stays private. No push, pull request or main merge is authorized from this worktree. The final combined validation assignment remains with the coordinator.
+
+## Measured composition counters
+
+The combined source has 17454 assembled lines. Record that measured value instead of 16988. The 15 distinct media conditions are the union of the reviewed notification and short-window safety conditions, rather than a new integration rule. Record 15 instead of 14. Preserve the six measured profile records, every other record, all seven strict counters and the 2 percent tolerance. No source minification or product change accompanies these two composition records.

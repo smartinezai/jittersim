@@ -32,7 +32,7 @@
   "recorded": {
     "page_bytes": 876031,
     "page_gzip6_bytes": 190100,
-    "page_lines": 16988,
+    "page_lines": 17454,
     "markup_bytes": 111587,
     "markup_lines": 1515,
     "css_bytes": 103277,
@@ -49,7 +49,7 @@
     "distinct_gap_values": 32,
     "distinct_z_indexes": 8,
     "distinct_border_radii": 22,
-    "distinct_media_queries": 14,
+    "distinct_media_queries": 15,
     "important_declarations": 13,
     "root_rules": 5,
     "aria_live_in_markup": 0,
