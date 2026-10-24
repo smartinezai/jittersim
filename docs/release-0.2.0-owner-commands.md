@@ -51,7 +51,15 @@ Do not add `--yes`: it merges and publishes without asking. Lint, the Python tes
 | `Publish v0.2.0 on GitHub as the latest release? [y/N]` | **y**, after the dry run above it printed `Release operation completed: publish`. Version and commit: `cat ~/jittersim-releases/0.2.0/package/release.json`. |
 | `Merge PR #N (release record and version 0.2.1) now? [y/N]` | **y**. Main is 0.2.1 from then on. |
 
-**Before step 4, write down** the profile names, the device names, the protected-device list, whether Panic is on and the access rules. You compare after the install.
+**Before step 4, take a fresh database backup.** New profiles or other settings may have been added since the previous backup. Run this on the Mac [OWNER], using the connection from the prerequisites above. Enter the admin token only at the hidden prompt:
+
+```sh
+"$JITTERSIM" backup pull
+```
+
+Continue only when the command succeeds and prints the new file's path in `~/jittersim-backups/`. Keep that file; an older backup is not a substitute. The command checks that the download is complete and looks like SQLite, not that its contents are sound. The [backup drill](user-guide.md#back-up-to-your-mac-and-check-the-copy) gives the separate database check. Repeat the fresh backup before any later Pi update.
+
+**Also write down** the profile names, the device names, the protected-device list, whether Panic is on and the access rules. You compare after the install.
 
 ```sh
 # 4. [OWNER] install the exact package on the Pi (the update service the dashboard uses, no sudo).

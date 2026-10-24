@@ -3,13 +3,13 @@
 The exact October2 fix list is preserved in [the historical archive](history/2026-10-02-backlog-and-ux/planned-fixes.md).
 New feature ideas are in [feature proposals](feature-proposals-2026-10-09.md).
 
-Baseline: `origin/main` at `f290ea9d` (the merge of PR 171 on 19 October 2026), checked on
-19 October 2026. Statuses come from the source and the merged pull requests on that commit. Nothing
-here was run on a Pi. The 4 October accepted main `5e0fed2` matched tested candidate 6fb864f. Hosted
-jobs cannot start (billing limit), so every pull request is gated by `scripts/local-ci.sh` on its head
-commit ([local CI](local-ci.md)).
+Baseline: candidate `afa7d222` on `origin/main`, checked on 24 October 2026.
+The open fixes below were reconciled with that source and its merged pull requests.
+The six local candidate gates passed; the unit gate covered Python 3.12 only. Hosted
+CI is billing-blocked, and the Python 3.9, 3.11 and 3.13 matrix has not been run on
+this candidate. Pi and phone acceptance remain outstanding. See [local CI](local-ci.md).
 
-## Changes after that candidate (9 to 19 October 2026)
+## Changes after the 4 October candidate (9 to 19 October 2026)
 
 - Router Wi-Fi writes are permanently refused by the Pi helper and the dashboard
   switch is read only (PR 87, merge `3903581`). Read-only router status checks and
@@ -109,13 +109,12 @@ Two browser checks needed updates when those changes were composed. Recovery
 now explicitly checks router status and waits for intercepted requests.
 Keyboard diagnostics permits only the pure range-preview POST while continuing
 to detect actual writes. The failed runs and corrected focused checks are
-retained. The complete current Linux sequence passed.
+retained. Those results describe the 4 October candidate.
 
-All configured local pipeline checks passed and the accepted main tree matches
-the frozen candidate. Signing trust, safe recovery and physical Pi/phone
-acceptance remain deployment gates. Hosted jobs stopped before execution by billing limits
-can use fully completed local counterparts under the current human authority.
-Do not describe them as successful hosted jobs.
+Candidate `afa7d222` has passed lint, unit (Python 3.12), browser, GUI, kernel and
+release checks locally. Signing trust, safe recovery and physical Pi/phone
+acceptance remain deployment gates. Local results do not establish successful hosted
+jobs or an installed release.
 
 The physical router incident remains unresolved. Later healthy addresses and
 services were recorded after recovery. They do not establish the initial
@@ -128,8 +127,9 @@ new tickets. The archived list retains all details and proposed fixes.
 
 ## Open fixes
 
-Open on 19 October 2026, with the items of 23 October added at the end of this list. PR 161 and 170
-have merged since. The pull requests that are still open and their states are in the
+Open against candidate `afa7d222` on 24 October 2026. PR 161, PR 170 and their
+review follow-ups are merged. PR 175 is held until v0.2.0 is installed; the PR 209
+Docker test-harness follow-up is held until publication. Their states are in the
 [roadmap](../ROADMAP.md) and on GitHub.
 
 - Two owner decisions from the review of PR 138 ([review results](review-results-carry-forward-2026-10-16.md)).
