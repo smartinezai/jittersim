@@ -295,7 +295,7 @@ def test_global_block_editor_describes_the_address_limit_as_permanent_help():
     assert note.tag == "p" and "policy-note" in note.classes
     assert "hidden" not in note.attrs and "role" not in note.attrs
     assert note.text() == (
-        "While JitterSim runs, the global block list blocks up to 4096 resolved addresses. "
+        "While impairment runs, the global block list blocks up to 4096 resolved addresses. "
         "With household access rules on, DNS still refuses every listed name. "
         "With those rules off, some listed sites may remain reachable above this limit."
     )
