@@ -59,9 +59,14 @@ def check_sections(page):
     for name in PAGES[1:]:
         page.locator(f'[data-page-link="{name}"]').click()
         only_visible(page, name)
+        assert page.evaluate("window.scrollY") <= 1
         assert page.url.endswith("#" + name)
     page.go_back()
     only_visible(page, "diagnostics")
+    assert page.evaluate("window.scrollY") <= 1
+    page.go_forward()
+    only_visible(page, "updates")
+    assert page.evaluate("window.scrollY") <= 1
     page.goto(page.url.split("#")[0] + "#router")
     only_visible(page, "router")
     page.goto(page.url.split("#")[0] + "#nonsense")
@@ -115,6 +120,19 @@ def check_emergency_controls(page):
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
 
 
+def check_skip_link(page):
+    skip = page.get_by_role("link", name="Skip to main content")
+    assert skip.bounding_box()["y"] + skip.bounding_box()["height"] <= 0
+    skip.focus()
+    expect(skip).to_be_focused()
+    expect(skip).to_be_in_viewport(ratio=1)
+    page.keyboard.press("Enter")
+    expect(page.locator("#content")).to_be_focused()
+    page.locator('[data-page-link="devices"]').click()
+    expect(page.locator("#page-devices")).to_be_focused()
+    assert skip.bounding_box()["y"] + skip.bounding_box()["height"] <= 0
+
+
 def check_keyboard_navigation(page):
     # Establish keyboard modality before checking the :focus-visible treatment.
     page.keyboard.press("Tab")
@@ -134,6 +152,13 @@ def check_keyboard_navigation(page):
     page.go_back()
     only_visible(page, "devices")
     expect(page.locator("#page-devices")).to_be_focused()
+    assert page.evaluate("window.scrollY") <= 1
+    page.go_forward()
+    only_visible(page, "profiles")
+    expect(page.locator("#page-profiles")).to_be_focused()
+    assert page.evaluate("window.scrollY") <= 1
+    page.go_back()
+    only_visible(page, "devices")
 
 
 def check_collapsing(page):
@@ -178,6 +203,7 @@ def check_narrow(page):
             expect(page.locator(f'[data-page-link="{name}"]')).to_be_visible()
         page.locator('[data-page-link="schedules"]').click()
         expect(page.locator("#page-schedules")).to_be_focused()
+        assert page.evaluate("window.scrollY") <= 1
         expect(page.locator("#page-schedules")).to_be_in_viewport()
         page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
         for control in ("#panic-button", "#router-wifi-toggle"):
@@ -269,6 +295,7 @@ def run():
                     expect(page.locator(".sidebar-nav")).to_be_hidden()
                     unlock(page)
                     check_action_help(page)
+                    check_skip_link(page)
                     check_keyboard_navigation(page)
                     check_sections(page)
                     check_emergency_controls(page)

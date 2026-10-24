@@ -245,7 +245,7 @@ def function_source(name):
 
 
 FUNCTIONS = (
-    "pageFromHash", "scrollBehavior", "pageStartTop", "moreToShow", "showPageStart",
+    "pageFromHash", "scrollBehavior", "moreToShow", "showPageStart",
     "syncNavHint", "revealNavLink", "controlsOpen", "setControlsOpen", "keepsControlsOpen",
     "setStatusOpen", "statusStripText", "syncStatusStrip", "showPage", "followLocation",
 )
@@ -343,16 +343,6 @@ def run_node(body):
 
 
 @NEEDS_NODE
-@pytest.mark.parametrize("top,scrolled,margin,expected", [
-    (660, 0, 8, 652), (-200, 900, 8, 692), (3, 0, 8, 0), (100.6, 10, 8, 103),
-])
-def test_the_page_start_is_scrolled_to_the_top(top, scrolled, margin, expected):
-    assert run_node(
-        f"console.log(JSON.stringify(pageStartTop({top}, {scrolled}, {margin})));"
-    ) == expected
-
-
-@NEEDS_NODE
 @pytest.mark.parametrize("offset,visible,total,expected", [
     (0, 300, 900, {"before": False, "after": True}),
     (600, 300, 900, {"before": True, "after": False}),
@@ -401,8 +391,8 @@ def test_a_page_link_on_a_phone_shows_and_focuses_the_page_start():
     )
     assert result["shown"] == ["page-router"]
     assert result["current"] == ["link-router"]
-    # The section is 660px down with 300px scrolled: the window goes to 952 (8px margin).
-    assert result["scrolls"] == [{"top": 952, "behavior": "auto"}]
+    # Navigation resets the document, keeping the header and page links visible.
+    assert result["scrolls"] == [{"top": 0, "behavior": "auto"}]
     assert result["focused"] == ["page-router"]
     assert result["open"] is False and result["expanded"] == "false"
 
@@ -414,7 +404,7 @@ def test_a_page_link_on_a_wide_window_focuses_the_section_and_keeps_its_heading_
         "showPage('traffic', true); showPage('profiles', false);\n"
         "console.log(JSON.stringify({scrolls, focused}));"
     )
-    assert result == {"scrolls": [{"top": 892, "behavior": "auto"}], "focused": ["page-traffic"]}
+    assert result == {"scrolls": [{"top": 0, "behavior": "auto"}], "focused": ["page-traffic"]}
 
 
 @NEEDS_NODE
