@@ -6004,6 +6004,14 @@
     let refreshWanted;
 
     async function refresh(only) {
+      const revision = adminTokenRevision;
+      if (dashboardRefresh && dashboardRefreshRevision !== revision) {
+        // An older token's read can fail after a new check accepts its token. Wait for
+        // that refresh to end, then read for this revision without inheriting its error.
+        await dashboardRefresh.catch(() => {});
+        if (revision !== adminTokenRevision) return;
+        return refresh(only);
+      }
       invalidateAdminTools();
       const scope = only === undefined ? null : only;
       refreshWanted = refreshWanted === undefined || refreshWanted === null || scope === null
@@ -6011,6 +6019,7 @@
         : new Set([...refreshWanted, ...scope]);
       refreshAgain = true;
       if (dashboardRefresh) return dashboardRefresh;
+      dashboardRefreshRevision = revision;
       dashboardRefresh = (async () => {
         if (dashboardPoll) await dashboardPoll;
         do {
@@ -9448,6 +9457,7 @@
     }
 
     let dashboardRefresh = null;
+    let dashboardRefreshRevision = -1;
 
     let dashboardPoll = null;
 

@@ -4179,6 +4179,7 @@ class ControlServerTests(unittest.TestCase):
             "const document = {hidden: true}; const dashboardLoaded = true;\n"
             "let adminTokenVerified = true;\n"
             "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false, refreshWanted;\n"
+            "let dashboardRefreshRevision = -1, adminTokenRevision = 0;\n"
             "const unansweredPaths = new Set();\n"
             "let page = 'activity'; function currentPage() { return page; }\n"
             "const seen = []; let release; let hold = new Promise(resolve => {release = resolve;});\n"
@@ -4208,6 +4209,7 @@ class ControlServerTests(unittest.TestCase):
         result = self._run_dashboard_functions(
             ["refresh"],
             "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false, refreshWanted;\n"
+            "let dashboardRefreshRevision = -1, adminTokenRevision = 0;\n"
             "let release; const hold = new Promise(resolve => {release = resolve;});\n"
             "let active = 0, peak = 0, calls = 0;\n"
             "async function refreshDashboard() { calls++; active++; peak = Math.max(peak, active);\n"
