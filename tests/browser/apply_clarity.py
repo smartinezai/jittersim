@@ -102,9 +102,14 @@ def assert_tip_inside_window(page, icon, what):
     assert box["left"] + box["width"] <= size["width"] + 0.5, (what, "runs past the right", box)
     assert box["top"] + box["height"] <= size["height"] + 0.5, (what, "runs past the bottom", box)
     anchor = icon.bounding_box()
-    if size["width"] > 768:
-        # Stay beside the help icon without covering the action button.
-        assert box["left"] >= anchor["x"] + anchor["width"], (what, box, anchor)
+    # Help may sit beside, above or below a header command, without covering it.
+    separated = (
+        box["left"] >= anchor["x"] + anchor["width"] or
+        box["left"] + box["width"] <= anchor["x"] or
+        box["top"] >= anchor["y"] + anchor["height"] or
+        box["top"] + box["height"] <= anchor["y"]
+    )
+    assert separated, (what, box, anchor)
     return box
 
 

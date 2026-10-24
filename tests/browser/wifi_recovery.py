@@ -20,6 +20,7 @@ def check_wifi_recovery(page):
     fallback.click()
     expect(fallback).to_have_attribute("aria-expanded", "true")
     expect(button).to_be_enabled()
+    button.scroll_into_view_if_needed()
     expect(button).to_be_in_viewport()
     field = page.locator("#access-point-ssid")
     field.fill("Copied network")

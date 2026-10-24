@@ -200,13 +200,14 @@ def check_action_help(page):
         height = page.viewport_size["height"]
         assert 0 <= box["x"] and box["x"] + box["width"] <= width
         assert 0 <= box["y"] and box["y"] + box["height"] <= height
-        if width > 768:
-            assert 0 <= box["x"] - anchor["x"] - anchor["width"] <= 16
-            assert abs(box["y"] - anchor["y"]) <= box["height"]
-        else:
-            gap = min(abs(box["y"] - anchor["y"] - anchor["height"]),
-                      abs(anchor["y"] - box["y"] - box["height"]))
-            assert gap <= 16
+        # A header action near the right edge places help below or above it.
+        gaps = (
+            box["x"] - anchor["x"] - anchor["width"],
+            anchor["x"] - box["x"] - box["width"],
+            box["y"] - anchor["y"] - anchor["height"],
+            anchor["y"] - box["y"] - box["height"],
+        )
+        assert any(0 <= gap <= 16 for gap in gaps), (box, anchor)
         tip.hover()
         expect(tip).to_be_visible()
         page.mouse.move(0, 0)

@@ -186,8 +186,7 @@ def check_router_copy(page):
     assert len(seen) >= 3
     assert_still_signed_in(page)
     page.unroute("**/api/router/operation")
-    if controls.is_visible() and controls.get_attribute("aria-expanded") == "true":
-        controls.click()
+    close_controls(page)
 
 
 def check_page_loaded_during_the_outage(page):
