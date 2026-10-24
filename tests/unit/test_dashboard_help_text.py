@@ -283,3 +283,19 @@ def test_no_two_different_fields_share_a_help_text():
     icons = [help_icon(field.nearest("label")) for field in id_inputs()]
     id_texts = [icon.attrs.get("data-help") for icon in icons if icon is not None]
     assert len(set(id_texts)) == len(id_texts)
+
+
+def test_global_block_editor_describes_the_address_limit_as_permanent_help():
+    editor = next(node for node in PAGE.walk() if node.attrs.get("id") == "website-blocklist")
+    note_id = editor.attrs["aria-describedby"]
+    notes = [node for node in PAGE.walk() if node.attrs.get("id") == note_id]
+    assert len(notes) == 1
+    note = notes[0]
+    assert note.parent is editor.nearest("label").parent.parent
+    assert note.tag == "p" and "policy-note" in note.classes
+    assert "hidden" not in note.attrs and "role" not in note.attrs
+    assert note.text() == (
+        "While JitterSim runs, the global block list blocks up to 4096 resolved addresses. "
+        "With household access rules on, DNS still refuses every listed name. "
+        "With those rules off, some listed sites may remain reachable above this limit."
+    )
