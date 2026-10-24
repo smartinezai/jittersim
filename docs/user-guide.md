@@ -872,6 +872,24 @@ cleared that record. Then JitterSim is not running until you choose **Start** or
 **Reset network**. Protected clients remain protected through reconnects and IP
 changes.
 
+### Prepared device profiles
+
+On **Devices**, **Prepared device profiles** saves a profile choice for a manually
+entered Wi-Fi MAC address, with an optional display name. Saving, editing or deleting
+a prepared choice does not change active network settings. Choices are paged in
+sets of 20; **Refresh prepared choices** reloads saved records.
+
+Choose **Review** to see the current profile settings, configuration version and
+pending revision. **Use profile for this MAC** is a separate confirmed action. The
+Pi then checks for a fresh, reachable client with that exact MAC on its test Wi-Fi;
+a matching name or a different private address is insufficient. A successful review
+does not establish a live match. Prepared protection records cannot be activated here.
+
+After a conflict or lost response, check saved and running settings, refresh and
+review again before another Use. The prepared choice remains after Use; saved and
+live results are reported separately. Real network behaviour still needs hardware
+verification.
+
 ### Connected clients and protected devices
 
 Open **Connected clients** after checking the admin token. This panel shows

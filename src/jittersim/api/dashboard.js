@@ -10347,8 +10347,22 @@
     // Prepared choices are private storage, never a connected-device observation.
     let preparedRows = [], preparedPage = 0, preparedEdit = null, preparedReview = null;
     let preparedEpoch = 0, preparedListSerial = 0, preparedReviewSerial = 0;
-    let preparedLoaded = false, preparedBusy = false, preparedDialog = null;
+    let preparedLoaded = false, preparedBusy = false, preparedDialog = null, preparedOperation = null;
 
+    function beginPreparedOperation() {
+      const operation = {};
+      preparedOperation = operation;
+      preparedBusy = true;
+      return operation;
+    }
+    function finishPreparedOperation(operation, button) {
+      if (preparedOperation !== operation) return false;
+      preparedOperation = null;
+      preparedBusy = false;
+      setButtonBusy(button, false);
+      setPreparedFormBusy(false);
+      return true;
+    }
     function preparedOwner() {
       return {token: adminTokenRevision, epoch: preparedEpoch, intent: actionIntentRevision};
     }
@@ -10382,6 +10396,8 @@
       preparedPage = 0;
       preparedLoaded = false;
       preparedBusy = false;
+      preparedOperation = null;
+      if (typeof clearDraft === "function") clearDraft("prepared-form");
       setPreparedFormBusy(false);
       invalidatePreparedReview();
       resetPreparedForm();
@@ -10487,7 +10503,8 @@
         payload.mac_address = edit.mac_address; payload.expected_revision = edit.revision;
       }
       let saved = false;
-      preparedBusy = true; setPreparedFormBusy(true); setButtonBusy(element("prepared-save"), true);
+      const operation = beginPreparedOperation();
+      setPreparedFormBusy(true); setButtonBusy(element("prepared-save"), true);
       try {
         await request("/api/pending-devices", "POST", payload, {isResponseCurrent: () => preparedCurrent(owner)});
         if (!preparedCurrent(owner)) return;
@@ -10497,9 +10514,8 @@
       } catch (error) {
         if (preparedCurrent(owner)) preparedMessage(error.message + " Refresh saved choices before trying again; a lost response can leave the result unknown.", true);
       } finally {
-        if (owner.token === adminTokenRevision && owner.epoch === preparedEpoch) {
-          preparedBusy = false; setPreparedFormBusy(false); setButtonBusy(element("prepared-save"), false);
-          if (saved && preparedCurrent(owner)) await loadPreparedChoices();
+        if (finishPreparedOperation(operation, element("prepared-save")) && saved && preparedCurrent(owner)) {
+          await loadPreparedChoices();
         }
       }
     }
@@ -10507,7 +10523,7 @@
       invalidatePreparedReview();
       const owner = preparedOwner();
       if (!Number.isSafeInteger(row.revision) || row.revision < 1) { preparedMessage("Refresh before deleting this revision.", true); return; }
-      preparedBusy = true;
+      const operation = beginPreparedOperation();
       try {
         if (!await preparedConfirm(button, "Delete the prepared choice for " + row.mac_address + "? Active settings stay unchanged.",
           {title: "Delete prepared choice", confirmLabel: "Delete choice", danger: true}) || !preparedCurrent(owner)) return;
@@ -10516,11 +10532,11 @@
         if (!preparedCurrent(owner)) return;
         preparedMessage("Prepared choice deleted. Active settings stay unchanged.");
         await loadPreparedAfterWrite();
-        element("prepared-title").focus();
+        if (preparedCurrent(owner)) element("prepared-title").focus();
       } catch (error) {
         if (preparedCurrent(owner)) preparedMessage(error.message + " Refresh before trying again; the saved result may be unknown.", true);
       } finally {
-        if (preparedCurrent(owner)) { preparedBusy = false; setButtonBusy(button, false); }
+        finishPreparedOperation(operation, button);
       }
     }
     async function loadPreparedAfterWrite() {
@@ -10559,7 +10575,7 @@
       const review = preparedReview, owner = preparedOwner(), button = element("prepared-use");
       const serial = preparedReviewSerial;
       const current = () => preparedCurrent(owner) && serial === preparedReviewSerial && preparedReview === review;
-      preparedBusy = true;
+      const operation = beginPreparedOperation();
       try {
         const payload = preparedUsePayload(review);
         const allow = review.profile.website_mode === "allow_only" ? " This profile blocks every site outside its allow list." : "";
@@ -10585,9 +10601,7 @@
         }
       } catch (error) { if (preparedCurrent(owner)) preparedMessage(error.message, true); }
       finally {
-        if (owner.token === adminTokenRevision && owner.epoch === preparedEpoch) {
-          preparedBusy = false; setButtonBusy(button, false);
-        }
+        finishPreparedOperation(operation, button);
       }
     }
     privateDataLockHooks.push(clearPreparedPrivate);
@@ -10603,7 +10617,7 @@
           state.configuration_version !== preparedReview.configuration_version) invalidatePreparedReview();
     });
     new MutationObserver(() => {
-      if (currentPage() !== "devices") { preparedEpoch += 1; invalidatePreparedReview(); preparedBusy = false; setPreparedFormBusy(false); }
+      if (currentPage() !== "devices") { preparedEpoch += 1; invalidatePreparedReview(); preparedBusy = false; preparedOperation = null; setPreparedFormBusy(false); }
       else if (adminTokenVerified && !preparedLoaded) loadPreparedChoices();
     }).observe(document.body, {attributes: true, attributeFilter: ["data-section"]});
     element("prepared-form").addEventListener("submit", savePreparedChoice);

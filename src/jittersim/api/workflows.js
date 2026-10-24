@@ -45,7 +45,7 @@ function draftFields(form) {
 }
 
 function rememberDraft(form) {
-  if (!form || !form.id || form.id === 'admin-token-form') return;
+  if (!form || !form.id || form.id === 'admin-token-form' || form.id === 'prepared-form') return;
   const fields = draftFields(form).map((field, index) => ({
     key: field.id || String(index),
     value: field.value,

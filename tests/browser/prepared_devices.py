@@ -15,10 +15,12 @@ from tests.browser.protected_clients import HEADERS, MAC_ADDRESS, sign_in
 def check(browser, base, width, height):
     context = browser.new_context(viewport={"width": width, "height": height}, has_touch=width < 500)
     page = context.new_page()
-    errors, writes = [], []
+    errors, writes, apply_writes = [], [], []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.on("request", lambda request: writes.append((request.url, request.post_data_json))
             if request.method == "POST" and "pending-devices" in request.url else None)
+    page.on("request", lambda request: apply_writes.append(request.post_data_json)
+            if request.method == "POST" and request.url.endswith("/api/connected-devices/apply-profile") else None)
     # Reset only synthetic fixture state, never real hardware.
     rows = page.request.get(base + "/api/pending-devices", headers=HEADERS).json()["pending_devices"]
     for row in rows:
@@ -38,7 +40,7 @@ def check(browser, base, width, height):
     page.locator("#prepared-save").click()
     row = card.locator("[data-prepared-mac]")
     expect(row).to_contain_text("Prepared phone")
-    assert all("apply-profile" not in url for url, _ in writes)
+    assert not apply_writes
     row.get_by_role("button", name=re.compile("^Edit")).click()
     expect(page.locator("#prepared-mac")).to_have_js_property("readOnly", True)
     page.locator("#prepared-name").fill("Prepared edited")
@@ -94,11 +96,27 @@ def check(browser, base, width, height):
     page.add_script_tag(content=engine)
     violations = page.evaluate("async () => (await axe.run(document.querySelector('#prepared-card'), {runOnly:{type:'tag',values:['wcag2a','wcag2aa','wcag21aa']}})).violations")
     assert not violations, violations
-    page.screenshot(path=f"test-results/prepared-profiles/prepared-{width}.png", full_page=True)
+    page.locator("#prepared-review details summary").click()
+    card.scroll_into_view_if_needed()
+    page.screenshot(path=f"test-results/prepared-profiles/prepared-{width}.png")
     row.get_by_role("button", name=re.compile("^Delete")).click()
     page.locator("dialog[open]").get_by_role("button", name="Delete choice").click()
     expect(card.locator("[data-prepared-mac]")).to_have_count(0)
     expect(page.locator("#prepared-title")).to_be_focused()
+    if width == 1440:
+        # The list is bounded without creating 256 records or running another suite.
+        choices = [{"mac_address": f"02:00:00:01:00:{index:02x}", "action": "protect", "revision": index + 1,
+                    "display_name": f"Prepared {index}"} for index in range(21)]
+        def list_page(route):
+            route.fulfill(content_type="application/json", body=json.dumps({"pending_devices": choices}))
+        page.route("**/api/pending-devices", list_page)
+        page.locator("#prepared-refresh").click()
+        expect(card.locator("[data-prepared-mac]")).to_have_count(20)
+        expect(card).to_contain_text("Prepared protection — use unavailable")
+        page.locator("#prepared-next").click()
+        expect(card.locator("[data-prepared-mac]")).to_have_count(1)
+        expect(page.locator("#prepared-note")).to_contain_text("21–21 of 21")
+        page.unroute("**/api/pending-devices", list_page)
     assert not errors, errors
     context.close()
 
