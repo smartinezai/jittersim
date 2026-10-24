@@ -1,11 +1,14 @@
 """Exercise first enrollment, failures and removal in the served dashboard."""
 
+from collections import deque
+import json
 import os
 import re
 import selectors
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -84,6 +87,10 @@ def run():
                     page.on("pageerror", lambda error: errors.append(str(error)))
                     page.on("request", lambda request: requested.append(request.url))
                     failed = []
+                    # Keep only paths and statuses; headers and bodies may contain credentials.
+                    responses = deque(maxlen=80)
+                    page.on("response", lambda response: responses.append(
+                        (urlsplit(response.url).path, response.status)))
                     page.on("response", lambda response: failed.append((response.status, response.url))
                             if response.status >= 400 else None)
                     page.goto(f"http://127.0.0.1:{port}")
@@ -116,7 +123,23 @@ def run():
                     page.locator("#allow-dashboard-device").click()
                     expect(page.locator("#private-dashboard")).to_be_visible()
                     expect(page.locator("#dashboard-access-list")).to_contain_text("Browser Mac")
-                    expect(page.locator("#admin-credential-state")).to_contain_text("Accepted")
+                    try:
+                        expect(page.locator("#admin-credential-state")).to_contain_text("Accepted")
+                    except AssertionError:
+                        try:
+                            state = page.evaluate("""() => ({
+                                credential: document.querySelector("#admin-credential-state").textContent,
+                                tokenStatus: document.querySelector("#token-check-status").textContent,
+                                dashboardStatus: document.querySelector("#dashboard-access-status").textContent,
+                                revision: adminTokenRevision, verified: adminTokenVerified,
+                                checking: adminTokenChecking, rejected: adminTokenRejected,
+                                refused: adminTokenRefused
+                            })""")
+                        except Exception as error:
+                            state = {"unavailable": type(error).__name__}
+                        print("Enrollment failure state:", json.dumps(state, sort_keys=True), flush=True)
+                        print("Response path/status order:", json.dumps(list(responses)), flush=True)
+                        raise
                     # After sign-in the page may use the real name and takes it from a private route.
                     expect(page).to_have_title("JitterSim")
                     expect(page.locator("#brand-title")).to_have_text("JitterSim")
