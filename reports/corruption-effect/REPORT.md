@@ -5,8 +5,42 @@ Plan approved by coordinator on 24 October 2026. Scope is the single new
 `tests/kernel/test_corruption_effect.py` plus its own plan and this report.
 No production, pinned or shared fixture changes. No TCP recovery claim.
 
-Execution status: first approved attempt FAILED. Corrected source awaits
-review and separate execution approval. No second run has started.
+Execution status: first approved attempt FAILED. After the separately
+reviewed count correction the one authorized corrected-head run PASSED.
+Both receipts are preserved. No automatic retry occurred.
+
+## Corrected-head result
+
+Executed commit: `76a5ea49742724efa236820d65b82f57ab9e5649`.
+Tree: `d186d6254bdce9c28b75a74c96aa3d780b7b87e1`.
+Image: `sha256:f17adf9e2202a7aa93ebfd1eafec046a90f2347b40232030e219af949ad17ffb`.
+Exactly one test passed with zero skips in 12.458 seconds. Terminal exit 0.
+The medium runner confirmed no tracked changes before or after execution.
+
+| Phase | Offered | Router received | Pi controls received | Router frames clean |
+| --- | ---: | ---: | ---: | --- |
+| 0% | 100 | 100 | 20 | true |
+| 100% | 100 | 12 | 20 | true |
+| Recovery 0% | 100 | 100 | 20 | true |
+
+The IFB netem queue reported `corrupt 100%` with 99 packets and 10494 bytes
+sent. Its zero queue-drop count does not mean corruption had no effect:
+damaged packets can be rejected after leaving that queue. This test observes
+the resulting delivery reduction at the router with other impairments off.
+It does not measure an exact bit-flip percentage or prove TCP recovery.
+
+Full corrected evidence is in `test-results/jittersim-corruption-effect-78090/`:
+`result.json`, `test.log`, `build.log`, `cleanup.log`, `locks.log`,
+`final-evidence.json`, `image.id` and `container.id`. Additional preflight
+and terminal logs use prefix `corruption-effect-preflight-20261024T174523Z`.
+
+Namespace cleanup passed. Container removal and subsequent exact-name absence
+were confirmed. No owned processes remained and both locks were free.
+The unrelated `b2744e7e3a5b` container remained running and untouched.
+All runner activity ended before this report update. Physical Pi driver and
+offload behavior remain unresolved. No production or pinned files changed.
+
+## Preserved first failure
 
 Reviewed and executed commit: `5e56a5edc073b755cda07367d810a128d9074a1a`.
 Tree: `308eb4f1f61da4182b40e3539993d286a245d67d`.
@@ -46,8 +80,9 @@ five second subprocess timeout. `-W` controls response waiting rather than
 the total command runtime. Only the two option arguments and their comment
 changed. All offered counts, effect thresholds, IFB evidence, frame checks
 and three phases are unchanged. The first failed receipt remains intact.
-Compilation and Ruff passed on corrected source. Docker execution is pending
-separate coordinator review and approval.
+Compilation and Ruff passed on corrected source. The coordinator separately
+reviewed the exact correction and authorized only the corrected execution
+recorded above.
 
 Static checks: Python 3.9 compilation passed with a workspace cache directory.
 Ruff E/F/I passed. The bounded runner Python block compiles. The first
