@@ -9,8 +9,16 @@ import pytest
 
 from jittersim.api.server import DASHBOARD_HTML
 
-
 CASES = {
+    "manual_navigation_closes_utilities_and_keeps_unloaded_brand_neutral": """
+      showPage("devices", false);
+      assert.deepEqual(controlChanges, []);
+      assert.deepEqual(focusedPages, []);
+      showPage("profiles", true);
+      assert.deepEqual(controlChanges, [[false, false]]);
+      assert.deepEqual(focusedPages, ["profiles"]);
+      assert.equal(document.title, "Sign in");
+    """,
     "main_heading_follows_navigation_and_authentication": """
       applyBrand(false);
       assert.equal(element("page-heading").textContent, "Sign in");
@@ -248,6 +256,9 @@ def test_brand_reply_ownership(case):
         replaceState(state,title,hash){historyWrites.push(["replace",hash]);window.location.hash=hash}
       }};
       const phoneLayout = {matches:false};
+      const controlChanges = [], focusedPages = [];
+      function setControlsOpen(open, moveFocus) { controlChanges.push([open, moveFocus]); }
+      function showPageStart(id) { focusedPages.push(id); scrolls.push(["page", id]); }
       function revealNavLink() {}
       const brand = {name:"JitterSim", command:"jittersim", default_ssid:"JitterSim"};
       let request;

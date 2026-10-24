@@ -89,6 +89,10 @@
       <p id="brand-title">Network lab</p>
       <span id="mode-badge" class="badge pending">Checking mode...</span>
     </div>
+    <div class="sidebar-version">
+      <p id="sidebar-version" class="sidebar-version-text">Version unknown</p>
+      <a id="sidebar-update-link" class="sidebar-update-link" href="#updates" hidden></a>
+    </div>
     <nav class="sidebar-nav" aria-label="Sections">
       <ul>
         <li><a href="#devices" data-page-link="devices">Devices <span id="nav-devices-count" class="nav-chip" hidden></span></a></li>
@@ -156,29 +160,28 @@
             <span id="router-wifi-toggle" class="router-wifi-value" data-unknown="true">Unknown</span>
           </div>
         </div>
+      </div>
+      <div class="control-utilities" role="group" aria-label="Network utilities">
+        <h2 class="utilities-heading">Network utilities</h2>
         <div class="router-wifi-copy">
           <button id="refresh-router-wifi" type="button">Check router Wi-Fi</button>
           <button id="sync-router-ap" class="primary" type="button" aria-describedby="router-action-message" disabled>Copy router Wi-Fi to Pi</button>
           <p id="router-action-message" class="router-wifi-status"></p>
           <button id="quick-reset-wifi-name" type="button" disabled>Reset Wi-Fi name</button>
         </div>
-      </div>
-      <div class="sidebar-version">
-        <p id="sidebar-version" class="sidebar-version-text">Version unknown</p>
-        <a id="sidebar-update-link" class="sidebar-update-link" href="#updates" hidden></a>
-      </div>
-      <div class="sidebar-credentials">
-        <button id="open-admin-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
-          <span>Admin token</span><span id="admin-credential-state" class="credential-state">Needed</span>
-        </button>
-        <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
-          <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
-        </button>
+        <div class="sidebar-credentials">
+          <button id="open-admin-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
+            <span>Admin token</span><span id="admin-credential-state" class="credential-state">Needed</span>
+          </button>
+          <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
+            <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
+          </button>
+        </div>
       </div>
     </div>
   </aside>
   <main class="content" id="content" tabindex="-1">
-    <h1 id="page-heading" class="sr-only">Sign in</h1>
+    <h1 id="page-heading" class="page-heading">Sign in</h1>
   <section class="notice address-move" id="address-move-card" aria-label="New address for one of your devices" hidden>
     <p id="address-move-text" role="status"></p>
     <label>Which device was it?

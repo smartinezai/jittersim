@@ -764,42 +764,6 @@
       overflow-wrap: anywhere;
       box-shadow: 0 0.6rem 1.2rem rgba(0, 0, 0, 0.35);
     }
-    /* A short window needs the room for the footer so that Panic and the router switch and the
-       copy buttons stay in view. The sidebar lists nine pages and on a laptop or a full HD screen
-       the list would push them below the fold. Up to 1000px of height the links share a compact
-       row of 24px (the smallest comfortable target) and the footer uses tighter gaps. Wider Linux
-       fonts wrap the mode badge and the status lines so the footer needs this margin there. */
-    @media (min-width: 48.01rem) and (max-height: 1000px) {
-      .sidebar { gap: 0.5rem; padding-block: 0.65rem; }
-      .sidebar-brand #brand-title { font-size: 1.2rem; }
-      .sidebar-brand .badge { padding: 0.2rem 0.45rem; font-size: 0.72rem; }
-      .sidebar-nav ul { gap: 0; }
-      .sidebar-nav a { min-height: 1.5rem; padding-block: 0.22rem; font-size: 0.88rem; line-height: 1.2; }
-      .sidebar-status { padding-block: 0.25rem; }
-      .sidebar-footer, .sidebar-operate, .sidebar-actions { gap: 0.35rem; }
-      .sidebar .router-wifi-control { padding-block: 0.25rem; }
-      .active-profile { gap: 0.2rem; }
-      .active-profile select { padding-block: 0.3rem; }
-      .sidebar .active-profile button { min-height: 2.2rem; padding-block: 0.3rem; }
-    }
-    /* The label wraps to two lines in the narrow sidebar. Both labels need the same room so the
-       buttons below do not jump when it changes. */
-    @media (min-width: 48.01rem) {
-      .sidebar .sidebar-actions #apply-button { min-height: 4.1rem; min-height: calc(2lh + 1.24rem + 2px); }
-    }
-    /* With the Active profile control the column is taller than a laptop window. Then the page
-       list gives up room first and scrolls inside itself (four and a half links stay in view so
-       the cut one shows that it scrolls) so that Panic
-       and the router switch and both copy buttons stay where they were. On a taller window
-       nothing scrolls. */
-    @media (min-width: 48.01rem) {
-      .sidebar-nav { min-height: 7rem; overflow-y: auto; }
-      .sidebar-nav a:focus-visible { outline-offset: -2px; }
-      .sidebar-nav[data-more-after] {
-        -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.25rem), transparent);
-        mask-image: linear-gradient(to bottom, #000 calc(100% - 1.25rem), transparent);
-      }
-    }
     @media (max-width: 700px) {
       .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 1rem; width: calc(100vw - 2rem); }
       .badge { display: inline-block; margin-top: 1rem; }

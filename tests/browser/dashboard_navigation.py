@@ -1,4 +1,4 @@
-"""Move between dashboard sections, collapse cards and keep the sidebar in reach."""
+"""Navigate dashboard pages and keep emergency actions reachable in every layout."""
 
 import os
 import selectors
@@ -8,11 +8,14 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
-from tests.browser.draft_navigation import check_draft_navigation
 from tests.browser.diagnostics_keyboard import check_diagnostics_keyboard
-from tests.browser.phone import close_controls, open_controls
+from tests.browser.draft_navigation import check_draft_navigation
+from tests.browser.phone import assert_router_status_is_read_only, close_controls, open_controls
 
-PAGES = ("devices", "profiles", "schedules", "router", "traffic", "access", "diagnostics")
+PAGES = (
+    "devices", "profiles", "schedules", "router", "traffic", "measurements", "activity",
+    "access", "diagnostics", "updates",
+)
 
 
 def unlock(page):
@@ -52,14 +55,17 @@ def check_sections(page):
         only_visible(page, name)
         assert page.url.endswith("#" + name)
     page.go_back()
-    only_visible(page, "access")
+    only_visible(page, "diagnostics")
     page.goto(page.url.split("#")[0] + "#router")
     only_visible(page, "router")
     page.goto(page.url.split("#")[0] + "#nonsense")
     only_visible(page, "devices")
 
 
-def check_nothing_floats(page):
+def check_emergency_controls(page):
+    """The header scrolls away while Panic, status and the utility opener stay usable."""
+
+    close_controls(page)
     pinned = page.evaluate(
         """() => Array.from(document.querySelectorAll('body *'))
             .filter((node) => ['fixed', 'sticky'].includes(getComputedStyle(node).position))
@@ -67,15 +73,53 @@ def check_nothing_floats(page):
             .filter((node) => !node.hidden && node.getClientRects().length)
             .map((node) => node.className || node.id || node.tagName)"""
     )
-    assert pinned == ["sidebar"], pinned
+    assert set(pinned) == {"safety-bar", "controls-toggle"}, pinned
     page.locator('[data-page-link="schedules"]').click()
-    page.locator("#page-schedules").evaluate("(node) => node.scrollIntoView({block: 'end'})")
-    # On a short window the page list scrolls inside itself, so the wheel turns over the lower
-    # part of the sidebar where a person reaches for the footer.
-    page.mouse.move(100, page.viewport_size["height"] - 60)
-    page.mouse.wheel(0, 3000)
-    for control in ("#panic-button", "#apply-button", "#router-wifi-toggle"):
-        expect(page.locator(control)).to_be_in_viewport()
+    expect(page.locator("#page-schedules")).to_be_focused()
+    page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+    for control in ("#panic-button", "#router-wifi-toggle", "#controls-toggle"):
+        expect(page.locator(control)).to_be_in_viewport(ratio=1)
+    assert_router_status_is_read_only(page)
+    last = page.locator("#page-schedules > section:not([hidden])").last.bounding_box()
+    bar = page.locator(".safety-bar").bounding_box()
+    assert last["y"] + last["height"] <= bar["y"] + 0.5, (last, bar)
+
+    # Utilities open from an explicit control, accept keyboard focus and close predictably.
+    open_controls(page)
+    utilities = page.locator(".control-utilities")
+    expect(utilities).to_be_visible()
+    assert page.evaluate("""() => {
+        const active = document.activeElement;
+        return !!active && !active.disabled && !!active.closest('.control-utilities');
+    }""")
+    for selector in (
+        "#open-admin-credentials", "#open-router-credentials", "#quick-reset-wifi-name",
+    ):
+        page.locator(selector).scroll_into_view_if_needed()
+        expect(page.locator(selector)).to_be_in_viewport(ratio=1)
+    expect(page.locator("#panic-button")).to_be_in_viewport(ratio=1)
+    page.keyboard.press("Escape")
+    expect(utilities).to_be_hidden()
+    expect(page.locator("#controls-toggle")).to_be_focused()
+    open_controls(page)
+    page.locator("#brand-title").click()
+    expect(utilities).to_be_hidden()
+    expect(page.locator("#controls-toggle")).to_have_attribute("aria-expanded", "false")
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
+
+
+def check_keyboard_navigation(page):
+    link = page.locator('[data-page-link="profiles"]')
+    link.focus()
+    expect(link).to_be_focused()
+    assert link.evaluate("node => getComputedStyle(node).outlineStyle !== 'none'")
+    page.keyboard.press("Enter")
+    only_visible(page, "profiles")
+    expect(page.locator("#page-profiles")).to_be_focused()
+    expect(page.locator("#page-heading")).to_have_text("Profiles")
+    page.go_back()
+    only_visible(page, "devices")
+    expect(page.locator("#page-devices")).to_be_focused()
 
 
 def check_collapsing(page):
@@ -210,8 +254,9 @@ def run():
                     expect(page.locator(".sidebar-nav")).to_be_hidden()
                     unlock(page)
                     check_action_help(page)
+                    check_keyboard_navigation(page)
                     check_sections(page)
-                    check_nothing_floats(page)
+                    check_emergency_controls(page)
                     check_collapsing(page)
                     check_reveal(page)
                     if width == 1440:
@@ -228,7 +273,7 @@ def run():
                         reset_help = page.get_by_role("img", name="Reset network help", exact=True)
                         reset_help.focus()
                         expect(page.locator("#sidebar-action-help")).to_be_visible()
-                        page.locator(".sidebar").evaluate("node => { node.scrollTop = 0; }")
+                        page.evaluate("window.dispatchEvent(new Event('resize'))")
                         expect(page.locator("#sidebar-action-help")).to_be_hidden()
                     assert not errors, errors
                     context.close()

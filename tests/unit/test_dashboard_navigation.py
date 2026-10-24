@@ -1,4 +1,4 @@
-"""Sidebar shell: sections, preserved ids, no floating panels, routing helpers."""
+"""Dashboard shell: preserved navigation, controls and safe responsive layout."""
 
 import json
 import re
@@ -97,21 +97,18 @@ def test_floating_dock_and_sticky_bar_are_gone():
     # .field-tooltip is the help bubble that follows its button. On a phone the bar with Panic
     # and the router switch and the Controls sheet are pinned (see the next test).
     allowed = {".sidebar", ".toast", ".credentials-panel", ".help-icon::after",
-               ".sidebar-action-help", ".field-tooltip"} | PHONE_PINNED
+               ".sidebar-action-help", ".field-tooltip",
+               ".sidebar.controls-open .control-utilities"} | PHONE_PINNED
     assert pinned <= allowed, pinned
 
 
-def test_only_the_phone_layout_pins_the_bar_and_the_sheet():
+def test_the_phone_sheet_keeps_panic_and_its_toggle_pinned_above_it():
     css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
     css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
     phone = re.search(r"@media \(max-width: 48rem\) \{(.*?)\n\}", css, re.DOTALL).group(1)
-    outside = css.replace(phone, "")
     for selector in PHONE_PINNED:
         rule = re.search(r"(?:^|\n)\s*" + re.escape(selector) + r" \{([^{}]*)\}", phone)
         assert rule and "position: fixed" in rule.group(1), selector
-        assert not re.search(
-            r"(?:^|[\n}])\s*" + re.escape(selector) + r" \{[^{}]*position:", outside
-        ), selector
 
 
 SECOND_SCRIPT = (
@@ -162,9 +159,9 @@ def test_updates_have_their_own_page_and_the_sidebar_shows_version_and_badge():
     sidebar = sidebar_html()
     assert re.search(r'<a href="#updates" data-page-link="updates"[^>]*>Updates ', sidebar)
     assert 'id="update-available-badge"' in sidebar
-    footer = sidebar[sidebar.index('class="sidebar-footer"'):]
-    assert 'id="sidebar-version"' in footer
-    link = re.search(r'<a id="sidebar-update-link"[^>]*>', footer).group(0)
+    assert 'id="sidebar-version"' in sidebar
+    assert sidebar.index('id="sidebar-version"') < sidebar.index('class="sidebar-nav"')
+    link = re.search(r'<a id="sidebar-update-link"[^>]*>', sidebar).group(0)
     assert 'href="#updates"' in link and "hidden" in link
     assert "page-updates" in HTML
     # Router and Wi-Fi keeps a link to the new page.
@@ -186,7 +183,7 @@ def test_a_skip_link_is_the_first_stop_and_leads_to_focusable_main_content():
 
 def test_main_has_the_only_level_one_heading_with_neutral_initial_text():
     assert re.findall(r'<h1\b[^>]*>.*?</h1>', HTML) == [
-        '<h1 id="page-heading" class="sr-only">Sign in</h1>'
+        '<h1 id="page-heading" class="page-heading">Sign in</h1>'
     ]
     assert re.search(r'<main\b[^>]*>\s*<h1 id="page-heading"', HTML)
     assert '<p id="brand-title">Network lab</p>' in sidebar_html()

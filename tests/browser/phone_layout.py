@@ -1,4 +1,4 @@
-"""Use the dashboard on phone-sized windows and check that laptop windows keep the sidebar.
+"""Use the dashboard on phone-sized windows and verify the full-width desktop shell.
 
 On a phone the sidebar is a short header (the name, the mode, one row of page links and one line
 of status). Panic and the router Wi-Fi status sit in a bar pinned to the bottom of the window and
@@ -16,7 +16,13 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
-from tests.browser.phone import assert_router_status_is_read_only, close_controls, open_controls, open_status, sidebar_control
+from tests.browser.phone import (
+    assert_router_status_is_read_only,
+    close_controls,
+    open_controls,
+    open_status,
+    sidebar_control,
+)
 
 PHONES = ((390, 844), (360, 640), (320, 568))
 DESKTOPS = ((1280, 800), (1920, 1000))
@@ -453,36 +459,58 @@ def check_phone(page, base, width, height, stress, css, first):
 
 
 def check_desktop(page, width, height):
-    """A laptop or desktop window keeps the sidebar with nothing of the phone layout."""
+    """The full-width header leaves navigation visible and reserves a separate safety bar."""
 
     page.set_viewport_size({"width": width, "height": height})
+    close_controls(page)
     page.locator('[data-page-link="devices"]').click()
-    page.evaluate("document.querySelector('.sidebar').scrollTo(0, 0)")
-    for selector in ("#controls-toggle", "#status-strip"):
-        expect(page.locator(selector)).to_be_hidden()
-    pinned = page.evaluate(
-        """() => Array.from(document.querySelectorAll('body *'))
-            .filter((node) => ['fixed', 'sticky'].includes(getComputedStyle(node).position))
-            .filter((node) => !node.closest('#toast, #credentials-panel'))
-            .filter((node) => !node.hidden && node.getClientRects().length)
-            .map((node) => node.className || node.id || node.tagName)"""
-    )
-    assert pinned == ["sidebar"], pinned
-    sidebar = box(page, ".sidebar")
-    assert sidebar["x"] == 0 and sidebar["width"] < 300, sidebar
-    for selector in ("#active-profile-select", "#apply-button", "#reset-button", "#apply-summary"):
+    page.evaluate("window.scrollTo(0, 0)")
+    header = box(page, ".sidebar")
+    assert abs(header["x"]) <= 0.5 and abs(header["width"] - width) <= 1, header
+    for name in PAGES:
+        link = page.locator(f'[data-page-link="{name}"]')
+        expect(link).to_be_in_viewport(ratio=1)
+        assert link.get_attribute("href") == "#" + name
+    for selector in (
+        "#active-profile-select", "#active-profile-button", "#apply-button", "#reset-button",
+    ):
         expect(page.locator(selector)).to_be_visible()
-    order = [box(page, selector)["y"] for selector in
-             ("#active-profile-select", "#active-profile-button", "#apply-button", "#reset-button",
-              "#panic-button", "#router-wifi-toggle", "#sync-router-ap")]
-    assert order == sorted(order), order
-    # The whole status, Panic and copy button on a laptop screen, not a sliver of them.
-    for selector in ("#router-wifi-toggle", "#panic-button", "#sync-router-ap"):
-        expect(page.locator(selector)).to_be_in_viewport(ratio=1)
-    scrolled = page.evaluate("document.querySelector('.sidebar').scrollTop")
-    assert scrolled == 0, scrolled
+    no_sideways_overflow(page, f"{width}x{height} desktop header")
+
+    # The secondary surface starts closed and keeps focus and emergency actions available.
+    expect(page.locator("#controls-toggle")).to_be_visible()
+    expect(page.locator(".control-utilities")).to_be_hidden()
+    open_controls(page)
+    assert page.evaluate("""() => {
+        const active = document.activeElement;
+        return !!active && !active.disabled && !!active.closest('.control-utilities');
+    }""")
+    for selector in (
+        "#open-admin-credentials", "#open-router-credentials", "#quick-reset-wifi-name",
+    ):
+        page.locator(selector).scroll_into_view_if_needed()
+        clear_of_the_bar(page, selector, f"{width}x{height} utilities")
+    inside_window(page, "#panic-button", f"{width}x{height} utilities")
+    page.keyboard.press("Escape")
+    expect(page.locator("#controls-toggle")).to_be_focused()
+    expect(page.locator(".control-utilities")).to_be_hidden()
+    open_controls(page)
+    page.locator("#brand-title").click()
+    expect(page.locator("#controls-toggle")).to_have_attribute("aria-expanded", "false")
+    expect(page.locator(".control-utilities")).to_be_hidden()
+
+    page.locator('[data-page-link="schedules"]').click()
+    expect(page.locator("#page-schedules")).to_be_focused()
+    page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+    for selector in ("#router-wifi-toggle", "#panic-button", "#controls-toggle"):
+        inside_window(page, selector, f"{width}x{height} longest page")
+    assert_router_status_is_read_only(page)
+    no_sideways_overflow(page, f"{width}x{height} longest page")
+    page.locator('[data-page-link="devices"]').click()
+    page.evaluate("window.scrollTo(0, 0)")
     page.screenshot(path=f"test-results/phone-layout-desktop-{width}x{height}.png")
-    print(f"{width}x{height}: switch {measure(page)['switch']} panic {measure(page)['panic']}")
+    measured = measure(page)
+    print(f"{width}x{height}: header {header}, status {measured['switch']} panic {measured['panic']}")
 
 
 def run():
@@ -512,12 +540,15 @@ def run():
                 assert page.evaluate("scrollBehavior()") == "auto"
                 page.emulate_media(reduced_motion="no-preference")
                 assert page.evaluate("scrollBehavior()") == "smooth"
-                for width, height in DESKTOPS:
-                    check_desktop(page, width, height)
+                for _, css in STRESSES:
+                    set_font_stress(page, css)
+                    for width, height in DESKTOPS:
+                        check_desktop(page, width, height)
+                set_font_stress(page, "")
                 assert not errors, errors
                 context.close()
                 print("Phone layout acceptance passed at 390x844, 360x640 and 320x568"
-                      " with desktop windows unchanged.")
+                      " and the full-width desktop shell, including wide fonts.")
             finally:
                 browser.close()
     finally:

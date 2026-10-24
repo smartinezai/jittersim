@@ -47,11 +47,8 @@
    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
    SOFTWARE.
 */
-/* Visual refresh layer. The server adds this file last so that it can refine the earlier rules
-   without changing their structure. Colours come from the tokens at the top of dashboard.css.
-   Sizes, spacing, radii, shadows and motion come from the scales below. The phone rules in
-   phone.css own the layout up to 48rem, so the sidebar refinements here stay inside the
-   desktop media query and the rest only changes paint, never position or size of touch targets. */
+/* Final dashboard layer: shared token-based controls and a full-width Operate shell.
+   phone.css retains the compact safety bar and Controls sheet. */
 
 html { -webkit-text-size-adjust: 100%; }
 body {
@@ -244,21 +241,62 @@ summary::marker { color: var(--tx-muted); }
 .sidebar-nav a { gap: 0.6rem; justify-content: flex-start; font-weight: 550; transition: background var(--dur) var(--ease), color var(--dur) var(--ease); }
 .sidebar-nav a .nav-chip { margin-left: auto; }
 
-@media (min-width: 48.01rem) {
-  .sidebar { background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0) 12rem), var(--bg-sidebar); }
-  .sidebar-nav a { position: relative; border: 1px solid transparent; border-radius: var(--radius-sm); }
-  .sidebar-nav a:hover { background: var(--bg-nav-hover); color: var(--tx-bright); }
-  .sidebar-nav a[aria-current="page"] {
-    border-color: rgba(90, 169, 255, 0.22);
-    background: linear-gradient(90deg, rgba(90, 169, 255, 0.20), rgba(90, 169, 255, 0.07));
-    color: #fff;
-  }
-  .sidebar-nav a[aria-current="page"]::after {
-    content: ""; position: absolute; left: -0.5rem; top: 22%; bottom: 22%; width: 0.2rem;
-    border-radius: 0 0.2rem 0.2rem 0; background: var(--accent);
-  }
-  .sidebar-status { border-radius: var(--radius); background: rgba(255, 255, 255, 0.02); }
-  .content { padding-top: 1.75rem; }
+/* Operate shell: page links and commands use the full window, without a crowded rail. */
+.app { display: block; }
+.sidebar { position: static; height: auto; overflow: visible; border-right: 0; border-bottom: 1px solid var(--line); }
+.sidebar-nav { min-width: 0; }
+.sidebar-nav a[aria-current="page"]::after { content: none; }
+.sidebar-version { min-width: 0; }
+.control-utilities { display: contents; }
+.utilities-heading { margin: 0; font-size: 1rem; }
+.sidebar:not(.controls-open) .utilities-heading { display: none; }
+.dashboard-locked .utilities-heading, .dashboard-locked .router-wifi-copy { display: none; }
+.content { width: 100%; margin-inline: auto; }
+#page-heading { margin: 0 0 1rem; font-size: 1.5rem; line-height: 1.3; letter-spacing: -0.02em; }
+
+@media (min-width: 48.01rem) and (min-height: 36.01rem) {
+  html { scroll-padding-bottom: 5.5rem; }
+  .sidebar { display: flex; flex-flow: row wrap; align-items: center; gap: 0.6rem 1rem; padding: 0.8rem 1rem; background: var(--bg-sidebar); }
+  .sidebar-brand { flex: 0 1 auto; }
+  .sidebar-brand .badge { margin-left: 0.5rem; }
+  .sidebar-version { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-left: auto; }
+  .sidebar-version p { margin: 0; }
+  .sidebar-update-link { width: auto; padding: 0.25rem 0.55rem; }
+  .sidebar-nav { order: 3; flex-basis: 100%; overflow: visible; }
+  .sidebar-nav ul { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+  .sidebar-nav a { min-height: 2.5rem; padding: 0.4rem 0.65rem; border: 1px solid transparent; border-radius: var(--radius-sm); white-space: nowrap; }
+  .sidebar-nav a[aria-current="page"] { border-color: var(--bd-selected); background: var(--bg-selected); color: var(--tx-bright); }
+  .sidebar-nav a:focus-visible { outline-offset: -3px; }
+  .sidebar .status-strip { display: flex; align-items: center; gap: 0.5rem; max-width: 32rem; min-height: 2.5rem; padding: 0.35rem 0.6rem; color: var(--tx); background: var(--bg-inset); font-size: var(--fs-xs); }
+  .status-strip > span { overflow-wrap: anywhere; }
+  .status-strip::after { content: "+"; margin-left: auto; }
+  .status-strip[aria-expanded="true"]::after { content: "−"; }
+  .sidebar-status { order: 5; flex-basis: 100%; }
+  .sidebar:not(.status-open) #sidebar-status { display: none; }
+  .sidebar-footer { order: 4; flex-basis: 100%; margin: 0; border-top: 1px solid var(--line); padding-top: 0.75rem; }
+  .sidebar-operate { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: 0.5rem 1rem; }
+  .active-profile { grid-row: span 2; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0.5rem; }
+  .active-profile-note, .active-profile-link { grid-column: 1 / -1; }
+  .sidebar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.75rem; }
+  .sidebar-action-row { grid-template-columns: auto auto; }
+  .sidebar .sidebar-actions #apply-button { min-height: 2.5rem; }
+  .sidebar .apply-summary { flex-basis: 100%; order: 1; }
+  .sidebar .action-message { grid-column: 1 / -1; }
+  .content { padding: 1.5rem 1.75rem 4rem; padding-bottom: 6rem; }
+  .safety-bar { position: fixed; z-index: 60; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: 1.5rem; min-height: 4.5rem; padding: 0.6rem 1rem; padding-right: 8rem; border-top: 1px solid var(--line); background: var(--bg-sidebar); }
+  .safety-bar .panic-button { flex: 0 0 auto; min-height: 2.75rem; padding: 0.4rem 0.7rem; }
+  .safety-bar .router-wifi-control { gap: 1rem; margin: 0; padding: 0; border: 0; background: none; }
+  .controls-toggle { position: fixed; z-index: 61; right: 1.5rem; bottom: 0.85rem; display: block; min-height: 2.75rem; padding: 0.4rem 0.7rem; }
+  .controls-toggle[aria-expanded="true"] { border-color: var(--accent); background: var(--bg-selected); }
+  .control-utilities { display: none; }
+  .sidebar.controls-open .control-utilities { position: fixed; z-index: 58; right: 1.5rem; bottom: 5rem; display: grid; gap: 1rem; width: min(38rem, calc(100vw - 3rem)); max-height: calc(100dvh - 7rem); overflow-y: auto; overscroll-behavior: contain; padding: 1.25rem; border: 1px solid var(--bd-raised); border-radius: var(--radius-lg); background: var(--bg-raised); box-shadow: var(--shadow-pop); }
+  .router-wifi-copy { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }
+  #router-action-message { grid-column: 1 / -1; }
+  .sidebar .router-wifi-copy button, .sidebar-credentials button { min-height: 2.75rem; }
+  .dashboard-locked .control-utilities { display: block; }
+  .dashboard-locked .controls-toggle { display: none; }
+  .dashboard-locked .sidebar-operate { display: none; }
+  .toast { top: auto; bottom: 5.25rem; }
 }
 
 /* Panic stays unmistakable. The orange of access.css keeps its meaning. */
@@ -269,17 +307,8 @@ summary::marker { color: var(--tx-muted); }
 .switch-track { box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35); }
 .switch-thumb { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45); transition: transform var(--dur) var(--ease); }
 
-/* Page change: the cards of the opened page rise in. Static screenshots use the end state. */
-/* Only the position moves. A fade would blend the text colour with the background while it runs
-   and make a contrast check read the wrong colour. */
-@keyframes card-in { from { transform: translateY(0.5rem); } to { transform: none; } }
 @keyframes toast-in { from { transform: translateY(0.6rem); } to { transform: none; } }
 @keyframes pulse-dot { 50% { opacity: 0.25; } }
-.page:not([hidden]) > .card { animation: card-in 280ms var(--ease) both; }
-.page:not([hidden]) > .card:nth-child(2) { animation-delay: 30ms; }
-.page:not([hidden]) > .card:nth-child(3) { animation-delay: 60ms; }
-.page:not([hidden]) > .card:nth-child(n + 4) { animation-delay: 90ms; }
-
 /* Scrollbars follow the theme. */
 * { scrollbar-width: thin; scrollbar-color: var(--bd-strong) transparent; }
 
@@ -289,7 +318,7 @@ summary::marker { color: var(--tx-muted); }
   .uplink-value, .observation-device, .quota-row, .randomness-field, .traffic-rate-form,
   .page > .card, .sidebar-nav a, .data-table tbody tr, .analytics-table tbody tr,
   .progression-meter span, .quota-meter span, .switch-thumb { transition: none; }
-  .page:not([hidden]) > .card, .toast, .badge.pending::before { animation: none; }
+  .toast, .badge.pending::before { animation: none; }
   button:active:not(:disabled) { transform: none; }
 }
 

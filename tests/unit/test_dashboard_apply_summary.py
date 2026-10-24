@@ -765,16 +765,15 @@ def test_the_apply_and_reset_buttons_each_have_a_help_icon():
     assert re.search(r'id="reset-button"[^>]*>[^<]*</button>\s*<span class="help-icon"', dock)
 
 
-def test_the_apply_button_keeps_its_height():
+def test_the_apply_button_is_compact_on_desktop_without_a_fixed_height():
     css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
-    # One line and two lines of the label need the same room so the footer does not jump.
-    assert re.search(r"#apply-button \{[^{}]*min-height: calc\(2lh \+ 1\.24rem \+ 2px\)", css)
+    rule = re.search(r"\.sidebar \.sidebar-actions #apply-button \{([^{}]*)\}", css).group(1)
+    assert "min-height: 2.5rem" in rule
+    assert not re.search(r"(?:^|;)\s*height:", rule)
 
 
-def test_the_sidebar_is_one_column_that_scrolls_as_a_whole():
-    # A pinned footer hid the router Wi-Fi switch and the copy buttons on a laptop window with
-    # the taller fonts of the CI machine. They stay in the one column below Panic instead and the
-    # column scrolls. So the controls that matter are reachable whatever the fonts are.
+def test_global_controls_keep_their_logical_keyboard_order():
+    # One set of controls serves both layouts, with emergency actions before secondary utilities.
     dock = sidebar_html()
     assert "sidebar-scroll" not in DASHBOARD_HTML and "sidebar-secondary" not in DASHBOARD_HTML
     order = [dock.index(marker) for marker in (
@@ -783,21 +782,20 @@ def test_the_sidebar_is_one_column_that_scrolls_as_a_whole():
         'class="router-wifi-control"', 'class="router-wifi-copy"', 'class="sidebar-credentials"',
     )]
     assert order == sorted(order)
-    css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
-    sidebar_rule = re.search(r"\n    \.sidebar \{([^{}]*)\}", css).group(1)
-    assert "overflow-y: auto" in sidebar_rule
-    assert "height: 100dvh" in sidebar_rule
 
 
-def test_a_short_window_gives_the_footer_room_so_panic_stays_in_view():
+def test_desktop_emergency_actions_are_independent_of_header_height():
     css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
-    # Up to 1000px of height (a laptop or a full HD screen) the sidebar and its footer use tighter gaps.
-    block = re.search(
-        r"@media \(min-width: 48\.01rem\) and \(max-height: 1000px\) \{([^@]*?)\n    \}", css
+    desktop = re.search(
+        r"@media \(min-width: 48\.01rem\) and \(min-height: 36\.01rem\) \{(.*?)\n\}",
+        css, re.DOTALL,
     ).group(1)
-    assert re.search(r"\.sidebar \{[^{}]*gap: 0\.5rem", block)
-    assert re.search(r"\.sidebar-nav a \{[^{}]*padding-block: 0\.22rem", block)
-    assert re.search(r"\.sidebar-footer, \.sidebar-operate, \.sidebar-actions \{ gap: 0\.35rem", block)
+    bar = re.search(r"\.safety-bar \{([^{}]*)\}", desktop).group(1)
+    assert "position: fixed" in bar and "bottom: 0" in bar
+    # The emergency control is outside the utility disclosure and appears only once.
+    dock = sidebar_html()
+    assert dock.index('id="panic-button"') < dock.index('class="control-utilities"')
+    assert DASHBOARD_HTML.count('id="panic-button"') == 1
 
 
 def test_panic_says_how_to_run_again():

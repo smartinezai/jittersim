@@ -51,9 +51,7 @@
     function syncNavHint() {
       const nav = document.querySelector(".sidebar-nav");
       const row = nav.querySelector("ul");
-      const more = phoneLayout.matches
-        ? moreToShow(row.scrollLeft, row.clientWidth, row.scrollWidth)
-        : moreToShow(nav.scrollTop, nav.clientHeight, nav.scrollHeight);
+      const more = moreToShow(row.scrollLeft, row.clientWidth, row.scrollWidth);
       nav.toggleAttribute("data-more-before", more.before);
       nav.toggleAttribute("data-more-after", more.after);
     }
@@ -95,7 +93,8 @@
       controlsToggle.setAttribute("aria-expanded", String(open));
       if (!moveFocus) return;
       if (open) {
-        const first = Array.from(controlsSheet.querySelectorAll("select, button"))
+        const focusRoot = phoneLayout.matches ? controlsSheet : document.querySelector(".control-utilities");
+        const first = Array.from(focusRoot.querySelectorAll("select, button"))
           .find((node) => !node.disabled && !node.closest(".safety-bar") && node.getClientRects().length);
         if (first) first.focus({ preventScroll: true });
       } else if (wasOpen) {
@@ -146,13 +145,9 @@
       document.body.dataset.section = id;
       if (typeof updatePageTitle === "function") updatePageTitle(adminTokenVerified);
       if (userInitiated) {
-        // On a phone the header stays above the page so the page start is shown and focused.
-        if (phoneLayout.matches) {
-          setControlsOpen(false, false);
-          showPageStart(id);
-        } else {
-          window.scrollTo(0, 0);
-        }
+        // The full-width navigation hands focus to the selected page at every size.
+        setControlsOpen(false, false);
+        showPageStart(id);
       }
       revealNavLink(id);
       // A chart drawn while its page was hidden has no size, so draw it again.
