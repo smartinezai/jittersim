@@ -10,6 +10,7 @@ from jittersim.api.server import ControlServer
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.networking.helper import HelperClientError
 from tests.unit.test_api import CountingHelper
 
 
@@ -139,3 +140,63 @@ def test_byte_start_preserves_quota_usage_and_other_device_progress(live_progres
     assert progression_payload(server, "alice-run")["progress_percent"] == 50
     assert progression_payload(server, "bob-run")["progress_percent"] == 50
     assert download_delay(helper) == download_delay(helper, "bob") == 550
+
+
+@pytest.mark.parametrize("reason", [None, "helper-busy"])
+@pytest.mark.parametrize("existing_run", [False, True])
+def test_byte_start_refuses_a_failed_sample_without_saving(
+    live_progressions, reason, existing_run,
+):
+    server, repository, helper, scheduler, clock = live_progressions
+    if existing_run:
+        start_progression(server, "first")
+    helper.devices["alice"] = 400
+    previous_runs = repository.list_active_progressions(now=clock[0])
+    previous_version = repository.get_runtime_state().configuration_version
+    previous_plan = helper.applied_plan
+    read_counters = helper.traffic_counters
+    reads = []
+
+    def fail_once():
+        reads.append(True)
+        if len(reads) == 1:
+            raise HelperClientError("temporary counter read failure", reason=reason)
+        return read_counters()
+
+    with patch.object(helper, "traffic_counters", side_effect=fail_once):
+        status, _, body = server.write_response_for("/api/progressions", {
+            "id": "first", "device_id": "alice",
+            "start_profile_id": "start", "end_profile_id": "end",
+            "duration_minutes": 60, "mode": "bytes", "traffic_target_bytes": 1000,
+        })
+        assert status == 503, json.loads(body)
+        assert "not started" in json.loads(body)["error"]
+        assert len(reads) == 1
+        assert repository.list_active_progressions(now=clock[0]) == previous_runs
+        assert repository.get_runtime_state().configuration_version == previous_version
+        assert helper.applied_plan == previous_plan
+        assert helper.devices["alice"] == 400
+
+        # A new request can start once the helper recovers, with no old bytes charged.
+        response = start_progression(server, "first")
+        assert response["traffic_baseline_bytes"] == 400
+        assert response["traffic_bytes"] == response["progress_percent"] == 0
+        assert download_delay(helper) == 100
+        clock[0] += 6
+        scheduler.tick(repository=repository, now=clock[0])
+        assert progression_payload(server, "first")["progress_percent"] == 0
+        assert download_delay(helper) == 100
+        helper.devices["alice"] = 500
+        clock[0] += 6
+        scheduler.tick(repository=repository, now=clock[0])
+        assert progression_payload(server, "first")["progress_percent"] == 50
+        assert download_delay(helper) == 550
+
+
+def test_ordinary_apply_keeps_best_effort_counter_sampling(live_progressions):
+    server, _, helper, _, _ = live_progressions
+    start_progression(server, "first")
+    with patch.object(helper, "traffic_counters", side_effect=HelperClientError("unavailable")):
+        status, _, body = server.write_response_for("/api/apply", {})
+    assert status == 200, json.loads(body)
+    assert download_delay(helper) == 100

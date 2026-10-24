@@ -796,15 +796,15 @@ class RuntimeScheduler:
 
     def sample_usage(
         self, *, repository: ConfigRepository, include_device_traffic: bool = False,
-    ) -> None:
-        """Record quota and device traffic before the helper counters restart.
+    ) -> bool:
+        """Return whether quota and device traffic were sampled successfully.
 
         Include device traffic when starting a byte progression, even if nothing
-        needed counters before this start.
+        needed counters before this start. Other callers may keep sampling best effort.
         """
 
         with self._apply_lock:
-            self._sample_quota_usage(
+            return self._sample_quota_usage(
                 repository=repository, now=time.time(),
                 include_device_traffic=include_device_traffic,
             )
@@ -2260,7 +2260,7 @@ class RuntimeScheduler:
 
     def _sample_quota_usage(
         self, *, repository: ConfigRepository, now: float, include_device_traffic: bool = False,
-    ) -> None:
+    ) -> bool:
         data_limits = tuple(
             data_limit
             for data_limit in repository.list_data_limits()
@@ -2288,10 +2288,10 @@ class RuntimeScheduler:
             and not has_byte_progression
             and not include_device_traffic
         ):
-            return
+            return False
         get_traffic_counters = getattr(self._helper_client, "traffic_counters", None)
         if get_traffic_counters is None:
-            return
+            return False
         self._last_quota_sample_at = now
         try:
             counters = get_traffic_counters()
@@ -2419,6 +2419,8 @@ class RuntimeScheduler:
                     )
         except (AttributeError, KeyError, TypeError, ValueError, StorageError, HelperClientError):
             LOGGER.warning("quota traffic sample failed", exc_info=True)
+            return False
+        return True
 
     @staticmethod
     def _quota_reset_is_due(

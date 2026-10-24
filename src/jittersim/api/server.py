@@ -3205,9 +3205,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             if progression.mode == "bytes" and self.scheduler is not None:
                 # Start under the write's exclusive lock, after counting old traffic.
                 # Include counters even when no quota or earlier progression is active.
-                self.scheduler.sample_usage(
+                if not self.scheduler.sample_usage(
                     repository=self.repository, include_device_traffic=True,
-                )
+                ):
+                    return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                        {"error": "could not read traffic counters; "
+                                  "progression was not started. Try again."}
+                    )
                 progression = replace(
                     progression,
                     traffic_baseline_bytes=self.scheduler.device_traffic_bytes(
