@@ -4389,7 +4389,8 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         compile_stored_plan(repository=self.repository)
 
     def _verify_selected_client(self, device: Device, snapshot: dict) -> None:
-        if not snapshot["association_status_available"] or not any(
+        # A recent cached list keeps running profiles steady but cannot authorize a new save.
+        if snapshot.get("stale") or not snapshot["association_status_available"] or not any(
             client["association_verified"]
             and client["ipv4_address"] == str(device.ipv4_address)
             and client["mac_address"] == device.mac_address
