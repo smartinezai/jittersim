@@ -25,6 +25,7 @@ def check_notification_wrapping(page):
                 page.locator("#notification-regression-source").focus()
                 page.evaluate("message => showToast(message, 'error')", message)
                 text = page.locator("#toast-message")
+                text.evaluate("node => node.scrollTop = 0")
                 expect(text).to_have_text(message)
                 expect(page.locator("#action-alert")).to_have_text(message)
                 expect(page.locator("#action-announcer")).to_have_text("")
