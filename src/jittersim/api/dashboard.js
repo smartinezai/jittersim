@@ -10546,6 +10546,8 @@
     async function reviewPreparedChoice(row, button) {
       invalidatePreparedReview();
       const owner = preparedOwner(), serial = preparedReviewSerial;
+      const requestOwner = {};
+      button.preparedReviewOwner = requestOwner;
       setButtonBusy(button, true);
       try {
         const review = await request("/api/pending-devices/review?mac=" + encodeURIComponent(row.mac_address), "GET", undefined,
@@ -10567,7 +10569,10 @@
       } catch (error) {
         if (preparedCurrent(owner) && serial === preparedReviewSerial) preparedMessage(error.message, true);
       } finally {
-        if (preparedCurrent(owner)) setButtonBusy(button, false);
+        if (button.preparedReviewOwner === requestOwner) {
+          delete button.preparedReviewOwner;
+          if (adminTokenVerified && owner.token === adminTokenRevision && button.isConnected) setButtonBusy(button, false);
+        }
       }
     }
     async function usePreparedChoice() {

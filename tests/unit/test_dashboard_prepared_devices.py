@@ -169,3 +169,24 @@ def test_old_operation_cannot_release_a_newer_operations_busy_state():
     result = run_node(sources, "(()=>{const old=beginPreparedOperation();const current=beginPreparedOperation();"
                       "return {oldReleased:finishPreparedOperation(old,{}),preparedBusy,released,same:preparedOperation===current};})()")
     assert result == {"oldReleased": False, "preparedBusy": True, "released": 0, "same": True}
+
+
+@pytest.mark.parametrize("supersede, disabled", [
+    ("actionIntentRevision++;preparedReviewSerial++;", False),
+    ("actionIntentRevision++;preparedReviewSerial++;button.preparedReviewOwner={newer:true};", True),
+    ("adminTokenVerified=false;button.isConnected=false;", True),
+    ("adminTokenRevision++;", True),
+])
+def test_deferred_review_cleanup_after_panic_is_owned_and_cannot_render_private_data(supersede, disabled):
+    sources = ["let adminTokenVerified=true,adminTokenRevision=1,preparedEpoch=1,actionIntentRevision=0,preparedReviewSerial=0,preparedReview=null;",
+               "const currentPage=()=>'devices';let button={disabled:false,isConnected:true},release,messages=0;",
+               "const nodes={};const element=id=>nodes[id]||(nodes[id]={hidden:true,textContent:''});",
+               "const invalidatePreparedReview=()=>{preparedReviewSerial++;preparedReview=null;};",
+               "const setButtonBusy=(button,busy)=>button.disabled=busy,preparedMessage=()=>messages++;",
+               "const request=()=>new Promise(resolve=>release=resolve);",
+               function_source("preparedOwner"),function_source("preparedCurrent"),
+               "async " + function_source("reviewPreparedChoice")]
+    result = run_async(sources, "(async()=>{const pending=reviewPreparedChoice({mac_address:'" + MAC + "'},button);" +
+                       supersede + "release({profile:{name:'private'}});await pending;return {disabled:button.disabled,"
+                       "review:preparedReview,messages,reviewHidden:element('prepared-review').hidden,settings:element('prepared-settings').textContent};})()")
+    assert result == {"disabled": disabled, "review": None, "messages": 0, "reviewHidden": True, "settings": ""}
