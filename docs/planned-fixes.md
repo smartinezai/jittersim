@@ -185,8 +185,8 @@ Their states are in the [roadmap](../ROADMAP.md) and on GitHub.
     available" pill wraps to two lines in the desktop nav (a shorter text fixes it). On a phone the Allow
     button sits under the Credentials sheet. A separate local fixture check found that the old help-icon
     size report measured the visual box rather than the effective target: pseudo-element targets measured
-    32 px on desktop and 44 px on phone or coarse input. Sixty cardinal-hit checks opened help correctly
-    with no clipping. This is bounded Chromium fixture evidence, not general phone acceptance.
+    32 px on desktop and 44 px on phone or coarse input. Sixty cardinal-hit checks matched the intended help controls. The sampled mouse and touch
+    interactions showed the correct help with no clipping. This is bounded Chromium fixture evidence, not general phone acceptance.
     The Schedules form wraps its End field alone at 1366x768. Panic is behind the backdrop while a window is open
     (by design, Close and Escape work).
   - Triage of the Codex dark-theme findings: the scrolling page-link row at 375 px is intended
@@ -198,8 +198,8 @@ Their states are in the [roadmap](../ROADMAP.md) and on GitHub.
     page load.
 - Source follow-ups in the reviewed composition: dashboard speed-test streams allow one waiting request
   per run; Pi-specific priority behavior still needs physical verification. Access-plan reuse is keyed by
-  content and rereads settings each time, with only three engine paths using it. API reads still build and
-  validate their own saved or applied policies. Summary polling omits domain arrays while default and
+  content and rereads settings each time. Three engine paths and the access API reuse saved plans.
+  Helper policies and unsaved or imported settings still receive full validation. Summary polling omits domain arrays while default and
   editor API reads remain full. DNS renewal submits at most eight unfinished lookups, retains good stale
   answers only for the original 600-second window after errors and retries after 30 seconds. A successful
   empty answer replaces the old addresses. The 4096-address cap is still shown only in a log line.

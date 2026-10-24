@@ -532,6 +532,8 @@ fixture isolation (`666f7b04`). Validation results apply only to their recorded 
 not transfer automatically between revisions. Run local gates for the selected exact release
 head. The official Python 3.9, 3.11 and 3.13 matrix remains outside the current evidence.
 Physical acceptance, signing, publication and installation remain separate.
+This revision also includes the reviewed per-page title correction `b244d57e` and saved-plan
+reuse in the access API `ee32b631`. Their results remain specific to their tested heads.
 Every unticked box in the milestones above is one of these:
 
 - Owner-run physical acceptance on the Pi (Milestones 9 to 15 and the router security section).
