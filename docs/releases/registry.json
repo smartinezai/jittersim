@@ -3,7 +3,7 @@
   "reservations": [
     {
       "sequence": 1792860082,
-      "state": "reserved",
+      "state": "retired",
       "version": "0.2.0"
     }
   ],
