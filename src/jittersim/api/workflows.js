@@ -342,7 +342,7 @@ function renderSystemHealth(data) {
   const values = [
     'Dashboard connected',
     data.helper_configured ? (data.helper_reachable ? 'Network helper connected' : 'Network helper unavailable') : 'Configuration only',
-    'Version: ' + (system.version || 'Unknown'),
+    'Version: ' + shortReleaseLabel(system.version),
     system.disk_free_bytes === null || system.disk_free_bytes === undefined ? 'Disk space unavailable' :
       'Free disk: ' + (system.disk_free_bytes / 1073741824).toFixed(1) + ' GB',
     system.temperature_celsius == null ? null : 'Temperature: ' + system.temperature_celsius.toFixed(1) + ' °C',
@@ -351,7 +351,7 @@ function renderSystemHealth(data) {
   ];
   if (system.version) knownHealthVersion = system.version;
   const version = installedReleaseLabel();
-  if (version) element('sidebar-version').textContent = 'Version ' + version;
+  if (version) element('sidebar-version').textContent = 'Version ' + shortReleaseLabel(version);
   element('health-details').replaceChildren(...values.filter(Boolean).map(value => textNode('p', value)));
   const uplink = textNode('p', element('uplink-state').textContent === 'Unavailable' ? 'Ethernet information unavailable' : 'Ethernet: ' + element('uplink-state').textContent);
   uplink.id = 'health-uplink'; element('health-details').append(uplink);
@@ -778,7 +778,25 @@ function releaseOperationBusy() {
   return Boolean(releaseState && RELEASE_BUSY_PHASES.includes(releaseState.phase));
 }
 function updatesPageActive() { return !document.hidden && currentPage() === 'updates'; }
-function releaseLabel(state) { return (state && (state.tag || state.available)) || ''; }
+function shortReleaseLabel(version) {
+  if (typeof version !== 'string' || !version) return 'Unknown';
+  const match = /^v?(\d+\.\d+\.\d+)(?:\.dev\+([0-9a-f]{7,40}))?$/.exec(version);
+  return match ? match[2] ? 'Preview ' + match[2].slice(0, 7) : match[1] : version;
+}
+function renderReleaseDetails(state) {
+  for (const kind of ['installed', 'available']) {
+    const id = 'update-' + kind;
+    const version = state?.[kind];
+    element(id + '-version').textContent = typeof version === 'string' && version &&
+      !/^Unversioned(?: installation)?$/i.test(version) ? version : 'Unknown';
+    const meta = state?.[kind + '_metadata'];
+    element(id + '-commit').textContent = meta?.commit || 'Unknown';
+    const signer = meta?.signer;
+    element(kind === 'installed' ? 'update-installed-signer' : 'update-signer').textContent = signer
+      ? meta.signer_label ? meta.signer_label + ' (' + signer + ')' : signer
+      : meta ? 'No signer recorded' : kind === 'available' && state?.signed_by || 'Unknown';
+  }
+}
 function installedReleaseLabel() {
   const label = releaseState && releaseState.installed;
   return label && !/^Unversioned(?: installation)?$/i.test(label) ? label : lastConfirmedInstalledVersion || knownHealthVersion;
@@ -807,11 +825,11 @@ function renderUpdates(failedRead) {
   const ready = adminTokenVerified && stagedReleaseReady(state);
   const installed = installedReleaseLabel();
   const blocked = state && state.available && state.installable === false && state.reason;
-  if (installed) element('sidebar-version').textContent = 'Version ' + installed;
-  element('update-installed').textContent = installed || 'Unknown';
+  if (installed) element('sidebar-version').textContent = 'Version ' + shortReleaseLabel(installed);
+  element('update-installed').textContent = shortReleaseLabel(installed);
   element('update-available').textContent = !state ? 'Unknown. Check for updates to try again.'
-    : ready ? releaseLabel(state) : blocked ? releaseLabel(state) + ' (cannot be installed)' : 'No newer release staged';
-  element('update-signer').textContent = ready && state.signed_by ? state.signed_by : 'Not applicable';
+    : ready ? shortReleaseLabel(state.available) : blocked ? shortReleaseLabel(state.available) + ' (cannot be installed)' : 'No newer release staged';
+  renderReleaseDetails(state);
   element('update-recovery').textContent = !state || typeof state.rollback_available !== 'boolean' ? 'Unknown'
     : state.rollback_available ? 'Kept. Restore previous installation is available.'
     : state.recovery_problem ? 'Could not be checked. Read the update log on the Pi.'
@@ -819,7 +837,7 @@ function renderUpdates(failedRead) {
   const notes = ready && typeof state.notes === 'string' ? state.notes.trim().slice(0, 16384) : '';
   element('update-notes').textContent = notes;
   element('update-notes-box').hidden = !notes;
-  element('release-install').textContent = ready ? 'Install ' + releaseLabel(state) : 'Install update';
+  element('release-install').textContent = ready ? 'Install ' + shortReleaseLabel(state.available) : 'Install update';
   element('update-last-checked').textContent = onlineView && onlineView.checked_at
     ? new Date(onlineView.checked_at * 1000).toLocaleString() : 'Unknown';
   element('release-check').disabled = working;
@@ -838,7 +856,7 @@ function renderUpdates(failedRead) {
   // The progress line speaks (role="status"), so it is only written when its words change.
   if (element('update-progress').textContent !== progress) element('update-progress').textContent = progress;
   element('sidebar-update-link').hidden = !ready;
-  element('sidebar-update-link').textContent = ready ? 'Update available: ' + releaseLabel(state) : '';
+  element('sidebar-update-link').textContent = ready ? 'Update available: ' + shortReleaseLabel(state.available) : '';
   element('update-available-badge').hidden = !ready;
   const nav = element('updates-tab-link');
   if (ready) nav.setAttribute('aria-label', 'Updates, update available');
@@ -856,11 +874,15 @@ function loadReleaseStatus({force = false} = {}) {
       if (!updateContextCurrent(context)) return null;
       releaseState = state;
       if (state.installed && !/^Unversioned(?: installation)?$/i.test(state.installed)) lastConfirmedInstalledVersion = state.installed;
-      const signer = state.available && state.signed_by ? ' (signed by ' + state.signed_by + ')' : '';
+      let message = state.message || 'Status read.';
+      if (state.phase === 'ready' && stagedReleaseReady(state) && state.signed_by &&
+          message === 'Release ' + state.available + ' signed by ' + state.signed_by + ' verified and ready to install.') {
+        message = 'Release ' + shortReleaseLabel(state.available) + ' verified and ready to install.';
+      }
       const blocked = state.available && state.installable === false && state.reason;
-      element('release-status').textContent = 'Installed: ' + (installedReleaseLabel() || 'Unknown') +
-        ' · Available: ' + (state.available ? state.available + signer : 'None staged') +
-        ' · ' + (blocked ? state.reason : state.message || 'Status read.');
+      element('release-status').textContent = 'Installed: ' + shortReleaseLabel(installedReleaseLabel()) +
+        ' · Available: ' + (state.available ? shortReleaseLabel(state.available) : 'None staged') +
+        ' · ' + (blocked ? state.reason : message);
       if (releaseOperationBusy() && !updateWatch) {
         updateWatch = watchUpdate(state, context, state.request_kind === 'rollback' || (!identifiedUpdate(state) && state.phase === 'rolling-back') ? 'restore' : 'install', state.available || '');
         updateOutcome = '';
@@ -902,16 +924,16 @@ async function followUpdate() {
             updateOutcome = 'The requested update was not confirmed. The Pi now reports a different or unidentified operation.';
             updateWatch = null;
           } else if (phase === 'complete' && watch.kind === 'install' && watch.label && state.installed === watch.label) {
-            updateOutcome = 'Updated to ' + watch.label + '.';
+            updateOutcome = 'Updated to ' + shortReleaseLabel(watch.label) + '.';
             updateWatch = null;
           } else if (phase === 'rolled-back' && watch.kind === 'restore' && state.installed) {
             updateOutcome = watch.requestId
-              ? 'Previous installation restored. Installed version: ' + state.installed + '.'
-              : 'The Pi reports rollback status. This restore request is not confirmed. Installed version: ' + state.installed + '.';
+              ? 'Previous installation restored. Installed version: ' + shortReleaseLabel(state.installed) + '.'
+              : 'The Pi reports rollback status. This restore request is not confirmed. Installed version: ' + shortReleaseLabel(state.installed) + '.';
             updateWatch = null;
           } else if (['complete','rolled-back','failed'].includes(phase)) {
             updateOutcome = 'The requested update was not confirmed. ' + (state.message || '') +
-              ' Installed version: ' + (state.installed || 'Unknown') + '.';
+              ' Installed version: ' + shortReleaseLabel(state.installed) + '.';
             updateWatch = null;
           }
           renderUpdates();
@@ -1083,7 +1105,7 @@ async function installUpdate() {
   const context = updateContext();
   if (!updateContextCurrent(context) || !stagedReleaseReady(releaseState)) return;
   const version = releaseState.available;
-  const label = releaseLabel(releaseState);
+  const label = releaseState.tag || releaseState.available;
   const signer = releaseState.signed_by ? ' It is signed by ' + releaseState.signed_by + '.' : '';
   if (!await confirmWorkflow('Install ' + label + '?' + signer + ' The installation and settings are backed up first and restored automatically if the Pi is not healthy afterwards. The dashboard and test network will restart. Keep an independent management connection available.')) return;
   if (!updateContextCurrent(context) || !stagedReleaseReady(releaseState) || releaseState.available !== version) return;
@@ -1246,7 +1268,9 @@ function clearUpdatePrivateState() {
   element('update-progress').hidden = true;
   element('update-progress').textContent = '';
   element('updates-tab-link').removeAttribute('aria-label');
-  element('update-installed').textContent = knownHealthVersion || 'Unknown';
+  element('update-installed').textContent = shortReleaseLabel(knownHealthVersion);
+  renderReleaseDetails(null);
+  element('update-release-details').open = false;
   element('update-available').textContent = 'Sign in to read update status.';
   element('update-signer').textContent = 'Sign in to read update status.';
   element('update-recovery').textContent = 'Unknown';
@@ -1294,9 +1318,18 @@ function installReleaseControls() {
       <div><dt>Installed</dt><dd id="update-installed">Unknown</dd></div>
       <div><dt>Last checked</dt><dd id="update-last-checked">Not checked yet</dd></div>
       <div><dt>Newest release</dt><dd id="update-available">No newer release found</dd></div>
-      <div><dt>Signed by</dt><dd id="update-signer">Not applicable</dd></div>
       <div><dt>Recovery copy</dt><dd id="update-recovery">Unknown</dd></div>
     </dl>
+    <details id="update-release-details"><summary>Details</summary>
+      <dl class="update-facts">
+        <div><dt>Installed version</dt><dd id="update-installed-version">Unknown</dd></div>
+        <div><dt>Installed commit</dt><dd id="update-installed-commit">Unknown</dd></div>
+        <div><dt>Installed signer</dt><dd id="update-installed-signer">Unknown</dd></div>
+        <div><dt>Staged version</dt><dd id="update-available-version">Unknown</dd></div>
+        <div><dt>Staged commit</dt><dd id="update-available-commit">Unknown</dd></div>
+        <div><dt>Staged signer</dt><dd id="update-signer">Unknown</dd></div>
+      </dl>
+    </details>
     <details id="update-notes-box" hidden><summary>Release notes</summary><pre id="update-notes" class="update-notes" tabindex="0" role="region" aria-label="Release notes text"></pre></details>
     <p id="release-status">Check for an approved release on this Pi.</p>
     <p id="online-check-status" class="form-note">Loading the online check…</p>

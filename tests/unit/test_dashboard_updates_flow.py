@@ -171,7 +171,7 @@ def test_check_find_confirm_install_restart_and_reconnect():
   const posts = calls.filter(c => c[0] === "POST" && c[1] === "/api/updates/check-online");
   assert.equal(posts.length, 1, "one online check, not two");
   assert.deepEqual(posts[0][2], {force: true});
-  assert.match(element("update-available").textContent, /v1\.1\.0/);
+  assert.match(element("update-available").textContent, /1\.1\.0/);
   assert.match(element("update-signer").textContent, /desk-mac/);
   assert.match(element("update-last-checked").textContent, /\d/);
   assert.equal(element("sidebar-update-link").hidden, false);
@@ -183,7 +183,7 @@ def test_check_find_confirm_install_restart_and_reconnect():
   const install = element("release-install").click();
   await install;
   assert.equal(confirmations.length, 1);
-  assert.match(confirmations[0], /v1\.1\.0/);
+  assert.match(confirmations[0], /1\.1\.0/);
   assert.match(confirmations[0], /restart/);
   const installs = calls.filter(c => c[1] === "/api/updates/install");
   assert.equal(installs.length, 1);
@@ -282,7 +282,7 @@ def test_install_button_names_the_release_and_notes_and_recovery_follow_the_stat
 
   pi.staged = {version: "1.1.0", tag: "v1.1.0", notes: "  ## v1.1.0\n\n* Faster checks\n"};
   await loadReleaseStatus({force: true});
-  assert.equal(element("release-install").textContent, "Install v1.1.0");
+  assert.equal(element("release-install").textContent, "Install 1.1.0");
   assert.equal(element("update-notes-box").hidden, false);
   assert.equal(element("update-notes").textContent, "## v1.1.0\n\n* Faster checks");
 
@@ -324,7 +324,7 @@ def test_signing_out_clears_the_release_name_notes_and_recovery_facts():
   pi.staged = {version: "1.1.0", tag: "v1.1.0", notes: "* Faster checks"};
   pi.rollback = true;
   await loadReleaseStatus({force: true});
-  assert.equal(element("release-install").textContent, "Install v1.1.0");
+  assert.equal(element("release-install").textContent, "Install 1.1.0");
   assert.equal(element("update-notes-box").hidden, false);
   clearUpdatePrivateState();
   assert.equal(element("release-install").textContent, "Install update");
@@ -332,4 +332,135 @@ def test_signing_out_clears_the_release_name_notes_and_recovery_facts():
   assert.equal(element("update-notes-box").hidden, true);
   assert.equal(element("update-notes").textContent, "");
   assert.equal(element("update-recovery").textContent, "Unknown");
+""")
+
+
+@NODE
+def test_short_release_labels_preserve_exact_details_and_raw_requests():
+    run(r"""
+  const commit = "03fe31d8a1695dd42c9e213540f3127b555e8640";
+  assert.equal(shortReleaseLabel("0.2.0"), "0.2.0");
+  assert.equal(shortReleaseLabel("v0.2.0"), "0.2.0");
+  assert.equal(shortReleaseLabel("0.2.0.dev+03fe31d"), "Preview 03fe31d");
+  assert.equal(shortReleaseLabel("0.2.0.dev+" + commit), "Preview 03fe31d");
+  assert.equal(shortReleaseLabel("v1"), "v1", "legacy labels stay literal");
+  assert.equal(shortReleaseLabel(null), "Unknown");
+  assert.equal(shortReleaseLabel("0.2.0.dev+not-a-commit"), "0.2.0.dev+not-a-commit");
+  const version = "0.2.0.dev+03fe31d";
+  releaseState = {installed: version, available: "0.2.0", tag:"v0.2.0", installable:true,
+    installed_metadata:{commit, sequence:17, signer:null, signer_label:null},
+    available_metadata:{commit:"a".repeat(40), sequence:18, signer:"SHA256:fixture", signer_label:"<img src=x>"}};
+  const original = JSON.stringify(releaseState);
+  renderUpdates();
+  assert.equal(element("sidebar-version").textContent, "Version Preview 03fe31d");
+  assert.equal(element("update-installed").textContent, "Preview 03fe31d");
+  assert.equal(element("update-available").textContent, "0.2.0");
+  assert.equal(element("update-installed-version").textContent, version);
+  assert.equal(element("update-installed-commit").textContent, commit);
+  assert.equal(element("update-installed-signer").textContent, "No signer recorded");
+  assert.equal(element("update-available-commit").textContent, "a".repeat(40));
+  assert.equal(element("update-signer").textContent, "<img src=x> (SHA256:fixture)");
+  assert.equal(JSON.stringify(releaseState), original, "presentation leaves raw identity untouched");
+  assert.equal(stagedReleaseReady({installed:"0.2.0.dev+03fe31d000", available:"0.2.0.dev+03fe31d111", installable:true}), true,
+    "identical short previews never determine readiness");
+  assert.equal(stagedReleaseReady({installed:"0.2.0", available:"0.2.0", installable:true}), false);
+
+  releaseState.installed_metadata = null;
+  renderUpdates();
+  assert.equal(element("update-installed-commit").textContent, "Unknown", "never infer commit from version text");
+  assert.equal(element("update-installed-signer").textContent, "Unknown");
+  clearUpdatePrivateState();
+  assert.equal(element("update-available-commit").textContent, "Unknown");
+  assert.equal(element("update-signer").textContent, "Sign in to read update status.");
+  assert.equal(element("update-release-details").open, false);
+  adminTokenVerified = true;
+  pi.installed = "0.1.0";
+  pi.staged = {version, tag:"unrelated-tag"};
+  await loadReleaseStatus({force:true});
+  await installUpdate();
+  const install = calls.find(c => c[1] === "/api/updates/install");
+  assert.deepEqual(install[2], {version, confirm:true});
+""")
+
+
+def test_release_identity_uses_native_details_and_text_values():
+    source = WORKFLOWS.read_text()
+    assert '<details id="update-release-details"><summary>Details</summary>' in source
+    assert '<dd id="update-signer">' in source
+    assert "element(id + '-commit').textContent" in source
+
+
+@NODE
+def test_ready_message_shortens_only_the_exact_current_verified_template():
+    run(r"""
+  const version = "0.2.0.dev+03fe31d";
+  pi.staged = {version};
+  const ready = {installed:"0.1.0", available:version, phase:"ready", installable:true, signed_by:"desk-mac",
+    message:"Release " + version + " signed by desk-mac verified and ready to install."};
+  request = async () => ready;
+  await loadReleaseStatus({force:true});
+  assert.match(element("release-status").textContent, /Preview 03fe31d verified and ready to install\./);
+  assert.ok(!element("release-status").textContent.includes(version));
+  assert.ok(!element("release-status").textContent.includes("desk-mac"));
+  assert.equal(ready.message, "Release " + version + " signed by desk-mac verified and ready to install.");
+  for (const diagnostic of ["Release " + version + " signed by another-key verified and ready to install.",
+    "Signature failed for " + version + ": desk-mac is no longer trusted.",
+    "Release " + version + " signed by desk-mac verified and ready to install. Unexpected suffix."]) {
+    ready.message = diagnostic;
+    await loadReleaseStatus({force:true});
+    assert.ok(element("release-status").textContent.endsWith(diagnostic));
+  }
+  ready.message = "Release " + version + " signed by desk-mac verified and ready to install.";
+  ready.installable = false;
+  await loadReleaseStatus({force:true});
+  assert.ok(element("release-status").textContent.endsWith(ready.message), "never rewrite a non-ready diagnostic");
+""")
+
+
+@NODE
+def test_exact_installed_version_never_uses_cached_health_or_previous_identity():
+    run(r"""
+  knownHealthVersion = "0.2.0.dev+03fe31d";
+  lastConfirmedInstalledVersion = "0.1.0";
+  for (const installed of ["Unversioned installation", "Unversioned", undefined, null, ""]) {
+    releaseState = {installed, available:null};
+    renderUpdates();
+    assert.equal(element("update-installed-version").textContent, "Unknown");
+    assert.equal(element("update-installed-commit").textContent, "Unknown");
+    assert.equal(element("update-installed-signer").textContent, "Unknown");
+    assert.equal(element("sidebar-version").textContent, "Version 0.1.0", "sidebar keeps existing fallback");
+  }
+  releaseState = {installed:"0.2.0.dev+03fe31d"};
+  renderUpdates();
+  assert.equal(element("update-installed-version").textContent, releaseState.installed);
+  element("update-release-details").open = true;
+  clearUpdatePrivateState();
+  assert.equal(element("update-installed-version").textContent, "Unknown", "sign-out never substitutes retained health version");
+  assert.equal(element("update-installed-commit").textContent, "Unknown");
+  assert.equal(element("update-installed-signer").textContent, "Unknown");
+  assert.equal(element("update-release-details").open, false);
+""")
+
+
+@NODE
+def test_install_confirmations_keep_distinct_full_versions_and_tag_precedence():
+    run(r"""
+  confirmAnswer = false;
+  const versions = ["0.2.0.dev+03fe31d000", "0.2.0.dev+03fe31d111"];
+  for (const version of versions) {
+    releaseState = {installed:"0.1.0", available:version, installable:true, signed_by:"desk-mac"};
+    renderUpdates();
+    assert.equal(element("release-install").textContent, "Install Preview 03fe31d");
+    await installUpdate();
+    assert.ok(confirmations.at(-1).startsWith("Install " + version + "?"));
+    assert.ok(confirmations.at(-1).includes("It is signed by desk-mac."));
+  }
+  assert.notEqual(confirmations[0], confirmations[1]);
+  releaseState.tag = "v0.2.0-preview-exact-tag";
+  await installUpdate();
+  assert.ok(confirmations.at(-1).startsWith("Install v0.2.0-preview-exact-tag?"));
+  releaseState.tag = "";
+  await installUpdate();
+  assert.ok(confirmations.at(-1).startsWith("Install " + versions[1] + "?"));
+  assert.equal(calls.filter(c => c[1] === "/api/updates/install").length, 0, "declining still sends no install");
 """)
