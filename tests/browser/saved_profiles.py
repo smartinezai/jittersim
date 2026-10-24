@@ -210,6 +210,10 @@ def check_clearing_and_removal(page, base, headers, width):
     expect(mode).to_be_enabled()
     expect(page.locator('button[data-reset-field="upload-delay-random-mode"]')).to_be_enabled()
     reset("upload-delay-random-enabled", "100")
+    page.locator("#upload-delay-random-card").screenshot(
+        path=f"test-results/profile-field-reset-randomness-{width}.png"
+    )
+    assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
     # Reset is still a draft and never saves or applies it on its own.
     assert saved(page, base, headers, profile_id) == original
     submit = page.locator("#profile-form button[type='submit']")
