@@ -32,7 +32,7 @@ LOADERS = (
     "loadConnectedDevices loadUnaffectedDevices loadUplink loadGatewayPersistence loadQuotas "
     "loadServiceAssignments loadServiceLists loadConditions loadEveryoneElse loadAdminTools "
     "loadDashboardAccessList loadTestSessions loadSettingsHistory loadWorkspace loadAccessStatus "
-    "pollReleaseProgress loadUpdateCheckPreference"
+    "pollReleaseProgress loadUpdateCheckPreference loadPreparedChoices"
 ).split()
 
 HARNESS = r"""
@@ -40,6 +40,7 @@ const called = [];
 let dashboardLoaded = true;
 let adminTokenVerified = true;
 let adminTokenRevision = 0;
+let preparedLoaded = false, preparedBusy = false;
 const document = {hidden:false};
 let page = "devices";
 function currentPage() { return page; }
