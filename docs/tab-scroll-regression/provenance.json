@@ -1,0 +1,10 @@
+{
+  "tested_head": "468aa721defe7ea88f876325830e536c83e18e15",
+  "src_tree": "e5b0db78e6b8c091b1574e2db498668e44db776e",
+  "source": "local synthetic dashboard-navigation fixture, Chromium1243 / Playwright1.63.0; no live Pi or extension",
+  "captures": {
+    "before-1440.png": "87b4e61f93ce6112ae9ffa79f9900bea492b9fdff2a04105032b288e8a56fdc2",
+    "after-390.png": "a049b4c2d998537dff685dc579d474345dac3df8a65d8bb402418966aa04eb95",
+    "after-1440.png": "4fa89c51ae6a48435cfe151f40e04bd1a4da3a35148d8fd00489df61440c5d15"
+  }
+}

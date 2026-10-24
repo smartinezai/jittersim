@@ -26,11 +26,6 @@
       return reduce ? "auto" : "smooth";
     }
 
-    // Where the window scrolls so that a page starts at the top, a small margin above it.
-    function pageStartTop(sectionTop, scrolled, margin) {
-      return Math.max(0, Math.round(sectionTop + scrolled - margin));
-    }
-
     // Whether a scrolling row or column of links has more to show before or after.
     function moreToShow(offset, visible, total) {
       return { before: offset > 1, after: offset + visible < total - 1 };
@@ -42,11 +37,9 @@
         window.scrollTo(0, 0);
         return;
       }
-      const heading = document.getElementById("page-heading");
-      const anchor = !phoneLayout.matches && heading ? heading : section;
-      window.scrollTo({
-        top: pageStartTop(anchor.getBoundingClientRect().top, window.scrollY, 8), behavior: "auto"
-      });
+      // Page navigation keeps the header and page links visible instead of aligning
+      // the lower section heading with the viewport and hiding the navigation.
+      window.scrollTo({ top: 0, behavior: "auto" });
       section.focus({ preventScroll: true });
     }
 
