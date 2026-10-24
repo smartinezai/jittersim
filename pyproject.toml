@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jittersim"
-version = "0.2.0"
+version = "1.0.0"
 description = "A controlled network impairment simulator for Raspberry Pi test networks"
 readme = "README.md"
 requires-python = ">=3.9"
