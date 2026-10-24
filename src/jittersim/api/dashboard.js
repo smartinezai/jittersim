@@ -459,7 +459,9 @@
 
     function applyBrand(signedIn) {
       const name = signedIn && brandInfo ? brandInfo.name : "";
-      document.title = name || "Sign in";
+      const page = name && document.getElementById("page-" + document.body.dataset.section);
+      const label = page && page.getAttribute("aria-label");
+      document.title = name ? (label ? label + " · " : "") + name : "Sign in";
       element("brand-title").textContent = name || "Network lab";
       element("brand-sidebar").setAttribute("aria-label", name || "Network lab");
       element("measure-command").textContent = signedIn && brandInfo
