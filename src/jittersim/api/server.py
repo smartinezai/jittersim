@@ -3202,6 +3202,18 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 raise ValueError("start profile does not exist")
             if self.repository.get_profile(progression.end_profile_id) is None:
                 raise ValueError("end profile does not exist")
+            if progression.mode == "bytes" and self.scheduler is not None:
+                # Start under the write's exclusive lock, after counting old traffic.
+                # Include counters even when no quota or earlier progression is active.
+                self.scheduler.sample_usage(
+                    repository=self.repository, include_device_traffic=True,
+                )
+                progression = replace(
+                    progression,
+                    traffic_baseline_bytes=self.scheduler.device_traffic_bytes(
+                        device_id=progression.device_id,
+                    ),
+                )
             self.repository.save_progression(progression)
         except (KeyError, TypeError, ValueError, StorageError) as error:
             return _bad_request("invalid progression configuration", error)
@@ -3223,6 +3235,10 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             progression,
             repository=self.repository,
             now=int(time.time()),
+            traffic_bytes=(
+                self.scheduler.device_traffic_bytes(device_id=progression.device_id)
+                if self.scheduler is not None else 0
+            ),
         )
         response.setdefault("live_applied", status == HTTPStatus.OK)
         return status, content_type, _json_bytes(response)

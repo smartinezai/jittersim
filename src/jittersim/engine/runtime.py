@@ -794,11 +794,20 @@ class RuntimeScheduler:
         with self._lock:
             return self.applied_plan(), self.applied_target_states()
 
-    def sample_usage(self, *, repository: ConfigRepository) -> None:
-        """Record quota and device traffic before the helper counters restart."""
+    def sample_usage(
+        self, *, repository: ConfigRepository, include_device_traffic: bool = False,
+    ) -> None:
+        """Record quota and device traffic before the helper counters restart.
+
+        Include device traffic when starting a byte progression, even if nothing
+        needed counters before this start.
+        """
 
         with self._apply_lock:
-            self._sample_quota_usage(repository=repository, now=time.time())
+            self._sample_quota_usage(
+                repository=repository, now=time.time(),
+                include_device_traffic=include_device_traffic,
+            )
 
     def sample_before_control_change(self, *, repository: ConfigRepository) -> None:
         """Record usage before an Apply or Reset replaces the helper counters."""
@@ -2249,7 +2258,9 @@ class RuntimeScheduler:
             return
         self._sample_quota_usage(repository=repository, now=now)
 
-    def _sample_quota_usage(self, *, repository: ConfigRepository, now: float) -> None:
+    def _sample_quota_usage(
+        self, *, repository: ConfigRepository, now: float, include_device_traffic: bool = False,
+    ) -> None:
         data_limits = tuple(
             data_limit
             for data_limit in repository.list_data_limits()
@@ -2275,6 +2286,7 @@ class RuntimeScheduler:
             and not service_quotas
             and not time_quotas
             and not has_byte_progression
+            and not include_device_traffic
         ):
             return
         get_traffic_counters = getattr(self._helper_client, "traffic_counters", None)
