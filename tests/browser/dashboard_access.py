@@ -112,7 +112,7 @@ def check_token_form_errors(page):
         (409, {"error": "Fixture helper busy", "code": "helper-busy"},
          "Device verification is busy"),
     ):
-        def reject(route, code=code, body=body):
+        def reject(route):
             route.fulfill(status=code, content_type="application/json", body=json.dumps(body))
 
         page.route(access_route, reject)
