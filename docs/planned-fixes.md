@@ -194,26 +194,18 @@ have merged since. The pull requests that are still open and their states are in
     should not report it again. The "Token accepted. Diagnostics loaded." toast covering content at 375 px is
     intended (it leaves after 6 seconds and has Dismiss). Optional polish: skip it for the automatic sign-in on
     page load.
-- Follow-ups of PR 189 (dashboard speed test, review of its fix round): no test asserts that `SO_PRIORITY 0` is set
-  after `IP_TOS` (swapping them leaves priority 2 on Linux and all tests pass), so record one ordered list of
-  calls. `SO_PRIORITY = getattr(socket, "SO_PRIORITY", None)` turns the fix off silently when Python does not
-  expose the constant, so fall back to 12 on Linux. A script with the admin token can park several workers
-  for 1 second each while the first part streams, so allow one waiter per run. The dashboard test still shows
-  the label "Slower than the cap: the internet, the Pi's Wi-Fi or the device was the limit", but the internet
-  is not in that path. The brcmfmac behaviour of the priority reset is not yet checked on a Pi.
-- Follow-ups of PR 188 (2000-name block list, from the reviews and the measurements): `/api/site-blocks/delete`
-  runs the whole access check although a delete cannot add combinations, so on a database that is already over
-  the limit a delete is refused (run the check only for add and replace). There is no test for
-  `/api/history/restore` over the limit. Renewals queue up to 24 lookups, so a new name can wait seconds
-  behind them on a slow DNS server (cap queued renewals at 8). A failed renewal caches an empty answer for 60
-  seconds and drops good addresses (keep the old addresses when a lookup raises). `wait_for_room` should return
-  False after shutdown, which PR 201 needs. Measured at 2000 names of 29 characters: the `/api/access` answer
-  grows from 9.9 KB to 135 to 179 KB and is polled every 5 seconds (leave the names out of the poll), compiling
-  a plan takes 9.3 ms instead of 0.7 ms on a Mac (about ten times that on a Pi 3B+, cache the plan by
-  configuration version), and the 4096-address cap shows only in a log line.
-- Review notes left by PR 187: the branch that swallows a helper reset error on the 409 path
-  (`server.py` about 6277) has no test, so add one that raises `HelperClientError` and expects the 502 answer
-  and one warning. `dns_watch.py` line 333 is 105 characters (limit 100, CI does not select that rule).
+- Follow-ups of PR 189 (dashboard speed test) that PR 208 did not close: a script with the admin token can park
+  several workers for 1 second each while the first part streams, so allow one waiter per run. The brcmfmac
+  behaviour of the priority reset is not yet checked on a Pi. PR 208 added the order test for the two socket
+  options, the Linux value 12 for `SO_PRIORITY` and the label without the internet.
+- Follow-ups of PR 188 (2000-name block list, from the reviews and the measurements) that PR 208 did not close:
+  renewals queue up to 24 lookups, so a new name can wait seconds behind them on a slow DNS server (cap queued
+  renewals at 8). A failed renewal caches an empty answer for 60 seconds and drops good addresses (keep the old
+  addresses when a lookup raises). Measured at 2000 names of 29 characters: the `/api/access` answer grows from
+  9.9 KB to 135 to 179 KB and is polled every 5 seconds (leave the names out of the poll), compiling a plan
+  takes 9.3 ms instead of 0.7 ms on a Mac (about ten times that on a Pi 3B+, cache the plan by configuration
+  version), and the 4096-address cap shows only in a log line. PR 208 closed the delete-rule check and the
+  history restore test.
 
 ## Observed accessibility improvements
 
