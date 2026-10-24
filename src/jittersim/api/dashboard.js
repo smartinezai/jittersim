@@ -1259,6 +1259,7 @@
     let observedNames = new Set();
 
     const openObservationGroups = new Set();
+    const collapsedObservationDevices = new Set();
 
     const observationProfileChoice = new Map();
 
@@ -4049,7 +4050,8 @@
     function groupBlockedText(group) {
       const blocked = group.names.filter((observation) => observation.globally_blocked === true).length;
       if (blocked === 0) return "";
-      return blocked === group.names.length ? "All blocked" : blocked + " blocked";
+      return blocked === group.names.length
+        ? "All on global block list" : blocked + " on global block list";
     }
 
     function groupLimitNote(count) {
@@ -4096,6 +4098,7 @@
     function renderObservations(data) {
       const container = element("observations");
       const count = element("observation-count");
+      const focusedDevice = document.activeElement && document.activeElement.dataset.observationDevice;
       observedDomainsByDevice = {};
       observedNames = new Set();
       container.replaceChildren();
@@ -4132,7 +4135,27 @@
         title.textContent = deviceDisplayName(device);
         const address = document.createElement("p");
         address.textContent = device.ipv4_address;
-        heading.append(title, address);
+        const body = document.createElement("div");
+        body.className = "observation-device-body";
+        body.id = "device-" + observationGroupDomId(device.ipv4_address, "names");
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "observation-device-toggle";
+        toggle.dataset.observationDevice = device.ipv4_address;
+        toggle.setAttribute("aria-controls", body.id);
+        const setExpanded = (expanded) => {
+          body.hidden = !expanded;
+          toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+          toggle.textContent = (expanded ? "Hide names" : "Show names") +
+            " (" + (device.domains || []).length + ")";
+          toggle.setAttribute("aria-label", toggle.textContent + " for " + deviceDisplayName(device) +
+            " at " + device.ipv4_address);
+          if (expanded) collapsedObservationDevices.delete(device.ipv4_address);
+          else collapsedObservationDevices.add(device.ipv4_address);
+        };
+        setExpanded(!collapsedObservationDevices.has(device.ipv4_address));
+        toggle.addEventListener("click", () => setExpanded(body.hidden));
+        heading.append(title, address, toggle);
         const targetProfile = document.createElement("select");
         targetProfile.setAttribute("aria-label", "Profile for discovered domains");
         const chosenProfileId = chosenObservationProfile(
@@ -4157,7 +4180,8 @@
         const targetRow = document.createElement("div");
         targetRow.className = "observation-actions";
         targetRow.append(targetProfile);
-        card.append(heading, targetRow);
+        body.appendChild(targetRow);
+        card.append(heading, body);
         const list = document.createElement("ul");
         list.className = "observation-domain-list";
         // One name. A row of a group also gets its block button in blockSyncs so the group can
@@ -4198,7 +4222,7 @@
           hostName.textContent = parts.domain;
           const badge = document.createElement("span");
           badge.className = "observation-badge";
-          badge.textContent = "Blocked";
+          badge.textContent = "On global block list";
           host.append(hostName, badge);
           domain.appendChild(host);
           const hintLine = document.createElement("div");
@@ -4403,8 +4427,9 @@
         groupObservations(device.domains).forEach((group) => {
           list.appendChild(group.single ? buildRow(group.names[0], [], null) : buildGroup(group));
         });
-        card.append(list);
+        body.appendChild(list);
         container.appendChild(card);
+        if (focusedDevice === device.ipv4_address) toggle.focus({ preventScroll: true });
       });
     }
 

@@ -172,7 +172,7 @@ def test_every_remote_command_against_the_live_dashboard(dashboard, capsys):
     assert code == 0
     assert "It applies on its own while profiles are running." in out
     code, out, _ = run(capsys, "traffic", "--blocked")
-    assert "tags-eu.tiqcdn.com" in out and "Blocked" in out and "netflix" not in out
+    assert "tags-eu.tiqcdn.com" in out and "On global block list" in out and "netflix" not in out
     code, out, _ = run(capsys, "traffic", "unblock", "tags-eu.tiqcdn.com")
     assert code == 0
     assert out.startswith("Saved: removed tags-eu.tiqcdn.com")

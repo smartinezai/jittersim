@@ -582,8 +582,8 @@ def test_the_profile_messages_name_the_group_and_the_count():
 @NODE
 @pytest.mark.parametrize(
     "blocked, text",
-    [([False, False, False], ""), ([True, False, False], "1 blocked"),
-     ([True, True, False], "2 blocked"), ([True, True, True], "All blocked")],
+    [([False, False, False], ""), ([True, False, False], "1 on global block list"),
+     ([True, True, False], "2 on global block list"), ([True, True, True], "All on global block list")],
 )
 def test_the_group_says_how_many_of_its_names_are_blocked(blocked, text):
     items = [
@@ -679,6 +679,7 @@ let profiles = [];
 let observedDomainsByDevice = {};
 let observedNames = new Set();
 const openObservationGroups = new Set();
+const collapsedObservationDevices = new Set();
 const observationProfileChoice = new Map();
 const calls = [];
 const confirmations = [];
@@ -941,7 +942,7 @@ def test_the_header_block_button_blocks_every_name_in_one_call_and_turns_into_un
         ["success", "Removed 7 ImmoScout24 names from the global block list. " + ENFORCE],
     ]
     assert out["afterBlock"] == {
-        "header": "Unblock all", "badge": "All blocked", "badgeHidden": False,
+        "header": "Unblock all", "badge": "All on global block list", "badgeHidden": False,
         "rows": ["Unblock"] * 7,
     }
     assert out["last"] == {
@@ -968,7 +969,7 @@ def test_unblocking_one_name_in_a_blocked_group_turns_the_header_into_block_rema
 
     assert out["start"] == "Unblock all"
     assert out["header"] == "Block remaining"
-    assert out["badge"] == "6 blocked"
+    assert out["badge"] == "6 on global block list"
     assert out["rows"][2] == "Block globally"
     assert out["rows"].count("Unblock") == 6
     assert out["calls"][1] == ["request", REMOVE_BLOCK, "POST", {"domain": IMMO_NAMES[2][0]}]
@@ -1661,7 +1662,7 @@ def test_a_partly_blocked_system_group_shows_an_undo_next_to_the_disabled_block_
         "block": ["Block remaining", True],
         "undo": ["Unblock blocked names", False, False, "Unblock blocked names: 2 Google names"],
         "note": False,
-        "badge": "2 blocked",
+        "badge": "2 on global block list",
     }
     assert out["calls"] == [
         ["message", "Removing 2 Google names from the global block list...", "working"],
@@ -1703,7 +1704,7 @@ def test_a_failed_undo_keeps_the_state_and_shows_the_error():
         "last": ["message", "the helper is busy", "error"],
         "undoHidden": False,
         "undoDisabled": False,
-        "badge": "1 blocked",
+        "badge": "1 on global block list",
     }
 
 
@@ -2107,3 +2108,62 @@ def test_failed_profile_add_does_not_retry_or_replace_a_different_profile(groupe
     assert out["confirmations"] == []
     assert out["profiles"] == [SLOW_PROFILE, FAST_PROFILE]
     assert out["disabled"] is False
+
+
+@NODE
+def test_device_names_can_be_collapsed_independently_and_stay_collapsed_after_refresh():
+    steps = """
+      function parts(index) {
+        const card = cards()[index];
+        return {toggle: byClass(card, "observation-device-toggle")[0],
+                body: byClass(card, "observation-device-body")[0]};
+      }
+      const initial = [parts(0).body.hidden, parts(1).body.hidden];
+      await click(groupParts(cards()[0], 1).toggle);
+      await click(parts(0).toggle);
+      const collapsed = [parts(0).body.hidden, parts(1).body.hidden];
+      render();
+      const refreshed = [parts(0).body.hidden, parts(1).body.hidden];
+      const a = parts(0), b = parts(1);
+      const semantics = {tag: a.toggle.tagName, type: a.toggle.type,
+        expanded: a.toggle.attrs["aria-expanded"], controls: a.toggle.attrs["aria-controls"],
+        bodyId: a.body.id, otherId: b.body.id, label: a.toggle.attrs["aria-label"],
+        text: a.toggle.textContent};
+      await click(a.toggle);
+      console.log(JSON.stringify({initial, collapsed, refreshed, semantics,
+        reopened: !a.body.hidden, groupStillOpen: groupParts(cards()[0], 1).isOpen(), calls}));
+    """
+    out = run_dashboard(steps, [example_device(), example_device("192.168.50.125")])
+    assert out["initial"] == [False, False]
+    assert out["collapsed"] == out["refreshed"] == [True, False]
+    assert out["reopened"] and out["groupStillOpen"]
+    assert out["calls"] == []
+    semantics = out["semantics"]
+    assert semantics["tag"] == "button" and semantics["type"] == "button"
+    assert semantics["expanded"] == "false"
+    assert semantics["controls"] == semantics["bodyId"] != semantics["otherId"]
+    assert semantics["label"].startswith(semantics["text"])
+    assert "192.168.50.124" in semantics["label"]
+
+
+@NODE
+def test_collapsed_device_keeps_profile_choice_and_updates_the_visible_name_count():
+    steps = """
+      const card = cards()[0];
+      const select = findAll(card, n => n.tagName === "select")[0];
+      select.value = "fast";
+      fire(select, "change");
+      await click(byClass(card, "observation-device-toggle")[0]);
+      devices[0].domains.push({domain: "new.example", query_count: 1});
+      render();
+      const updated = cards()[0];
+      console.log(JSON.stringify({hidden: byClass(updated, "observation-device-body")[0].hidden,
+        text: byClass(updated, "observation-device-toggle")[0].textContent,
+        profile: findAll(updated, n => n.tagName === "select")[0].value,
+        names: Array.from(observedNames)}));
+    """
+    out = run_dashboard(steps, [example_device()])
+    assert out["hidden"] is True
+    assert out["text"] == "Show names (13)"
+    assert out["profile"] == "fast"
+    assert "new.example" in out["names"]
