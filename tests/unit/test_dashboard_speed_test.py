@@ -345,15 +345,18 @@ def test_a_dashboard_run_does_not_blame_the_internet_for_a_slow_speed():
   speedTestState.meta = {verdict_labels: %s};
   const slow = {download: {verdict: 'below-cap', busy_average_kbit: 1000}};
   const row = (provider) => speedTestDirection({provider, summary: slow}, 'download')[1];
-  speedTestCompare();
-  pending.shift().resolve({
-    changes: [], warnings: [], baseline: {provider: 'fast-com'}, result: {provider: 'dashboard'},
-    verdicts: {download: {baseline: 'below-cap', result: 'below-cap'},
-               upload: {baseline: null, result: null}}});
-  await tick();
-  const box = nodes['speed-test-comparison'];
+  const compare = async (baseline, result) => {
+    speedTestCompare();
+    pending.shift().resolve({
+      changes: [], warnings: [], baseline: {provider: baseline}, result: {provider: result},
+      verdicts: {download: {baseline: 'below-cap', result: 'below-cap'},
+                 upload: {baseline: null, result: null}}});
+    await tick();
+    return nodes['speed-test-comparison'].children[1].children[0].textContent;
+  };
   console.log(JSON.stringify({dashboard: row('dashboard'), site: row('fast-com'),
-    comparison: box.children[1].children[0].textContent}));
+    comparison: await compare('fast-com', 'dashboard'),
+    reversed: await compare('dashboard', 'fast-com')}));
 })();
 """ % json.dumps(VERDICT_LABELS))
 
@@ -362,4 +365,6 @@ def test_a_dashboard_run_does_not_blame_the_internet_for_a_slow_speed():
         "site": VERDICT_LABELS["below-cap"],
         "comparison": "Download against the cap: before " + VERDICT_LABELS["below-cap"]
         + "; after " + VERDICT_LABELS["below-cap-dashboard"] + ".",
+        "reversed": "Download against the cap: before " + VERDICT_LABELS["below-cap-dashboard"]
+        + "; after " + VERDICT_LABELS["below-cap"] + ".",
     }

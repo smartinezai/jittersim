@@ -282,8 +282,8 @@ def write_access_api(server, path, payload, *, control_intent=None):
                     repository.save_access_policies(
                         mac, settings.website_policy, blocks=blocks, expected_version=version
                     )
-                    # Deleting a rule only shrinks the DNS views: a check could only refuse it
-                    # while the stored rules are already over the limit.
+                    # Deleting a rule normally only shrinks the DNS views: a check could only
+                    # refuse it while the stored rules are already over the limit.
                     if not path.endswith("/delete"):
                         server._check_access_rules()
 
