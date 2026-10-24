@@ -1009,6 +1009,7 @@
     });
 
     element("router-admin-password").addEventListener("input", () => {
+      setRouterPasswordError();
       routerPasswordRevision += 1;
       routerWifiEnabled = null;
       routerWifiCheckedAt = null;
@@ -1018,7 +1019,12 @@
       routerWifiRemoteChanging = false;
       routerPasswordVerified = false;
       routerPasswordRejected = false;
-      if (!routerActionPending) element("router-action-message").textContent = "";
+      if (!routerActionPending) {
+        element("router-action-message").textContent = "";
+        element("credential-router-status").textContent = element("router-admin-password").value
+          ? "Password changed. Choose Check password to sign in to the router."
+          : "Enter the router admin password and choose Check password.";
+      }
       updateCredentialStatus();
     });
 
@@ -7825,21 +7831,41 @@
       return error.status === 502 && /^Router login failed/.test(error.message);
     }
 
+    function setRouterPasswordError(message = "", invalid = false, focus = false) {
+      const field = element("router-admin-password");
+      const summary = element("router-password-errors");
+      const controls = element("router-credentials");
+      element("router-password-error-link").textContent = message;
+      summary.hidden = !message;
+      if (invalid) field.setAttribute("aria-invalid", "true");
+      else field.removeAttribute("aria-invalid");
+      if (message && focus && (controls.contains?.(document.activeElement) || document.activeElement === document.body)) {
+        summary.focus();
+      }
+    }
+
     async function checkRouterPassword() {
       if (routerActionPending || routerPasswordChecking) return;
       const button = element("check-router-password");
       const status = element("credential-router-status");
       if (!requireAdminToken(button)) return;
       const passwordRevision = routerPasswordRevision;
+      const tokenRevision = adminTokenRevision;
+      const focusError = Boolean(element("router-credentials").contains?.(document.activeElement));
       const password = element("router-admin-password").value;
       if (!password) {
         status.textContent = "Enter the router admin password first.";
         showMessage(status.textContent, "error");
         openCredentials("router", button);
+        setRouterPasswordError(status.textContent, true, focusError);
         return;
       }
-      if (routerPasswordBlocked(button)) return;
+      if (routerPasswordBlocked(button)) {
+        setRouterPasswordError(status.textContent, routerPasswordRejected, focusError);
+        return;
+      }
       if (routerCheckWaiting()) return;
+      setRouterPasswordError();
       const wasVerified = routerPasswordVerified;
       routerPasswordChecking = true;
       routerPasswordVerified = false;
@@ -7852,14 +7878,14 @@
       showMessage("Checking the router password...", "working");
       try {
         await routerRequest("/api/router/check", { admin_password: password });
-        if (passwordRevision !== routerPasswordRevision) return;
+        if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) return;
         routerPasswordVerified = true;
         // Only Check password calls this so a remembered password gets a new 24 hours.
         syncRememberedCredentials("router");
         status.textContent = "Router password accepted. Nothing on the router was changed.";
         showMessage(status.textContent, "success");
       } catch (error) {
-        if (passwordRevision !== routerPasswordRevision) return;
+        if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) return;
         const tooSoon = error.status === 429 && error.retryAfter > 0;
         routerPasswordRejected = isRouterLoginFailure(error);
         if (tooSoon) {
@@ -7868,6 +7894,7 @@
           routerCheckWaitUntil = Date.now() + Math.ceil(error.retryAfter) * 1000;
         }
         status.textContent = error.message;
+        setRouterPasswordError(status.textContent, routerPasswordRejected, focusError);
         showMessage(error.message, tooSoon ? "info" : "error");
       } finally {
         routerPasswordChecking = false;
@@ -7879,6 +7906,10 @@
       }
     }
 
+    element("router-password-error-link").addEventListener("click", (event) => {
+      event.preventDefault();
+      element("router-admin-password").focus();
+    });
     element("check-router-password").addEventListener("click", checkRouterPassword);
     element("refresh-router-wifi").addEventListener("click", pollRouterWifi);
 
