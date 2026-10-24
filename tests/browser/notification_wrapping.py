@@ -30,7 +30,10 @@ def check_notification_wrapping(page):
                 expect(page.locator("#action-announcer")).to_have_text("")
                 metrics = text.evaluate("""node => ({
                     width: node.clientWidth, scrollWidth: node.scrollWidth,
-                    height: node.clientHeight, scrollHeight: node.scrollHeight
+                    height: node.clientHeight, scrollHeight: node.scrollHeight,
+                    toastHeight: node.parentElement.clientHeight,
+                    rows: getComputedStyle(node.parentElement).gridTemplateRows,
+                    align: getComputedStyle(node).alignSelf
                 })""")
                 assert metrics["scrollWidth"] <= metrics["width"] + 1, (width, font, metrics)
                 assert metrics["scrollHeight"] > metrics["height"], metrics
