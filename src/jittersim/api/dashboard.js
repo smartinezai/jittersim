@@ -1262,6 +1262,18 @@
     const collapsedObservationDevices = new Set();
 
     const observationProfileChoice = new Map();
+    let observationListKeys = null;
+    let latestObservationScan = null;
+    let observationViewRevision = 0;
+    let observationReadRevision = 0;
+    privateDataLockHooks.push(() => {
+      observationViewRevision += 1;
+      observationReadRevision += 1;
+      observationListKeys = null;
+      latestObservationScan = null;
+      element("observation-scan-summary").textContent = "Saved results refresh automatically.";
+      document.querySelectorAll(".observation-new-name, .observation-new-group").forEach((node) => node.remove());
+    });
 
     let randomWebsiteAnalyticsRequestVersion = 0;
 
@@ -4107,12 +4119,42 @@
       };
     }
 
+    function observationNameKey(address, domain) {
+      return address + "|" + domain;
+    }
+
+    function newObservationScanKeys(before, captured) {
+      if (before === null || !Array.isArray(captured)) return null;
+      return new Set(captured.map((item) => observationNameKey(item.ipv4_address, item.domain))
+        .filter((key) => !before.has(key)));
+    }
+
+    function observationNameIsNew(address, domain) {
+      return Boolean(latestObservationScan && latestObservationScan.keys &&
+        latestObservationScan.keys.has(observationNameKey(address, domain)));
+    }
+
+    function newDisplayedObservationCount() {
+      if (observationListKeys === null || !latestObservationScan || latestObservationScan.keys === null) return null;
+      return Array.from(observationListKeys).filter((key) => latestObservationScan.keys.has(key)).length;
+    }
+
     function renderObservations(data) {
       const container = element("observations");
       const count = element("observation-count");
       const focusedDevice = document.activeElement && document.activeElement.dataset.observationDevice;
       observedDomainsByDevice = {};
       observedNames = new Set();
+      observationListKeys = data.available ? new Set((data.devices || []).flatMap((device) =>
+        (device.domains || []).map((item) => observationNameKey(device.ipv4_address, item.domain)))) : null;
+      const summary = element("observation-scan-summary");
+      const added = newDisplayedObservationCount();
+      summary.textContent = "Saved results refresh automatically. New to list compares the latest successful scan " +
+        "with the list shown when it started.";
+      if (latestObservationScan) {
+        summary.textContent += added === null ? " Latest successful scan: new-name comparison unavailable." :
+          " Latest successful scan: " + added + (added === 1 ? " displayed name" : " displayed names") + " new to list.";
+      }
       container.replaceChildren();
       if (!data.available) {
         count.textContent = "Unavailable";
@@ -4236,6 +4278,12 @@
           badge.className = "observation-badge";
           badge.textContent = "On global block list";
           host.append(hostName, badge);
+          if (observationNameIsNew(device.ipv4_address, observation.domain)) {
+            const added = document.createElement("span");
+            added.className = "observation-category observation-new-name";
+            added.textContent = "New to list";
+            host.appendChild(added);
+          }
           domain.appendChild(host);
           const hintLine = document.createElement("div");
           hintLine.className = "observation-hint-line";
@@ -4343,6 +4391,14 @@
           const groupBadge = document.createElement("span");
           groupBadge.className = "observation-badge";
           meta.append(nameCount, groupBadge);
+          const addedCount = group.names.filter((item) => observationNameIsNew(
+            device.ipv4_address, item.domain)).length;
+          if (addedCount > 0) {
+            const added = document.createElement("span");
+            added.className = "observation-category observation-new-group";
+            added.textContent = addedCount + " new to list";
+            meta.appendChild(added);
+          }
           title.append(groupName, meta);
           const totalQueries = document.createElement("span");
           totalQueries.className = "observation-domain-count";
@@ -4532,13 +4588,22 @@
       }
     }
 
-    async function loadObservations() {
+    async function loadObservations(afterScan = false) {
+      if (observationRequestInFlight && !afterScan) return false;
+      const reading = ++observationReadRevision;
+      const revision = observationViewRevision;
+      let available = false;
       try {
-        renderObservations(await request("/api/observations", "GET"));
+        const data = await request("/api/observations", "GET");
+        if (revision !== observationViewRevision || reading !== observationReadRevision) return false;
+        renderObservations(data);
+        available = Boolean(data.available);
       } catch (error) {
+        if (revision !== observationViewRevision || reading !== observationReadRevision) return false;
         renderObservations({ available: false, devices: [], message: error.message });
       }
       renderServiceListObserved();
+      return available;
     }
 
     function formatQuotaBytes(bytes) {
@@ -5269,19 +5334,28 @@
     async function scanObservations() {
       if (!helperConfigured || observationRequestInFlight) return;
       observationRequestInFlight = true;
+      observationReadRevision += 1;
+      const revision = observationViewRevision;
+      const before = observationListKeys === null ? null : new Set(observationListKeys);
       const scanButton = element("scan-observations");
       setButtonBusy(scanButton, true);
       scanButton.textContent = "Scanning...";
       showMessage("Sampling DNS queries from the test network...", "working");
       try {
         const result = await request("/api/observations/scan", "POST", {});
+        if (revision !== observationViewRevision) return;
+        latestObservationScan = { keys: newObservationScanKeys(before, result.observations) };
+        await loadObservations(true);
+        if (revision !== observationViewRevision) return;
+        const added = newDisplayedObservationCount();
+        const comparison = added === null ? "New-name comparison unavailable." :
+          added + (added === 1 ? " displayed name" : " displayed names") + " new to list.";
         showMessage(
-          "Traffic scan complete: " + result.captured_observations + " domain observations captured.",
+          "Traffic scan complete: " + result.captured_observations + " domain observations captured. " + comparison,
           "success"
         );
-        loadObservations();
       } catch (error) {
-        showMessage(error.message, "error");
+        if (revision === observationViewRevision) showMessage(error.message, "error");
       } finally {
         observationRequestInFlight = false;
         scanButton.disabled = !helperConfigured;

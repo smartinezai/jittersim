@@ -1,6 +1,7 @@
 """Exercise observed-site confirmation with two real dashboard tabs."""
 
 import argparse
+import copy
 import json
 import os
 import selectors
@@ -204,6 +205,89 @@ def check_membership_labels(browser, base, width, evidence):
         context.close()
 
 
+def check_new_scan_names(browser, base, width, evidence):
+    context = browser.new_context(viewport={"width": width, "height": 900})
+    try:
+        page = context.new_page()
+        authenticate(page, base)
+        page.wait_for_function("() => !dashboardRefresh")
+        original = page.request.get(base + "/api/observations", headers=HEADERS).json()
+        first = next(d for d in original["devices"] if d["ipv4_address"] == "192.168.50.124")
+        old = next(o for o in first["domains"] if o["domain"] == "logs.dradis.netflix.com")
+        fresh = dict(old, domain="fresh.netflix.com", query_count=1)
+        state = {"phase": 0, "fail": False, "posts": 0}
+
+        def observations(route):
+            data = copy.deepcopy(original)
+            if state["phase"]:
+                for device in data["devices"]:
+                    if device["ipv4_address"] == "192.168.50.124":
+                        device["domains"].append(fresh)
+                    elif device["ipv4_address"] == "192.168.50.184":
+                        device["domains"].append(old)
+                data["total_domains"] += 2
+            route.fulfill(json=data)
+
+        def scan(route):
+            state["posts"] += 1
+            if state["fail"]:
+                state["fail"] = False
+                route.fulfill(status=503, json={"error": "scan unavailable"})
+                return
+            state["phase"] += 1
+            route.fulfill(json={"captured_observations": 3, "observations": [
+                {"ipv4_address": "192.168.50.124", "domain": old["domain"]},
+                {"ipv4_address": "192.168.50.124", "domain": fresh["domain"]},
+                {"ipv4_address": "192.168.50.184", "domain": old["domain"]}]})
+
+        page.route("**/api/observations", observations)
+        page.route("**/api/observations/scan", scan)
+        page.evaluate("() => loadObservations()")
+        summary = page.locator("#observation-scan-summary")
+        expect(summary).to_contain_text("Saved results refresh automatically")
+        page.locator("#scan-observations").click()
+        expect(summary).to_contain_text("2 displayed names new to list")
+        expect(page.locator("#scan-observations")).to_be_enabled()
+        card = page.locator(".observation-device").filter(has_text="192.168.50.124").first
+        group = card.locator(".observation-group").filter(has_text="Netflix")
+        expect(group.locator(".observation-new-group")).to_have_text("1 new to list")
+        expect(group.locator(".observation-new-group")).to_be_visible()
+        expect(group.locator(".observation-group-body")).to_be_hidden()
+        expect(page.locator(".observation-new-name")).to_have_count(2)
+        for _ in range(2):
+            page.evaluate("() => pollDashboard()")
+        page.evaluate("() => showPage('devices', true)")
+        page.evaluate("() => showPage('traffic', true)")
+        expect(summary).to_contain_text("2 displayed names new to list")
+        expect(page.locator(".observation-new-name")).to_have_count(2)
+        assert state["posts"] == 1, state
+        page.set_viewport_size({"width": 320 if width == 390 else width, "height": 900})
+        card.screenshot(path=f"test-results/discovery-new-names-{width}.png")
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
+        state["fail"] = True
+        page.locator("#scan-observations").click()
+        expect(page.locator("#message")).to_contain_text("scan unavailable")
+        expect(summary).to_contain_text("2 displayed names new to list")
+        page.locator("#scan-observations").click()
+        expect(summary).to_contain_text("0 displayed names new to list")
+        expect(page.locator(".observation-new-name")).to_have_count(0)
+        assert state["posts"] == 3, state
+        state["phase"] = 0
+        page.evaluate("() => loadObservations()")
+        page.locator("#scan-observations").click()
+        expect(page.locator(".observation-new-name")).to_have_count(2)
+        page.evaluate("() => lockDashboardAccess('Locked for fixture')")
+        expect(summary).to_have_text("Saved results refresh automatically.")
+        expect(page.locator(".observation-new-name, .observation-new-group")).to_have_count(0)
+        page.evaluate("() => setDashboardUnlocked(true)")
+        expect(summary).not_to_contain_text("Latest")
+        expect(page.locator(".observation-new-name, .observation-new-group")).to_have_count(0)
+        evidence.append(f"new names at {width}px: repeat/device-pair distinction, collapsed groups, "
+                        "poll and navigation persistence, failed scan retention, next-scan replacement, private lock clearing")
+    finally:
+        context.close()
+
+
 def check_actions(browser, base, kind, width, evidence):
     context = browser.new_context(viewport={"width": width, "height": 1000 if width > 768 else 844})
     context.set_default_timeout(15000)
@@ -365,6 +449,7 @@ def run(*, cases=("single", "group"), widths=(1920, 390)):
                 for width in widths:
                     check_membership_labels(browser, f"http://127.0.0.1:{port}", width, evidence)
                     check_device_collapse(browser, f"http://127.0.0.1:{port}", width, evidence)
+                    check_new_scan_names(browser, f"http://127.0.0.1:{port}", width, evidence)
                 for width in widths:
                     for kind in cases:
                         check_actions(browser, f"http://127.0.0.1:{port}", kind, width, evidence)
