@@ -1,0 +1,5 @@
+$ /Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/tab-scroll-worktree/.venv-local-ci-3.12/bin/python -m tests.browser.dashboard_navigation
+# started 2026-10-24 23:28:16 +0200
+Unfinished-form navigation browser acceptance passed.
+Dashboard navigation browser acceptance passed.
+# finished with status 0 after 18.3 seconds
