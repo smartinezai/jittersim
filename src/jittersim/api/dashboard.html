@@ -28,6 +28,10 @@
     </p>
     <h3>Admin token</h3>
     <form id="admin-token-form" autocomplete="on">
+    <div id="admin-token-errors" class="form-error" tabindex="-1" aria-labelledby="admin-token-errors-title" hidden>
+      <p id="admin-token-errors-title">Token check failed</p>
+      <ul><li><a id="admin-token-error-link" href="#admin-token"></a></li></ul>
+    </div>
     <!-- A name next to the password lets the Mac Keychain and password managers keep the token. -->
     <input class="visually-hidden" type="text" name="username" value="dashboard" autocomplete="username" tabindex="-1" aria-hidden="true">
     <label>Admin token

@@ -5903,6 +5903,20 @@
     let adminTokenCheckRevision = -1;
     let adminTokenCheckNext = null;
 
+    function setAdminTokenError(message = "", invalid = false, focus = false) {
+      const field = element("admin-token");
+      const summary = element("admin-token-errors");
+      const form = element("admin-token-form");
+      element("admin-token-error-link").textContent = message;
+      summary.hidden = !message;
+      if (invalid) field.setAttribute("aria-invalid", "true");
+      else field.removeAttribute("aria-invalid");
+      // Background recovery must not take focus from another task.
+      if (message && focus && (form.contains?.(document.activeElement) || document.activeElement === document.body)) {
+        summary.focus();
+      }
+    }
+
     function startAdminTokenCheck() {
       adminTokenCheckNext = null;
       adminTokenCheckRevision = adminTokenRevision;
@@ -5917,6 +5931,8 @@
       const button = element("check-admin-token");
       const status = element("token-check-status");
       const tokenRevision = adminTokenRevision;
+      const focusError = Boolean(element("admin-token-form").contains?.(document.activeElement));
+      setAdminTokenError();
       setDashboardUnlocked(false);
       element("allow-dashboard-device").disabled = true;
       if (!element("admin-token").value.trim()) {
@@ -5927,6 +5943,7 @@
         showMessage("Enter the admin token first.", "error");
         updateCredentialStatus();
         openCredentials("admin");
+        setAdminTokenError(status.textContent, true, focusError);
         return;
       }
       adminTokenChecking = true;
@@ -5998,6 +6015,7 @@
         }
         status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
         status.className = "token-check-status " + (result.ok ? "success" : "error");
+        if (!result.ok) setAdminTokenError(status.textContent, adminTokenRefused, focusError);
         // The dashboard unlocks while the check is still loading, so the person can save
         // something before it ends. A success text must not replace that newer message.
         // The token status above always shows the result, and a failure always shows.
@@ -6020,6 +6038,7 @@
           : helperBusy ? "Device verification is busy. Your token is kept. Choose Check token to try again."
           : "Token check failed: " + error.message;
         status.className = "token-check-status " + (helperBusy ? "" : "error");
+        setAdminTokenError(status.textContent, adminTokenRefused, focusError);
         showMessage(status.textContent, connectionLost || helperBusy ? "info" : "error");
         if (connectionLost && typeof recheckTokenWhenPiAnswers === "function") recheckTokenWhenPiAnswers();
       } finally {
@@ -7193,6 +7212,10 @@
     // Enter in the field presses the Check token button, which runs the check above. The form
     // itself never leaves the page.
     element("admin-token-form").addEventListener("submit", (event) => event.preventDefault());
+    element("admin-token-error-link").addEventListener("click", (event) => {
+      event.preventDefault();
+      element("admin-token").focus();
+    });
     // A pasted token is checked straight away. Typing it is checked with the button.
     element("admin-token").addEventListener("paste", () => {
       window.setTimeout(() => {
@@ -7223,6 +7246,7 @@
     });
 
     element("admin-token").addEventListener("input", () => {
+      setAdminTokenError();
       adminTokenRevision += 1;
       if (typeof cancelWifiRecovery === "function") cancelWifiRecovery();
       adminTokenChecking = false;
