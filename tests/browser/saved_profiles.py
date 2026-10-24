@@ -159,6 +159,68 @@ def check_device_profile_picker(page, base, headers, width):
     assert device["profile_id"] == "slow"
 
 
+def check_clearing_and_removal(page, base, headers, width):
+    """Defaults stay cleared after another edit and removal never drops references."""
+    profile_id = f"clear-values-{width}"
+    original_payload = dict(SLOW, id=profile_id, name="Clear saved values")
+    assert page.request.post(base + "/api/profiles", headers=headers, data=original_payload).ok
+    original = saved(page, base, headers, profile_id)
+    page.evaluate("loadProfiles()")
+    row = page.locator(f'.saved-profile-row[data-profile-id="{profile_id}"]')
+    row.locator('button[data-action="edit"]').click()
+    expect(page.locator("#profile-id")).to_have_value(profile_id)
+    page.locator("#upload-bandwidth").fill("")
+    page.locator("#download-bandwidth").fill("")
+    page.locator("#profile-advanced").evaluate("node => node.open = true")
+    page.locator("#profile-seed").fill("")
+    page.locator("#profile-outage-probability").fill("0")
+    page.locator("#upload-loss").fill("0")
+    page.locator("#profile-website-mode").select_option("unrestricted")
+    page.locator("#profile-website-domains").fill("")
+    submit = page.locator("#profile-form button[type='submit']")
+    with page.expect_response(is_profile_save):
+        submit.click()
+    expect(submit).to_be_enabled()
+    expected = dict(original, random_seed=None, outage_probability=0,
+                    website_mode="unrestricted", website_domains=[])
+    expected["upload"] = dict(original["upload"], bandwidth_kbit=None, loss_percent=0)
+    expected["download"] = dict(original["download"], bandwidth_kbit=None)
+    assert saved(page, base, headers, profile_id) == expected
+    page.locator("#new-profile").click()
+    row.locator('button[data-action="edit"]').click()
+    expect(page.locator("#profile-seed")).to_have_value("")
+    expect(page.locator("#upload-bandwidth")).to_have_value("")
+    expect(page.locator("#download-bandwidth")).to_have_value("")
+    expect(page.locator("#profile-website-domains")).to_have_value("")
+    page.locator("#profile-name").fill("Renamed after clearing")
+    with page.expect_response(is_profile_save):
+        submit.click()
+    expect(submit).to_be_enabled()
+    assert saved(page, base, headers, profile_id) == dict(expected, name="Renamed after clearing")
+    page.locator("#new-profile").click()
+
+    # A saved device prevents deletion. Removing that device then permits deletion.
+    device_id = f"clear-device-{width}"
+    assert page.request.post(base + "/api/devices", headers=headers, data={
+        "id": device_id, "name": "Clear test device", "ipv4_address": "192.168.50.240",
+        "profile_id": profile_id,
+    }).ok
+    delete = row.locator('button[data-action="delete"]')
+    delete.click()
+    page.get_by_role("dialog").get_by_role("button", name="Cancel", exact=True).click()
+    assert saved(page, base, headers, profile_id) == dict(expected, name="Renamed after clearing")
+    delete.click()
+    page.get_by_role("dialog").get_by_role("button", name="Delete profile", exact=True).click()
+    expect(page.locator("#message")).to_contain_text("profile is in use by device Clear test device")
+    expect(row).to_be_visible()
+    assert page.request.post(base + "/api/devices/delete", headers=headers, data={"id": device_id}).ok
+    delete.click()
+    page.get_by_role("dialog").get_by_role("button", name="Delete profile", exact=True).click()
+    expect(row).to_have_count(0)
+    profiles = page.request.get(base + "/api/profiles", headers=headers).json()["profiles"]
+    assert all(profile["id"] != profile_id for profile in profiles)
+
+
 def run():
     process = subprocess.Popen(
         [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True
@@ -434,6 +496,8 @@ def run():
                         base + "/api/general-profile", headers=headers
                     ).json()
                     assert general["profile"] is None and general["active"] is False
+
+                    check_clearing_and_removal(page, base, headers, width)
 
                     # Edit reloads first so a change made elsewhere is not saved back stale.
                     changed = dict(saved(page, base, headers, "slow"), name="Renamed elsewhere")
