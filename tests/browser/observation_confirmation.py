@@ -304,6 +304,7 @@ def run(*, cases=("single", "group"), widths=(1920, 390)):
                 evidence = []
                 for width in widths:
                     check_membership_labels(browser, f"http://127.0.0.1:{port}", width, evidence)
+                for width in widths:
                     for kind in cases:
                         check_actions(browser, f"http://127.0.0.1:{port}", kind, width, evidence)
                 print(json.dumps(
