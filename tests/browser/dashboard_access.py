@@ -112,7 +112,11 @@ def run():
                     expect(page.locator("#private-dashboard")).to_be_hidden()
                     assert not any(url.endswith("/api/devices") for url in requested)
                     assert not any("/api/updates" in url or "/api/update-preferences" in url for url in requested)
-                    page.locator("#close-credentials").click()
+                    if width <= 768:
+                        expect(page.locator("#credentials-panel")).to_be_hidden()
+                        expect(page.locator("#allow-dashboard-device")).to_be_focused()
+                    else:
+                        page.locator("#close-credentials").click()
                     page.route("**/api/dashboard-access/register-self", lambda route: route.fulfill(
                         status=503, content_type="application/json", body='{"error":"Cannot save fixture access"}'))
                     page.locator("#allow-dashboard-device").click()

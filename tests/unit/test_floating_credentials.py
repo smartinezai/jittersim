@@ -24,7 +24,7 @@ def served_functions():
         + block("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
         + block("let helperConfigured =", "let profiles =")
         + block("const PI_NOT_ANSWERING", "const adminTokenHelp =")
-        + block("async function checkAdminToken()", "async function refresh(")
+        + block("async function checkAdminToken(", "async function refresh(")
         + block(
             'element("check-admin-token").addEventListener("click",',
             'element("traffic-rate-form").addEventListener("submit",',
@@ -46,10 +46,14 @@ const assert = require("node:assert/strict");
 const nodes = new Map();
 const messages = [];
 const documentListeners = new Map();
+const phoneLayout = {matches:false};
 const timers = new Map();
 let timerSerial = 0;
 const document = {hidden: false, activeElement: null, documentElement: {style: {setProperty() {}}},
-                  addEventListener(type, callback) {documentListeners.set(type, callback)}, getElementById: (id) => element(id)};
+                  addEventListener(type, callback) {documentListeners.set(type, callback)},
+                  removeEventListener(type, callback) {
+                    if (documentListeners.get(type) === callback) documentListeners.delete(type);
+                  }, getElementById: (id) => element(id)};
 const storage = new Map();
 let storageBroken = false;
 const blocked = () => {if (storageBroken) throw new Error("storage blocked")};
@@ -1210,7 +1214,7 @@ def test_diagnostics_failures_report_their_http_status():
     script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
     real = script[
         script.index("let adminToolsPhysicalRead =") : script.index(
-            "async function checkAdminToken()"
+            "async function checkAdminToken("
         )
     ]
     program = (
