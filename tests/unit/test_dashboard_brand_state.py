@@ -11,6 +11,30 @@ from jittersim.api.server import DASHBOARD_HTML
 
 
 CASES = {
+    "navigation_preserves_cleared_ssid_and_brand_state": """
+      request = async () => brand; await loadBrand();
+      showPage("router", true);
+      const ssid = element("access-point-ssid");
+      assert.equal(ssid.value, brand.default_ssid);
+      ssid.value = "";
+      document.activeElement = links[0];
+      const loadedBrand = brandInfo, serial = brandRequestSerial;
+      const command = element("measure-command");
+      command.textContent = "Unchanged command text";
+      showPage("devices", true);
+      assert.equal(document.title, "Devices · " + brand.name);
+      showPage("router", true);
+      assert.equal(document.title, "Router and Wi-Fi · " + brand.name);
+      assert.equal(ssid.value, "");
+      assert.equal(command.textContent, "Unchanged command text");
+      assert.equal(brandInfo, loadedBrand);
+      assert.equal(brandRequestSerial, serial);
+      adminTokenVerified = false;
+      showPage("profiles", true);
+      assert.equal(document.title, "Sign in");
+      assert.equal(brandInfo, loadedBrand);
+      assert.equal(brandRequestSerial, serial);
+    """,
     "all_pages_use_static_region_labels": """
       request = async () => brand; await loadBrand();
       for (const [id, label] of Object.entries(labels)) {

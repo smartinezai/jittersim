@@ -5,7 +5,8 @@
 The dashboard currently gives every signed-in page the same browser title. Use the
 shown page's existing static region label before the private product name. Keep
 `Sign in` until the existing private branding reply arrives and restore it when
-access is lost. Reuse `showPage` and `applyBrand` without changing navigation.
+access is lost. Share a small title updater between `showPage` and `applyBrand` without changing
+navigation or other branding effects.
 
 Scope approved on 24 October 2026. There are no open design questions. The main
 risk is revealing private branding after sign-out or letting a delayed branding
@@ -18,11 +19,13 @@ place and focused tests cover these transitions.
   values. Read those labels rather than navigation text with live device counts
   or update badges. Do not add visible headings.
 - `dashboard-navigation.js` resolves the initial hash and history changes through
-  `pageFromHash` and `showPage`. Refresh branding after its existing section update
+  `pageFromHash` and `showPage`. Refresh only the title after its existing section update
   using the existing guarded cross-script convention.
 - `dashboard.js` already controls the private name through `applyBrand`. Combine
   the resolved section label with that name using a middle dot. Preserve the
-  existing name-only fallback when there is no matching section.
+  existing name-only fallback when there is no matching section. The shared
+  `updatePageTitle` helper writes only `document.title`. Navigation must not run
+  default-SSID initialization, change branding or advance the request serial.
 - Do not add a product name literal to public markup or scripts. Never include
   device names, counts, token text, errors or other user data in the title.
 
@@ -31,7 +34,9 @@ place and focused tests cover these transitions.
 Extend the existing branding test harness with the served page labels and real
 navigation functions. Cover every known page, initial deep links, the unknown-hash
 Devices fallback, programmatic tabs, plain and modified clicks, history changes,
-late replies, blocked access and sign-out. Keep existing phone focus and scroll
+late replies, blocked access and sign-out. Verify a deliberately cleared SSID draft
+remains blank across navigation with focus outside the field. Check navigation
+preserves branding and the branding request serial. Keep existing phone focus and scroll
 checks unchanged. Run focused branding, neutral sign-in, navigation, impact and
 refresh tests plus narrow lint, asset budgets and documentation links. Record
 results under ignored `test-results/page-titles`.
@@ -59,5 +64,11 @@ also passed. The detector returned no findings. Independent source and privacy
 review found no blocker. The existing dashboard-access browser journey now expects
 the exact Devices title after sign-in while retaining exact neutral sign-in
 checks. The final focused branding, neutral sign-in and phone navigation batch
-passed with 69 tests. Full native, browser and GUI gates will run on the clean
-commit without further source changes. No push or merge occurred.
+passed with 69 tests. The initial full native gate passed with 8,857 tests and 118 skips on `0603dc2d`.
+The final frontend delta review then found that calling all of `applyBrand` during
+navigation refilled a cleared SSID draft. The browser gate was stopped and its
+interrupted result retained before source edits. A new regression failed on that
+commit and the correction shares a title-only helper. The corrected commit needs
+fresh source review and full gates. The corrected focused batch passed with 498
+tests. Narrow lint, JavaScript syntax and static budgets passed. No push or merge
+occurred.
