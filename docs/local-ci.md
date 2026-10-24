@@ -165,11 +165,12 @@ scripts/local-ci.sh unit --docker 3.13
 
 This runs pytest in a throw-away `python:X.Y-slim-bookworm` container with the
 source copied in (the checkout is mounted read-only). The container is limited to
-1 CPU and 1 GB. The slim image has no Git, Node, `ssh-keygen` or `jittersim` group, so the
-container installs the first three with `apt` (it needs network access and takes about a minute),
-creates the group and commits the copied source as one snapshot, which lets the Git-backed tests
-run. The kernel tests still skip because the container is not privileged. Read the skip counts
-in the summary.
+1 CPU and 1 GB. The slim image has no Git, `ssh-keygen` or `jittersim` group, so the container
+installs the first two with `apt` (it needs network access and takes about a minute), creates the
+group and commits the copied source as one snapshot (the host `.git` is left out), which lets the
+Git-backed tests run. Node comes from the `nodejs-wheel-binaries` wheel, because Debian's `nodejs`
+is too old for the dashboard pattern test. The kernel tests still skip because the container is
+not privileged. Read the skip counts in the summary.
 
 The browser, GUI and homepage commands run on the venv Python only.
 
