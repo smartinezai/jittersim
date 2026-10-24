@@ -106,16 +106,17 @@ def check_membership_labels(browser, base, width, evidence):
         page = context.new_page()
         authenticate(page, base)
         page.wait_for_function("() => !dashboardRefresh")
-        page.evaluate("""async () => {
-            const data = await request('/api/observations', 'GET');
-            for (const device of data.devices) {
-                for (const name of device.domains) {
-                    name.globally_blocked = name.domain.includes('netflix.com') ||
-                        name.domain.includes('nflxvideo.net') || name.domain.includes('whatsapp.net');
-                }
-            }
-            renderObservations(data);
-        }""")
+        def membership_response(route):
+            response = route.fetch()
+            data = response.json()
+            for device in data["devices"]:
+                for name in device["domains"]:
+                    name["globally_blocked"] = any(part in name["domain"] for part in (
+                        "netflix.com", "nflxvideo.net", "whatsapp.net"))
+            route.fulfill(response=response, json=data)
+
+        page.route("**/api/observations", membership_response)
+        page.evaluate("() => loadObservations()")
         card = page.locator('.observation-device').filter(has_text='192.168.50.124').first
         group = card.locator('.observation-group').filter(has_text='Netflix')
         badge = group.locator('.observation-group-toggle .observation-badge')
