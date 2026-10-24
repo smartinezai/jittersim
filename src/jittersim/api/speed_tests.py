@@ -15,6 +15,7 @@ import os
 import secrets
 import socket
 import sqlite3
+import sys
 import threading
 import time
 from dataclasses import asdict
@@ -94,8 +95,17 @@ NOT_OWN_QUEUE = (
     "The dashboard test needs a profile of this device's own: the Pi's own traffic does not pass "
     "a shared queue, and with no profile nothing is shaped. Apply a profile to this device (one "
     "with nothing set measures without limits) or use a speed test site.")
-# Linux only. Other systems (a Mac running the tests) have no socket priority to reset.
-SO_PRIORITY = getattr(socket, "SO_PRIORITY", None)
+
+
+def socket_priority_option() -> Optional[int]:
+    """The socket priority option: Linux only, and 12 there if this Python does not name it.
+
+    Other systems (a Mac running the tests) have no socket priority to reset.
+    """
+    return getattr(socket, "SO_PRIORITY", 12 if sys.platform.startswith("linux") else None)
+
+
+SO_PRIORITY = socket_priority_option()
 # How long a part waits for the other part's stream to end before it is refused.
 STREAM_WAIT_SECONDS = 1.0
 # Sent again and again, never changed: no file and no memory that grows with the test.
