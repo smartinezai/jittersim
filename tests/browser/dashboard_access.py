@@ -141,7 +141,7 @@ def run():
                         print("Response path/status order:", json.dumps(list(responses)), flush=True)
                         raise
                     # After sign-in the page may use the real name and takes it from a private route.
-                    expect(page).to_have_title("JitterSim")
+                    expect(page).to_have_title("Devices · JitterSim")
                     expect(page.locator("#brand-title")).to_have_text("JitterSim")
                     expect(page.locator("#measure-command")).to_have_text("jittersim measure --label normal")
                     expect(page.locator("#update-token-command")).to_have_text("sudo jittersim update set-token")

@@ -457,9 +457,16 @@
     let brandInfo = null;
     let brandRequestSerial = 0;
 
+    function updatePageTitle(signedIn) {
+      const name = signedIn && brandInfo ? brandInfo.name : "";
+      const page = name && document.getElementById("page-" + document.body.dataset.section);
+      const label = page && page.getAttribute("aria-label");
+      document.title = name ? (label ? label + " · " : "") + name : "Sign in";
+    }
+
     function applyBrand(signedIn) {
       const name = signedIn && brandInfo ? brandInfo.name : "";
-      document.title = name || "Sign in";
+      updatePageTitle(signedIn);
       element("brand-title").textContent = name || "Network lab";
       element("brand-sidebar").setAttribute("aria-label", name || "Network lab");
       element("measure-command").textContent = signedIn && brandInfo

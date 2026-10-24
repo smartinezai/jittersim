@@ -144,6 +144,7 @@
         else link.removeAttribute("aria-current");
       });
       document.body.dataset.section = id;
+      if (typeof updatePageTitle === "function") updatePageTitle(adminTokenVerified);
       if (userInitiated) {
         // On a phone the header stays above the page so the page start is shown and focused.
         if (phoneLayout.matches) {
