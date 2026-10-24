@@ -13,12 +13,69 @@ from tests.browser.phone import sidebar_control
 from tests.browser.protected_clients import HEADERS, sign_in
 
 
+def check_connected_group_help(page):
+    """Keep the empty instruction readable without changing saved group choices."""
+    page.locator('[data-page-link="devices"]').first.click()
+    page.evaluate("""() => {
+        window.groupHelpTest = {groups, data: lastConnectedData};
+        groups = [];
+        renderConnectedDevices({available: true, association_status_available: true, devices: [{
+            mac_address: '02:00:00:00:00:fe', ipv4_address: '192.168.50.254',
+            display_name: 'Group selector check', association_verified: true
+        }]});
+    }""")
+    try:
+        row = page.locator('.connected-row[data-mac-address="02:00:00:00:00:fe"]')
+        select = row.locator('select[data-draft="group"]')
+        help_text = row.get_by_text("Create a group on the Profiles page.", exact=True)
+        expect(select.locator("option:checked")).to_have_text("No groups")
+        expect(select).to_be_disabled()
+        expect(help_text).to_be_visible()
+        expect(select).to_have_attribute("aria-describedby", help_text.get_attribute("id"))
+        assert select.evaluate("""node => {
+            const style = getComputedStyle(node);
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            context.font = style.font;
+            const textWidth = context.measureText(node.selectedOptions[0].textContent).width;
+            return textWidth <= node.clientWidth - parseFloat(style.paddingLeft) -
+                parseFloat(style.paddingRight) - 24;
+        }"""), "Empty group text must fit beside the native select arrow"
+        assert help_text.evaluate("node => node.scrollWidth <= node.clientWidth + 1")
+        page.evaluate("""() => {
+            groups = [
+                {id: 'saved-group', name: 'Saved household group',
+                    profile_id: 'normal', device_ids: []},
+                {id: 'other-group', name: 'Another household group',
+                    profile_id: 'normal', device_ids: []}
+            ];
+            const data = {...lastConnectedData, devices: lastConnectedData.devices.map(device =>
+                ({...device, group_id: 'saved-group', assigned_device_id: 'saved-device'}))};
+            renderConnectedDevices(data);
+            renderConnectedDevices(data);
+        }""")
+        expect(select).to_have_value("saved-group")
+        expect(select.locator("option:checked")).to_have_text("Saved household group")
+        expect(select.locator('option[value="other-group"]')).to_have_text(
+            "Another household group"
+        )
+        expect(help_text).to_have_count(0)
+        expect(select).not_to_have_attribute("aria-describedby")
+    finally:
+        page.evaluate("""() => {
+            groups = window.groupHelpTest.groups;
+            renderConnectedDevices(window.groupHelpTest.data);
+            delete window.groupHelpTest;
+        }""")
+
+
 def check_width(browser, base, width, height):
     context = browser.new_context(viewport={"width": width, "height": height})
     page = context.new_page()
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     sign_in(page, base)
+    check_connected_group_help(page)
 
     def post(path, data):
         response = page.request.post(base + path, headers=HEADERS, data=data)
