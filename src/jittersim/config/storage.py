@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Sequence, Tuple, Union
 
@@ -24,6 +24,12 @@ from .exemptions import (
     MAX_ADDRESS_MOVES, MAX_UNAFFECTED_DEVICES, AddressMove, UnaffectedDevice, normalize_exempt_mac,
 )
 from .payloads import impairment_payload, profile_payload
+from .pending_devices import (
+    MAX_PENDING_DEVICE_CHOICES,
+    MAX_PENDING_REVISION,
+    PendingDeviceChoice,
+    validate_pending_integer,
+)
 from .models import (
     AccessOptions,
     DataLimit,
@@ -61,6 +67,10 @@ class StorageError(RuntimeError):
 
 class DeviceConflictError(StorageError):
     """Raised when an assignment would overwrite a changed or conflicting device."""
+
+
+class PendingDeviceConflictError(StorageError):
+    """Raised when a prepared choice changed after it was read."""
 
 
 class TrafficRateSettingsError(StorageError):
@@ -311,6 +321,24 @@ class ConfigRepository:
                 random_seed INTEGER,
                 settings_json TEXT NOT NULL DEFAULT '{}'
             );
+            CREATE TABLE IF NOT EXISTS pending_device_choices (
+                mac_address TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL CHECK (length(display_name) <= 64),
+                action TEXT NOT NULL CHECK (action IN ('profile', 'protect')),
+                profile_id TEXT REFERENCES profiles(id) ON DELETE NO ACTION
+                    DEFERRABLE INITIALLY DEFERRED,
+                source TEXT NOT NULL
+                    CHECK (source IN ('owner-entered', 'imported-neighbour-cache')),
+                observed_at INTEGER CHECK (observed_at IS NULL OR
+                    (typeof(observed_at) = 'integer' AND observed_at BETWEEN 0 AND 253402300799)),
+                saved_at INTEGER NOT NULL
+                    CHECK (typeof(saved_at) = 'integer' AND saved_at BETWEEN 0 AND 253402300799),
+                revision INTEGER PRIMARY KEY AUTOINCREMENT CHECK (revision > 0),
+                CHECK ((action = 'profile' AND profile_id IS NOT NULL) OR
+                       (action = 'protect' AND profile_id IS NULL))
+            );
+            CREATE INDEX IF NOT EXISTS pending_device_profile
+                ON pending_device_choices(profile_id);
             CREATE TABLE IF NOT EXISTS devices (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -1752,6 +1780,86 @@ class ConfigRepository:
             self._rollback()
             raise StorageError("could not remove connected-device label") from error
 
+    def list_pending_device_choices(self) -> tuple:
+        """Return prepared choices without looking up any active clients."""
+
+        try:
+            return tuple(PendingDeviceChoice(**dict(row)) for row in self._connection.execute(
+                "SELECT * FROM pending_device_choices ORDER BY mac_address"
+            ))
+        except (sqlite3.Error, ValueError, TypeError) as error:
+            raise StorageError("could not read pending device choices") from error
+
+    def get_pending_device_choice(self, mac_address: str) -> Optional[PendingDeviceChoice]:
+        """Read one choice by its normalized MAC hint."""
+
+        mac = normalize_exempt_mac(mac_address)
+        try:
+            row = self._connection.execute(
+                "SELECT * FROM pending_device_choices WHERE mac_address = ?", (mac,)
+            ).fetchone()
+            return None if row is None else PendingDeviceChoice(**dict(row))
+        except (sqlite3.Error, ValueError, TypeError) as error:
+            raise StorageError("could not read pending device choice") from error
+
+    def save_pending_device_choice(
+        self, choice: PendingDeviceChoice, *, expected_revision: Optional[int] = None
+    ) -> PendingDeviceChoice:
+        """Create or explicitly revise a prepared choice without changing live settings."""
+
+        if not isinstance(choice, PendingDeviceChoice):
+            raise ValueError("pending choice is invalid")
+        choice = replace(choice)
+        if expected_revision is not None:
+            validate_pending_integer(expected_revision, "expected revision", MAX_PENDING_REVISION, 1)
+        try:
+            with self.transaction():
+                current = self.get_pending_device_choice(choice.mac_address)
+                if (None if current is None else current.revision) != expected_revision:
+                    raise PendingDeviceConflictError("pending device choice changed since it was read")
+                if choice.profile_id is not None and self.get_profile(choice.profile_id) is None:
+                    raise StorageError("pending device profile does not exist")
+                if current is None:
+                    count = self._connection.execute(
+                        "SELECT COUNT(*) FROM pending_device_choices"
+                    ).fetchone()[0]
+                    if count >= MAX_PENDING_DEVICE_CHOICES:
+                        raise StorageError("pending device choice limit reached")
+                saved = replace(choice, saved_at=int(time.time()))
+                self._connection.execute(
+                    "INSERT INTO pending_device_choices "
+                    "(mac_address, display_name, action, profile_id, source, "
+                    "observed_at, saved_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(mac_address) DO UPDATE SET "
+                    "display_name = excluded.display_name, action = excluded.action, "
+                    "profile_id = excluded.profile_id, source = excluded.source, "
+                    "observed_at = excluded.observed_at, saved_at = excluded.saved_at, "
+                    "revision = excluded.revision",
+                    (saved.mac_address, saved.display_name, saved.action, saved.profile_id,
+                     saved.source, saved.observed_at, saved.saved_at),
+                )
+                # SQLite allocates a fresh durable revision even after delete/recreate.
+                saved = self.get_pending_device_choice(saved.mac_address)
+            return saved
+        except sqlite3.Error as error:
+            raise StorageError("could not save pending device choice") from error
+
+    def delete_pending_device_choice(self, mac_address: str, *, expected_revision: int) -> None:
+        """Remove exactly the reviewed revision of a prepared choice."""
+
+        mac = normalize_exempt_mac(mac_address)
+        validate_pending_integer(expected_revision, "expected revision", MAX_PENDING_REVISION, 1)
+        try:
+            with self.transaction():
+                current = self.get_pending_device_choice(mac)
+                if current is None or current.revision != expected_revision:
+                    raise PendingDeviceConflictError("pending device choice changed since it was read")
+                self._connection.execute(
+                    "DELETE FROM pending_device_choices WHERE mac_address = ?", (mac,)
+                )
+        except sqlite3.Error as error:
+            raise StorageError("could not remove pending device choice") from error
+
     def save_pattern_events(self, events: Sequence[dict], *, now: int) -> None:
         """Retain bounded configuration choices without recording traffic contents."""
 
@@ -1859,6 +1967,11 @@ class ConfigRepository:
             f"scenario {scenario.name}"
             for scenario in self.list_scenarios()
             if any(step.profile_id == profile_id for step in scenario.steps)
+        )
+        references.extend(
+            f"pending device {choice.display_name or choice.mac_address}"
+            for choice in self.list_pending_device_choices()
+            if choice.profile_id == profile_id
         )
         if self.get_everyone_else_profile_id() == profile_id:
             references.append("everyone else")
