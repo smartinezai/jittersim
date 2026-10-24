@@ -3172,7 +3172,15 @@
         groupSelect.setAttribute("aria-label", "Group for " + (device.display_name || device.mac_address));
         const groupPlaceholder = document.createElement("option");
         groupPlaceholder.value = "";
-        groupPlaceholder.textContent = groups.length ? "Choose group..." : "Create a group on the Profiles page";
+        groupPlaceholder.textContent = groups.length ? "Choose group..." : "No groups";
+        if (!groups.length) {
+          const groupHelp = document.createElement("p");
+          groupHelp.id = "connected-group-help-" + device.mac_address;
+          groupHelp.className = "form-note";
+          groupHelp.textContent = "Create a group on the Profiles page.";
+          groupSelect.setAttribute("aria-describedby", groupHelp.id);
+          details.appendChild(groupHelp);
+        }
         groupSelect.appendChild(groupPlaceholder);
         groups.forEach((group) => {
           const option = document.createElement("option");
