@@ -5,7 +5,49 @@ Plan approved by coordinator on 24 October 2026. Scope is the single new
 `tests/kernel/test_corruption_effect.py` plus its own plan and this report.
 No production, pinned or shared fixture changes. No TCP recovery claim.
 
-Execution status: NOT RUN. Await final source review and an exclusive window.
+Execution status: first approved attempt FAILED. Corrected source awaits
+review and separate execution approval. No second run has started.
+
+Reviewed and executed commit: `5e56a5edc073b755cda07367d810a128d9074a1a`.
+Tree: `308eb4f1f61da4182b40e3539993d286a245d67d`.
+Image: `sha256:de4cebf4c786cbae945b3172a2f322fb2611402fd05ad4c8f25bce14f7171d92`.
+The medium runner confirmed no tracked changes before or after execution.
+
+The build succeeded. The single case failed with zero skips. The first 0%
+phase delivered 100/100 client requests and 20/20 Pi control requests with
+clean router-facing frames. In the 100% phase ping reported 166 transmitted
+and 31 received within its two second deadline. The assertion requiring
+exactly 100 transmitted failed at test line 117. The corruption phase's
+remaining capture and IFB assertions and the recovery 0% phase were not
+completed. This is a failed test sampling/count contract. It does not prove
+that production corruption is broken or that this causal check passed.
+
+Full retained evidence is in
+`test-results/jittersim-corruption-effect-77760/`: `result.json`, `test.log`,
+`build.log`, `cleanup.log`, `locks.log`, `final-evidence.json`, `image.id` and
+`container.id`. Additional preflight and terminal logs are in test-results
+with prefix `corruption-effect-preflight-20261024T174109Z`.
+
+Cleanup is confirmed: namespace removal printed success, the runner recorded
+container_removed=true and a subsequent exact-name Docker query returned no
+container. Both locks were free and no owned runner process remained. The
+unrelated `maia-skills-combined-check` container `b2744e7e3a5b` remained running.
+The first run was not retried. Physical Pi/offload behavior is still
+unresolved. This report was updated only after all runner activity ended.
+
+## Authorized count correction
+
+The coordinator reviewed the first failure against the primary
+[iputils ping manual](https://www.man7.org/linux/man-pages/man8/ping.8.html)
+and authorized one narrow correction. With `-c` and `-w` together ping waits
+for the requested reply count or deadline rather than enforcing a fixed
+send count. The test now uses `-c` with `-W 1` and keeps its existing outer
+five second subprocess timeout. `-W` controls response waiting rather than
+the total command runtime. Only the two option arguments and their comment
+changed. All offered counts, effect thresholds, IFB evidence, frame checks
+and three phases are unchanged. The first failed receipt remains intact.
+Compilation and Ruff passed on corrected source. Docker execution is pending
+separate coordinator review and approval.
 
 Static checks: Python 3.9 compilation passed with a workspace cache directory.
 Ruff E/F/I passed. The bounded runner Python block compiles. The first
@@ -22,8 +64,8 @@ Every phase requires all 20 Pi-originated controls and clean router frames.
 Existing no-IFB and protected-device evidence is reused rather than repeated.
 
 Capture retention is capped at 1024 frames. Setup/removal commands have five
-second deadlines. Ping has a two second deadline and an outer five second
-timeout. Capture readiness and completion have deadlines. Its child is
+second deadlines. Ping uses fixed send counts with `-W 1` for response waiting
+and an outer five second timeout. Capture readiness and completion have deadlines. Its child is
 terminated and reaped in finally. Namespace removal is registered before
 creation and checks that each owned namespace disappeared even after a
 partial failure. Docker removal adds the final containment boundary.

@@ -106,12 +106,12 @@ class CorruptionEffectTests(unittest.TestCase):
         try:
             self.assertTrue(select.select([capture.stdout], [], [], 2)[0], "capture not ready")
             self.assertEqual(capture.stdout.readline().strip(), "ready")
-            # Both commands have a ping deadline and an outer subprocess deadline.
+            # Fixed send counts use a response wait and an outer subprocess deadline.
             for namespace, count, pattern in (
                 (lab.CLIENT, CLIENT_COUNT, CLIENT_PATTERN), (lab.PI, PI_COUNT, PI_PATTERN)
             ):
                 result = lab.run_in(namespace, "ping", "-n", "-q", "-c", str(count),
-                                    "-i", "0.005", "-w", "2", "-s", "64", "-p",
+                                    "-i", "0.005", "-W", "1", "-s", "64", "-p",
                                     f"{pattern:02x}", lab.ROUTER_ADDRESS, check=False)
                 self.assertIn(result.returncode, (0, 1), result.stdout + result.stderr)
                 self.assertIn(f"{count} packets transmitted", result.stdout, result.stdout)
