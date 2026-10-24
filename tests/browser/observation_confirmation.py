@@ -127,7 +127,10 @@ def check_device_collapse(browser, base, width, evidence):
         expect(body).to_be_hidden()
         expect(toggle).to_be_focused()
         box = toggle.bounding_box()
-        assert box and box["width"] >= 44 and box["height"] >= 44, box
+        minimum_height = 36 if page.evaluate(
+            "matchMedia('(min-width: 48.01rem) and (pointer: fine)').matches"
+        ) else 44
+        assert box and box["width"] >= 44 and box["height"] >= minimum_height, box
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
         page.screenshot(path=f"test-results/discovery-devices-collapsed-{width}.png")
         toggle.press("Space")
@@ -146,7 +149,10 @@ def check_device_collapse(browser, base, width, evidence):
                 page.set_viewport_size({"width": narrow, "height": 900})
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), narrow
                 target = toggle.bounding_box()
-                assert target and target["width"] >= 44 and target["height"] >= 44, target
+                minimum_height = 36 if page.evaluate(
+                    "matchMedia('(min-width: 48.01rem) and (pointer: fine)').matches"
+                ) else 44
+                assert target and target["width"] >= 44 and target["height"] >= minimum_height, target
                 card.screenshot(path=f"test-results/discovery-devices-long-name-{narrow}.png")
         assert posts == [], posts
         evidence.append(f"device groups at {width}px: keyboard collapse, focus and state after refresh, "

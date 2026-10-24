@@ -18,3 +18,7 @@ No changes to the three pinned files, original PR branches, unrelated UI work or
 ## Review
 
 This plan follows the coordinator-assigned one-file composition and current autonomous implementation authority. Independent review is required before the combined change is handed back as ready.
+
+## Test-contract correction after the first full gates
+
+The first combined browser run recorded 37 of 38 passing steps. The collapse helper inherited a 44px desktop minimum from the older base, while current main explicitly approves a 36px minimum for desktop fine-pointer main buttons and preserves 44px targets elsewhere. Correct only the two height expectations using that existing media/pointer contract. Keep 44px width, all focus/collapse assertions and the 320px touch-layout minimum. No product CSS or class change is required. Preserve the failed full run and independently review this delta before corrected-head checks.
