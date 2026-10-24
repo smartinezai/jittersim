@@ -184,6 +184,14 @@ def test_a_skip_link_is_the_first_stop_and_leads_to_focusable_main_content():
     assert re.search(r'<main[^>]*id="content"[^>]*tabindex="-1"', HTML)
 
 
+def test_main_has_the_only_level_one_heading_with_neutral_initial_text():
+    assert re.findall(r'<h1\b[^>]*>.*?</h1>', HTML) == [
+        '<h1 id="page-heading" class="sr-only">Sign in</h1>'
+    ]
+    assert re.search(r'<main\b[^>]*>\s*<h1 id="page-heading"', HTML)
+    assert '<p id="brand-title">Network lab</p>' in sidebar_html()
+
+
 def test_named_regions_do_not_share_a_name():
     names = re.findall(r'<(?:section|pre)[^>]*aria-label="([^"]+)"', HTML)
     assert len(names) == len(set(names)), sorted({n for n in names if names.count(n) > 1})

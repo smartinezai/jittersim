@@ -462,6 +462,7 @@
       const page = name && document.getElementById("page-" + document.body.dataset.section);
       const label = page && page.getAttribute("aria-label");
       document.title = name ? (label ? label + " · " : "") + name : "Sign in";
+      element("page-heading").textContent = label || "Sign in";
     }
 
     function applyBrand(signedIn) {
