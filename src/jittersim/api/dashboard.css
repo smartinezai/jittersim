@@ -953,5 +953,5 @@
     .update-badge {
       display: inline-flex; align-items: center; margin-left: 0.4rem; padding: 0.1rem 0.42rem;
       border: 1px solid var(--bd-info); border-radius: 999px; background: var(--bg-info);
-      color: var(--tx-info); font-size: 0.68rem; font-weight: 600;
+      color: var(--tx-info); font-size: 0.68rem; font-weight: 600; white-space: nowrap;
     }
