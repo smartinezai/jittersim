@@ -187,6 +187,19 @@ def check_clearing_and_removal(page, base, headers, width):
         expect(button).to_be_focused()
         expect(page.locator(f"#{field_id}")).to_have_value(default)
 
+    # Validation text stays below the input and reset target without overlapping either.
+    page.locator("#upload-loss").fill("-1")
+    assert not page.locator("#upload-loss").evaluate("node => node.reportValidity()")
+    error = page.locator("#upload-loss-error")
+    expect(error).to_be_visible()
+    error_box = error.bounding_box()
+    reset_box = page.locator('button[data-reset-field="upload-loss"]').bounding_box()
+    assert error_box["y"] >= reset_box["y"] + reset_box["height"], (error_box, reset_box)
+    page.locator("#upload-loss").locator("..").locator("..").screenshot(
+        path=f"test-results/profile-field-reset-error-{width}.png"
+    )
+    reset("upload-loss", "0")
+    expect(error).to_have_count(0)
     reset("upload-bandwidth", "")
     reset("download-bandwidth", "")
     page.locator("#profile-advanced").evaluate("node => node.open = true")

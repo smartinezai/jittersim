@@ -6502,7 +6502,11 @@
         icon.appendChild(path);
         button.appendChild(icon);
         button.addEventListener("click", () => resetProfileField(field));
-        wrapper.append(label, button);
+        const controlRow = document.createElement("div");
+        controlRow.className = "profile-field-reset-controls";
+        label.htmlFor = field.id;
+        controlRow.append(field, button);
+        wrapper.append(label, controlRow);
         controls.push({ field, label, wrapper, button });
       });
       const sync = () => controls.forEach(({ field, label, wrapper, button }) => {
