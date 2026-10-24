@@ -199,13 +199,13 @@ have merged since. The pull requests that are still open and their states are in
   behaviour of the priority reset is not yet checked on a Pi. PR 208 added the order test for the two socket
   options, the Linux value 12 for `SO_PRIORITY` and the label without the internet.
 - Follow-ups of PR 188 (2000-name block list, from the reviews and the measurements) that PR 208 did not close:
-  renewals queue up to 24 lookups, so a new name can wait seconds behind them on a slow DNS server (cap queued
-  renewals at 8). A failed renewal caches an empty answer for 60 seconds and drops good addresses (keep the old
-  addresses when a lookup raises). Measured at 2000 names of 29 characters: the `/api/access` answer grows from
+  measured at 2000 names of 29 characters, the `/api/access` answer grows from
   9.9 KB to 135 to 179 KB and is polled every 5 seconds (leave the names out of the poll), compiling a plan
   takes 9.3 ms instead of 0.7 ms on a Mac (about ten times that on a Pi 3B+, cache the plan by configuration
   version), and the 4096-address cap shows only in a log line. PR 208 closed the delete-rule check and the
-  history restore test.
+  history restore test. The DNS follow-up caps background submissions at 8 unfinished lookups atomically
+  and keeps successful old addresses after renewal errors within their original 600-second stale window,
+  with 30 seconds between retries. Successful empty answers still replace the old addresses.
 
 ## Observed accessibility improvements
 

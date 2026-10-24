@@ -4,7 +4,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import wait
+from concurrent.futures import ThreadPoolExecutor, wait
 
 import pytest
 
@@ -41,6 +41,61 @@ def test_cancelled_queue_items_keep_capacity_until_consumed():
         assert not pool._unfinished
     assert calls == []
     assert pool.submit(lambda: "recovered").result(timeout=2) == "recovered"
+
+
+
+def test_concurrent_limited_submissions_leave_capacity_for_foreground_work():
+    pool = BoundedLookupPool(workers=1, name="limited-pool-test")
+    release = threading.Event()
+    callers_ready = threading.Barrier(25)
+    accepted = []
+    foreground = []
+
+    def submit_limited():
+        callers_ready.wait(timeout=5)
+        return pool.submit(release.wait, 5, unfinished_limit=8)
+
+    try:
+        with ThreadPoolExecutor(max_workers=24) as callers:
+            submissions = [callers.submit(submit_limited) for _ in range(24)]
+            callers_ready.wait(timeout=5)
+            accepted = [future for call in submissions if (future := call.result(timeout=5))]
+        assert len(accepted) == 8
+        assert pool.unfinished() == 8
+        # Concurrent caller order does not determine which accepted item is running.
+        assert any(future.cancel() for future in accepted)
+        assert pool.submit(lambda: None, unfinished_limit=8) is None
+        foreground = [pool.submit(release.wait, 5) for _ in range(MAX_UNFINISHED_LOOKUPS - 8)]
+        assert all(future is not None for future in foreground)
+        assert pool.submit(lambda: None) is None
+    finally:
+        release.set()
+        wait(accepted + foreground, timeout=5)
+    deadline = time.monotonic() + 5
+    while pool.unfinished() and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert pool.submit(lambda: "recovered", unfinished_limit=8).result(timeout=2) == "recovered"
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_submission_limit_must_be_positive(limit):
+    pool = BoundedLookupPool(workers=1, name="invalid-pool-limit")
+    with pytest.raises(ValueError, match="unfinished_limit must be greater than 0"):
+        pool.submit(lambda: None, unfinished_limit=limit)
+
+
+def test_submission_limit_cannot_raise_the_fixed_pool_capacity():
+    pool = BoundedLookupPool(workers=1, name="fixed-pool-limit")
+    release = threading.Event()
+    held = []
+    try:
+        held = [pool.submit(release.wait, 5, unfinished_limit=100)
+                for _ in range(MAX_UNFINISHED_LOOKUPS)]
+        assert all(future is not None for future in held)
+        assert pool.submit(lambda: None, unfinished_limit=100) is None
+    finally:
+        release.set()
+        wait(held, timeout=5)
 
 
 def test_completed_and_failed_work_release_capacity():
