@@ -281,6 +281,7 @@ def run():
                         page.screenshot(path="test-results/dashboard-devices-390.png")
                         page.set_viewport_size({"width": 900, "height": 360})
                         check_action_help(page)
+                        open_controls(page)
                         reset_help = page.get_by_role("img", name="Reset network help", exact=True)
                         reset_help.focus()
                         expect(page.locator("#sidebar-action-help")).to_be_visible()

@@ -57,3 +57,13 @@ forbidden. The first browser failures and setup failure are preserved in test-re
 The merged successor retains its four exact approved records; private aggregate
 CSS records remain unchanged. Only JSbytes now670500 exceeds the previous limit
 668854. No new baseline approval is inferred; coordinator decision is pending.
+
+## Final source freeze and review
+
+Production source is frozen at df1816dd5926015a6f01c597dfe69515e21b25d2.
+Independent review marked all four initial findings resolved; fresh visual finish
+review returned ship with no material fixes. The main coordinator explicitly
+approved only the measured JS-byte record670500, then independent metadata review
+verified that single leaf, source identity, all seven strict values and2% tolerance.
+The previous pending wording above is historical evidence, not a current blocker.
+Owner subsequently changed the final reserve to8%; no reset was used.
