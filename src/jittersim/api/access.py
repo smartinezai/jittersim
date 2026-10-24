@@ -9,7 +9,6 @@ from urllib.parse import parse_qs
 from jittersim.diagnostic_records import recorded
 from jittersim.config.models import MacPolicy, SiteBlock, normalize_mac_address
 from jittersim.config.storage import DeviceConflictError, RepositoryBusy, StorageError
-from jittersim.engine.access import build_access_plan
 from jittersim.engine.runtime import SchedulerBusy
 from jittersim.networking.helper import HelperClientError
 
@@ -84,7 +83,7 @@ def read_access_api(server, path, query=""):
         return None
     from jittersim.engine.access import access_from_payload
 
-    plan = build_access_plan(server.repository.access_settings())
+    plan = server.repository.access_plan()
     result = {
         "available": False,
         "wifi_admission_available": False,
@@ -365,7 +364,7 @@ def write_access_api(server, path, payload, *, control_intent=None):
             ))
             if not accepted:
                 return server._apply_refused(generation)
-        plan = build_access_plan(repository.access_settings())
+        plan = repository.access_plan()
         refused = server._apply_refused(generation)
         if refused is not None:
             return refused

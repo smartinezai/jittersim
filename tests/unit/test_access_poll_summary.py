@@ -6,13 +6,14 @@ import json
 import socket
 import threading
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
 from jittersim.api.server import ControlServer
 from jittersim.config.models import AccessOptions, Device, MacPolicy, Profile, SiteBlock, WebsitePolicy
 from jittersim.config.storage import ConfigRepository
+from jittersim.engine import access as access_engine
 from jittersim.engine.access import access_from_payload, build_access_plan
 from jittersim.networking.helper import HelperClientError
 
@@ -60,6 +61,88 @@ def read(server, query="", path="/api/access"):
     status, _, body = server.response_for(path, query)
     assert status == 200
     return json.loads(body)
+
+
+def test_warm_full_and_summary_reads_still_parse_changed_helper_policies(server):
+    helper = server.helper_client.access_status
+    with patch.object(access_engine, "build_access_plan", wraps=build_access_plan) as build, \
+            patch.object(access_engine, "access_from_payload", wraps=access_from_payload) as parse:
+        assert read(server)["applied"] is True
+        assert build.call_count == 1
+        parse.reset_mock()
+        helper.reset_mock()
+        assert read(server)["applied"] is True
+        assert read(server, "summary=1")["applied"] is True
+        policy = helper.return_value["policy"]
+        policy["clients"][0]["address"] = "192.168.50.40"
+        changed_address = read(server, "summary=1")
+        assert changed_address["applied"] is True
+        assert changed_address["policy"]["clients"][0]["address"] == "192.168.50.40"
+        domains = policy["websites"]["blocked_domains"]
+        policy["websites"]["blocked_domains"] = ("changed.example.test", *domains[1:])
+        assert read(server, "summary=1")["applied"] is False
+        assert build.call_count == 1
+        assert helper.call_count == parse.call_count == 4
+        assert all(call.args[0] is policy for call in parse.call_args_list)
+
+
+def test_warm_reads_do_not_reuse_a_helper_failure_or_skip_invalid_policy_checks(server):
+    helper = server.helper_client.access_status
+    original = copy.deepcopy(helper.return_value["policy"])
+    with patch.object(access_engine, "build_access_plan", wraps=build_access_plan) as build:
+        read(server, "summary=1")
+        helper.return_value["policy"] = {"version": True}
+        with patch.object(access_engine, "access_from_payload", wraps=access_from_payload) as parse:
+            assert server.response_for("/api/access")[0] == 503
+            assert server.response_for("/api/access", "summary=1")[0] == 503
+            assert parse.call_count == 2
+            helper.side_effect = HelperClientError("synthetic failure after a warm read")
+            assert server.response_for("/api/access", "summary=1")[0] == 503
+            assert parse.call_count == 2
+            helper.side_effect = None
+            helper.return_value["policy"] = original
+            assert read(server, "summary=1")["applied"] is True
+            assert parse.call_count == 3
+        assert build.call_count == 1
+
+
+def test_warm_apply_reuses_rules_but_quick_action_and_disable_use_new_saved_rules(server):
+    helper = server.helper_client
+    helper.apply_access = Mock(return_value={"ok": True})
+    helper.control_revision = Mock(return_value="synthetic-control-revision")
+    with patch.object(access_engine, "build_access_plan", wraps=build_access_plan) as build:
+        read(server, "summary=1")
+        initial = server.repository.access_plan()
+        version = server.repository.get_runtime_state().configuration_version
+        status, _, body = server.write_response_for("/api/access/apply", {"version": version})
+        assert status == 200, body
+        assert helper.apply_access.call_args.args[0] is initial
+        assert helper.apply_access.call_args.kwargs == {"control_revision": "synthetic-control-revision"}
+        assert build.call_count == 1
+        blocked = "02:00:00:00:02:00"
+        status, _, body = server.write_response_for("/api/access/device", {
+            "version": version, "mac_address": blocked, "blocked": True})
+        assert status == 200, body
+        device_plan = helper.apply_access.call_args.args[0]
+        assert device_plan is not initial
+        assert blocked in device_plan.mac.denylist
+        assert device_plan is server.repository.access_plan()
+        status, _, body = server.write_response_for("/api/access/disable", {
+            "version": server.repository.get_runtime_state().configuration_version,
+            "confirmed": True})
+        assert status == 200, body
+        disabled = helper.apply_access.call_args.args[0]
+        assert disabled is not device_plan and disabled.options.enabled is False
+        assert disabled is server.repository.access_plan()
+        assert build.call_count == 3
+        helper.apply_access.reset_mock()
+        assert server.write_response_for("/api/access/apply", {"version": version})[0] == 409
+        refusal = (409, "application/json", b'{"error":"synthetic control refusal"}\n')
+        with patch.object(server, "_apply_refused", return_value=refusal):
+            assert server.write_response_for("/api/access/apply", {
+                "version": server.repository.get_runtime_state().configuration_version}) == refusal
+        helper.apply_access.assert_not_called()
+        assert build.call_count == 3
 
 
 def test_summary_preserves_status_and_device_rules_without_any_domain_names(server):
@@ -146,6 +229,7 @@ def test_summary_does_not_mutate_helper_policy_or_later_full_editor_reads(server
 
 @pytest.mark.parametrize("section", ["websites", "site-rule"])
 def test_summary_still_detects_a_domain_only_change_with_the_same_count(server, section):
+    read(server, "summary=1")
     if section == "websites":
         original = server.repository.get_website_policy()
         server.repository.save_website_policy(WebsitePolicy(
