@@ -5,6 +5,7 @@ archive and a dry run of scripts/release.sh with a throwaway key."""
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -13,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tests.release_support import have_ssh_keygen, make_key
+from tests.release_expiry_support import isolated_agent, run_owned
 
 ROOT = Path(__file__).resolve().parents[2]
 COMMIT = "a" * 40
@@ -338,7 +340,7 @@ def source(tmp_path):
     return root
 
 
-def run_release(source, key, tmp_path, *args, env=None):
+def run_release(source, key, tmp_path, *args, env=None, runner=subprocess.run, timeout=180):
     fake = tmp_path / "bin"
     fake.mkdir(exist_ok=True)
     (fake / "gh").write_text("#!/bin/sh\ntouch " + str(tmp_path / "gh-was-called") + "\nexit 1\n")
@@ -350,9 +352,9 @@ def run_release(source, key, tmp_path, *args, env=None):
     for name in ("JITTERSIM_RELEASE_PYTHON", "JITTERSIM_RELEASE_LOCAL_CI"):
         environment.pop(name, None)
     environment.update(env or {})
-    return subprocess.run(["sh", str(source / "scripts/release.sh"), "--dry-run", "--home", str(tmp_path / "releases"),
+    return runner(["sh", str(source / "scripts/release.sh"), "--dry-run", "--home", str(tmp_path / "releases"),
                            "--key", str(key), *args], cwd=source, env=environment, capture_output=True,
-                          text=True, stdin=subprocess.DEVNULL, timeout=180)
+                          text=True, stdin=subprocess.DEVNULL, timeout=timeout)
 
 
 def test_release_script_dry_run_builds_signed_release_without_touching_github(release, source, key, tmp_path):
@@ -440,7 +442,8 @@ def test_generated_github_notes_stay_inside_the_release_section(release, source,
 
 @pytest.mark.skipif(shutil.which("ssh-agent") is None or shutil.which("ssh-add") is None,
                     reason="the passphrase key path needs ssh-agent and ssh-add")
-def test_release_script_asks_for_an_expired_key_before_it_writes_a_half_record(source, tmp_path):
+@pytest.mark.parametrize("terminal", [False, True], ids=["headless", "owned-terminal"])
+def test_release_script_asks_for_an_expired_key_before_it_writes_a_half_record(source, tmp_path, terminal):
     """The passphrase key lives in ssh-agent for one hour. The checks can take longer, so the key can
     be gone when the record is signed. The script wrote the unsigned record first and signing
     failed after it, which left a record that later steps refused with no way to continue. It now
@@ -448,37 +451,48 @@ def test_release_script_asks_for_an_expired_key_before_it_writes_a_half_record(s
     keys = tmp_path / "keys"
     keys.mkdir()
     protected = keys / "protected"
-    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "throwaway-passphrase", "-C", "test",
-                    "-f", str(protected)], check=True, capture_output=True, stdin=subprocess.DEVNULL)
+    run_owned(["ssh-keygen", "-q", "-t", "ed25519", "-N", "throwaway-passphrase", "-C", "test",
+               "-f", str(protected)], check=True, capture_output=True)
     askpass = tmp_path / "askpass.sh"
     askpass.write_text("#!/bin/sh\necho throwaway-passphrase\n")
     askpass.chmod(0o755)
-    agent = subprocess.run(["ssh-agent", "-s"], check=True, capture_output=True, text=True).stdout
-    values = dict(line.split(";")[0].split("=", 1) for line in agent.splitlines() if "=" in line.split(";")[0])
-    agent_env = {"SSH_AUTH_SOCK": values["SSH_AUTH_SOCK"]}
-    try:
-        subprocess.run(["ssh-add", str(protected)], check=True, capture_output=True, stdin=subprocess.DEVNULL,
-                       env=dict(os.environ, **agent_env, SSH_ASKPASS=str(askpass), SSH_ASKPASS_REQUIRE="force"))
+    with isolated_agent() as agent_env:
+        agent_overrides = {name: agent_env[name] for name in ("SSH_AUTH_SOCK", "SSH_AGENT_PID")}
+        run_owned(["ssh-add", str(protected)], check=True, capture_output=True,
+                  env=dict(agent_env, SSH_ASKPASS=str(askpass), SSH_ASKPASS_REQUIRE="force",
+                           DISPLAY="fixture:0"))
         # Stands in for the check tools. The first call ends the agent's hold on the key like the
         # one hour lifetime does, so the key is gone when the checks are done.
         tool = tmp_path / "fake-python"
-        tool.write_text(f"#!/bin/sh\nssh-add -d {protected}.pub >/dev/null 2>&1 || true\nexit 0\n")
+        expired = tmp_path / "key-expired"
+        tool.write_text("#!/bin/sh\n"
+                        '[ "$HOME" = ' + shlex.quote(str(tmp_path / "home")) + " ] || exit 1\n"
+                        '[ "$(command -v gh)" = ' + shlex.quote(str(tmp_path / "bin/gh"))
+                        + " ] || exit 1\nif [ ! -f " + shlex.quote(str(expired)) + " ]; then\n"
+                        "ssh-add -d " + shlex.quote(str(protected) + ".pub") + " || exit 1\n"
+                        "touch " + shlex.quote(str(expired)) + "\nfi\nexit 0\n")
         tool.chmod(0o755)
-        # The script asks for the passphrase again. This answer is wrong, so the test never waits for
-        # a person, also when it runs in a terminal.
-        wrong = tmp_path / "wrong-askpass.sh"
-        wrong.write_text("#!/bin/sh\necho not-the-passphrase\n")
-        wrong.chmod(0o755)
+        # A nonempty wrong answer can be requested forever. Empty output cancels the prompt.
+        cancelled = tmp_path / "prompt-cancelled"
+        cancel = tmp_path / "cancel-askpass.sh"
+        cancel.write_text("#!/bin/sh\ntouch " + shlex.quote(str(cancelled)) + "\nexit 1\n")
+        cancel.chmod(0o755)
         result = run_release(source, protected, tmp_path, "0.3.0",
-                             env=dict(agent_env, JITTERSIM_RELEASE_PYTHON=str(tool),
+                             env=dict(agent_overrides, JITTERSIM_RELEASE_PYTHON=str(tool),
                                       JITTERSIM_RELEASE_LOCAL_CI="none", JITTERSIM_RELEASE_FAKE_CHECKS="0",
-                                      SSH_ASKPASS=str(wrong), SSH_ASKPASS_REQUIRE="force"))
-    finally:
-        subprocess.run(["ssh-agent", "-k"], capture_output=True, env=dict(os.environ, **values))
+                                      SSH_ASKPASS=str(cancel), SSH_ASKPASS_REQUIRE="force",
+                                      DISPLAY="fixture:0"),
+                             runner=lambda *args, **kwargs: run_owned(*args, terminal=terminal, **kwargs),
+                             timeout=30)
+        assert expired.exists(), result.stdout + result.stderr
+        assert run_owned(["ssh-add", "-l"], env=agent_env, capture_output=True).returncode == 1
+    if terminal:
+        assert cancelled.exists(), result.stdout + result.stderr
     assert result.returncode != 0
     assert "ssh-agent" in result.stderr, result.stdout + result.stderr
     evidence = tmp_path / "releases/0.3.0/evidence"
     assert not (evidence / "local-verification.json").exists()
+    assert not (evidence / "local-verification.json.sig").exists()
 
 
 def test_checks_run_with_the_check_python_first_on_the_path(source, key, tmp_path):
