@@ -21,7 +21,7 @@ limits. See [local CI](local-ci.md), the
 | Chrome dashboard access | Source includes trust and reconnect assistance | Establish the actual browser failure. Earlier permission and VPN guesses are unproven. |
 | Router Wi-Fi controls | Deliberate read-only checks and the copy to the Pi are implemented. Router Wi-Fi writes are refused since PR 87 | Turn router Wi-Fi on or off with the router's own button or page. The physical outage cause is unproven. |
 | Discover router-connected devices before they join the Pi | Requested on 23 October 2026, not started | Show devices connected to the household Wi-Fi router, including devices not connected to the Pi. Save their MAC addresses and preassign protection or profiles, activating them only after a verified connection to the Pi. Distinguish router Wi-Fi association from a LAN observation. Design deliberate read-only discovery with router compatibility and privacy checks. This backlog entry does not authorise router contact or configuration changes. |
-| Remote CLI and official deployment | Delivered to main. `scripts/release.sh` cuts, checks, signs and publishes a release, and `sudo jittersim update` or `jittersim remote update now` updates the Pi in one step (PR 108, 110, 122) | Trust the release key and verify recovery on the Pi. The first release, v0.2.0, is not cut yet (no tag, no GitHub release). |
+| Remote CLI and official deployment | Delivered to main. `scripts/release.sh` cuts, checks, signs and publishes a release, and `sudo jittersim update` or `jittersim remote update now` updates the Pi in one step (PR 108, 110, 122) | Trust the release key and verify recovery on the Pi. Release PR 239 is merged and the signed v0.2.0 package is prepared. Owner installation, acceptance and publication remain. |
 | Integration | Present in reviewed source. Configured counterpart checks passed on the earlier candidate | Run gates on the exact source revision before relying on those results. Verify the installed release separately. |
 | Remembered credential renewal | Present in reviewed source; PR 224 fixes the reproduced token-refresh race | Verify real installed-browser behavior separately from fixture coverage. |
 | Phone dashboard layout | Safety bar, navigation and fixed help are implemented | Real phones, Safari and test/management network acceptance remain. |
@@ -29,7 +29,7 @@ limits. See [local CI](local-ci.md), the
 | Apply a profile to one device | Implemented. After a reset network the device starts alone and everything else stays paused (PR 96, 127, 131). While Everyone runs, a device runs its own profile beside it and Everyone keeps running for every other device (PR 149). Refused before saving while Everyone is saved but not running, while what runs is older than the saved settings, or while Panic is latched ([design addendum](device-apply-start-design-2026-10-09.md)) | Physical check on the Pi with two phones, one on Everyone and one on its own profile. |
 | Random ranges and patterns | Implemented with legacy relative selection preserved | All 40 kernel cases and native packet checks passed on the 4 October candidate. Physical client acceptance remains. |
 | Erratic connections (Delivery A) | Reliability foundations implemented: independent outage choices, service-list behaviour, live queue updates that keep counters, fresh or repeatable patterns (PR 84). Upload corruption runs on an `ifb` device and never toward the router (PR 125, 135) | Deliveries B to F are not started: long delays, condition stages and pauses, connection faults and presets, nearly finished downloads, usage worsening. The limits, counters, restart and rollback gate and independent expiry after a dashboard crash remain ([plan](implementation-plan-erratic-connections-2026-10-03.md)). |
-| Signed and online releases | Implemented. The Pi checks GitHub for a signed release with a read-only token, and the release and local CI tooling is merged (PR 108, 109, 110, 114, 116, 122, 139). The Updates page names the staged release (PR 112). The update status carries the signed release notes, a check a person asks for only checks and stages, and a development-label build that stopped can be retried (PR 111) | Cut v0.2.0 (see below), complete signing trust and the physical release gates. Do not label unavailable hosted CI green. |
+| Signed and online releases | Implemented. The Pi checks GitHub for a signed release with a read-only token, and the release and local CI tooling is merged (PR 108, 109, 110, 114, 116, 122, 139). The Updates page names the staged release (PR 112). The update status carries the signed release notes, a check a person asks for only checks and stages, and a development-label build that stopped can be retried (PR 111) | Install and physically accept the prepared v0.2.0 package, then publish it (see below). Verify installed signing trust. Do not label unavailable hosted CI green. |
 | Persistent outage logs | Merged with the dashboard token wait fix (PR 86, 91) and a read-only router health canary (PR 133). An independent Panic-consumer review approved the helper and access modules of that day as a bundle that `PANIC_APPROVED_SOURCES` still lists ([review](review-results-panic-consumers-outage-logging-2026-10-09.json)). The newest entry is the one for PR 138. A review is not approval of deployment | Actual disposable-system reboot proof and the owner's capture of router event times ([outage dossier](outage-dossier-2026-10-04-2026-10-09.md)). Since PR 142 an install or update keeps the journal on disk (`90-jittersim-persistent.conf`), which a reboot on the Pi has to confirm. |
 | Protected-device dashboard access | Merged (PR 92, landed with the combined Panic batch in PR 136). A protected device opens the dashboard with the admin token and no separate Allow this device step, the access list shows the reason, and an emergency device check sits on the Panic path ([plan](implementation-plan-protected-device-dashboard-access-2026-10-04.md)) | Physical check on the Pi with a protected phone. The helper socket still authorizes by group only ([design note](design-helper-action-authorization-2026-10-09.md), proposal only). |
 | Pi Wi-Fi follows the router | Merged (PR 140). After a **Copy router Wi-Fi to Pi** that worked, the Pi records the router's Wi-Fi name and security (no password). Every boot renames a saved Wi-Fi with another name, such as `JitterSim-Recovery`, back to the router name, and a manual Wi-Fi change or a name reset stops the following (`src/jittersim/networking/wifi_follow.py`, [Pi guide](../deploy/raspberry-pi/README.md)) | Physical check on the Pi that a reboot returns from Recovery to the router name. `python -m jittersim.networking.wifi_follow recovery` holds Recovery across reboots when the owner wants that. |
@@ -39,7 +39,7 @@ limits. See [local CI](local-ci.md), the
 | Router safety audit, round 2 | Merged (PR 150, 157): a router-side capture found three things the Pi sent onto the household LAN, mostly with no profile running (TCP resets and similar packets without NAT, ARP answers for its Wi-Fi address on the uplink, and a forwarded packet with an ICMP redirect). The management firewall now drops them, and an install or update checks the rules first ([audit](router-safety-audit-round2-2026-10-17.md)) | The read-only checks on the real Pi and the owner decisions of the audit (dual access point after every boot, download damage in Pi-only mode, a runtime same-subnet refusal). |
 | Two Wi-Fis with one name | Merged (PR 160, 169): the boot step looks once at the Wi-Fi names on the air and keeps `JitterSim-Recovery` for that boot when the router name is on the air from another BSSID. The look does not depend on the Pi's language. The test Wi-Fi refuses to start when the Ethernet address is inside `192.168.50.0/24` | A physical check on the Pi that includes a cold boot with the router Wi-Fi on and shows `boot_scan: seen`, not `failed`. |
 | Audits and test depth | Merged: a security audit of main with four fixes (PR 159, [report](security-audit-2026-10-18.md)), a soak harness and three resource fixes (PR 164, [audit](soak-and-resource-audit-2026-10-18.md)), mutation testing (PR 166, [report](mutation-testing-2026-10-18.md)), property-based codec tests (PR 167) and route tables for the dashboard's reads (PR 155) and writes (PR 163). PR 170 and the review fixes of PR 187 are merged | Owner decisions in the audit reports and physical acceptance remain. |
-| Dashboard accessibility and GUI improvements | Partly delivered: a skip link and unique regions (PR 88), in-page questions with focus return (PR 141), one announcer and quiet polled lists (PR 146), QA sweep fixes (PR 152) and restored focus after network actions (PR 218) | Per-page browser titles are implemented with private branding after sign-in ([plan](implementation-plan-page-titles-2026-10-24.md)). Page headings, form error text, a data-scaled traffic axis with a text alternative and the other slices of the GUI improvement plan (not committed to the repository, see the [backlog audit](backlog-audit-2026-10-16.md)) also remain. |
+| Dashboard accessibility and GUI improvements | Per-page titles and restored action focus are merged. Page headings and token/router form errors are implemented in isolated reviewed post-release source. The data-scaled traffic axis and text alternative are reviewed in PR 237, with D4 approved | Finish applicable integration checks and actual phone acceptance. These later changes are not all in the prepared v0.2.0 package. See the delivery snapshot below. |
 | Pi boot robustness | Delivered to main (PR 142): the `.local` name is announced (Avahi setting corrected), the name service survives an early hangup and restarts, the journal stays on disk and the boot noise is gone | Physical check on the Pi after an update and a reboot: `netlab.local` resolves and `journalctl --list-boots` shows more than one boot. |
 | Additional Website List modes | Not started. `website_mode` accepts only `unrestricted` and `allow_only` | Review scope and verify the proposed accounting behavior. The plan expects a helper change. |
 | Mark the device in use in the Devices tab | Delivered to main (PR 181): the Connected clients row of the device you browse with over the Pi's Wi-Fi says **This device**. The match uses the Wi-Fi address the Pi verified for the request, so Ethernet and loopback requests show no label ([plan](implementation-plan-devices-this-device-2026-10-23.md)) | Physical check with a real phone on the test Wi-Fi, including one with a private Wi-Fi address. |
@@ -49,10 +49,37 @@ limits. See [local CI](local-ci.md), the
 | Save the Pi backup on a Mac | Delivered to main (PR 179): `jittersim backup pull` saves the database backup in `~/jittersim-backups/` and never replaces a file. It runs once each time, a schedule is a cron or launchd line ([plan](implementation-plan-backup-pull-2026-10-23.md)) | Run it against the real Pi and restore from the file once. |
 | Quick button to reset the Pi Wi-Fi name | Delivered to main (PR 182): a **Reset Wi-Fi name** button in the sidebar, on every page, with the confirm dialog of PR 141 | Physical check on the Pi: press it from a phone on the test Wi-Fi and see the page wait, name the network to join and show the result after the phone rejoins. |
 | Protected devices not affected by the global block list | Requested on 23 October 2026. Checked on 23 October: protected devices skip profile shaping but are **not** exempt from the global block list (the firewall drop comes before the protected return and the household DNS redirect reaches every device) | Make the smallest fail-safe change: a wrong exemption only un-blocks, protection never moves automatically and nothing delays Panic. A protected device that opted into DNS ad blocking keeps only that. The DNS part needs the Panic-pinned `access.py`, so it waits until v0.2.0 is installed (an independent review and one new `PANIC_APPROVED_SOURCES` entry). |
-| Dashboard redesign with components | Requested on 23 October 2026, not started and not before v0.2.0 is released | Port the dashboard to components for a smoother, more interactive and more responsive interface. The recommended path in the [UI overhaul proposal](ui-overhaul-proposal-2026-10-09.md) is Preact (about 6 KB gzipped), built with esbuild on the Mac only, the built file committed so the Pi never needs Node, and the hashed CSP kept. Start with the Devices page and keep every id and label so the browser journeys still pass, then go page by page. Not while feature pull requests still edit `dashboard.js`. React (about 70 KB gzipped) was rejected, and Angular, Svelte, Lit and Alpine fit poorly. Open question for the owner: what exactly feels choppy today? |
+| Dashboard redesign with components | The owner authorised an isolated parallel redesign on 24 October. The Operate shell is implemented with top page links, compact action controls and persistent safety status, reusing the existing implementation without a new framework | Complete the remaining mobile audit, final receipts and the draft PR. Real phone, Safari and network acceptance remain. The earlier [component proposal](ui-overhaul-proposal-2026-10-09.md) is historical, not a dependency of this draft. Keep release main frozen. |
 | Smaller buttons with a clear hierarchy | Implemented in reviewed source (PR 226): compact action controls with existing labels and focus treatment | Physical phone acceptance remains. |
 | Router status shown as a label, not a switch | Present in reviewed source (PR 220) | Physical acceptance remains. Router Wi-Fi writes are refused since PR 87. |
 | Short, human-friendly release labels | Present in reviewed source (PR 225): stable releases use the version and development builds use a short preview label with exact build details available separately | Verify against an installed release. The signed manifest identity, version strings and update order are unchanged. |
+
+## Delivery snapshot on 24 October 2026
+
+[Release PR 239](https://github.com/smartinezai/jittersim/pull/239) merged as
+`3f5499a9`. The signed v0.2.0 package is prepared with sequence `1792860082`.
+Its archive signature and recorded hashes were verified. The three signed local
+checks passed on the identical tree before merge. Hosted jobs did not execute
+because of billing. This does not establish a published or installed release.
+The owner still needs a fresh checked backup, installation of that exact package,
+physical acceptance and publication. Main remains reserved while the owner
+completes backup, installation, physical acceptance and publication. Follow the
+[owner commands](release-0.2.0-owner-commands.md).
+
+The isolated post-release source includes reviewed heading, token and router
+error improvements, name display filtering and shared in-flight access reads.
+Its receipts do not transfer to the release package. A separate Operate redesign
+is implemented and undergoing final desktop and phone fixture checks. It keeps
+the existing browser implementation without adding a component framework.
+Real-phone, Safari and network acceptance remain separate.
+
+[PR 209](https://github.com/smartinezai/jittersim/pull/209) now has completed full
+Python 3.11 and retained Python 3.13 unit rows on exact head `96836d05`, each with
+8616 passed and 155 skipped. They are not a complete platform matrix for current
+main. Its merge still waits for first publication. The owner approved D4's
+data-scaled traffic axis in [PR 237](https://github.com/smartinezai/jittersim/pull/237).
+That product-choice hold is resolved, while review, applicable checks and the
+release freeze still apply. The chart is not part of the current release package.
 
 ## Release preparation on 24 October 2026
 
@@ -69,13 +96,14 @@ testing), 167 (property tests) and 168 (interrupted apply cleanup). PR 161 and 1
 on that day and have merged since (PR 170 on 19 October, PR 161 on 23 October). The open pull
 requests today are on GitHub, and the [roadmap](../ROADMAP.md) lists the ones it follows.
 
-The first release, v0.2.0, is being prepared. `pyproject.toml` already says `0.2.0`, no version is
-reserved in `docs/releases/registry.json`, and no tag or GitHub release exists. The tooling is merged.
-What is left is the owner's: the one-time root install of current `main` on the Pi, the read-only
-GitHub token, a Mac connection to the dashboard, the run of `scripts/release.sh 0.2.0` and the
-physical acceptance of the exact package (see the [owner runbook](release-runbook-2026-10-16.md)
-and the [draft of the release notes](release-notes-0.2.0-draft.md)). With PR 111 merged, the
-dashboard can show the release notes of a staged release.
+The first release has reached the signed-package stage. Release PR 239 merged
+as `3f5499a9` and reserved version `0.2.0` at sequence `1792860082`. The package
+is verified locally and is not yet a GitHub release. Owner backup, installation,
+physical acceptance and publication remain. A bootstrap update must be justified
+by the installed Pi's protected-file compatibility, not inferred from an old
+runbook snapshot. See the [owner runbook](release-runbook-2026-10-16.md) and
+[release notes](release-notes-0.2.0-draft.md). The Updates page can show the notes
+of a staged release.
 
 ## Further ideas
 
