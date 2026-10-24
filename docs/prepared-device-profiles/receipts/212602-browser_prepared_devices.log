@@ -1,0 +1,4 @@
+$ /Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/prepared-profiles-worktree/.venv-local-ci-3.12/bin/python -m tests.browser.prepared_devices
+# started 2026-10-24 21:26:04 +0200
+Prepared profile UI passed at desktop and 320/375/390 widths, including large text, focus and axe.
+# finished with status 0 after 7.6 seconds

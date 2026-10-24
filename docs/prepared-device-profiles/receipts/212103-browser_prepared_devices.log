@@ -1,0 +1,14 @@
+$ /Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/prepared-profiles-worktree/.venv-local-ci-3.12/bin/python -m tests.browser.prepared_devices
+# started 2026-10-24 21:21:07 +0200
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/prepared-profiles-worktree/tests/browser/prepared_devices.py", line 142, in <module>
+    run()
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/prepared-profiles-worktree/tests/browser/prepared_devices.py", line 132, in run
+    check(browser, f"http://127.0.0.1:{port}", width, height)
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/prepared-profiles-worktree/tests/browser/prepared_devices.py", line 94, in check
+    assert box and box["height"] >= 44, box
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: {'x': 99.390625, 'y': 166.390625, 'width': 102.1875, 'height': 36}
+# finished with status 1 after 3.2 seconds

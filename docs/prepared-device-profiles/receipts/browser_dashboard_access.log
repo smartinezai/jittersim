@@ -1,0 +1,6 @@
+$ /Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/prepared-profiles-worktree/.venv-local-ci-3.12/bin/python -m tests.browser.dashboard_access
+# started 2026-10-24 21:21:12 +0200
+dashboard response status=401
+dashboard response status=401
+Dashboard access browser acceptance passed.
+# finished with status 0 after 6.6 seconds
