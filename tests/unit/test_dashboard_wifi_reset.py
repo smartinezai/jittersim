@@ -15,6 +15,8 @@ def reset_scenario(**options):
 const options = OPTIONS;
 let wifiResetPending = !!options.resetPending, wifiChangePending = !!options.changePending;
 let helperConfigured = options.helper !== false, adminTokenRevision = 1;
+let adminTokenVerified = true, focusReturns = 0;
+const restoreBusyFocus = () => { focusReturns++; };
 const brandInfo = {default_ssid: "Lab"}, WIFI_RESTART_NOTICE = "Restart notice";
 const fields = {"wifi-reset-status": {textContent: "original"}, "access-point-ssid": {value: "Typed"}};
 const element = (id) => fields[id];
@@ -36,6 +38,7 @@ const runWifiChange = async (path, payload, callback, name) => {
   changes++;
   events.push(["run", path, payload, name, buttons.map(b => b.disabled)]);
   if (options.newToken) adminTokenRevision++;
+  if (options.signOut) adminTokenVerified = false;
   if (options.newDraft) formDrafts.set("access-point-form", "draft-two");
   if (options.newName) fields["access-point-ssid"].value = "New typing";
   if (options.fail) throw new Error("Synthetic failure");
@@ -46,7 +49,7 @@ const runWifiChange = async (path, payload, callback, name) => {
 FUNCTION
 resetWifiName({currentTarget: buttons[0]}).then(() => console.log(JSON.stringify({
   pending: wifiResetPending, fields, drafts: [...formDrafts], buttons, events, messages,
-  questions, changes, heldAtQuestion
+  questions, changes, heldAtQuestion, focusReturns
 }))).catch(error => {console.error(error); process.exit(1);});
 """.replace("OPTIONS", json.dumps(options)).replace(
         "FUNCTION", "async " + function_source("resetWifiName"))
@@ -85,6 +88,7 @@ def test_success_disables_both_buttons_closes_sheet_and_clears_the_replaced_draf
     assert result["fields"]["access-point-ssid"]["value"] == "Lab"
     assert result["drafts"] == []
     assert result["messages"] == [["Finished", "success"]]
+    assert result["focusReturns"] == 1
     assert result["pending"] is False
     assert result["buttons"] == [{"disabled": False}, {"disabled": False}]
 
@@ -111,6 +115,7 @@ def test_an_old_token_callback_cannot_change_fields_messages_or_controls():
     assert result["drafts"] == [["access-point-form", "draft-one"]]
     assert result["messages"] == []
     assert "settle" not in result["events"]
+    assert result["focusReturns"] == 0
     assert result["pending"] is False
 
 
@@ -123,3 +128,8 @@ def test_failure_and_giving_up_release_both_buttons(options, message):
     assert result["fields"]["wifi-reset-status"]["textContent"] == message
     assert result["pending"] is False
     assert result["buttons"] == [{"disabled": False}, {"disabled": False}]
+
+
+def test_reset_does_not_return_focus_after_sign_out():
+    result = reset_scenario(signOut=True)
+    assert result["focusReturns"] == 0

@@ -6039,14 +6039,31 @@
     const runningActions = new Set();
     let actionIntentRevision = 0;
 
+    function restoreBusyFocus(opener, fallback) {
+      if (document.activeElement !== document.body) return;
+      const visible = (node) => node && node.isConnected && !node.disabled &&
+        !node.closest("[hidden], [inert]") && node.getClientRects().length &&
+        window.getComputedStyle(node).visibility !== "hidden";
+      const target = visible(opener) ? opener : visible(fallback) ? fallback : null;
+      if (target) target.focus({preventScroll: true});
+    }
+
+    let actionReturnFocus = null;
+    privateDataLockHooks.push(() => { actionReturnFocus = null; });
+
     function setActionBusy(busy, path) {
+      const focused = document.activeElement;
+      const applyButton = element("apply-button");
+      const resetButton = element("reset-button");
+      if (busy && !networkActionBusy &&
+          (focused === applyButton || focused === resetButton) && !focused.disabled) {
+        actionReturnFocus = {button: focused, revision: adminTokenRevision};
+      }
       if (busy) runningActions.add(path);
       else runningActions.delete(path);
       busy = runningActions.size > 0;
       networkActionBusy = busy;
       if (busy) networkActionRevision += 1;
-      const applyButton = element("apply-button");
-      const resetButton = element("reset-button");
       applyButton.disabled = busy || !helperConfigured;
       resetButton.disabled = busy || !helperConfigured;
       applyBusy = runningActions.has("/api/apply");
@@ -6065,6 +6082,13 @@
       ["general-profile-apply", "general-profile-stop"].forEach((id) => {
         element(id).setAttribute("aria-busy", String(generalBusy));
       });
+      if (!busy) {
+        const returning = actionReturnFocus;
+        actionReturnFocus = null;
+        if (returning && returning.revision === adminTokenRevision && adminTokenVerified) {
+          restoreBusyFocus(returning.button);
+        }
+      }
     }
 
     const PANIC_QUEUED = "Panic is sent now. It runs as soon as the Pi can take it";
@@ -7497,7 +7521,10 @@
         if (tokenRevision === adminTokenRevision) showMessage(error.message, "error");
       } finally {
         wifiResetPending = false;
-        if (tokenRevision === adminTokenRevision) settleResetWifiButtons();
+        if (tokenRevision === adminTokenRevision) {
+          settleResetWifiButtons();
+          if (adminTokenVerified) restoreBusyFocus(button, element("controls-toggle"));
+        }
       }
     }
     resetWifiButtons().forEach((each) => each.addEventListener("click", resetWifiName));
