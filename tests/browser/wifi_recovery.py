@@ -65,13 +65,13 @@ def check_wifi_recovery(page):
 
 
 def check_router_copy(page):
-    page.locator("#open-router-credentials").click()
+    sidebar_control(page, "#open-router-credentials").click()
     page.locator("#router-admin-password").fill("browser-router-password")
     page.locator("#check-router-password").click()
     expect(page.locator("#router-credential-state")).to_contain_text("Accepted")
     page.locator("#remember-router-password").check()
     page.locator("#close-credentials").click()
-    button = page.locator("#sync-router-ap")
+    button = sidebar_control(page, "#sync-router-ap")
     copies = []
     page.on("request", lambda request: copies.append(request)
             if request.url.endswith("/api/router/sync-ap") else None)
@@ -100,7 +100,7 @@ def check_router_status(page):
     page.on("request", lambda request: checks.append(request.post_data_json["refresh"])
             if request.url.endswith("/api/router/status") else None)
     assert_router_status_is_read_only(page)
-    page.locator("#refresh-router-wifi").click()
+    sidebar_control(page, "#refresh-router-wifi").click()
     # The password check a moment ago used the router budget, so the Pi does not ask the router
     # again yet. The page says how long to wait and shows no state it does not have.
     expect(page.locator("#message")).to_contain_text("choose Check router Wi-Fi again")
@@ -109,7 +109,7 @@ def check_router_status(page):
     expect(button).to_have_attribute("data-unknown", "true")
     page.wait_for_timeout((wait + 1) * 1000)
     checks.clear()
-    page.locator("#refresh-router-wifi").click()
+    sidebar_control(page, "#refresh-router-wifi").click()
     # Router Wi-Fi switching is refused for recovery safety. The label only shows the state.
     expect(button).to_have_text("On", timeout=10000)
     assert checks and checks[0] is True and all(refresh is False for refresh in checks[1:])
@@ -158,19 +158,19 @@ def run():
                 check_wifi_recovery(page)
                 expect(page.locator("#reset-wifi-name")).to_be_in_viewport()
                 assert_router_status_is_read_only(page)
-                page.locator("#refresh-router-wifi").click()
+                sidebar_control(page, "#refresh-router-wifi").click()
                 expect(page.locator("#router-wifi-toggle")).to_have_attribute(
                     "data-unknown", "false", timeout=10000)
                 page.screenshot(path="test-results/wifi-pi-desktop.png", animations="disabled")
                 page.set_viewport_size({"width": 1280, "height": 800})
-                # Whole controls and not a sliver of them. The sidebar lists nine pages
-                # and a laptop screen must still show Panic and the router status and
-                # the copy button. The Linux fonts on CI are wider than the Mac ones.
+                # The full-width header and open utilities retain complete controls,
+                # with Panic and read-only router status in the separate safety bar.
                 expect(page.locator("#router-wifi-toggle")).to_be_in_viewport(ratio=1)
                 expect(page.locator("#panic-button")).to_be_in_viewport(ratio=1)
                 expect(page.locator("#sync-router-ap")).to_be_in_viewport(ratio=1)
                 sidebar = page.locator(".sidebar").bounding_box()
-                assert sidebar["x"] == 0 and sidebar["width"] < 300
+                assert abs(sidebar["x"]) <= 0.5 and abs(sidebar["width"] - 1280) <= 1, sidebar
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
                 page.screenshot(path="test-results/wifi-pi-laptop.png", animations="disabled")
                 page.set_viewport_size({"width": 390, "height": 844})
                 page.locator("#reset-wifi-name").scroll_into_view_if_needed()

@@ -166,10 +166,7 @@ def check_access_point_form(page):
 
 
 def check_router_copy(page):
-    controls = page.locator("#controls-toggle")
-    if controls.is_visible() and not page.locator("#open-router-credentials").is_visible():
-        controls.click()
-    page.locator("#open-router-credentials").click()
+    sidebar_control(page, "#open-router-credentials").click()
     page.locator("#router-admin-password").fill("browser-router-password")
     page.locator("#check-router-password").click()
     expect(page.locator("#router-credential-state")).to_contain_text("Accepted")
@@ -177,7 +174,7 @@ def check_router_copy(page):
     seen = drop_connection(page, "**/api/router/operation", 2)
 
     expect(page.locator("#sync-router-ap")).to_be_enabled(timeout=15000)
-    page.locator("#sync-router-ap").click()
+    sidebar_control(page, "#sync-router-ap").click()
     answer_confirm(page, "Copy Wi-Fi", title="Copy the router Wi-Fi to the Pi?",
                    text=["Browser home using WPA2", "Wi-Fi will restart"])
     banner = page.locator("#wifi-change-banner")

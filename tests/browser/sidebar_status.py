@@ -47,11 +47,10 @@ def devices_line(page):
 
 
 def show_status(page):
-    """On a phone the full status block opens from the one line strip in the header."""
+    """The full status block opens from the visible strip in either layout."""
 
-    if is_phone(page):
-        expect(page.locator("#status-strip")).to_be_visible()
-        open_status(page)
+    expect(page.locator("#status-strip")).to_be_visible()
+    open_status(page)
 
 
 def wait_for_automatic_token_check(page):
@@ -226,6 +225,7 @@ def check_width(browser, width, height):
         check_one_message(page, width, height)
         if width == 1920:
             check_notification_wrapping(page)
+        show_status(page)
 
         # signed in with nothing applied yet
         expect(status).to_be_visible()

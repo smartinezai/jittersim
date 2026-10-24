@@ -10,6 +10,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.confirm_dialogs import answer_confirm, cancel_with_escape
+from tests.browser.phone import sidebar_control
 from tests.browser.route_support import keep_interception_on
 
 PROTECTED_MAC = "02:00:00:00:00:01"
@@ -111,7 +112,7 @@ def check_a_token_edit_does_not_wait_for_a_check_that_hangs(page):
       window.stale = checkAdminToken().then(() => { window.staleEnded = true; });
     }""")
     wait_for_held(held, page)
-    page.locator("#open-admin-credentials").click()
+    sidebar_control(page, "#open-admin-credentials").click()
     field = page.locator("#admin-token")
     field.fill("")
     field.fill("browser-test")

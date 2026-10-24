@@ -14,6 +14,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.phone import sidebar_control
+
 TOKEN = "browser-test"
 PAGES = ("devices", "profiles", "schedules", "router", "traffic", "access", "measurements",
          "activity", "diagnostics", "updates")
@@ -304,7 +306,7 @@ def check_panic_stays_enabled(page, seen):
 def check_token_form(page):
     """The token sits in a form with a hidden name so the Keychain can store it."""
 
-    page.locator("#open-admin-credentials").click()
+    sidebar_control(page, "#open-admin-credentials").click()
     form = page.locator("form#admin-token-form")
     expect(form).to_have_count(1)
     token = form.locator("#admin-token")

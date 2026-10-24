@@ -131,9 +131,8 @@ WIDE_FONTS = (
 STRESSES = (("normal fonts", ""), ("wide fonts", WIDE_FONTS))
 # The fixture can put the wide fonts on every page. Then there are no normal fonts to check.
 WIDE_PAGE = os.environ.get("JITTERSIM_BROWSER_TEST_WIDE_FONTS") == "1"
-# The sidebar scrolls as a whole. A window as tall as the content shows all of it and a shorter
-# one shows what it can and scrolls to the rest. So the journey asks for the first only on the
-# tall window and for the reach of every control on the others.
+# The full-width header carries common actions. Secondary utilities open from Controls,
+# while Panic and router status stay in a separate safety bar at every size.
 TALL_WINDOW = (1920, 1000)
 REACH_SIZES = ((1280, 700), (1280, 721), (1280, 760), (1280, 800), (390, 844))
 REACH_TARGETS = ("#panic-button", "#router-wifi-toggle", "#sync-router-ap")
@@ -175,19 +174,26 @@ def assert_no_overlap_or_overflow(page, what):
 
     boxes = page.evaluate(
         """() => {
-            // On a short window the page list scrolls inside itself. A link scrolled out of the
-            // list is cut off by it, so only the part inside the list counts.
+            // A disclosure may cover the header behind it. Check its controls and the
+            // safety bar together; closed, check the header and bar as one surface.
+            const scopes = controlsOpen()
+                ? (phoneLayout.matches ? ['#sidebar-controls', '#controls-toggle']
+                    : ['.control-utilities', '.safety-bar', '#controls-toggle'])
+                : ['.sidebar'];
+            const roots = scopes.map(selector => document.querySelector(selector));
             const list = document.querySelector('.sidebar-nav').getBoundingClientRect();
             return Array.from(document.querySelectorAll(
                 '.sidebar button, .sidebar a, .sidebar .help-icon, .sidebar p, .sidebar summary'
-            )).map((node) => {
+            )).filter(node => roots.some(root => root && root.contains(node))).map((node) => {
                 const box = node.getBoundingClientRect();
                 const clip = node.closest('.sidebar-nav') ? list
                     : {top: -Infinity, bottom: Infinity, left: -Infinity, right: Infinity};
-                const top = Math.max(box.top, clip.top), bottom = Math.min(box.bottom, clip.bottom);
+                const top = Math.max(box.top, clip.top, 0);
+                const bottom = Math.min(box.bottom, clip.bottom, innerHeight);
                 return {
                     name: node.id || node.textContent.trim().slice(0, 24),
-                    shown: box.width > 0 && box.height > 0 && node.offsetParent !== null && bottom - top > 1,
+                    shown: box.width > 0 && box.height > 0 && bottom - top > 1 &&
+                        getComputedStyle(node).visibility !== 'hidden',
                     left: box.left, top: top, right: box.right, bottom: bottom,
                 };
             }).filter((box) => box.shown);
@@ -216,22 +222,30 @@ def fits_in_window(box, size):
 
 
 def scroll_like_a_person(page, selector, what):
-    """Turn the mouse wheel over the sidebar until the control is fully in the window.
+    """Open a secondary utility if needed, then wheel its actual scrolling container."""
 
-    A script can scroll an area that a person cannot reach so the wheel is used. It moves the
-    sidebar when the sidebar scrolls and the page when the sidebar is part of the page.
-    """
-
-    size = page.viewport_size
+    control = sidebar_control(page, selector)
+    size = dict(page.viewport_size)
+    if selector not in ("#panic-button", "#router-wifi-toggle"):
+        size["height"] = page.locator(".safety-bar").bounding_box()["y"]
     for _ in range(60):
-        box = page.locator(selector).bounding_box()
+        box = control.bounding_box()
         assert box is not None, (what, selector, "is not on the page")
         if fits_in_window(box, size):
             return box
-        sidebar = page.locator(".sidebar").bounding_box()
+        area = control.evaluate("""node => {
+            for (let up = node.parentElement; up; up = up.parentElement) {
+                if (/(auto|scroll)/.test(getComputedStyle(up).overflowY) &&
+                    up.scrollHeight > up.clientHeight) {
+                    const box = up.getBoundingClientRect();
+                    return {x: box.left, y: box.top, width: box.width, height: box.height};
+                }
+            }
+            return {x: 0, y: 0, width: innerWidth, height: innerHeight};
+        }""")
         page.mouse.move(
-            sidebar["x"] + sidebar["width"] / 2,
-            min(sidebar["y"] + sidebar["height"] / 2, size["height"] / 2),
+            max(1, min(area["x"] + area["width"] / 2, page.viewport_size["width"] - 1)),
+            max(1, min(area["y"] + area["height"] / 2, size["height"] - 1)),
         )
         page.mouse.wheel(0, 120 if box["y"] + box["height"] > size["height"] else -120)
         page.wait_for_timeout(20)
@@ -241,10 +255,13 @@ def scroll_like_a_person(page, selector, what):
 def assert_reachable(page, what):
     """Scroll to each control that has to be reachable and find it fully in the window."""
 
+    close_controls(page)
+    page.evaluate("window.scrollTo(0, 0)")
     for selector in REACH_TARGETS:
         scroll_like_a_person(page, selector, what)
         inside_window(page, selector, what)
         assert_no_overlap_or_overflow(page, what)
+    close_controls(page)
 
 
 def assert_reachable_on_a_phone(page, what):
@@ -264,17 +281,17 @@ def assert_reachable_on_a_phone(page, what):
 
 
 def assert_whole_sidebar_in_window(page, what):
-    """On a tall window the buttons that act on the network are in view with no scrolling."""
+    """The full-width header exposes common commands and the safety bar stays usable."""
 
-    for selector in ("#apply-button", "#reset-button", "#panic-button"):
+    close_controls(page)
+    page.evaluate("window.scrollTo(0, 0)")
+    header = page.locator(".sidebar").bounding_box()
+    assert header and abs(header["x"]) <= 0.5, (what, header)
+    assert abs(header["width"] - page.viewport_size["width"]) <= 1, (what, header)
+    for selector in ("#apply-button", "#reset-button", "#panic-button", "#router-wifi-toggle"):
         inside_window(page, selector, what)
-    scrolling = page.evaluate(
-        """() => {
-            const sidebar = document.querySelector('.sidebar');
-            return {top: sidebar.scrollTop, extra: sidebar.scrollHeight - sidebar.clientHeight};
-        }"""
-    )
-    assert scrolling["top"] == 0, (what, "the sidebar was scrolled", scrolling)
+    expect(page.locator("#controls-toggle")).to_be_visible()
+    expect(page.locator(".control-utilities")).to_be_hidden()
     assert_no_overlap_or_overflow(page, what)
 
 
@@ -286,10 +303,9 @@ def assert_sidebar_everywhere(page, state):
         set_font_stress(page, css)
         width, height = TALL_WINDOW
         page.set_viewport_size({"width": width, "height": height})
-        page.evaluate("document.querySelector('.sidebar').scrollTo(0, 0)")
+        page.evaluate("window.scrollTo(0, 0)")
         if css or WIDE_PAGE:
-            # Wider fonts need a taller window to show everything. A window that is just tall
-            # enough for the normal fonts is no promise for them so only the reach is checked.
+            # Wider fonts may wrap the header. Every command must remain reachable.
             assert_reachable(page, f"{state} with {stress} at {width}x{height}")
         else:
             assert_whole_sidebar_in_window(page, f"{state} at {width}x{height}")
@@ -633,8 +649,7 @@ def check_width(browser, width, height):
         assert_old_wording_is_gone(page)
         shoot("running")
 
-        # The label changes between one and two lines in the narrow sidebar. The button and the
-        # buttons below it must keep their size and spacing so that the footer does not jump.
+        # Starting keeps the common commands' size and relative placement stable.
         running_geometry = footer_geometry(page)
         for name in stopped_geometry:
             # Fonts round to a fraction of a pixel in a different way for each label.
