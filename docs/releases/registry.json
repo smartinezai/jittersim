@@ -1,5 +1,11 @@
 {
   "format": 1,
-  "sequence_floor": null,
-  "reservations": []
+  "reservations": [
+    {
+      "sequence": 1792860082,
+      "state": "reserved",
+      "version": "0.2.0"
+    }
+  ],
+  "sequence_floor": 1792860081
 }
