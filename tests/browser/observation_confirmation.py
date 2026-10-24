@@ -131,8 +131,14 @@ def check_membership_labels(browser, base, width, evidence):
         expect(page.locator('#observation-note')).to_contain_text('not whether a query or request was blocked')
         for check_width in (width, 320) if width == 390 else (width,):
             page.set_viewport_size({"width": check_width, "height": 900})
-            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), check_width
             card.screenshot(path=f'test-results/discovery-membership-{check_width}.png')
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), check_width
+            assert badge.evaluate("""badge => {
+                const count = badge.closest('.observation-group-toggle')
+                    .querySelector('.observation-domain-count').getBoundingClientRect();
+                const box = badge.getBoundingClientRect();
+                return box.right <= count.left || box.bottom <= count.top || box.top >= count.bottom;
+            }"""), f'membership badge overlaps query count at {check_width}px'
         evidence.append(f'membership labels at {width}px: exact list membership, unchanged counts and actions')
     finally:
         context.close()

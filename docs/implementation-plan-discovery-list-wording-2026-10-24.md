@@ -9,3 +9,5 @@ Paths proposed to the coordinator are dashboard.js, dashboard.html, dashboard_ru
 The coordinator approved the exact display paths. Independent plan review found no blocking concerns. Browser jobs remain held for the reserved hardware-study quiet window. After editing, run gating lint and relevant unit tests. Use the shared heavy-test wrapper and the coordinator's approved browser slot for focused rendering and GUI checks on the exact final clean head. Inspect desktop and narrow-screen evidence in a bounded pass. Review the final diff independently before normal push and one draft PR. Leave PR229 untouched.
 
 Base: origin/main fadaa9d983c393e54c1e09a8dc489eb892fea163 freshly fetched and verified remotely. No current new-since-view marker was found in the renderer. That is a separate slice and is deliberately left out to keep this correction small.
+
+The first focused browser run demonstrated horizontal overflow at 320px from the longer group badge. Allow only badges inside observation-group-meta to wrap, retaining every other style. Add an explicit check that the badge does not overlap the query count. Repeat the same exact-head checks after this correction.
