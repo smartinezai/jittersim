@@ -41,6 +41,7 @@ const deviceTitle=d=>d.name;
 const formDrafts=new Map();
 let helperConfigured=true,accessRulesSaved=false,dashboardLoaded=true,adminTokenVerified=true;
 let adminTokenRevision=0;
+let preparedLoaded=false,preparedBusy=false;
 const document={hidden:false};
 const currentPage=()=> 'access';
 let displayedSites=[],deviceText=[];
