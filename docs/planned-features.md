@@ -123,6 +123,18 @@ is published, normal owners should use the dashboard without terminal commands.
 Verify that full path on the actual Pi. See [release production](releasing.md) and
 [the owner commands](release-0.2.0-owner-commands.md).
 
+Acceptance for the separate producer candidate path:
+
+- An authenticated owner explicitly selects or supplies an exact signed candidate
+  through the dashboard before stable publication. Normal **Check for updates**
+  must not silently offer unapproved drafts. No Pi terminal or TLS bypass is required.
+- The existing trusted-key, archive identity, compatibility, release-order and
+  recovery checks remain. Candidate transfer and staging show progress and useful
+  errors, and installation needs a separate explicit confirmation.
+- Test that exact archive on the Pi and record real acceptance before approval and
+  stable publication. Do not fabricate evidence or claim the candidate was accepted
+  merely because download, signature verification or installation succeeded.
+
 ## Further ideas
 
 The complete earlier ideas are retained in the archive. Their old planned or
