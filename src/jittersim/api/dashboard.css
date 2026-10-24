@@ -656,7 +656,7 @@
       background: var(--sidebar-bg); border-right: 1px solid var(--line);
     }
     .sidebar-brand { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.6rem; }
-    .sidebar-brand h1 { margin: 0; font-size: 1.4rem; }
+    .sidebar-brand #brand-title { margin: 0; font-size: 1.4rem; font-weight: 700; letter-spacing: -0.04em; }
     .sidebar-brand .badge { display: inline-block; margin: 0; padding: 0.2rem 0.55rem; }
     .sidebar-nav ul { display: grid; gap: 0.2rem; margin: 0; padding: 0; list-style: none; }
     .sidebar-nav a {
@@ -771,7 +771,7 @@
        fonts wrap the mode badge and the status lines so the footer needs this margin there. */
     @media (min-width: 48.01rem) and (max-height: 1000px) {
       .sidebar { gap: 0.5rem; padding-block: 0.65rem; }
-      .sidebar-brand h1 { font-size: 1.2rem; }
+      .sidebar-brand #brand-title { font-size: 1.2rem; }
       .sidebar-brand .badge { padding: 0.2rem 0.45rem; font-size: 0.72rem; }
       .sidebar-nav ul { gap: 0; }
       .sidebar-nav a { min-height: 1.5rem; padding-block: 0.22rem; font-size: 0.88rem; line-height: 1.2; }

@@ -315,7 +315,7 @@ def check_sheet(page, what):
     expect(page.locator("#apply-button")).to_be_hidden()
     # A tap outside the sheet closes it too.
     open_controls(page)
-    page.locator(".sidebar-brand h1").click()
+    page.locator("#brand-title").click()
     expect(toggle).to_have_attribute("aria-expanded", "false")
 
 

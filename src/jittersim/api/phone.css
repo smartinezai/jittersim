@@ -22,7 +22,7 @@
     position: static; height: auto; overflow: visible; gap: 0.5rem;
     padding: 0.6rem 1rem 0.65rem; border-right: 0; border-bottom: 1px solid var(--line);
   }
-  .sidebar-brand h1 { font-size: 1.25rem; }
+  .sidebar-brand #brand-title { font-size: 1.25rem; }
 
   /* Every page stays one tap away. The row scrolls inside itself and never the page. */
   .sidebar-nav { margin-inline: -1rem; }
