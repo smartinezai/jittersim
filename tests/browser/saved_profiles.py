@@ -224,6 +224,7 @@ def check_clearing_and_removal(page, base, headers, width):
     assert saved(page, base, headers, profile_id) == expected
     page.locator("#new-profile").click()
     row.locator('button[data-action="edit"]').click()
+    expect(page.locator("#profile-id")).to_have_value(profile_id)
     expect(page.locator("#profile-seed")).to_have_value("")
     expect(page.locator("#upload-bandwidth")).to_have_value("")
     expect(page.locator("#download-bandwidth")).to_have_value("")
@@ -232,7 +233,8 @@ def check_clearing_and_removal(page, base, headers, width):
     with page.expect_response(is_profile_save):
         submit.click()
     expect(submit).to_be_enabled()
-    assert saved(page, base, headers, profile_id) == dict(expected, name="Renamed after clearing")
+    actual = saved(page, base, headers, profile_id)
+    assert actual == dict(expected, name="Renamed after clearing"), actual
     page.locator("#new-profile").click()
 
     # A saved device prevents deletion. Removing that device then permits deletion.
@@ -244,12 +246,14 @@ def check_clearing_and_removal(page, base, headers, width):
     delete = row.locator('button[data-action="delete"]')
     delete.click()
     page.get_by_role("dialog").get_by_role("button", name="Cancel", exact=True).click()
-    assert saved(page, base, headers, profile_id) == dict(expected, name="Renamed after clearing")
+    actual = saved(page, base, headers, profile_id)
+    assert actual == dict(expected, name="Renamed after clearing"), actual
     delete.click()
     page.get_by_role("dialog").get_by_role("button", name="Delete profile", exact=True).click()
     expect(page.locator("#message")).to_contain_text("profile is in use by device Clear test device")
     expect(row).to_be_visible()
-    assert saved(page, base, headers, profile_id) == dict(expected, name="Renamed after clearing")
+    actual = saved(page, base, headers, profile_id)
+    assert actual == dict(expected, name="Renamed after clearing"), actual
     assigned = page.request.get(base + "/api/devices", headers=headers).json()["devices"]
     assert next(device for device in assigned if device["id"] == device_id)["profile_id"] == profile_id
     assert page.request.post(base + "/api/devices/delete", headers=headers, data={"id": device_id}).ok
