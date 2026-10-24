@@ -1,6 +1,6 @@
 # v0.2.0 owner acceptance card
 
-Commands and evidence wording: [owner commands page](release-0.2.0-owner-commands.md). Checked against main `174a304e` (later commits change only these two pages).
+Commands and evidence wording: [owner commands page](release-0.2.0-owner-commands.md). Checked against main `174a304e` (later commits change only one test file and these two pages).
 
 ## Safety first
 

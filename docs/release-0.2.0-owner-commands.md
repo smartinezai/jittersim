@@ -2,7 +2,7 @@
 
 **[OWNER]** only you can do it (key passphrase, sudo password, y/N answers). **[EITHER]** anyone can paste it. Every command below was checked against `scripts/release.sh`, `src/jittersim/cli.py` and `src/jittersim/remote_cli.py` on main. The reasons are in the [owner runbook](release-runbook-2026-10-16.md).
 
-Facts on 24 October (main `174a304e`, later commits change only documents): no tag, no GitHub release, `docs/releases/registry.json` reserves nothing, `pyproject.toml` and `__init__.py` say 0.2.0. The release text (Unreleased entries plus [the notes file](release-notes-0.2.0-draft.md)) is about 4 KB and changes when either changes. The script stops above 15000 bytes.
+Facts on 24 October (main `174a304e`, later commits change only one test file and documents): no tag, no GitHub release, `docs/releases/registry.json` reserves nothing, `pyproject.toml` and `__init__.py` say 0.2.0. The release text (Unreleased entries plus [the notes file](release-notes-0.2.0-draft.md)) is about 4 KB and changes when either changes. The script stops above 15000 bytes.
 
 ## Before you start (all must be true)
 
