@@ -247,10 +247,40 @@ class PendingDeviceTests(unittest.TestCase):
         )
         self.assertEqual(self.repository.get_profile("slow").name, "Changed")
         before = active_rows(self.repository)
-        with self.assertRaises(StorageError):
+        with self.assertRaises(StorageError) as refused:
             self.repository.replace_settings(SavedSettings())
+        self.assertIn(
+            f"Remove pending device choices for {saved.mac_address}", str(refused.exception)
+        )
+        self.assertIn("before importing settings that omit their profiles", str(refused.exception))
         self.assertEqual(active_rows(self.repository), before)
         self.assertEqual(self.repository.list_pending_device_choices(), (saved,))
+        self.assertFalse(self.repository.in_transaction)
+        self.assertEqual(
+            self.repository._connection.execute("PRAGMA foreign_keys").fetchone()[0], 1
+        )
+
+    def test_import_pending_reference_message_is_bounded_and_version_check_stays_first(self):
+        for index in range(8):
+            self.repository.save_pending_device_choice(
+                choice(index, action="profile", profile_id="slow", display_name="<b>" + "x" * 61)
+            )
+        pending = self.repository.list_pending_device_choices()
+        before = active_rows(self.repository)
+        with self.assertRaisesRegex(StorageError, "^settings changed since the preview$"):
+            self.repository.replace_settings(SavedSettings(), expected_version=-1)
+        with self.assertRaises(StorageError) as refused:
+            self.repository.replace_settings(SavedSettings())
+        message = str(refused.exception)
+        for saved in pending[:3]:
+            self.assertIn(saved.mac_address, message)
+        for saved in pending[3:]:
+            self.assertNotIn(saved.mac_address, message)
+        self.assertIn("(and 5 more)", message)
+        self.assertNotIn("<b>", message)
+        self.assertLess(len(message), 200)
+        self.assertEqual(active_rows(self.repository), before)
+        self.assertEqual(self.repository.list_pending_device_choices(), pending)
         self.assertFalse(self.repository.in_transaction)
         self.assertEqual(
             self.repository._connection.execute("PRAGMA foreign_keys").fetchone()[0], 1

@@ -2154,6 +2154,19 @@ class ConfigRepository:
                     and self.get_runtime_state().configuration_version != expected_version
                 ):
                     raise StorageError("settings changed since the preview")
+                incoming_profiles = {profile.id for profile in settings.profiles}
+                pending_references = tuple(
+                    choice.mac_address for choice in self.list_pending_device_choices()
+                    if choice.profile_id is not None and choice.profile_id not in incoming_profiles
+                )
+                if pending_references:
+                    references = ", ".join(pending_references[:3])
+                    if len(pending_references) > 3:
+                        references += f" (and {len(pending_references) - 3} more)"
+                    raise StorageError(
+                        f"Remove pending device choices for {references} before importing "
+                        "settings that omit their profiles"
+                    )
                 ad_devices = blocking_macs(settings.ad_blocking_devices)
                 ad_allowances = allowed_domains(settings.ad_blocking_allowances)
                 if set(ad_devices) - {item.mac_address for item in settings.unaffected_devices}:

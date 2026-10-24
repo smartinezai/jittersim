@@ -22,9 +22,9 @@ exports retain their current format and do not include pending choices.
 
 ## Focused checks
 
-The direct Python 3.12 run passed 150 tests across:
+The direct Python 3.12 run passed 151 tests across:
 
-- tests/unit/test_pending_devices.py: 12 tests
+- tests/unit/test_pending_devices.py: 13 tests
 - tests/unit/test_storage.py
 - tests/unit/test_storage_migrations.py
 - tests/unit/test_changing_profiles.py
@@ -46,12 +46,12 @@ and git diff --check passed. The native wrapper command for the final commit is:
 PIP_NO_INDEX=1 PIP_NO_BUILD_ISOLATION=0 scripts/local-ci.sh rerun \
   tests/unit/test_pending_devices.py tests/unit/test_storage.py \
   tests/unit/test_storage_migrations.py tests/unit/test_changing_profiles.py \
-  --python 3.12 --step-timeout 60 --results-dir test-results/pending-final
+  --python 3.12 --step-timeout 60 --results-dir test-results/pending-final-review
 ```
 
 The wrapper uses a private copy of cached Python 3.12 dependencies and installs
 the local package. Shared runtimes are not changed. Wrapper output is retained
-under test-results/pending-final and its exact commit is in that run's summary.
+under test-results/pending-final-review and its exact commit is in that run's summary.
 
 ## Actual older repository proof
 
@@ -98,3 +98,20 @@ No API, server, dashboard, scheduler, engine, helper or pinned file changed.
 No real router, Pi, network call, browser, Docker or heavy suite was used.
 Physical acceptance and Stage 2 activation remain unimplemented and untested.
 Publication waits for independent review of the final diff and these receipts.
+
+## Review correction after 082dde37
+
+The new-code import refusal now checks pending profile references within the
+existing transaction immediately after the expected configuration version check
+and before any mutation. The message identifies at most three normalized MAC
+addresses, states the number of remaining choices and instructs the owner to
+remove those choices before importing settings that omit their profiles. It
+never aggregates display names. The message is under 200 characters even at the
+256-choice cap. No choice, active setting or configuration version is changed.
+The deferred foreign key remains the final integrity check.
+
+The added test verifies the bounded message, exclusion of supplied markup,
+expected-version error precedence and unchanged application rows and pending
+choices. The existing omitted-profile test now checks the actionable message as
+well as full atomicity. The actual older-source probe still exercises its
+generic error and remains the documented compatibility limit above.
