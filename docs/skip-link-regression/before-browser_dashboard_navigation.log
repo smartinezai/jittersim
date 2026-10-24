@@ -1,0 +1,242 @@
+$ /Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/skip-link-worktree/.venv-local-ci-3.12/bin/python -m tests.browser.dashboard_navigation
+# started 2026-10-24 23:49:26 +0200
+{
+  "results": [
+    {
+      "case": "desktop",
+      "initial": {
+        "top": -64,
+        "bottom": -16.8125,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "devices",
+        "active": "controls-toggle",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "focused": {
+        "top": 12,
+        "bottom": 59.1875,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": true,
+        "focusVisible": true,
+        "section": "devices",
+        "active": "",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "after_pointer": {
+        "top": -64,
+        "bottom": -16.8125,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "page-profiles",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "activated": {
+        "top": -291,
+        "bottom": -243.8125,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "content",
+        "pageScale": 1,
+        "scrollY": 227,
+        "root": "16px"
+      }
+    },
+    {
+      "case": "phone",
+      "initial": {
+        "top": -64,
+        "bottom": -16.8125,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "devices",
+        "active": "controls-toggle",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "focused": {
+        "top": 12,
+        "bottom": 59.1875,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": true,
+        "focusVisible": true,
+        "section": "devices",
+        "active": "",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "after_pointer": {
+        "top": -64,
+        "bottom": -16.8125,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "page-profiles",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "activated": {
+        "top": -317,
+        "bottom": -269.8125,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "content",
+        "pageScale": 1,
+        "scrollY": 253,
+        "root": "16px"
+      }
+    },
+    {
+      "case": "large-text",
+      "initial": {
+        "top": -128,
+        "bottom": 10.375,
+        "width": 296,
+        "height": 138.375,
+        "focused": false,
+        "focusVisible": false,
+        "section": "devices",
+        "active": "controls-toggle",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "32px"
+      },
+      "focused": {
+        "top": 24,
+        "bottom": 162.375,
+        "width": 296,
+        "height": 138.375,
+        "focused": true,
+        "focusVisible": true,
+        "section": "devices",
+        "active": "",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "32px"
+      },
+      "after_pointer": {
+        "top": -128,
+        "bottom": 10.375,
+        "width": 296,
+        "height": 138.375,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "page-profiles",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "32px"
+      },
+      "activated": {
+        "top": -6329,
+        "bottom": -6190.625,
+        "width": 296,
+        "height": 138.375,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "content",
+        "pageScale": 1,
+        "scrollY": 6201,
+        "root": "32px"
+      }
+    },
+    {
+      "case": "page-scale",
+      "initial": {
+        "top": -64,
+        "bottom": -16.8125,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "devices",
+        "active": "controls-toggle",
+        "pageScale": 2,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "focused": {
+        "top": 12,
+        "bottom": 59.1875,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": true,
+        "focusVisible": true,
+        "section": "devices",
+        "active": "",
+        "pageScale": 2,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "after_pointer": {
+        "top": -64,
+        "bottom": -16.8125,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "page-profiles",
+        "pageScale": 2,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "activated": {
+        "top": -64,
+        "bottom": -16.8125,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "content",
+        "pageScale": 2,
+        "scrollY": 0,
+        "root": "16px"
+      }
+    }
+  ],
+  "issues": [
+    "large-text: unfocused skip link leaks into viewport",
+    "large-text: skip link remains onscreen after pointer navigation"
+  ]
+}
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/skip-link-worktree/tests/browser/dashboard_navigation.py", line 388, in <module>
+    run()
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/skip-link-worktree/tests/browser/dashboard_navigation.py", line 343, in run
+    check_skip_matrix(browser, f"http://127.0.0.1:{port}")
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/skip-link-worktree/tests/browser/dashboard_navigation.py", line 322, in check_skip_matrix
+    assert not issues, issues
+           ^^^^^^^^^^
+AssertionError: ['large-text: unfocused skip link leaks into viewport', 'large-text: skip link remains onscreen after pointer navigation']
+# finished with status 1 after 4.4 seconds
