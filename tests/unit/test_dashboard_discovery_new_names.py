@@ -88,7 +88,8 @@ function baseline() { observationListKeys = new Set([observationNameKey(old.ipv4
 def run_scan(steps):
     start = SCRIPT.index("    let observationListKeys = null;")
     end = SCRIPT.index("    let randomWebsiteAnalyticsRequestVersion", start)
-    sources = "\n".join(function_source(name) for name in (
+    sources = "\n".join(("async " if name in ("scanObservations", "loadObservations") else "")
+                        + function_source(name) for name in (
         "observationNameKey", "newObservationScanKeys", "newDisplayedObservationCount",
         "scanObservations", "loadObservations"))
     program = (HARNESS + SCRIPT[start:end] + sources + "\n(async () => {\n" + steps
