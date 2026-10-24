@@ -166,6 +166,26 @@ def prepare_page(browser, base, width, dpr, general_active, touch=False):
     return context, page, requests, errors
 
 
+def expect_legend_targets(page, touch):
+    """Keep visible chart controls usable on desktop and touch screens."""
+    assert page.evaluate('matchMedia("(pointer: coarse)").matches') == touch
+    buttons = page.locator(".traffic-legend button:visible")
+    assert buttons.count() >= 4
+    heights = []
+    for button in buttons.all():
+        expect(button).to_be_visible()
+        button.scroll_into_view_if_needed()
+        box = button.bounding_box()
+        viewport = page.viewport_size
+        assert box and viewport
+        assert box["width"] >= 44 and box["height"] >= 44, box
+        assert box["x"] >= 0 and box["x"] + box["width"] <= viewport["width"] + 1, box
+        assert box["y"] >= 0 and box["y"] + box["height"] <= viewport["height"] + 1, box
+        heights.append(box["height"])
+    print(f"Visible legend targets: {buttons.count()}, minimum height {min(heights)}px, "
+          f"width {page.viewport_size['width']}px, coarse pointer {touch}")
+
+
 def check_chart(browser, base, width, dpr, general_active, touch=False):
     context, page, requests, errors = prepare_page(
         browser, base, width, dpr, general_active, touch
@@ -188,6 +208,7 @@ def check_chart(browser, base, width, dpr, general_active, touch=False):
             visible_series = SERIES[:4]
         for series in visible_series:
             expect(page.locator(f'[data-traffic-series="{series}"]')).to_be_visible()
+        expect_legend_targets(page, touch)
 
         expect(page.locator("#traffic-status")).to_contain_text(
             "Sampling live traffic", timeout=8000
@@ -283,6 +304,7 @@ def check_chart(browser, base, width, dpr, general_active, touch=False):
         page.set_viewport_size({"width": resized_width, "height": 900})
         expect(page.locator("#traffic-chart")).to_be_visible()
         assert page.evaluate("document.documentElement.scrollWidth") <= resized_width + 1
+        expect_legend_targets(page, touch)
         choose_plot_point(page, 5)
         expect_emphasis(page, "profile_download")
         expect(detail).to_contain_text("5.00 Mbit/s")

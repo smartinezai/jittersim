@@ -683,7 +683,7 @@
             </div>
           </div>
         </details>
-        <button type="submit">Save profile</button>
+        <button class="primary" type="submit">Save profile</button>
         <button id="new-profile" type="button" hidden>New profile</button>
       </form>
       <details>
@@ -794,7 +794,7 @@
         <p id="schedule-clock" class="form-note"></p>
         <p class="form-note">A device's own schedule wins over its group's. Timers and
           progressions win over schedules.</p>
-        <button type="submit">Save schedule</button>
+        <button class="primary" type="submit">Save schedule</button>
       </form>
       <div id="schedule-list" class="schedule-list">No schedules yet.</div>
     </section>
@@ -819,7 +819,7 @@
         </label>
       </div>
       <p class="form-note">The timer starts when saved. It temporarily overrides schedules and the device’s normal profile. The selected profile’s rerolls, outages, website rules and other settings run during the timer then the device returns to its normal profile.</p>
-      <button class="primary" type="submit">Start timer</button>
+      <button type="submit">Start timer</button>
     </form>
     <div id="timer-list" class="timer-list">No active timers.</div>
   </section>
@@ -840,7 +840,7 @@
         when you press Start. A running scenario takes over from schedules, as a timer does.
         For a device, starting a timer or a scenario replaces the other and a device's own
         timer or scenario wins over its group's. Data limits still win.</p>
-      <button class="primary" type="submit">Start scenario</button>
+      <button type="submit">Start scenario</button>
     </form>
     <div id="scenario-run-list" class="timer-list">No running scenarios.</div>
     <h3>Saved scenarios</h3>
@@ -902,7 +902,7 @@
         <textarea id="progression-domains" placeholder="youtube.com, example.com"></textarea>
       </label>
       <p class="form-note">The start and end profiles are interpolated gradually. Existing randomness and outage settings continue to run. DNS mode counts observed queries. Device-data mode counts IPv4 upload and download bytes, so a long stream can advance it even when there are few new DNS queries. The device returns to its normal schedule or profile when the duration ends.</p>
-      <button class="primary" type="submit">Start progression</button>
+      <button type="submit">Start progression</button>
     </form>
     <div id="progression-list" class="progression-list">No active progressions.</div>
   </section>
@@ -947,7 +947,7 @@
         <label class="quota-check"><input id="data-limit-enabled" type="checkbox" checked> Enabled</label>
       </div>
       <p class="form-note">Editing a saved limit keeps its current usage. The fallback profile starts when the device total reaches the limit.</p>
-      <button class="primary" type="submit">Save device limit</button>
+      <button type="submit">Save device limit</button>
     </form>
     <div id="data-limit-list" class="quota-list">Enter the admin token to view limits.</div>
   </section>
@@ -992,7 +992,7 @@
         <label class="quota-check"><input id="group-data-limit-enabled" type="checkbox" checked> Enabled</label>
       </div>
       <p class="form-note">The shared limit adds the byte counters for all group members. A per-device limit takes priority if the same device has both.</p>
-      <button class="primary" type="submit">Save group limit</button>
+      <button type="submit">Save group limit</button>
     </form>
     <div id="group-data-limit-list" class="quota-list">Enter the admin token to view group limits.</div>
   </section>
@@ -1030,7 +1030,7 @@
         <button type="button" id="service-list-add-observed">Add to hostnames</button>
       </div>
       <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device profile or the profile for Everyone. Protected devices are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's random variation and random outages apply to the whole list: all affected devices get the same new values and the same outages. During an outage the listed services are unreachable while the Pi's DNS and the dashboard and other sites keep working. The profile's website list is not used for service lists.</p>
-      <button class="primary" type="submit">Save service list</button>
+      <button type="submit">Save service list</button>
     </form>
     <div id="service-list-list" class="quota-list">Enter the admin token to view service lists.</div>
   </section>
@@ -1062,7 +1062,7 @@
         <textarea id="service-assignment-domains" rows="4" required placeholder="netflix.com&#10;google.com&#10;youtube.com"></textarea>
       </label>
       <p class="form-note">Includes subdomains of each name. Configure the Mac browser's HTTPS proxy as 192.168.50.1:3128 while connected to the test Wi-Fi. Other proxied sites keep the device profile. Apps and connections that bypass the proxy are outside this control.</p>
-      <button class="primary" type="submit">Save browser service profile</button>
+      <button type="submit">Save browser service profile</button>
     </form>
     <div id="service-assignment-list" class="quota-list">Enter the admin token to view service profiles.</div>
   </section>
@@ -1119,7 +1119,7 @@
         <select id="service-quota-domains" class="quota-domain-picker" multiple required></select>
       </label>
       <p class="form-note">Only domains observed from the selected device appear here. Select all names used by the service. Matching direct traffic is counted together then multiplied by the quota weight. Browser proxy tunnels are outside this limit.</p>
-      <button class="primary" type="submit">Save service limit</button>
+      <button type="submit">Save service limit</button>
     </form>
     <div id="service-quota-list" class="quota-list">Enter the admin token to view service limits.</div>
   </section>
@@ -1176,7 +1176,7 @@
         <select id="time-quota-domains" class="quota-domain-picker" multiple required></select>
       </label>
       <p class="form-note">Active time is counted when matching traffic is seen. A long video stream therefore keeps using the allowance even when there are no new clicks. Save the limit then start its timer from the saved row.</p>
-      <button class="primary" type="submit">Save time limit</button>
+      <button type="submit">Save time limit</button>
     </form>
     <div id="time-quota-list" class="quota-list">Enter the admin token to view time limits.</div>
   </section>
@@ -1306,7 +1306,7 @@
       </div>
       <div class="observation-actions">
         <span id="observation-count" class="count-badge">No scan yet</span>
-        <button id="scan-observations" class="primary" type="button">Scan now</button>
+        <button id="scan-observations" type="button">Scan now</button>
       </div>
     </div>
     <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits. Protected devices never appear here. Optional ad blocking checks domain names without saving history. Block globally also blocks every name under a name (example.com also blocks www.example.com) while household access rules are on. Blocked and Unblock show on the exact name that was blocked.</p>
@@ -1350,7 +1350,7 @@
       <label>Result files
         <input id="measurement-files" type="file" accept=".json,application/json" multiple>
       </label>
-      <button id="copy-measurements" type="button" disabled>Copy table as Markdown</button>
+      <button id="copy-measurements" class="primary" type="button" disabled>Copy table as Markdown</button>
       <button id="clear-measurements" type="button" disabled>Clear</button>
     </div>
     <div id="measurement-table" class="table-wrap">Add result files to compare runs.</div>
@@ -1370,7 +1370,7 @@
         <p>The last 500 network events, newest first. Rerolls are left out.</p>
       </div>
       <div class="activity-actions">
-        <button type="button" id="activity-copy">Copy as Markdown</button>
+        <button type="button" id="activity-copy" class="primary">Copy as Markdown</button>
         <button type="button" id="activity-download">Download Markdown</button>
         <button type="button" id="activity-clear">Clear all</button>
       </div>
@@ -1448,7 +1448,7 @@
           </div>
         </div>
         <p class="policy-note">Website rules use resolved IPv4 destinations and are best effort. VPNs, encrypted DNS and direct IP connections can bypass them.</p>
-        <button id="save-policies" type="submit">Save access rules</button>
+        <button id="save-policies" class="primary" type="submit">Save access rules</button>
       </form>
     </section>
   </section><!-- /page:access -->
@@ -1486,7 +1486,7 @@
     <section class="card" data-collapse="open">
       <div class="section-heading">
         <div><h2 id="diagnostics-title">Diagnostics</h2><p>Runtime state and available traffic counters</p></div>
-        <button id="refresh-diagnostics" type="button">Refresh</button>
+        <button id="refresh-diagnostics" class="primary" type="button">Refresh</button>
       </div>
       <pre id="diagnostics-json" tabindex="0" role="region" aria-label="Diagnostics data">Enter the admin token to inspect diagnostics.</pre>
     </section>

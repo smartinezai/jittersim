@@ -416,7 +416,6 @@
     .traffic-legend button.traffic-dimmed { opacity: 0.5; }
     .traffic-key { display: block; flex: 0 0 2.25rem; width: 2.25rem; height: 0.75rem; }
     .traffic-chart-detail { margin: 0.65rem 0 0; min-height: 2.8em; color: var(--tx-strong); font-size: 0.82rem; overflow-wrap: anywhere; }
-    @media (pointer: coarse) { .traffic-legend button { min-height: 44px; } }
     .traffic-note { margin: 0.75rem 0 0; color: var(--tx-muted); font-size: 0.8rem; }
     .uplink-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
     .uplink-value { padding: 0.75rem; border: 1px solid var(--bd-subtle); border-radius: 0.6rem; background: var(--bg-inset); }
