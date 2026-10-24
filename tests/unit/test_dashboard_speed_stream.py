@@ -9,6 +9,7 @@ import socket
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from unittest import mock
 
 from jittersim.api import speed_tests as routes
@@ -232,6 +233,87 @@ class StreamTests(DashboardTestBase):
         run.streaming = True
         refused = self.stream(self.run_id, "shaped").refused
         self.assertEqual(refused, (409, "The other part of this test is still running"))
+
+    @contextmanager
+    def waiting_stream(self):
+        """Hold the admitted caller between checks without timing a thread's arrival."""
+        sleeping = threading.Event()
+        resume = threading.Event()
+        outcome = {}
+
+        def pause(seconds):
+            if threading.current_thread() is not worker:
+                raise AssertionError("An additional caller must not wait")
+            sleeping.set()
+            if not resume.wait(5):
+                raise AssertionError("The test did not release the waiter")
+
+        def open_part():
+            try:
+                outcome["opened"] = self.manager.open_stream(self.run_id, "shaped", PHONE_ADDRESS)
+            except Exception as error:
+                outcome["error"] = error
+
+        run = self.manager.runs[self.run_id]
+        self.manager.open_stream(self.run_id, "reference", PHONE_ADDRESS)
+        worker = threading.Thread(target=open_part, daemon=True)
+        with mock.patch.object(routes.time, "sleep", side_effect=pause):
+            worker.start()
+            try:
+                self.assertTrue(sleeping.wait(5), "The caller never waited for the stream")
+                yield run, outcome
+            finally:
+                resume.set()
+                worker.join(5)
+                self.assertFalse(worker.is_alive(), "The waiting caller did not finish")
+
+    def test_only_one_caller_waits_and_it_can_open_when_the_stream_closes(self) -> None:
+        with self.waiting_stream() as (run, outcome):
+            for _ in range(3):
+                with self.assertRaises(routes.SpeedTestRequestError) as refused:
+                    self.manager.open_stream(self.run_id, "shaped", PHONE_ADDRESS)
+                self.assertEqual(refused.exception.status, 409)
+                self.assertIn("Another request is waiting", str(refused.exception))
+            self.manager.close_stream(run)
+            # Closing the stream does not let a new caller steal the admitted caller's part.
+            with self.assertRaises(routes.SpeedTestRequestError):
+                self.manager.open_stream(self.run_id, "shaped", PHONE_ADDRESS)
+        self.assertNotIn("error", outcome)
+        self.assertIs(outcome["opened"][0], run)
+        self.assertEqual(run.parts, {"reference", "shaped"})
+        self.assertFalse(run.stream_waiting)
+        self.manager.close_stream(run)
+
+    def test_a_wait_timeout_releases_admission_for_a_retry(self) -> None:
+        with mock.patch.object(routes.time, "monotonic", return_value=100) as clock:
+            with self.waiting_stream() as (run, outcome):
+                clock.return_value = 101
+        self.assertIsInstance(outcome.get("error"), routes.SpeedTestRequestError)
+        self.assertIn("still running", str(outcome["error"]))
+        self.assertFalse(run.stream_waiting)
+        self.assertEqual(run.parts, {"reference"})
+        self.manager.close_stream(run)
+        self.assertIs(self.manager.open_stream(self.run_id, "shaped", PHONE_ADDRESS)[0], run)
+        self.manager.close_stream(run)
+
+    def assert_waiter_stops(self, ending):
+        with self.waiting_stream() as (run, outcome):
+            ending()
+        self.assertIsInstance(outcome.get("error"), routes.SpeedTestRequestError)
+        self.assertEqual(outcome["error"].status, 409)
+        self.assertNotIn("opened", outcome)
+        self.assertFalse(run.stream_waiting)
+        self.assertEqual(run.parts, {"reference"})
+        self.manager.close_stream(run)
+
+    def test_cancelling_the_run_releases_the_waiter(self) -> None:
+        self.assert_waiter_stops(lambda: self.manager.cancel(self.run_id))
+
+    def test_shutdown_releases_the_waiter(self) -> None:
+        self.assert_waiter_stops(self.manager.shutdown)
+
+    def test_a_pending_reset_releases_the_waiter(self) -> None:
+        self.assert_waiter_stops(lambda: setattr(self.server, "_resets_pending", 1))
 
     def test_a_site_run_has_no_stream(self) -> None:
         self.manager.cancel(self.run_id)

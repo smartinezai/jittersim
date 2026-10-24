@@ -416,7 +416,6 @@
     .traffic-legend button.traffic-dimmed { opacity: 0.5; }
     .traffic-key { display: block; flex: 0 0 2.25rem; width: 2.25rem; height: 0.75rem; }
     .traffic-chart-detail { margin: 0.65rem 0 0; min-height: 2.8em; color: var(--tx-strong); font-size: 0.82rem; overflow-wrap: anywhere; }
-    @media (pointer: coarse) { .traffic-legend button { min-height: 44px; } }
     .traffic-note { margin: 0.75rem 0 0; color: var(--tx-muted); font-size: 0.8rem; }
     .uplink-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
     .uplink-value { padding: 0.75rem; border: 1px solid var(--bd-subtle); border-radius: 0.6rem; background: var(--bg-inset); }
@@ -620,20 +619,7 @@
     .router-wifi-copy { display: grid; gap: 0.5rem; }
     .router-wifi-copy .router-wifi-status:empty { display: none; }
     .sidebar .router-wifi-copy button { min-height: 2.4rem; padding: 0.35rem 0.5rem; font-size: 0.8rem; text-align: center; }
-    .sidebar .router-wifi-toggle {
-      display: grid; place-items: center; flex: 0 0 2.8rem; min-height: 2.75rem;
-      padding: 0; border: 0; background: transparent; border-radius: 0.5rem;
-    }
-    .sidebar .router-wifi-toggle:hover:not(:disabled) { background: var(--bg-control-hover); }
-    .switch-track {
-      width: 2.5rem; height: 1.4rem; padding: 0.18rem; border-radius: 1rem;
-      background: #40546b; transition: background 160ms ease;
-    }
-    .switch-thumb { width: 1.04rem; height: 1.04rem; border-radius: 50%; background: #f4f8fc; transition: transform 160ms ease; }
-    .router-wifi-toggle[aria-checked="true"] .switch-track { background: #2e926e; }
-    .router-wifi-toggle[aria-checked="true"] .switch-thumb { transform: translateX(1.1rem); }
-    .router-wifi-toggle[data-unknown="true"] .switch-track { background: #26394e; }
-    .router-wifi-toggle[aria-busy="true"]::after { display: none; }
+    .router-wifi-value { flex: 0 0 auto; font-size: 0.85rem; font-weight: 550; color: var(--tx-strong); }
     .credentials-panel {
       position: fixed; z-index: 110; right: 1rem;
       top: calc(var(--credential-viewport-top, 0px) + 1rem);

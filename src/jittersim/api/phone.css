@@ -102,13 +102,13 @@
   }
   .safety-bar .router-wifi-control > div { min-width: 0; }
   .safety-bar .router-wifi-label {
-    overflow: hidden; font-size: 0.78rem; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap;
+    display: block; font-size: 0.78rem; line-height: 1.2;
   }
   .safety-bar .router-wifi-status {
     display: -webkit-box; margin: 0.1rem 0 0; overflow: hidden; font-size: 0.7rem; line-height: 1.15;
     overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   }
-  .sidebar .safety-bar .router-wifi-toggle { flex: 0 0 2.75rem; height: 2.75rem; min-height: 0; }
+  .safety-bar .router-wifi-value { font-size: 0.78rem; margin-inline: 0.25rem; }
 
   .controls-toggle {
     position: fixed; z-index: 61; right: 0.75rem; bottom: calc(0.5rem + env(safe-area-inset-bottom, 0px));
@@ -184,6 +184,8 @@
   .controls-toggle::before { display: none; }
   .safety-bar { gap: 0.4rem; padding-left: 0.6rem; }
   .safety-bar .panic-button { padding: 0 0.7rem; }
+  .safety-bar .router-wifi-control { padding-inline-start: 0; gap: 0; }
+  .safety-bar .router-wifi-value { margin-inline: 0; font-weight: 400; }
 }
 
 /* The random value cards need 15rem each: on a narrow phone with large text they must shrink to one column. */

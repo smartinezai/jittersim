@@ -4,11 +4,11 @@ import json
 import sqlite3
 import time
 from dataclasses import replace
+from urllib.parse import parse_qs
 
 from jittersim.diagnostic_records import recorded
 from jittersim.config.models import MacPolicy, SiteBlock, normalize_mac_address
 from jittersim.config.storage import DeviceConflictError, RepositoryBusy, StorageError
-from jittersim.engine.access import build_access_plan
 from jittersim.engine.runtime import SchedulerBusy
 from jittersim.networking.helper import HelperClientError
 
@@ -59,12 +59,31 @@ def _definition(plan):
     return value
 
 
-def read_access_api(server, path):
+def _policy_summary(policy):
+    """Keep status and device rules without the domain names used by the editor."""
+    websites = policy["websites"]
+    return {
+        **policy,
+        "websites": {
+            "mode": websites["mode"],
+            "allowed_domain_count": len(websites["allowed_domains"]),
+            "blocked_domain_count": len(websites["blocked_domains"]),
+        },
+        "blocks": [
+            {**{key: value for key, value in rule.items() if key != "domains"},
+             "domain_count": len(rule["domains"])}
+            for rule in policy["blocks"]
+        ],
+    }
+
+
+def read_access_api(server, path, query=""):
+    """Read complete policies by default; summary=1 omits names from status polls."""
     if path != "/api/access":
         return None
     from jittersim.engine.access import access_from_payload
 
-    plan = build_access_plan(server.repository.access_settings())
+    plan = server.repository.access_plan()
     result = {
         "available": False,
         "wifi_admission_available": False,
@@ -97,6 +116,13 @@ def read_access_api(server, path):
         and runtime.observed_state == "reset"
         and runtime.last_action == "reset"
     )
+    if parse_qs(query).get("summary") == ["1"]:
+        # Compare the complete policies above. Omitted names must not hide pending changes.
+        result["saved_policy"] = _policy_summary(result["saved_policy"])
+        if result.get("policy") is not None:
+            # Older helpers can omit optional version-1 fields. Use the same
+            # defaults as the validated comparison, leaving the full response intact.
+            result["policy"] = _policy_summary(applied.payload())
     return response(result)
 
 
@@ -338,7 +364,7 @@ def write_access_api(server, path, payload, *, control_intent=None):
             ))
             if not accepted:
                 return server._apply_refused(generation)
-        plan = build_access_plan(repository.access_settings())
+        plan = repository.access_plan()
         refused = server._apply_refused(generation)
         if refused is not None:
             return refused

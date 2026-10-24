@@ -8,9 +8,10 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import jittersim.api.server as server_module
-from jittersim.api.server import ControlServer
+from jittersim.api.server import ControlRequestHandler, ControlServer
 from jittersim.config.address_follow import AddressFollowStore
 from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import Device, DomainObservation, Impairment, Profile, Scenario, ScenarioStep
@@ -150,17 +151,19 @@ class FixtureAccessManager(AccessManager):
 
 
 class DashboardHelperService(HelperService):
-    """The real helper, plus a staged release and a reachable router when seeded."""
+    """The real network helper with isolated release replies and a fake router."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._fixture_online_settings = {"daily_check": False, "install_automatically": False}
         if seeded():
             # Main's demo helper reported the router reachable; nothing probes it here.
             self._gateway_state = "available"
 
     def _handle_payload(self, payload):
-        if seeded() and isinstance(payload, dict) and payload.get("action") == "update-status":
-            return {
+        action = payload.get("action") if isinstance(payload, dict) else None
+        if action == "update-status":
+            status = {
                 "ok": True,
                 "phase": "idle",
                 "installed": "test-release",
@@ -172,7 +175,29 @@ class DashboardHelperService(HelperService):
                 "reason": None,
                 "trusted_keys": 1,
                 "message": "A verified release is staged and ready.",
+                "token_set": False,
+                "retry": None,
             }
+            if not seeded():
+                status.update(installed="Unversioned installation", available=None,
+                              installable=False, signed_by=None, notes=None,
+                              trusted_keys=0, message="No release is staged in the browser fixture.")
+            return status
+        if action in ("update-online-status", "update-online-settings"):
+            changes = payload.get("changes")
+            if action == "update-online-settings" and changes is not None:
+                if (not isinstance(changes, dict) or not changes
+                        or set(changes) - set(self._fixture_online_settings)
+                        or not all(isinstance(value, bool) for value in changes.values())):
+                    return {"ok": False, "error": "Invalid browser fixture update settings."}
+                self._fixture_online_settings.update(changes)
+            return {"ok": True, "state": "none", "job": payload.get("job"), "token_set": False,
+                    "settings": dict(self._fixture_online_settings),
+                    "message": "Online release checks are disabled in the browser fixture."}
+        # Keep new release actions out of the production dispatcher too.
+        if isinstance(action, str) and action.startswith("update-"):
+            return {"ok": False, "reason": "release-refused",
+                    "error": "Release operations are disabled in the browser fixture."}
         return super()._handle_payload(payload)
 
 
@@ -326,6 +351,24 @@ class FixtureCheckProber:
         pass
 
 
+class FixtureRequestHandler(ControlRequestHandler):
+    def _handle_write(self):
+        # Keep the normal token and device checks before refusing upload admission.
+        if (urlsplit(self.path).path == server_module.RELEASE_UPLOAD_PATH
+                and self.server.admin_token is not None
+                and self.server.is_authorized(self.headers.get("Authorization"))):
+            if not self._check_device_access(emergency=False):
+                return
+            self.close_connection = True
+            self._send_response(
+                status=503, content_type="application/json",
+                body=json.dumps({"error": "Release uploads are disabled in the browser fixture."}).encode(),
+                headers={"Connection": "close"},
+            )
+            return
+        return super()._handle_write()
+
+
 class FixtureServer(ControlServer):
     speed_test_prober_factory = FixtureProber
 
@@ -343,7 +386,17 @@ class FixtureServer(ControlServer):
         return FixtureCheckProber(target, probes, impairment)
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        # All callers, including the soak target, get private upload paths.
+        self._release_directory = tempfile.TemporaryDirectory(prefix="jittersim-browser-updates-")
+        root = Path(self._release_directory.name)
+        self.release_spool = root / "incoming-release"
+        self.release_upload_lock = root / "release-upload.lock"
+        try:
+            super().__init__(*args, **kwargs)
+        except BaseException:
+            self._release_directory.cleanup()
+            raise
+        self.RequestHandlerClass = FixtureRequestHandler
         # The request handler starts a speed test with the browser's address, so the fault is
         # hooked into the manager's start.
         manager = self._speed_test_manager
@@ -356,6 +409,12 @@ class FixtureServer(ControlServer):
             return run
 
         manager.start = start_with_fault
+
+    def server_close(self):
+        try:
+            super().server_close()
+        finally:
+            self._release_directory.cleanup()
 
     def _fail_speed_test(self, run_id):
         manager = self._speed_test_manager

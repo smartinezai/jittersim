@@ -28,9 +28,14 @@ class BoundedLookupPool:
         self._lock = threading.Condition()
         self._unfinished: Set[Future] = set()
 
-    def submit(self, function: Callable, *arguments) -> Optional[Future]:
+    def submit(
+        self, function: Callable, *arguments, unfinished_limit: int = MAX_UNFINISHED_LOOKUPS
+    ) -> Optional[Future]:
+        """Admit work below both the caller's limit and the pool's fixed capacity."""
+        if unfinished_limit <= 0:
+            raise ValueError("unfinished_limit must be greater than 0")
         with self._lock:
-            if len(self._unfinished) >= MAX_UNFINISHED_LOOKUPS:
+            if len(self._unfinished) >= min(unfinished_limit, MAX_UNFINISHED_LOOKUPS):
                 return None
             if len(self._threads) < self._workers:
                 thread = threading.Thread(

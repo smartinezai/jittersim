@@ -526,8 +526,15 @@ The project is ready for presentation when it can:
 
 ## Current remaining work
 
-Checked against `origin/main` at `f290ea9d` (PR 171) on 19 October 2026. Every unticked box in the
-milestones above is one of these:
+Checked against reviewed source composition `309be4d7` on 24 October 2026. It includes PRs
+212–214, 218–221 and 223–226, the merge of PR 222, PR 227's content-cache change and PR 228
+fixture isolation (`666f7b04`). Validation results apply only to their recorded commit and do
+not transfer automatically between revisions. Run local gates for the selected exact release
+head. The official Python 3.9, 3.11 and 3.13 matrix remains outside the current evidence.
+Physical acceptance, signing, publication and installation remain separate.
+This revision also includes the reviewed per-page title correction `b244d57e` and saved-plan
+reuse in the access API `ee32b631`. Their results remain specific to their tested heads.
+Every unticked box in the milestones above is one of these:
 
 - Owner-run physical acceptance on the Pi (Milestones 9 to 15 and the router security section).
 - An open design or decision: the household network design (Milestone 11), the separate client
@@ -536,15 +543,17 @@ milestones above is one of these:
   [carry-forward list](docs/carry-forward-panic-batch-2026-10-10.md).
 - Planned work that has not started: Milestones 16 to 19 (Deliveries B to F of the erratic
   connection plan) and the website list modes of the [planned features](docs/planned-features.md).
-- Planned work in progress: the open draft pull requests on GitHub.
+- Held follow-ups: PR 209 (Docker matrix test prerequisites) until v0.2.0 is published,
+  and PR 175 (helper caller checks) until v0.2.0 is installed. These holds are not cleared by
+  this local source composition.
 - Delivered on 23 October 2026: the **This device** label (PR 181), the **Reset Wi-Fi name**
   button in the sidebar (PR 182), **Check connection** (PR 161, 186 and 207), a speed test that
   runs from the dashboard itself, download only (PR 189), a global block list of 2000 names and
   80000 characters (PR 188), the preset sources with Slow 3G and DSL (PR 185) and
   `jittersim backup pull` (PR 179). Requested and not in main yet (see
   [planned features](docs/planned-features.md)): protected devices that the global block list
-  does not affect, which needs the Panic-pinned `access.py` and waits until after v0.2.0. After
-  v0.2.0: a dashboard redesign with components.
+  does not affect, which needs the Panic-pinned `access.py` and waits until v0.2.0 is installed.
+  The dashboard redesign waits until v0.2.0 is published.
 - The v0.2.0 release itself (Milestone 12), described below.
 
 Hosted CI cannot start jobs (billing limit). Every pull request is gated by
@@ -564,19 +573,29 @@ audit), 160 and 169 (boot Wi-Fi look), 162 (QA leftovers and flaky tests), 164 (
 resource fixes), 163 (write route table), 165 (speed test follow-ups), 166 (mutation testing), 167
 (property tests) and 168 (interrupted apply cleanup).
 
-Open pull requests on 19 October 2026 (all drafts, PR 163 and 165 merged during the day). Both below have merged since:
+PR 161 (**Check connection**) and PR 170 (security-audit follow-ups) are merged,
+along with the later fixes of PR 186 and PR 187. Explicitly held pull requests
+checked on 24 October 2026:
 
-| PR | What it does | State |
+| PR | What it does | Hold |
 | --- | --- | --- |
-| 161 | A **Check connection** button that sends probes to a device and compares loss and delay with its profile (replaces PR 153) | Merged on 23 October |
-| 170 | Finish the follow-ups of the PR 159 security audit | Merged on 19 October |
+| 209 | Give the Docker unit rows the tools the tests need | Do not merge before v0.2.0 is published |
+| 175 | Refuse saved-access changes from non-root helper callers | Do not merge before v0.2.0 is installed |
 
 The first release, v0.2.0, is being prepared. `pyproject.toml` already says `0.2.0`, but no tag, no
 GitHub release and no reserved version exist yet (`docs/releases/registry.json`). The release tooling
-is merged. The owner's steps, in order: install current `main` on the Pi once with the root installer
-(a Pi that runs an older development build refuses the signed packages), save the read-only GitHub
-token on the Pi, connect the Mac to the dashboard, run `scripts/release.sh 0.2.0`, install and test
-the exact package on the Pi and approve the release (see the
+is merged. The earlier candidate had six passing local gates with Python 3.12 unit coverage. Those
+results do not cover this combined source. Run the local gates on the exact source revision before
+using them as evidence. The Python 3.9, 3.11 and 3.13 matrix remains unrun. None establishes physical
+acceptance or installation.
+The owner's steps, in order: connect the Mac to the dashboard using the Pi's current
+certificate, then save a fresh database backup on the Mac and check the copy with the
+[backup drill](docs/user-guide.md#back-up-to-your-mac-and-check-the-copy). Do this before
+any Pi update, including the bootstrap, then repeat it before every later Pi update. Only then
+install current `main` on the Pi once with the root installer (an older development build refuses
+the signed packages), save the read-only GitHub token on the Pi, run
+`scripts/release.sh 0.2.0`, take another fresh checked backup before installing the exact package,
+test that package on the Pi and approve the release (see the
 [owner runbook](docs/release-runbook-2026-10-16.md) and the
 [draft release notes](docs/release-notes-0.2.0-draft.md)). The owner approves the release itself.
 

@@ -457,9 +457,16 @@
     let brandInfo = null;
     let brandRequestSerial = 0;
 
+    function updatePageTitle(signedIn) {
+      const name = signedIn && brandInfo ? brandInfo.name : "";
+      const page = name && document.getElementById("page-" + document.body.dataset.section);
+      const label = page && page.getAttribute("aria-label");
+      document.title = name ? (label ? label + " · " : "") + name : "Sign in";
+    }
+
     function applyBrand(signedIn) {
       const name = signedIn && brandInfo ? brandInfo.name : "";
-      document.title = name || "Sign in";
+      updatePageTitle(signedIn);
       element("brand-title").textContent = name || "Network lab";
       element("brand-sidebar").setAttribute("aria-label", name || "Network lab");
       element("measure-command").textContent = signedIn && brandInfo
@@ -6004,6 +6011,14 @@
     let refreshWanted;
 
     async function refresh(only) {
+      const revision = adminTokenRevision;
+      if (dashboardRefresh && dashboardRefreshRevision !== revision) {
+        // An older token's read can fail after a new check accepts its token. Wait for
+        // that refresh to end, then read for this revision without inheriting its error.
+        await dashboardRefresh.catch(() => {});
+        if (revision !== adminTokenRevision) return;
+        return refresh(only);
+      }
       invalidateAdminTools();
       const scope = only === undefined ? null : only;
       refreshWanted = refreshWanted === undefined || refreshWanted === null || scope === null
@@ -6011,6 +6026,7 @@
         : new Set([...refreshWanted, ...scope]);
       refreshAgain = true;
       if (dashboardRefresh) return dashboardRefresh;
+      dashboardRefreshRevision = revision;
       dashboardRefresh = (async () => {
         if (dashboardPoll) await dashboardPoll;
         do {
@@ -6039,14 +6055,31 @@
     const runningActions = new Set();
     let actionIntentRevision = 0;
 
+    function restoreBusyFocus(opener, fallback) {
+      if (document.activeElement !== document.body) return;
+      const visible = (node) => node && node.isConnected && !node.disabled &&
+        !node.closest("[hidden], [inert]") && node.getClientRects().length &&
+        window.getComputedStyle(node).visibility !== "hidden";
+      const target = visible(opener) ? opener : visible(fallback) ? fallback : null;
+      if (target) target.focus({preventScroll: true});
+    }
+
+    let actionReturnFocus = null;
+    privateDataLockHooks.push(() => { actionReturnFocus = null; });
+
     function setActionBusy(busy, path) {
+      const focused = document.activeElement;
+      const applyButton = element("apply-button");
+      const resetButton = element("reset-button");
+      if (busy && !networkActionBusy &&
+          (focused === applyButton || focused === resetButton) && !focused.disabled) {
+        actionReturnFocus = {button: focused, revision: adminTokenRevision};
+      }
       if (busy) runningActions.add(path);
       else runningActions.delete(path);
       busy = runningActions.size > 0;
       networkActionBusy = busy;
       if (busy) networkActionRevision += 1;
-      const applyButton = element("apply-button");
-      const resetButton = element("reset-button");
       applyButton.disabled = busy || !helperConfigured;
       resetButton.disabled = busy || !helperConfigured;
       applyBusy = runningActions.has("/api/apply");
@@ -6065,6 +6098,13 @@
       ["general-profile-apply", "general-profile-stop"].forEach((id) => {
         element(id).setAttribute("aria-busy", String(generalBusy));
       });
+      if (!busy) {
+        const returning = actionReturnFocus;
+        actionReturnFocus = null;
+        if (returning && returning.revision === adminTokenRevision && adminTokenVerified) {
+          restoreBusyFocus(returning.button);
+        }
+      }
     }
 
     const PANIC_QUEUED = "Panic is sent now. It runs as soon as the Pi can take it";
@@ -7497,13 +7537,16 @@
         if (tokenRevision === adminTokenRevision) showMessage(error.message, "error");
       } finally {
         wifiResetPending = false;
-        if (tokenRevision === adminTokenRevision) settleResetWifiButtons();
+        if (tokenRevision === adminTokenRevision) {
+          settleResetWifiButtons();
+          if (adminTokenVerified) restoreBusyFocus(button, element("controls-toggle"));
+        }
       }
     }
     resetWifiButtons().forEach((each) => each.addEventListener("click", resetWifiName));
 
     function renderRouterWifi() {
-      const button = element("router-wifi-toggle");
+      const value = element("router-wifi-toggle");
       const status = element("router-wifi-status");
       const password = element("router-admin-password").value;
       const fresh = routerWifiCheckedAt && Date.now() / 1000 - routerWifiCheckedAt < 45;
@@ -7518,11 +7561,8 @@
       element("check-router-password").disabled = busy || routerCheckWaiting();
       element("refresh-router-wifi").disabled = !helperConfigured || !adminTokenVerified ||
         !password || routerPasswordRejected || busy;
-      button.disabled = true;
-      button.title = "Router Wi-Fi switching is disabled for recovery safety. Use the router controls.";
-      button.setAttribute("aria-checked", String(known && routerWifiEnabled));
-      button.setAttribute("data-unknown", String(!known));
-      button.setAttribute("aria-busy", String(busy));
+      value.textContent = known ? (routerWifiEnabled ? "On" : "Off") : "Unknown";
+      value.setAttribute("data-unknown", String(!known));
       status.textContent = !adminTokenVerified ? "Check admin token" : !helperConfigured ? "Needs Pi helper" :
         !password ? "Enter router password" : routerPasswordRejected ? "Password rejected" :
         routerActionPending || routerWifiRemoteChanging ? "Changing…" : busy ? "Checking…" :
@@ -7652,7 +7692,7 @@
       if (routerPasswordBlocked(button)) return;
       routerActionPending = true;
       if (path === "/api/router/wifi") routerWifiMinimumCheck = Date.now() / 1000;
-      ["sync-router-ap", "router-wifi-toggle"].forEach((id) => { element(id).disabled = true; });
+      element("sync-router-ap").disabled = true;
       setButtonBusy(button, true);
       updateCredentialStatus();
       status.textContent = message;
@@ -7717,7 +7757,7 @@
       } finally {
         if (stillCurrent() && typeof clearReconnectFlag === "function") clearReconnectFlag();
         routerActionPending = false;
-        ["sync-router-ap", "router-wifi-toggle"].forEach((id) => { element(id).disabled = false; });
+        element("sync-router-ap").disabled = false;
         setButtonBusy(button, false);
         updateCredentialStatus();
       }
@@ -7751,12 +7791,11 @@
       }
       if (routerPasswordBlocked(button)) return;
       if (routerCheckWaiting()) return;
-      const routerButtons = ["sync-router-ap", "router-wifi-toggle"];
       const wasVerified = routerPasswordVerified;
       routerPasswordChecking = true;
       routerPasswordVerified = false;
       routerPasswordRejected = false;
-      routerButtons.forEach((id) => { element(id).disabled = true; });
+      element("sync-router-ap").disabled = true;
       setButtonBusy(button, true);
       button.textContent = "Checking...";
       updateCredentialStatus();
@@ -7783,7 +7822,7 @@
         showMessage(error.message, tooSoon ? "info" : "error");
       } finally {
         routerPasswordChecking = false;
-        routerButtons.forEach((id) => { element(id).disabled = false; });
+        element("sync-router-ap").disabled = false;
         setButtonBusy(button, false);
         button.textContent = "Check password";
         updateCredentialStatus();
@@ -9425,6 +9464,7 @@
     }
 
     let dashboardRefresh = null;
+    let dashboardRefreshRevision = -1;
 
     let dashboardPoll = null;
 

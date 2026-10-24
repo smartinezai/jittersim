@@ -5,6 +5,7 @@ import os
 import selectors
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
@@ -459,6 +460,74 @@ def check_sidebar_reach(browser):
         process.wait(timeout=10)
 
 
+def check_action_focus(page):
+    """Hold local fixture writes so focus and overlapping Panic are deterministic."""
+    wait_for_automatic_token_check(page)
+    held = {}
+    paths = ("/api/apply", "/api/reset", "/api/normal-access")
+
+    def hold(route):
+        held[route.request.url.rsplit("/api/", 1)[1]] = route
+
+    def reply(name):
+        deadline = time.monotonic() + 5
+        while name not in held and time.monotonic() < deadline:
+            page.wait_for_timeout(10)
+        assert name in held, (name, "request did not reach the local route")
+        held.pop(name).fulfill(status=400, json={"error": "Focus test action failed."})
+
+    for path in paths:
+        page.route("**" + path, hold)
+    try:
+        panic = page.locator("#panic-button")
+        for selector, name in (("#apply-button", "apply"), ("#reset-button", "reset")):
+            button = sidebar_control(page, selector)
+            button.focus()
+            button.press("Enter")
+            expect(button).to_be_disabled()
+            expect(page.locator("body")).to_be_focused()
+            expect(panic).to_be_enabled()
+            reply(name)
+            expect(button).to_be_enabled()
+            expect(button).to_be_focused()
+            page.keyboard.press("Tab")
+            assert page.evaluate("document.activeElement.className") != "skip-link"
+
+        # An action finishing must respect someone moving to another control.
+        start = sidebar_control(page, "#apply-button")
+        start.focus()
+        start.press("Enter")
+        expect(start).to_be_disabled()
+        panic.focus()
+        reply("apply")
+        expect(start).to_be_enabled()
+        expect(panic).to_be_focused()
+
+        # Panic stays usable during Start, in either order of completion.
+        for first, second in (("apply", "normal-access"), ("normal-access", "apply")):
+            start = sidebar_control(page, "#apply-button")
+            start.focus()
+            start.press("Enter")
+            expect(start).to_be_disabled()
+            expect(panic).to_be_enabled()
+            panic.focus()
+            panic.press("Enter")
+            expect(panic).to_have_attribute("aria-busy", "true")
+            reply(first)
+            page.wait_for_function("() => runningActions.size === 1")
+            expect(start).to_be_disabled()
+            expect(panic).to_be_enabled()
+            expect(panic).to_be_focused()
+            reply(second)
+            page.wait_for_function("() => runningActions.size === 0")
+            expect(start).to_be_enabled()
+            expect(panic).to_be_focused()
+    finally:
+        for path in paths:
+            page.unroute("**" + path, hold)
+    close_controls(page)
+
+
 def check_width(browser, width, height):
     # a fresh fixture for each width so that each run starts before the first Apply
     process, port = start_fixture()
@@ -489,6 +558,8 @@ def check_width(browser, width, height):
         expect(page.locator("#private-dashboard")).to_be_visible()
         page.locator("#remember-admin-token").check()
         page.locator("#close-credentials").click()
+
+        check_action_focus(page)
 
         # a saved profile and one saved device without starting anything
         post(
@@ -523,6 +594,7 @@ def check_width(browser, width, height):
         # Reset network switches it off. On a phone it is in the Controls sheet.
         sidebar_control(page, "#reset-button").click()
         expect(runtime).to_have_text(OFF)
+        expect(page.locator("#reset-button")).to_be_focused()
         expect(apply_button).to_have_text(START)
         expect(summary).to_have_text(SAVED_DEVICE)
         assert_old_wording_is_gone(page)

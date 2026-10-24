@@ -118,7 +118,7 @@ def test_release_docker_runs_match_the_workflow_in_order():
     assert script_array("RELEASE_DOCKER_RUNS") == workflow
     image = script_value("RELEASE_IMAGE")
     assert "docker build -f tests/wifi/Dockerfile -t %s ." % image in workflow_commands("wifi-recovery.yml")
-    assert 'docker build -f tests/wifi/Dockerfile -t "$RELEASE_IMAGE" .' in script_text()
+    assert 'docker build -f tests/wifi/Dockerfile --iidfile "$image_file" .' in script_text()
 
 
 def test_lint_rules_and_playwright_pin_match_the_workflows():

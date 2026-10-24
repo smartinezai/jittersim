@@ -1,4 +1,4 @@
-"""Phone layout: a short header, a bar with Panic and the router switch and a Controls sheet."""
+"""Phone layout: a short header, a bar with Panic and the router status and a Controls sheet."""
 
 import json
 import re
@@ -76,7 +76,7 @@ def test_the_phone_rules_come_after_the_earlier_narrow_screen_rules():
     assert ".sidebar { position: static" not in style
 
 
-def test_the_bar_is_pinned_to_the_bottom_with_panic_and_the_router_switch():
+def test_the_bar_is_pinned_to_the_bottom_with_panic_and_the_router_status():
     bar = phone(".safety-bar")
     assert bar["position"] == "fixed"
     assert (bar["left"], bar["right"], bar["bottom"]) == ("0", "0", "0")
@@ -137,7 +137,6 @@ def test_touch_targets_are_at_least_44px(selector):
 
 def test_the_bar_controls_are_44px_tall():
     assert phone(".safety-bar .panic-button")["height"] == TARGET
-    assert phone(".sidebar .safety-bar .router-wifi-toggle")["height"] == TARGET
     assert phone(".safety-bar .router-wifi-control")["height"] == TARGET
     # The cards and forms of the pages were 44px already.
     access = declarations(CSS)
@@ -489,3 +488,15 @@ def test_the_strip_follows_the_status_block():
         "true",
         [True, "false", False],
     ]
+
+
+def test_router_status_is_visible_text_without_a_control_role():
+    value = tag("router-wifi-toggle")
+    assert value.startswith("<span ")
+    assert 'id="router-wifi-label" class="router-wifi-label">Router Wi-Fi</span>' in HTML
+    for attribute in ("role=", "tabindex=", "aria-checked=", "aria-label=", "disabled"):
+        assert attribute not in value
+    assert 'class="router-wifi-value"' in value
+    assert 'class="switch-track"' not in HTML
+    assert phone(".safety-bar .router-wifi-label")["display"] == "block"
+    assert "text-overflow" not in phone(".safety-bar .router-wifi-label")

@@ -32,7 +32,8 @@ class FakeNode {
     this.textContent = "";
     this.value = "";
     this.hidden = false;
-    this.disabled = false;
+    this._disabled = false;
+    this.isConnected = true;
     this.checked = false;
     this.classes = new Set();
     this.classList = {
@@ -58,7 +59,14 @@ class FakeNode {
   querySelectorAll() { return []; }
   contains(node) { return node === this; }
   matches() { return false; }
-  focus() {}
+  set disabled(value) {
+    this._disabled = value;
+    if (value && document.activeElement === this) document.activeElement = document.body;
+  }
+  get disabled() { return this._disabled; }
+  closest() { return this.hidden ? this : null; }
+  getClientRects() { return this.hidden ? [] : [{}]; }
+  focus() { if (!this.disabled && !this.hidden) document.activeElement = this; }
   remove() {}
   scrollIntoView() {}
 }
@@ -66,7 +74,10 @@ const store = {};
 const element = (id) => (store[id] = store[id] || new FakeNode("div"));
 const document = {
   createElement: (tag) => new FakeNode(tag), activeElement: null, hidden: false,
+  body: new FakeNode("body"),
 };
+document.activeElement = document.body;
+const window = {getComputedStyle: () => ({visibility: "visible"})};
 let helperConfigured = true;
 let adminTokenVerified = true;
 let adminTokenRevision = 0;
@@ -167,7 +178,7 @@ PRIVATE_PANELS = lambda: (  # noqa: E731
     + between("function setPrivateDataPanels(", "let helperConfigured = false;")
 )
 ACTIONS = lambda: between(  # noqa: E731
-    "function setActionBusy(", 'element("apply-button").addEventListener'
+    "function restoreBusyFocus(", 'element("apply-button").addEventListener'
 )
 POLL = lambda: between("function pollLiveStatus(", "// The three are polled apart")  # noqa: E731
 
@@ -589,3 +600,36 @@ def test_a_successful_action_does_not_fetch_the_state_twice():
     result = run(body)
     assert "GET /api/state" not in result["requests"]
     assert result["shown"] == "Profiles off"
+
+
+@pytest.mark.parametrize("button,path", [("apply-button", "/api/apply"), ("reset-button", "/api/reset")])
+def test_network_action_returns_focus_after_the_last_overlapping_action(button, path):
+    result = run(
+        "element(%s).focus();" % json.dumps(button)
+        + "setActionBusy(true, %s);" % json.dumps(path)
+        + "setActionBusy(true, '/api/normal-access');"
+        + "setActionBusy(false, %s);" % json.dumps(path)
+        + "const waiting = document.activeElement === document.body;"
+        + "setActionBusy(false, '/api/normal-access');"
+        + "console.log(JSON.stringify({waiting, returned: document.activeElement === element(%s)}));"
+        % json.dumps(button)
+    )
+    assert result == {"waiting": True, "returned": True}
+
+
+@pytest.mark.parametrize("changed", [
+    "element('panic-button').focus();",
+    "element('apply-button').hidden = true;",
+    "element('apply-button').isConnected = false;",
+    "adminTokenRevision += 1;",
+    "privateDataLockHooks.forEach((hook) => hook());",
+    "helperConfigured = false;",
+])
+def test_network_action_does_not_restore_stale_or_unavailable_focus(changed):
+    result = run(
+        "element('apply-button').focus(); setActionBusy(true, '/api/apply');"
+        + changed
+        + "setActionBusy(false, '/api/apply');"
+        + "console.log(JSON.stringify({returned: document.activeElement === element('apply-button')}));"
+    )
+    assert result["returned"] is False

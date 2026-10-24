@@ -178,7 +178,7 @@ Usage: scripts/local-ci.sh [options] COMMAND [TARGET...] [-- EXTRA ARGUMENTS]
 Commands (each one is one workflow job, or a few):
   lint            ruff as the Lint job does, then advisory checks that only print counts
   unit            the whole pytest suite on one Python (the Python matrix job, one version)
-  browser         tests.browser.journeys and the 28 Pi browser modules
+  browser         tests.browser.journeys and the configured Pi browser modules
   gui             the GUI baseline job: its pytest files, gui_baseline and a11y_axe
   homepage        the Homepage reference job (needs npm and the network for npm ci)
   kernel          the Linux datapath job (Docker, privileged)
@@ -999,11 +999,32 @@ cmd_release_checks() {
   run_step "release-locked-wheels-py$PY_VERSION" "$TIMEOUT_DOCKER" - -- \
     "$VENV_PY" deploy/raspberry-pi/prepare-locked-wheels.py --source . --output "$RUN_DIR/locked-wheels-py$PY_VERSION"
   if [ "$DRY_RUN" != 1 ]; then docker_ready release-docker || return 0; fi
-  run_step release-docker-build "$TIMEOUT_DOCKER" - -- docker build -f tests/wifi/Dockerfile -t "$RELEASE_IMAGE" .
-  local entry parts
+  # Keep the build output beside its evidence. A floating tag can be replaced by another worktree.
+  local image_file=$RUN_DIR/release-image.id image_id=sha256:BUILD_OUTPUT digest
+  run_step release-docker-build "$TIMEOUT_DOCKER" - -- \
+    docker build -f tests/wifi/Dockerfile --iidfile "$image_file" .
+  if [ "$DRY_RUN" != 1 ]; then
+    [ "$LAST_RESULT" = PASS ] || return 0
+    image_id=$(cat "$image_file" 2>/dev/null) || image_id=
+    digest=${image_id#sha256:}
+    case "$image_id" in
+      sha256:*) case "$digest" in *[!0-9a-f]*) digest= ;; esac ;;
+      *) digest= ;;
+    esac
+    if [ "${#digest}" -ne 64 ]; then
+      record_blocked release-docker-image "Docker did not write a valid image ID to $image_file; no release containers were started."
+      return 0
+    fi
+    meta release_image "$image_id"
+  fi
+  local entry parts name index
   for entry in "${RELEASE_DOCKER_RUNS[@]}"; do
     read -r -a parts <<<"$entry"
-    run_step "release-$(docker_run_name "${parts[@]}")" "$TIMEOUT_DOCKER" - -- \
+    name=$(docker_run_name "${parts[@]}")
+    for index in "${!parts[@]}"; do
+      [ "${parts[$index]}" = "$RELEASE_IMAGE" ] && parts[$index]=$image_id
+    done
+    run_step "release-$name" "$TIMEOUT_DOCKER" - -- \
       docker run --memory "$DOCKER_MEMORY" "${parts[@]}"
   done
 }

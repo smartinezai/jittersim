@@ -61,6 +61,13 @@ Use this checkout (clean, nobody else edits it) for steps 2 and 5.
 
 ## 2. One-time bootstrap of the Pi with the current main  [OWNER, one sudo password]
 
+Before this bootstrap, save a **fresh database backup on the Mac** and check the copy with the
+[backup drill](user-guide.md#back-up-to-your-mac-and-check-the-copy). New profiles may have been
+added since an earlier backup. If the Mac connection is not ready, complete the connection setup
+in section 4 first, using the certificate of the installation the Pi currently runs. Do not
+start the bootstrap until the new backup is saved and checked. Repeat this before every later
+Pi update, including installation of the exact signed package.
+
 Be on the router network or Ethernet (not the Pi's test Wi-Fi). Keep a second terminal open with
 `ssh -i ~/.ssh/jittersim_ed25519 jittersim@192.168.0.17` and stay near the Pi: the installer
 restarts the dashboard, helper and DNS briefly (a running test Wi-Fi is not restarted).

@@ -3,13 +3,15 @@
 The exact October2 fix list is preserved in [the historical archive](history/2026-10-02-backlog-and-ux/planned-fixes.md).
 New feature ideas are in [feature proposals](feature-proposals-2026-10-09.md).
 
-Baseline: `origin/main` at `f290ea9d` (the merge of PR 171 on 19 October 2026), checked on
-19 October 2026. Statuses come from the source and the merged pull requests on that commit. Nothing
-here was run on a Pi. The 4 October accepted main `5e0fed2` matched tested candidate 6fb864f. Hosted
-jobs cannot start (billing limit), so every pull request is gated by `scripts/local-ci.sh` on its head
-commit ([local CI](local-ci.md)).
+Source status reconciled on 24 October 2026. This revision contains the reviewed
+follow-ups listed below. Original candidate `afa7d222` and its evidence remain
+preserved. Validation results apply only to their recorded commit and do not
+transfer automatically between revisions. Run local gates for the selected
+exact release head. The official Python 3.9, 3.11 and 3.13 matrix remains
+outside the current evidence. Physical acceptance, signing, publication and
+installation remain separate. Hosted CI is billing-blocked. See [local CI](local-ci.md).
 
-## Changes after that candidate (9 to 19 October 2026)
+## Changes after the 4 October candidate (9 to 19 October 2026)
 
 - Router Wi-Fi writes are permanently refused by the Pi helper and the dashboard
   switch is read only (PR 87, merge `3903581`). Read-only router status checks and
@@ -109,13 +111,12 @@ Two browser checks needed updates when those changes were composed. Recovery
 now explicitly checks router status and waits for intercepted requests.
 Keyboard diagnostics permits only the pure range-preview POST while continuing
 to detect actual writes. The failed runs and corrected focused checks are
-retained. The complete current Linux sequence passed.
+retained. Those results describe the 4 October candidate.
 
-All configured local pipeline checks passed and the accepted main tree matches
-the frozen candidate. Signing trust, safe recovery and physical Pi/phone
-acceptance remain deployment gates. Hosted jobs stopped before execution by billing limits
-can use fully completed local counterparts under the current human authority.
-Do not describe them as successful hosted jobs.
+Candidate `afa7d222` has passed lint, unit (Python 3.12), browser, GUI, kernel and
+release checks locally. Signing trust, safe recovery and physical Pi/phone
+acceptance remain deployment gates. Local results do not establish successful hosted
+jobs or an installed release.
 
 The physical router incident remains unresolved. Later healthy addresses and
 services were recorded after recovery. They do not establish the initial
@@ -128,9 +129,10 @@ new tickets. The archived list retains all details and proposed fixes.
 
 ## Open fixes
 
-Open on 19 October 2026, with the items of 23 October added at the end of this list. PR 161 and 170
-have merged since. The pull requests that are still open and their states are in the
-[roadmap](../ROADMAP.md) and on GitHub.
+Open against reviewed source composition `309be4d7` on 24 October 2026. PR 161,
+PR 170 and their review follow-ups are merged. PR 175 is held until v0.2.0 is
+installed; the PR 209 Docker test-harness follow-up is held until publication.
+Their states are in the [roadmap](../ROADMAP.md) and on GitHub.
 
 - Two owner decisions from the review of PR 138 ([review results](review-results-carry-forward-2026-10-16.md)).
   The recommended default applies until the owner decides.
@@ -157,34 +159,34 @@ have merged since. The pull requests that are still open and their states are in
   retry after "Device verification is busy" is manual. The probe with four simultaneous checks has
   not been repeated on an installed Pi. The backlog audit proposes one shared answer per peer
   ([backlog audit](backlog-audit-2026-10-16.md), item 1).
-- Small dashboard defect left by the QA sweep of 17 October (PR 152). The note under **Router outage
-  behavior** says "until you choose Apply" but the button is **Start**. The other findings of that
-  sweep (Revoke all homepage pairings, Clear on the Measurements page, row names on the **Delete**
+- The router outage note now names **Start** (PR 223). The other findings of the 17 October QA sweep
+  (Revoke all homepage pairings, Clear on the Measurements page, row names on the **Delete**
   and **Edit** buttons and the repeated Restore Wi-Fi name sentence) were fixed in PR 162.
 - Names accept control characters and bidirectional overrides through the API and import.
   This is a log and display hygiene question ([QA report](qa-report-2026-10-09.md)). An
-  HTTP/0.9 request still gets an answer with no status line. The browser fixture is not
-  hermetic for update actions.
+  HTTP/0.9 request still gets an answer with no status line. Browser fixture release operations
+  are isolated by PR 228 (`666f7b04`); the composed release head still needs its own gates.
 - Loaded Pi capacity was never measured (feature proposal 20 in
   [feature proposals](feature-proposals-2026-10-09.md)).
-- Tooling notes. The usage text of `scripts/local-ci.sh browser` still says 28 Pi browser modules
-  (there are 32 besides the journeys). The advisory checks of local CI report findings
+- Tooling notes: local-CI help and documentation refer to configured jobs rather than old module counts
+  (PR 223). Docker checks use the immutable image ID built by that invocation (PR 213).
+  The advisory checks of local CI report findings
   (zizmor 13, pip-audit 21, shellcheck 16 on 17 October) that never gate. The two overengineering
   reviews list further removals ([backend](review-overengineering-backend.md) and
   [front end and tests](review-overengineering-frontend-tests.md)).
 - Dashboard QA sweep of 23 October 2026 (main `3afb48d5`, 601 controls pressed at 1440 and 375 px, no
-  uncaught error or failed request). Four S3 findings were fixed in PR 204. Left open:
-  - **S2, keyboard focus is dropped to the page after Start or Reset network.** Both buttons are disabled
-    while the action runs (`setActionBusy`, `dashboard.js` about 6042) and nothing gives focus back, so the next
-    Tab starts at "Skip to main content". The same happens after confirming **Reset Wi-Fi name** on a phone.
-    Panic keeps focus. Fix: in `setActionBusy(false)`, if focus is on the body and the button had it when the
-    action began, focus the button again. It touches the code that drives Panic-adjacent buttons.
-  - S3: the phone bar cuts "Router Wi-Fi · read only" at 375 px and below (`phone.css` about 104, needs a shorter
-    label or two lines). The sidebar needs a scroll in short or landscape windows (the quick **Reset Wi-Fi name**
+  uncaught error or failed request). Four S3 findings were fixed in PR 204. PR 218 fixed the S2 where
+  focus could fall to the page after Start or Reset network, including **Reset Wi-Fi name**. Remaining
+  S3 findings:
+  - The phone bar label truncation at 375 px and below is addressed by PR 220.
+    The sidebar still needs a scroll in short or landscape windows (the quick **Reset Wi-Fi name**
     button is 4 px under the fold at 1366x768). `#connection-notice` is an `aside role="status"` toggled with
     `hidden`. The group select text "Create a group on th..." is cut (tests pin the wording). The "Update
     available" pill wraps to two lines in the desktop nav (a shorter text fixes it). On a phone the Allow
-    button sits under the Credentials sheet. The help icons are 20x20 px, under the 24 px minimum of WCAG 2.2.
+    button sits under the Credentials sheet. A separate local fixture check found that the old help-icon
+    size report measured the visual box rather than the effective target: pseudo-element targets measured
+    32 px on desktop and 44 px on phone or coarse input. Sixty cardinal-hit checks matched the intended help controls. The sampled mouse and touch
+    interactions showed the correct help with no clipping. This is bounded Chromium fixture evidence, not general phone acceptance.
     The Schedules form wraps its End field alone at 1366x768. Panic is behind the backdrop while a window is open
     (by design, Close and Escape work).
   - Triage of the Codex dark-theme findings: the scrolling page-link row at 375 px is intended
@@ -194,18 +196,15 @@ have merged since. The pull requests that are still open and their states are in
     should not report it again. The "Token accepted. Diagnostics loaded." toast covering content at 375 px is
     intended (it leaves after 6 seconds and has Dismiss). Optional polish: skip it for the automatic sign-in on
     page load.
-- Follow-ups of PR 189 (dashboard speed test) that PR 208 did not close: a script with the admin token can park
-  several workers for 1 second each while the first part streams, so allow one waiter per run. The brcmfmac
-  behaviour of the priority reset is not yet checked on a Pi. PR 208 added the order test for the two socket
-  options, the Linux value 12 for `SO_PRIORITY` and the label without the internet.
-- Follow-ups of PR 188 (2000-name block list, from the reviews and the measurements) that PR 208 did not close:
-  renewals queue up to 24 lookups, so a new name can wait seconds behind them on a slow DNS server (cap queued
-  renewals at 8). A failed renewal caches an empty answer for 60 seconds and drops good addresses (keep the old
-  addresses when a lookup raises). Measured at 2000 names of 29 characters: the `/api/access` answer grows from
-  9.9 KB to 135 to 179 KB and is polled every 5 seconds (leave the names out of the poll), compiling a plan
-  takes 9.3 ms instead of 0.7 ms on a Mac (about ten times that on a Pi 3B+, cache the plan by configuration
-  version), and the 4096-address cap shows only in a log line. PR 208 closed the delete-rule check and the
-  history restore test.
+- Source follow-ups in the reviewed composition: dashboard speed-test streams allow one waiting request
+  per run; Pi-specific priority behavior still needs physical verification. Access-plan reuse is keyed by
+  content and rereads settings each time. Three engine paths and the access API reuse saved plans.
+  Helper policies and unsaved or imported settings still receive full validation. Summary polling omits domain arrays while default and
+  editor API reads remain full. DNS renewal submits at most eight unfinished lookups, retains good stale
+  answers only for the original 600-second window after errors and retries after 30 seconds. A successful
+  empty answer replaces the old addresses. The 4096-address cap is still shown only in a log line.
+  The earlier DNS-branch enrollment failure remains unexplained.
+  PR 224 fixes a separately reproduced token-refresh race with an established cause.
 
 ## Observed accessibility improvements
 

@@ -39,6 +39,7 @@ async function request(path, method) {
   console.log(JSON.stringify({
     status: element("release-status").textContent,
     install: element("release-install").disabled,
+    signer: element("update-signer").textContent,
     badge: !element("update-available-badge").hidden,
   }));
   console.log("CASE-COMPLETE");
@@ -70,7 +71,8 @@ SIGNED = {"phase": "ready", "installed": "old1234", "available": "new5678",
 def test_a_signed_staged_release_names_its_signer_and_can_be_installed():
     shown = show(SIGNED)
     assert shown["install"] is False and shown["badge"] is True
-    assert "Available: new5678 (signed by desk-mac)" in shown["status"]
+    assert "Available: new5678 ·" in shown["status"]
+    assert shown["signer"] == "desk-mac"
 
 
 @NODE

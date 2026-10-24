@@ -160,6 +160,8 @@ class SpeedTestRun:
         # the browser measured.
         self.parts: set = set()
         self.streaming = False
+        # Only one request worker may wait for the current part to finish.
+        self.stream_waiting = False
         self.browser: Optional[Dict[str, Optional[float]]] = None
 
     def payload(self, now: float) -> Dict[str, Any]:
@@ -881,24 +883,35 @@ class SpeedTestManager:
         # The browser asks for the main part as soon as it ends the reference part. The server
         # may not have seen that end yet, so it waits a moment instead of refusing.
         wait_until = time.monotonic() + STREAM_WAIT_SECONDS
-        while True:
-            with self.lock:
-                run = self._running(run_id)
-                if run.provider != DASHBOARD_PROVIDER:
-                    raise SpeedTestRequestError("This test does not use the dashboard", 409)
-                if peer != run.ipv4_address:
-                    raise SpeedTestRequestError(NOT_THIS_DEVICE, 403)
-                if part in run.parts:
-                    raise SpeedTestRequestError("This part of the test already ran", 409)
-                if getattr(self.server, "_resets_pending", 0):
-                    raise SpeedTestRequestError("Reset or Panic is running.", 409)
-                if not run.streaming:
-                    run.parts.add(part)
-                    run.streaming = True
-                    return run, DASHBOARD_PARTS[part] + DASHBOARD_PART_GRACE_SECONDS
-            if time.monotonic() >= wait_until:
-                raise SpeedTestRequestError("The other part of this test is still running", 409)
-            time.sleep(0.05)
+        waiting_run = None
+        try:
+            while True:
+                with self.lock:
+                    run = self._running(run_id)
+                    if run.provider != DASHBOARD_PROVIDER:
+                        raise SpeedTestRequestError("This test does not use the dashboard", 409)
+                    if peer != run.ipv4_address:
+                        raise SpeedTestRequestError(NOT_THIS_DEVICE, 403)
+                    if part in run.parts:
+                        raise SpeedTestRequestError("This part of the test already ran", 409)
+                    if getattr(self.server, "_resets_pending", 0):
+                        raise SpeedTestRequestError("Reset or Panic is running.", 409)
+                    if run.stream_waiting and waiting_run is None:
+                        raise SpeedTestRequestError("Another request is waiting for this test", 409)
+                    if not run.streaming:
+                        run.parts.add(part)
+                        run.streaming = True
+                        return run, DASHBOARD_PARTS[part] + DASHBOARD_PART_GRACE_SECONDS
+                    if waiting_run is None:
+                        run.stream_waiting = True
+                        waiting_run = run
+                if time.monotonic() >= wait_until:
+                    raise SpeedTestRequestError("The other part of this test is still running", 409)
+                time.sleep(0.05)
+        finally:
+            if waiting_run is not None:
+                with self.lock:
+                    waiting_run.stream_waiting = False
 
     def close_stream(self, run: SpeedTestRun) -> None:
         with self.lock:

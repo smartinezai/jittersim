@@ -37,9 +37,11 @@ RESOLVE_WAIT_SECONDS = 10.0
 RESOLVER_THREADS = 8
 _lookup_pool = BoundedLookupPool(workers=RESOLVER_THREADS, name="website-dns")
 # A name that missed the deadline is not waited for again for this long. Its lookup
-# carries on in the background and fills the cache when it ends.
+# carries on in the background and fills the cache when it ends. Failed renewals also
+# wait this long before trying again, while the original answer remains usable.
 _TIMEOUT_MEMORY_SECONDS = 30.0
-_MAX_REMEMBERED_TIMEOUTS = 1024
+# Every cached name needs room for its failed-renewal retry time.
+_MAX_REMEMBERED_TIMEOUTS = _MAX_CACHED_DOMAINS
 _MAX_NAMES_IN_MESSAGE = 8
 _resolution_cache = OrderedDict()
 # Guards the cache and the two dictionaries below.
@@ -159,6 +161,11 @@ def _cached_addresses(*, domain: str) -> tuple:
     try:
         results = socket.getaddrinfo(domain, 443, socket.AF_INET, socket.SOCK_STREAM)
     except (OSError, ValueError):
+        stale = _stale_entry(domain)
+        if stale is not None and stale[1]:
+            # Keep the original expiry: failures must not extend the stale window.
+            _remember_timeout(domain)
+            return stale[1]
         results = ()
     for result in results:
         try:
@@ -198,13 +205,15 @@ def _renew(stale: List[tuple]) -> None:
     """Start background lookups for expired answers, the oldest first.
 
     The oldest first, so every name is renewed in turn however long the list is. Renewals
-    leave RESOLVER_THREADS places of the shared pool free for names that have no answer.
+    use at most RESOLVER_THREADS unfinished places, so new names are not queued behind
+    several batches of renewals. Admission is checked under the pool lock.
     """
 
     for _, name in sorted(stale):
-        if _lookup_pool.unfinished() >= MAX_UNFINISHED_LOOKUPS - RESOLVER_THREADS:
+        if _recently_timed_out(name):
+            continue
+        if _start_lookup(name, None, unfinished_limit=RESOLVER_THREADS) is None:
             return
-        _start_lookup(name, None)
 
 
 def _recently_timed_out(domain: str) -> bool:
@@ -254,16 +263,24 @@ def _lookup_with(resolver: AddressResolver, domain: str) -> tuple:
     return tuple(addresses)
 
 
-def _start_lookup(domain: str, resolver: Optional[AddressResolver]) -> Optional[Future]:
+def _start_lookup(
+    domain: str,
+    resolver: Optional[AddressResolver],
+    *,
+    unfinished_limit: int = MAX_UNFINISHED_LOOKUPS,
+) -> Optional[Future]:
     """Start bounded work or join a system lookup that is still running."""
 
     if resolver is not None:
-        return _lookup_pool.submit(_lookup_with, resolver, domain)
+        return _lookup_pool.submit(_lookup_with, resolver, domain, unfinished_limit=unfinished_limit)
     with _resolution_cache_lock:
         running = _pending.get(domain)
         if running is not None:
             return running
-        future = _lookup_pool.submit(_system_lookup, domain)
+        # A failed renewal may have finished since the caller checked its retry time.
+        if _recent_timeouts.get(domain, 0.0) > time.monotonic():
+            return None
+        future = _lookup_pool.submit(_system_lookup, domain, unfinished_limit=unfinished_limit)
         if future is None:
             return None
         _pending[domain] = future

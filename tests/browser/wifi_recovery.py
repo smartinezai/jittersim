@@ -10,7 +10,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.confirm_dialogs import answer_confirm, cancel_with_escape
-from tests.browser.phone import sidebar_control
+from tests.browser.phone import assert_router_status_is_read_only, sidebar_control
 
 
 def check_wifi_recovery(page):
@@ -94,12 +94,12 @@ def check_router_copy(page):
     expect(banner).to_be_hidden()
 
 
-def check_router_switch(page):
+def check_router_status(page):
     button = page.locator("#router-wifi-toggle")
     checks = []
     page.on("request", lambda request: checks.append(request.post_data_json["refresh"])
             if request.url.endswith("/api/router/status") else None)
-    expect(button).to_be_disabled()
+    assert_router_status_is_read_only(page)
     page.locator("#refresh-router-wifi").click()
     # The password check a moment ago used the router budget, so the Pi does not ask the router
     # again yet. The page says how long to wait and shows no state it does not have.
@@ -110,12 +110,11 @@ def check_router_switch(page):
     page.wait_for_timeout((wait + 1) * 1000)
     checks.clear()
     page.locator("#refresh-router-wifi").click()
-    # Router Wi-Fi switching is refused for recovery safety. The switch only shows the state.
-    expect(button).to_have_attribute("aria-checked", "true", timeout=10000)
+    # Router Wi-Fi switching is refused for recovery safety. The label only shows the state.
+    expect(button).to_have_text("On", timeout=10000)
     assert checks and checks[0] is True and all(refresh is False for refresh in checks[1:])
-    expect(button).to_be_disabled()
-    expect(button).to_have_attribute("title", re.compile("disabled for recovery safety"))
-    expect(page.locator("#router-wifi-label")).to_contain_text("read only")
+    assert_router_status_is_read_only(page)
+    expect(page.locator("#router-wifi-label")).to_have_text("Router Wi-Fi")
     expect(button).to_be_in_viewport()
     writes = []
     page.on("request", lambda request: writes.append(request)
@@ -123,7 +122,7 @@ def check_router_switch(page):
     button.click(force=True)
     page.wait_for_timeout(300)
     assert not writes
-    expect(button).to_have_attribute("aria-checked", "true")
+    expect(button).to_have_text("On")
     assert page.request.get(page.url + "api/health").status == 200
 
 
@@ -155,17 +154,17 @@ def run():
                 page.locator("#close-credentials").click()
                 page.locator('[data-page-link="router"]').click()
                 check_router_copy(page)
-                check_router_switch(page)
+                check_router_status(page)
                 check_wifi_recovery(page)
                 expect(page.locator("#reset-wifi-name")).to_be_in_viewport()
-                expect(page.locator("#router-wifi-toggle")).to_be_disabled()
+                assert_router_status_is_read_only(page)
                 page.locator("#refresh-router-wifi").click()
                 expect(page.locator("#router-wifi-toggle")).to_have_attribute(
-                    "aria-checked", "true", timeout=10000)
+                    "data-unknown", "false", timeout=10000)
                 page.screenshot(path="test-results/wifi-pi-desktop.png", animations="disabled")
                 page.set_viewport_size({"width": 1280, "height": 800})
                 # Whole controls and not a sliver of them. The sidebar lists nine pages
-                # and a laptop screen must still show Panic and the router switch and
+                # and a laptop screen must still show Panic and the router status and
                 # the copy button. The Linux fonts on CI are wider than the Mac ones.
                 expect(page.locator("#router-wifi-toggle")).to_be_in_viewport(ratio=1)
                 expect(page.locator("#panic-button")).to_be_in_viewport(ratio=1)

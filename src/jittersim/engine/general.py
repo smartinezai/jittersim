@@ -5,7 +5,6 @@ from typing import Optional, Sequence
 from jittersim.config.models import Profile
 from jittersim.config.storage import ConfigRepository
 
-from .access import build_access_plan
 from .compiler import compile_plan
 from .plan import GeneralProfileRule, NetworkPlan, ServiceListRule
 from .service_lists import build_service_list_rules
@@ -65,5 +64,5 @@ def _compile_general_plan(
             if service_list_rules is None
             else service_list_rules
         ),
-        access=build_access_plan(repository.access_settings()),
+        access=repository.access_plan(),
     )

@@ -140,7 +140,7 @@ button.danger:hover:not(:disabled) {
   border-color: var(--bad-border-hover);
 }
 button:disabled { box-shadow: none; opacity: 0.5; }
-.card-toggle, .observation-group-header .observation-group-toggle, .traffic-legend button, .sidebar .router-wifi-toggle {
+.card-toggle, .observation-group-header .observation-group-toggle, .traffic-legend button {
   background: none; box-shadow: none;
 }
 .card-toggle:hover:not(:disabled), .traffic-legend button:hover:not(:disabled) { background: none; }
@@ -318,4 +318,16 @@ summary::marker { color: var(--tx-muted); }
   content: ""; flex: none; width: 1.35rem; height: 1.35rem; border-radius: 0.4rem;
   background: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22white%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M4.5 14.5l3-3.5 3 5.5 3-9 3 7 3-2.5%22/%3E%3C/svg%3E") center / 100% no-repeat, linear-gradient(135deg, var(--accent), var(--bg-primary));
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12) inset, 0 0.3rem 0.8rem rgba(42, 108, 184, 0.35);
+}
+
+/* Desktop actions stay compact. Touch targets and specialised controls keep their sizes. */
+@media (min-width: 48.01rem) {
+  @media (pointer: fine) {
+    .content .page:not(#page-router, #page-updates) button:not(.help-icon, .card-toggle, .observation-group-toggle, .panic-button, [data-traffic-series]) {
+      min-height: 2.25rem;
+      min-width: 2.75rem;
+      padding: 0.35rem 0.6rem;
+    }
+    .content .page:not(#page-router, #page-updates) button:not(.primary, .danger, .help-icon, .card-toggle, .observation-group-toggle, .panic-button, [data-traffic-series], :focus-visible) { box-shadow: none; }
+  }
 }

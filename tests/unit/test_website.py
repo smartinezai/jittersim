@@ -8,6 +8,7 @@ from unittest.mock import patch
 from jittersim.config.models import MAX_GLOBAL_BLOCKED_DOMAINS, Device, Profile, WebsitePolicy
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine import website
+from jittersim.engine.lookup_pool import BoundedLookupPool
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
 from jittersim.engine.website import build_website_filters, resolve_domains
@@ -32,10 +33,17 @@ def numbered_answer(name, port, *_):
 
 def wait_for_renewals() -> None:
     """Wait for the background lookups that renew expired answers."""
-    with website._resolution_cache_lock:
-        running = list(website._pending.values())
-    for future in running:
-        future.result(timeout=5)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with website._resolution_cache_lock:
+            running = list(website._pending.values())
+        if not running:
+            return
+        for future in running:
+            future.result(timeout=5)
+        # Future waiters can wake before its pending-removal callback runs.
+        time.sleep(0.001)
+    raise AssertionError("background renewals did not finish")
 
 
 def fake_resolver(domain, _port, _family, _kind):
@@ -53,10 +61,12 @@ class WebsiteResolutionTests(unittest.TestCase):
     def setUp(self) -> None:
         with website._resolution_cache_lock:
             website._resolution_cache.clear()
+            website._recent_timeouts.clear()
 
     def tearDown(self) -> None:
         with website._resolution_cache_lock:
             website._resolution_cache.clear()
+            website._recent_timeouts.clear()
 
     def test_skips_unresolvable_domains_and_deduplicates_addresses(self) -> None:
         addresses = resolve_domains(
@@ -139,6 +149,164 @@ class WebsiteResolutionTests(unittest.TestCase):
                 self.assertEqual(
                     resolve_domains(domains=("example.com",)), (IPv4Address("203.0.113.11"),)
                 )
+
+    def test_concurrent_renewals_leave_a_new_name_after_one_running_lookup(self) -> None:
+        names = tuple(f"renew{number}.example" for number in range(32))
+        old = (IPv4Address("203.0.113.10"),)
+        pool = BoundedLookupPool(workers=8, name="website-renewal-limit-test")
+        release = threading.Semaphore(0)
+        started = threading.Condition()
+        running = []
+        callers_ready = threading.Barrier(5)
+        clock = FakeClock()
+        clock.now = 71.0
+
+        def lookup(name, *_):
+            if name in names:
+                with started:
+                    running.append(name)
+                    started.notify_all()
+                if not release.acquire(timeout=5):
+                    raise AssertionError("test did not release renewal")
+            return ((None, None, None, None, ("203.0.113.11", 0)),)
+
+        def renew_batch(batch):
+            callers_ready.wait(timeout=5)
+            return resolve_domains(domains=batch)
+
+        with website._resolution_cache_lock:
+            website._resolution_cache.update((name, (70.0, old)) for name in names)
+        with patch.object(website, "_lookup_pool", pool), patch.object(website, "time", clock), patch(
+            "jittersim.engine.website.socket.getaddrinfo", side_effect=lookup
+        ):
+            with ThreadPoolExecutor(max_workers=5) as callers:
+                try:
+                    calls = [callers.submit(renew_batch, names[offset:offset + 8])
+                             for offset in range(0, 32, 8)]
+                    callers_ready.wait(timeout=5)
+                    self.assertEqual([call.result(timeout=5) for call in calls], [old] * 4)
+                    self.assertEqual(pool.unfinished(), 8)
+                    with started:
+                        self.assertTrue(started.wait_for(lambda: len(running) == 8, timeout=2))
+                    cold = callers.submit(resolve_domains, domains=("new.example",))
+                    deadline = time.monotonic() + 2
+                    while pool.unfinished() != 9 and time.monotonic() < deadline:
+                        time.sleep(0.001)
+                    self.assertEqual(pool.unfinished(), 9)
+                    # One completed renewal must let the new lookup run immediately.
+                    release.release()
+                    self.assertEqual(cold.result(timeout=2), (IPv4Address("203.0.113.11"),))
+                finally:
+                    for _ in names:
+                        release.release()
+                    wait_for_renewals()
+
+    def test_failed_renewals_keep_the_original_expiry_and_pause_retries(self) -> None:
+        old = (IPv4Address("203.0.113.10"),)
+        for failure in (OSError, ValueError):
+            with self.subTest(failure=failure):
+                clock = FakeClock()
+                clock.now = 71.0
+                with website._resolution_cache_lock:
+                    website._resolution_cache["example.com"] = (70.0, old)
+                    website._recent_timeouts.clear()
+                with patch.object(website, "time", clock), patch(
+                    "jittersim.engine.website.socket.getaddrinfo", side_effect=failure("DNS failed")
+                ) as lookup:
+                    self.assertEqual(resolve_domains(domains=("example.com",)), old)
+                    wait_for_renewals()
+                    self.assertEqual(website._resolution_cache["example.com"], (70.0, old))
+                    clock.now += website._TIMEOUT_MEMORY_SECONDS - 0.001
+                    self.assertEqual(resolve_domains(domains=("example.com",)), old)
+                    wait_for_renewals()
+                    self.assertEqual(lookup.call_count, 1)
+                    clock.now += 0.001
+                    self.assertEqual(resolve_domains(domains=("example.com",)), old)
+                    wait_for_renewals()
+                    self.assertEqual(lookup.call_count, 2)
+                    # Even a failure just before expiry cannot keep the old answer alive.
+                    clock.now = 70.0 + website._STALE_SECONDS - 0.001
+                    self.assertEqual(resolve_domains(domains=("example.com",)), old)
+                    wait_for_renewals()
+                    self.assertEqual(lookup.call_count, 3)
+                    clock.now += 0.001
+                    self.assertIsNone(website._stale_entry("example.com"))
+                    self.assertEqual(resolve_domains(domains=("example.com",)), ())
+                    self.assertEqual(lookup.call_count, 3)
+                    clock.now += website._TIMEOUT_MEMORY_SECONDS
+                    self.assertEqual(resolve_domains(domains=("example.com",)), ())
+                    self.assertEqual(lookup.call_count, 4)
+                    self.assertEqual(website._fresh_addresses("example.com"), ())
+
+    def test_retry_memory_can_hold_a_failed_renewal_for_every_cached_name(self) -> None:
+        old = (IPv4Address("203.0.113.10"),)
+        names = tuple(f"failed{number}.example" for number in range(website._MAX_CACHED_DOMAINS))
+        clock = FakeClock()
+        clock.now = 71.0
+        with website._resolution_cache_lock:
+            website._resolution_cache.update((name, (70.0, old)) for name in names)
+        with patch.object(website, "time", clock), patch(
+            "jittersim.engine.website.socket.getaddrinfo", side_effect=OSError("DNS failed")
+        ) as lookup:
+            # Complete each renewal at the same instant, filling the retry memory.
+            for name in names:
+                self.assertEqual(website._cached_addresses(domain=name), old)
+            self.assertEqual(lookup.call_count, len(names))
+            self.assertEqual(len(website._recent_timeouts), len(names))
+            with patch.object(website, "_start_lookup") as start:
+                self.assertEqual(resolve_domains(domains=names), old)
+                start.assert_not_called()
+
+    def test_a_failed_renewal_that_finishes_after_the_stale_window_drops_the_old_answer(self):
+        old = (IPv4Address("203.0.113.10"),)
+        clock = FakeClock()
+        clock.now = 71.0
+
+        def failure(*_):
+            clock.now = 70.0 + website._STALE_SECONDS
+            raise OSError("DNS failed after the stale window")
+
+        with website._resolution_cache_lock:
+            website._resolution_cache["example.com"] = (70.0, old)
+        with patch.object(website, "time", clock), patch(
+            "jittersim.engine.website.socket.getaddrinfo", side_effect=failure
+        ):
+            self.assertEqual(website._cached_addresses(domain="example.com"), ())
+            self.assertEqual(website._fresh_addresses("example.com"), ())
+
+    def test_a_successful_empty_renewal_replaces_the_old_addresses(self) -> None:
+        old = (IPv4Address("203.0.113.10"),)
+        clock = FakeClock()
+        clock.now = 71.0
+        with website._resolution_cache_lock:
+            website._resolution_cache["example.com"] = (70.0, old)
+        with patch.object(website, "time", clock), patch(
+            "jittersim.engine.website.socket.getaddrinfo", return_value=()
+        ) as lookup:
+            self.assertEqual(resolve_domains(domains=("example.com",)), old)
+            wait_for_renewals()
+            self.assertEqual(resolve_domains(domains=("example.com",)), ())
+            self.assertEqual(website._resolution_cache["example.com"], (131.0, ()))
+            self.assertEqual(lookup.call_count, 1)
+
+    def test_a_renewal_can_recover_after_the_failure_retry_pause(self) -> None:
+        old = (IPv4Address("203.0.113.10"),)
+        clock = FakeClock()
+        clock.now = 71.0
+        new = ((None, None, None, None, ("203.0.113.11", 0)),)
+        with website._resolution_cache_lock:
+            website._resolution_cache["example.com"] = (70.0, old)
+        with patch.object(website, "time", clock), patch(
+            "jittersim.engine.website.socket.getaddrinfo", side_effect=[OSError("DNS failed"), new]
+        ) as lookup:
+            self.assertEqual(resolve_domains(domains=("example.com",)), old)
+            wait_for_renewals()
+            clock.now += website._TIMEOUT_MEMORY_SECONDS
+            self.assertEqual(resolve_domains(domains=("example.com",)), old)
+            wait_for_renewals()
+            self.assertEqual(resolve_domains(domains=("example.com",)), (IPv4Address("203.0.113.11"),))
+            self.assertEqual(website._resolution_cache["example.com"][0], 161.0)
+            self.assertEqual(lookup.call_count, 2)
 
     def test_an_answer_older_than_the_stale_window_is_looked_up_again(self) -> None:
         old = ((None, None, None, None, ("203.0.113.10", 0)),)
