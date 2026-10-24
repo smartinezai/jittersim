@@ -266,8 +266,18 @@ def check_new_scan_names(browser, base, width, evidence):
         expect(summary).to_contain_text("0 displayed names new to list")
         expect(page.locator(".observation-new-name")).to_have_count(0)
         assert state["posts"] == 3, state
+        state["phase"] = 0
+        page.evaluate("() => loadObservations()")
+        page.locator("#scan-observations").click()
+        expect(page.locator(".observation-new-name")).to_have_count(2)
+        page.evaluate("() => lockDashboardAccess('Locked for fixture')")
+        expect(summary).to_have_text("Saved results refresh automatically.")
+        expect(page.locator(".observation-new-name, .observation-new-group")).to_have_count(0)
+        page.evaluate("() => setDashboardUnlocked(true)")
+        expect(summary).not_to_contain_text("Latest")
+        expect(page.locator(".observation-new-name, .observation-new-group")).to_have_count(0)
         evidence.append(f"new names at {width}px: repeat/device-pair distinction, collapsed groups, "
-                        "poll and navigation persistence, failed scan retention, next-scan replacement")
+                        "poll and navigation persistence, failed scan retention, next-scan replacement, private lock clearing")
     finally:
         context.close()
 

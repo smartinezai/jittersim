@@ -1271,6 +1271,8 @@
       observationReadRevision += 1;
       observationListKeys = null;
       latestObservationScan = null;
+      element("observation-scan-summary").textContent = "Saved results refresh automatically.";
+      document.querySelectorAll(".observation-new-name, .observation-new-group").forEach((node) => node.remove());
     });
 
     let randomWebsiteAnalyticsRequestVersion = 0;

@@ -58,7 +58,10 @@ const hooks = [];
 const privateDataLockHooks = hooks;
 const button = {disabled: false, textContent: '', attrs: {},
   setAttribute(k, v) { this.attrs[k] = v; }, removeAttribute(k) { delete this.attrs[k]; }};
-function element() { return button; }
+const summary = {textContent: 'Latest successful scan: 2 displayed names new to list.'};
+const markers = [{removed: false, remove() { this.removed = true; }}];
+const document = {querySelectorAll: () => markers};
+function element(id) { return id === 'observation-scan-summary' ? summary : button; }
 let helperConfigured = true;
 let observationRequestInFlight = false;
 const calls = [], pending = [], messages = [], draws = [];
@@ -174,9 +177,11 @@ def test_private_lock_invalidates_late_scan_or_list_completion(lock_during):
     out = run_scan(steps + """
       await scanning;
       console.log(JSON.stringify({snapshot: observationListKeys, latest: latestObservationScan,
-        draws, success: messages.some(m => m[1] === 'success')}));
+        draws, success: messages.some(m => m[1] === 'success'),
+        summary: summary.textContent, markersRemoved: markers.every(n => n.removed)}));
     """)
-    assert out == {"snapshot": None, "latest": None, "draws": [], "success": False}
+    assert out == {"snapshot": None, "latest": None, "draws": [], "success": False,
+                   "summary": "Saved results refresh automatically.", "markersRemoved": True}
 
 
 def test_old_read_cannot_overwrite_scan_refresh_and_background_reads_wait():
