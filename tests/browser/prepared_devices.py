@@ -101,7 +101,11 @@ def check(browser, base, width, height):
     violations = page.evaluate("async () => (await axe.run(document.querySelector('#prepared-card'), {runOnly:{type:'tag',values:['wcag2a','wcag2aa','wcag21aa']}})).violations")
     assert not violations, violations
     page.locator("#prepared-review details summary").click()
-    card.scroll_into_view_if_needed()
+    if page.locator("#toast").is_visible():
+        expect(page.locator("#toast-message")).to_contain_text("Prepared choice retained.")
+        page.locator("#toast-dismiss").click()
+    card.screenshot(path=f"test-results/prepared-profiles/prepared-{width}-card.png")
+    page.locator("#prepared-use").scroll_into_view_if_needed()
     page.screenshot(path=f"test-results/prepared-profiles/prepared-{width}.png")
     if width == 1440:
         # A pending Review may be overtaken without leaving its row disabled.
