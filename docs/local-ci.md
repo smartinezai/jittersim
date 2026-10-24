@@ -75,6 +75,11 @@ downloads Chromium once into Playwright's cache.
 - A Docker step that cannot start (Docker is down, or the Docker VM is short of
   memory) is recorded as `BLOCKED` and the run exits with 1. It is never
   skipped silently.
+- The release and kernel Docker runners use the image ID written by their own
+  build, so another worktree cannot replace the image between build and run.
+  Release checks keep `release-image.id` beside their logs and record the ID in
+  `meta.tsv`. The kernel runner removes its temporary ID file when it exits.
+  Neither runner removes Docker images or changes the shared slot limits.
 
 ## Results
 
