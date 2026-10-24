@@ -10,13 +10,14 @@ import re
 import selectors
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.confirm_dialogs import answer_confirm, cancel_with_button, cancel_with_escape
-from tests.browser.phone import assert_router_status_is_read_only, is_phone, sidebar_control
+from tests.browser.phone import assert_router_status_is_read_only, close_controls, is_phone, sidebar_control
 
 ADMIN_TOKEN = "browser-test"
 ROUTER_PASSWORD = "browser-router-password"
@@ -502,6 +503,47 @@ def fixture_server():
         process.wait(timeout=10)
 
 
+def check_visible_router_read(browser, base, width, height):
+    context = browser.new_context(viewport={"width": width, "height": height})
+    page = context.new_page()
+    reads = []
+    def read_status(route):
+        reads.append(route.request.post_data_json)
+        route.fulfill(content_type="application/json", body=json.dumps({"result": {
+            "enabled": True, "checked_at": int(time.time()), "busy": False, "changing": False}}))
+    page.route("**/api/router/status", read_status)
+    page.goto(base)
+    sign_in(page)
+    close_controls(page)
+    expect(page.locator("#refresh-router-wifi")).to_be_disabled()
+    expect(page.locator("#router-wifi-status")).to_contain_text("Enter router password")
+    assert not reads
+    enter_router_password(page)
+    close_controls(page)
+    expect(page.locator(".control-utilities")).to_be_hidden()
+    expect(page.locator("#refresh-router-wifi")).to_be_enabled()
+    page.screenshot(path=f"test-results/router-check-{width}-before.png")
+    check = page.locator(".safety-bar .router-wifi-control").get_by_role("button", name="Check router Wi-Fi", exact=True)
+    expect(check).to_be_visible(timeout=2000)
+    expect(check).to_be_enabled()
+    check.click()
+    expect(page.locator("#router-wifi-toggle")).to_have_text("On")
+    assert len(reads) == 1
+    assert set(reads[0]) == {"admin_password", "refresh"}
+    assert_router_status_is_read_only(page)
+    check.focus()
+    page.keyboard.press("Enter")
+    expect(check).to_be_enabled()
+    assert len(reads) == 2
+    box = check.bounding_box()
+    assert box and box["height"] >= 44 and box["width"] >= 44, box
+    for selector in ("#panic-button", "#controls-toggle"):
+        expect(page.locator(selector)).to_be_in_viewport(ratio=1)
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+    page.screenshot(path=f"test-results/router-check-{width}-after.png")
+    context.close()
+
+
 def run():
     Path("test-results").mkdir(exist_ok=True)
     with sync_playwright() as playwright:
@@ -509,6 +551,11 @@ def run():
             executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE")
         )
         try:
+            if os.environ.get("JITTERSIM_ROUTER_CHECK_AUDIT") == "1":
+                for width, height in ((1440, 900), (375, 844), (320, 568)):
+                    with fixture_server() as port:
+                        check_visible_router_read(browser, f"http://127.0.0.1:{port}", width, height)
+                return
             for width, height in ((1920, 1000), (375, 844)):
                 # The Pi spaces router password checks apart, so each width gets its own Pi.
                 with fixture_server() as port:
