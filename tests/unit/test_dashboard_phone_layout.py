@@ -301,6 +301,9 @@ const sections = PAGES.map((page) => body.add(new Node("page-" + page, {
   dataset: {page}, box: {top: 660, bottom: 1400, left: 0, right: 390, width: 390, height: 740},
   matches: (s) => s === "[data-page]"
 })));
+const heading = body.add(new Node("page-heading", {
+  box: {top: 600, bottom: 635, left: 0, right: 900, width: 900, height: 35}
+}));
 const sidebar = body.add(new Node("sidebar", {matches: (s) => s === ".sidebar"}));
 const controlsToggle = sidebar.add(new Node("controls-toggle", {matches: (s) => s === "button"}));
 const controlsSheet = sidebar.add(new Node("sidebar-controls", {matches: (s) => s === "#sidebar-controls"}));
@@ -405,13 +408,13 @@ def test_a_page_link_on_a_phone_shows_and_focuses_the_page_start():
 
 
 @NEEDS_NODE
-def test_a_page_link_on_a_wide_window_focuses_the_selected_page():
+def test_a_page_link_on_a_wide_window_focuses_the_section_and_keeps_its_heading_visible():
     result = run_node(
         "phoneLayout.matches = false;\n"
         "showPage('traffic', true); showPage('profiles', false);\n"
         "console.log(JSON.stringify({scrolls, focused}));"
     )
-    assert result == {"scrolls": [{"top": 952, "behavior": "auto"}], "focused": ["page-traffic"]}
+    assert result == {"scrolls": [{"top": 892, "behavior": "auto"}], "focused": ["page-traffic"]}
 
 
 @NEEDS_NODE
@@ -470,11 +473,17 @@ def test_opening_the_sheet_moves_focus_to_its_first_control_and_closing_returns_
 def test_desktop_utilities_focus_the_first_usable_utility_and_return_to_controls():
     result = run_node(
         "phoneLayout.matches = false;\n"
-        "setControlsOpen(true, true); setControlsOpen(false, true);\n"
-        "console.log(JSON.stringify({focused, "
-        "expanded: controlsToggle.attributes['aria-expanded']}));"
+        "setControlsOpen(true, true);\n"
+        "const suppressToast = body.classes.has('phone-controls-open');\n"
+        "setControlsOpen(false, true);\n"
+        "console.log(JSON.stringify({focused, suppressToast, "
+        "expanded: controlsToggle.attributes['aria-expanded'], "
+        "closed: !body.classes.has('phone-controls-open')}));"
     )
-    assert result == {"focused": ["refresh-router-wifi", "controls-toggle"], "expanded": "false"}
+    assert result == {
+        "focused": ["refresh-router-wifi", "controls-toggle"],
+        "expanded": "false", "suppressToast": True, "closed": True,
+    }
 
 
 @NEEDS_NODE

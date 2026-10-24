@@ -77,8 +77,10 @@ def check_one_message(page, width, height):
     box = toast.bounding_box()
     assert box["width"] <= 22 * 16 + 1, box
     assert box["x"] >= 0 and box["y"] >= 0 and box["x"] + box["width"] <= width, box
-    if not is_phone(page):
-        assert height - (box["y"] + box["height"]) <= 17, box
+    bar = page.locator(".safety-bar").bounding_box()
+    gap = bar["y"] - (box["y"] + box["height"])
+    assert 0 <= gap <= 17, ("toast must stay just above the safety bar", box, bar)
+    assert bar["y"] + bar["height"] <= height + 0.5, bar
     expect(toast.get_by_role("button", name="Dismiss message")).to_be_visible()
     expect(toast).to_be_hidden(timeout=9000)
 

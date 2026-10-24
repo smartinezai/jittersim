@@ -42,8 +42,10 @@
         window.scrollTo(0, 0);
         return;
       }
+      const heading = document.getElementById("page-heading");
+      const anchor = !phoneLayout.matches && heading ? heading : section;
       window.scrollTo({
-        top: pageStartTop(section.getBoundingClientRect().top, window.scrollY, 8), behavior: "auto"
+        top: pageStartTop(anchor.getBoundingClientRect().top, window.scrollY, 8), behavior: "auto"
       });
       section.focus({ preventScroll: true });
     }
@@ -89,7 +91,7 @@
     function setControlsOpen(open, moveFocus) {
       const wasOpen = controlsOpen();
       sidebar.classList.toggle("controls-open", open);
-      document.body.classList.toggle("phone-controls-open", phoneLayout.matches && open);
+      document.body.classList.toggle("phone-controls-open", open);
       controlsToggle.setAttribute("aria-expanded", String(open));
       if (!moveFocus) return;
       if (open) {
@@ -267,7 +269,11 @@
     });
     const leavePhoneLayout = () => {
       if (!phoneLayout.matches) {
+        const focused = document.activeElement;
         setControlsOpen(false, false);
+        if (focused && controlsSheet.contains(focused) && !focused.getClientRects().length) {
+          controlsToggle.focus({ preventScroll: true });
+        }
         setStatusOpen(false);
       }
       revealNavLink(document.body.dataset.section);

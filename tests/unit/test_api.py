@@ -4563,7 +4563,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
         self.assertIn(
             'element("check-admin-token").addEventListener("click", async () => {\n'
-            "      await checkAdminToken();\n",
+            "      await checkAdminToken(true);\n",
             DASHBOARD_HTML,
         )
         self.assertIn('id="action-announcer" class="action-announcer" role="status"', DASHBOARD_HTML)

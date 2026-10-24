@@ -1,4 +1,4 @@
-"""Keep Panic reachable in short windows and preserve the existing sidebar on taller ones."""
+"""Keep Panic reachable across compact and full-width dashboard layouts."""
 
 import json
 import os
@@ -110,7 +110,7 @@ def check_compact(page, name):
     expect(toggle).to_have_attribute("aria-expanded", "false")
     expect(toggle).to_be_focused()
     toggle.click()
-    page.locator(".sidebar-brand h1").click()
+    page.locator("#brand-title").click()
     expect(toggle).to_have_attribute("aria-expanded", "false")
     # Only the disposable fixture can receive this request, and the route answers it here.
     page.route("**/api/normal-access", lambda route: route.fulfill(json={"normal_access": True}))
@@ -133,8 +133,13 @@ def check_resize(page):
     toggle = page.locator("#controls-toggle")
     toggle.click()
     expect(toggle).to_have_attribute("aria-expanded", "true")
+    page.locator("#open-admin-credentials").focus()
+    expect(page.locator("#open-admin-credentials")).to_be_focused()
     page.set_viewport_size({"width": 1280, "height": 800})
-    expect(toggle).to_be_hidden()
+    expect(toggle).to_be_visible()
+    expect(toggle).to_have_attribute("aria-expanded", "false")
+    expect(page.locator(".control-utilities")).to_be_hidden()
+    expect(toggle).to_be_focused()
     expect(page.locator("body")).not_to_have_class(re.compile(r"\bphone-controls-open\b"))
     page.locator("#apply-button").focus()
     page.set_viewport_size({"width": 844, "height": 390})
@@ -183,11 +188,18 @@ def check_landscape_safety(browser, base):
             if expected:
                 check_compact(page, name)
             else:
-                expect(page.locator("#controls-toggle")).to_be_hidden()
+                toggle = page.locator("#controls-toggle")
+                expect(toggle).to_be_visible()
+                expect(toggle).to_have_attribute("aria-expanded", "false")
+                expect(page.locator(".control-utilities")).to_be_hidden()
+                header = page.locator(".sidebar").bounding_box()
+                assert header and abs(header["width"] - width) <= 1, header
                 assert (
                     page.locator(".sidebar").evaluate("node => getComputedStyle(node).position")
-                    == "sticky"
+                    == "static"
                 )
+                panic_reachable(page)
+                assert_router_status_is_read_only(page)
             if (width, height, touch, font) == (1280, 800, False, 16):
                 check_resize(page)
             assert not errors, errors

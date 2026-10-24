@@ -113,8 +113,11 @@ def check_device_collapse(browser, base, width, evidence):
         toggle = card.locator(".observation-device-toggle")
         body = card.locator(".observation-device-body")
         posts = []
+        # Range preview is a debounced calculation, not a saved change. Every other
+        # POST remains forbidden while merely expanding or collapsing observations.
         page.on("request", lambda request: posts.append(request.url)
-                if request.method == "POST" else None)
+                if request.method == "POST" and
+                not request.url.endswith("/api/profiles/ranges") else None)
         expect(toggle).to_have_attribute("aria-expanded", "true")
         toggle.focus()
         toggle.press("Enter")

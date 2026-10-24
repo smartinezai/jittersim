@@ -970,7 +970,9 @@
       ["open-admin-credentials", "open-router-credentials", "open-router-credentials-inline"].forEach((id) => {
         element(id).setAttribute("aria-expanded", "false");
       });
-      if (credentialOpener && credentialOpener.isConnected) credentialOpener.focus({preventScroll: true});
+      const returnTo = credentialOpener && credentialOpener.isConnected && credentialOpener.getClientRects().length
+        ? credentialOpener : element("controls-toggle");
+      if (returnTo.getClientRects().length) returnTo.focus({preventScroll: true});
     }
 
     function updateCredentialViewport() {

@@ -29,6 +29,12 @@ def unlock(page):
         "Remembered until", timeout=20000
     )
     page.locator("#close-credentials").click()
+    assert page.evaluate("""() => {
+        const active = document.activeElement;
+        return !!active && !!active.getClientRects().length && !active.disabled;
+    }"""), "Closing initial credentials must return focus to a visible control"
+    if page.locator("#open-admin-credentials").is_hidden():
+        expect(page.locator("#controls-toggle")).to_be_focused()
 
 
 def wait_for_remembered_token(page):
@@ -98,6 +104,7 @@ def check_emergency_controls(page):
         page.locator(selector).scroll_into_view_if_needed()
         expect(page.locator(selector)).to_be_in_viewport(ratio=1)
     expect(page.locator("#panic-button")).to_be_in_viewport(ratio=1)
+    page.screenshot(path=f"test-results/operate-utilities-{page.viewport_size['width']}.png")
     page.keyboard.press("Escape")
     expect(utilities).to_be_hidden()
     expect(page.locator("#controls-toggle")).to_be_focused()
@@ -109,6 +116,8 @@ def check_emergency_controls(page):
 
 
 def check_keyboard_navigation(page):
+    # Establish keyboard modality before checking the :focus-visible treatment.
+    page.keyboard.press("Tab")
     link = page.locator('[data-page-link="profiles"]')
     link.focus()
     expect(link).to_be_focused()
@@ -117,6 +126,7 @@ def check_keyboard_navigation(page):
     only_visible(page, "profiles")
     expect(page.locator("#page-profiles")).to_be_focused()
     expect(page.locator("#page-heading")).to_have_text("Profiles")
+    expect(page.locator("#page-heading")).to_be_in_viewport(ratio=1)
     page.go_back()
     only_visible(page, "devices")
     expect(page.locator("#page-devices")).to_be_focused()

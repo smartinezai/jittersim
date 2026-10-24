@@ -11,7 +11,8 @@ no main/release merge, deployment, real Pi/router contact or pinned-network chan
   visual/code review follows committed implementation and batched captures.
 - Coordinator selects the combined base. Provisional branch is
   codex/dashboard-operate-redesign at e5513b47; its production source equals 4c843cac.
-  Await composition with the distinct private UI aggregate before editing UI.
+  Shell-only work proceeded provisionally; final composition reuses immutable private
+  UI aggregate63c1d84e and reviewed successor066d011b, preserving both parents.
 - Preserve and reuse compact buttons, router text badges, version details, profile
   resets/unassign, notifications, collapsible discovery and New observations.
 - Build once; batch desktop/mobile/font checks, fix material defects together,
@@ -41,3 +42,18 @@ announcers and IDs. Check 1440/1280 desktop, 390/320 phone and large-font/short-
 states, keyboard focus/return, overflow and read-only router semantics. Source-budget
 records and security limits are unchanged unless applicable approval is received.
 Record exact heads and distinguish inherited evidence from final-head checks.
+
+## First review and correction batch
+
+Read-only review of7ebe0090 found desktop utility resize focus, visible-heading
+scroll anchoring, utility/toast overlap and stale landscape acceptance assumptions.
+All are addressed in one correction batch. Compact headings retain their original
+screen-reader presentation to preserve content room at320px with large fonts.
+The credential panel returns focus to visible Controls when its original opener
+becomes hidden after sign-in. The observation collapse fixture now permits only
+the existing debounced, non-persisting range-preview POST; every other POST remains
+forbidden. The first browser failures and setup failure are preserved in test-results.
+
+The merged successor retains its four exact approved records; private aggregate
+CSS records remain unchanged. Only JSbytes now670500 exceeds the previous limit
+668854. No new baseline approval is inferred; coordinator decision is pending.

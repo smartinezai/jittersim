@@ -248,11 +248,17 @@ summary::marker { color: var(--tx-muted); }
 .sidebar-nav a[aria-current="page"]::after { content: none; }
 .sidebar-version { min-width: 0; }
 .control-utilities { display: contents; }
+.phone-controls-open .toast { visibility: hidden; }
 .utilities-heading { margin: 0; font-size: 1rem; }
 .sidebar:not(.controls-open) .utilities-heading { display: none; }
 .dashboard-locked .utilities-heading, .dashboard-locked .router-wifi-copy { display: none; }
 .content { width: 100%; margin-inline: auto; }
 #page-heading { margin: 0 0 1rem; font-size: 1.5rem; line-height: 1.3; letter-spacing: -0.02em; }
+
+/* The active navigation link already names the page in the compact header. */
+@media (max-width: 48rem), (max-height: 36rem) {
+  #page-heading { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
 
 @media (min-width: 48.01rem) and (min-height: 36.01rem) {
   html { scroll-padding-bottom: 5.5rem; }
