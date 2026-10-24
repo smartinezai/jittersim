@@ -235,7 +235,7 @@
       color: var(--tx-on-raised);
       box-shadow: 0 0.9rem 2rem rgba(0, 0, 0, 0.4);
     }
-    #toast-message { max-height: calc(40vh - 2rem); overflow-y: auto; overscroll-behavior: contain; }
+    #toast-message { overflow-wrap: anywhere; max-height: calc(40vh - 2rem); overflow-y: auto; overscroll-behavior: contain; }
     .toast[hidden] { display: none; }
     .toast.success { border-color: var(--ok-border); border-left-color: var(--ok); background: var(--ok-bg); }
     .toast.error { border-color: var(--bad-border); border-left-color: var(--bad); background: var(--bad-bg); }
