@@ -431,16 +431,23 @@ def test_unknown_writer_state_never_publishes_a_mutable_snapshot(pi):
     assert not (pi.code / "src").exists()
 
 
-def test_invalid_restore_input_is_refused_before_live_code_is_deleted(pi):
+@pytest.mark.parametrize("selector_temp", [False, True])
+def test_invalid_restore_input_is_refused_before_live_code_is_deleted(pi, selector_temp):
     pi.apply(lambda *args: None, lambda: True)
     backup = updates.recovery_backup(pi.root)
     updates.shutil.rmtree(backup / "data")
+    temporary = pi.root / "backup-current.tmp"
+    if selector_temp:
+        temporary.write_text("{")
+        temporary.chmod(0o600)
     updates.request_update("", rollback=True, root=pi.root, code=pi.code, config=pi.config,
                            run=lambda *args: None)
     before = (pi.code / "src/jittersim/api/server.py").read_bytes()
     with pytest.raises(updates.UpdateError, match="recovery"):
         pi.apply(lambda *args: None, lambda: True)
     assert (pi.code / "src/jittersim/api/server.py").read_bytes() == before
+    if selector_temp:
+        assert temporary.exists()
 
 
 def test_package_builds_finish_before_stop_and_outage_installs_only_wheels(pi):
@@ -891,3 +898,164 @@ def test_stable_preparation_uses_locked_builder_then_only_offline_installs(tmp_p
     assert not any("wheel" in command for command in commands)
     assert all("--no-index" in command and "--no-deps" in command for command in commands if "install" in command)
     assert len(result) == 1
+
+
+@pytest.mark.parametrize("previous,action", [
+    (False, "install"), (True, "install"), (True, "rollback"), (True, "rollback-retry"),
+])
+def test_selector_temp_interruption_can_finish_install_or_restore(pi, previous, action):
+    selected = identity = None
+    if previous:
+        pi.apply(lambda *args: None, lambda: True)
+        selected = updates.recovery_backup(pi.root)
+        identity = updates.recovery_identity(pi.root, selected)
+        pi.stage(sequence=101, version="v2")
+        updates.request_update("v2", root=pi.root, code=pi.code, config=pi.config,
+                               run=lambda *args: None)
+    replace = Path.replace
+    temporary = pi.root / "backup-current.tmp"
+
+    def interrupt(path, destination):
+        if path == temporary:
+            # atomic_json has really written, closed and fsynced this file.
+            assert path.is_file() and path.stat().st_mode & 0o777 == 0o600
+            assert updates.read_json(path)["name"].startswith("backup-")
+            raise KeyboardInterrupt()
+        return replace(path, destination)
+
+    with patch.object(Path, "replace", interrupt), pytest.raises(KeyboardInterrupt):
+        pi.apply(lambda *args: None, lambda: True)
+    request = updates.read_json(pi.root / "request.json")
+    assert request["restart_only"]
+    assert (pi.root / ("backup-" + request["attempt"]) / "complete.json").is_file()
+    assert temporary.is_file()
+    if previous:
+        assert updates.recovery_backup(pi.root) == selected
+        assert updates.recovery_identity(pi.root, selected) == identity
+        updates.validate_recovery(selected, updates.UpdateBudget())
+    else:
+        assert not (pi.root / "backup-current.json").exists()
+    if action.startswith("rollback"):
+        # A failed preflight clears install intent without touching the stale
+        # selector temporary, leaving an explicit Restore request possible.
+        def fail_preflight(command, timeout):
+            if str(pi.root / "staged" / updates.PREFLIGHT) in command:
+                raise updates.UpdateError("controlled preflight failure")
+
+        with pytest.raises(updates.UpdateError, match="controlled preflight failure"):
+            pi.apply(fail_preflight, lambda: True)
+        assert not (pi.root / "request.json").exists()
+        assert temporary.is_file()
+        updates.request_update("", rollback=True, root=pi.root, code=pi.code, config=pi.config,
+                               run=lambda *args: None)
+        if action == "rollback-retry":
+            failure = updates.UpdateError("cleanup interrupted")
+            with patch.object(updates, "cleanup_generations", side_effect=failure), \
+                    pytest.raises(updates.UpdateError, match="cleanup interrupted"):
+                pi.apply(lambda *args: None, lambda: True)
+            assert updates.read_json(pi.root / "request.json")["rollback"]
+            assert temporary.is_file()
+    pi.apply(lambda *args: None, lambda: True)
+    assert not temporary.exists()
+    assert not (pi.root / "request.json").exists()
+    if action == "install":
+        assert updates.read_json(pi.root / "status.json")["phase"] == "complete"
+        assert updates.release_floor(root=pi.root, code=pi.code) == (101 if previous else 100)
+        completed = updates.read_json(updates.recovery_backup(pi.root) / "complete.json")
+        assert completed["attempt"] == request["attempt"]
+        if previous:
+            assert updates.recovery_identity(pi.root, selected) == identity
+    else:
+        assert updates.read_json(pi.root / "status.json")["phase"] == "rolled-back"
+        assert (pi.code / "old-file").read_text() == "previous installation"
+        assert (pi.data / "jittersim.db").read_text() == "original settings"
+        assert updates.recovery_backup(pi.root) == selected
+        assert updates.recovery_identity(pi.root, selected) == identity
+
+
+@pytest.mark.parametrize("kind", [
+    "symlink", "dangling", "directory", "fifo", "public", "owner", "oversize",
+])
+def test_selector_temp_cleanup_refuses_unsafe_entries(tmp_path, monkeypatch, kind):
+    temporary = tmp_path / "backup-current.tmp"
+    outside = tmp_path / "outside"
+    outside.write_text("keep")
+    if kind in ("symlink", "dangling"):
+        temporary.symlink_to(outside if kind == "symlink" else tmp_path / "missing")
+    elif kind == "directory":
+        temporary.mkdir(mode=0o700)
+    elif kind == "fifo":
+        os.mkfifo(temporary, 0o600)
+    else:
+        temporary.write_bytes(b"x" * (65537 if kind == "oversize" else 1))
+        temporary.chmod(0o640 if kind == "public" else 0o600)
+        if kind == "owner":
+            monkeypatch.setattr(updates.os, "geteuid", lambda: temporary.lstat().st_uid + 1)
+    with pytest.raises(updates.UpdateError, match="recovery"):
+        updates.cleanup_generations(tmp_path, updates.UpdateBudget())
+    assert os.path.lexists(temporary)
+    assert outside.read_text() == "keep"
+
+
+@pytest.mark.parametrize("name", ["backup-current.tmp.extra", "backup-other.tmp"])
+def test_selector_temp_cleanup_still_refuses_unknown_recovery_names(tmp_path, name):
+    temporary = tmp_path / "backup-current.tmp"
+    temporary.write_text("{")
+    temporary.chmod(0o600)
+    (tmp_path / name).write_text("unknown")
+    with pytest.raises(updates.UpdateError, match="unknown recovery"):
+        updates.cleanup_generations(tmp_path, updates.UpdateBudget())
+    assert temporary.exists()
+    assert (tmp_path / name).exists()
+
+
+@pytest.mark.parametrize("contents", ["", "{", "x" * 65536], ids=["empty", "partial", "limit"])
+def test_selector_temp_cleanup_accepts_bounded_partial_writes(tmp_path, contents):
+    temporary = tmp_path / "backup-current.tmp"
+    temporary.write_text(contents)
+    temporary.chmod(0o600)
+    updates.cleanup_generations(tmp_path, updates.UpdateBudget())
+    assert not temporary.exists()
+
+
+@pytest.mark.parametrize("failure", ["budget", "selector", "completion"])
+def test_selector_temp_cleanup_requires_budget_and_valid_selection(tmp_path, failure):
+    temporary = tmp_path / "backup-current.tmp"
+    budget = updates.UpdateBudget()
+    if failure == "budget":
+        budget.deadline = time.monotonic() - 1
+    else:
+        attempt = "a" * 32
+        updates.atomic_json(tmp_path / "backup-current.json", {
+            "format": 2, "name": "backup-" + attempt, "attempt": attempt})
+        if failure == "completion":
+            selected = tmp_path / ("backup-" + attempt)
+            selected.mkdir(mode=0o700)
+            updates.atomic_json(selected / "complete.json", {"format": 2, "attempt": "b" * 32})
+    temporary.write_text("{")
+    temporary.chmod(0o600)
+    with pytest.raises(updates.UpdateError):
+        updates.cleanup_generations(tmp_path, budget)
+    assert temporary.exists()
+
+
+def test_selector_temp_cleanup_preserves_selected_and_previous_generations(tmp_path):
+    generations = []
+    for index in range(3):
+        attempt = str(index) * 32
+        folder = tmp_path / ("backup-" + attempt)
+        folder.mkdir(mode=0o700)
+        updates.atomic_json(folder / "complete.json", {
+            "format": 2, "attempt": attempt, "created_at": index})
+        generations.append(folder)
+    updates.atomic_json(tmp_path / "backup-current.json", {
+        "format": 2, "name": generations[0].name, "attempt": "0" * 32})
+    selector = (tmp_path / "backup-current.json").read_bytes()
+    temporary = tmp_path / "backup-current.tmp"
+    temporary.write_text("{")
+    temporary.chmod(0o600)
+    updates.cleanup_generations(tmp_path, updates.UpdateBudget())
+    assert not temporary.exists()
+    assert generations[0].is_dir() and generations[2].is_dir()
+    assert not generations[1].exists()
+    assert (tmp_path / "backup-current.json").read_bytes() == selector
