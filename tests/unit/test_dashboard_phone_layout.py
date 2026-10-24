@@ -18,7 +18,9 @@ CSS = re.sub(
     r"/\*.*?\*/", "", re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1),
     flags=re.DOTALL,
 )
-PHONE = re.search(r"@media \(max-width: 48rem\) \{(.*?)\n\}", CSS, re.DOTALL).group(1)
+PHONE = re.search(
+    r"@media \(max-width: 48rem\), \(max-height: 36rem\) \{(.*?)\n\}", CSS, re.DOTALL
+).group(1)
 SCRIPTS = re.findall(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL)
 SECOND_SCRIPT = SCRIPTS[1]
 NEEDS_NODE = pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
@@ -70,7 +72,9 @@ def block_of(class_name):
 
 def test_the_phone_rules_come_after_the_earlier_narrow_screen_rules():
     style = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
-    assert style.index(".field-tooltip {") < style.index("@media (max-width: 48rem) {")
+    assert style.index(".field-tooltip {") < style.index(
+        "@media (max-width: 48rem), (max-height: 36rem) {"
+    )
     # The stacked sidebar with wrapped page chips is gone.
     assert ".sidebar-nav ul { display: flex; flex-wrap: wrap" not in style
     assert ".sidebar { position: static" not in style

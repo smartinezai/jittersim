@@ -16,6 +16,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.landscape_safety import check_landscape_safety
 from tests.browser.phone import assert_router_status_is_read_only, close_controls, open_controls, open_status, sidebar_control
 
 PHONES = ((390, 844), (360, 640), (320, 568))
@@ -464,6 +465,7 @@ def run():
                     check_desktop(page, width, height)
                 assert not errors, errors
                 context.close()
+                check_landscape_safety(browser, base)
                 print("Phone layout acceptance passed at 390x844, 360x640 and 320x568"
                       " with desktop windows unchanged.")
             finally:

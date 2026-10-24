@@ -1,12 +1,12 @@
-/* Phone layout. Up to 48rem the sidebar becomes a short header: the name, the mode, the page
+/* Compact layout. Up to 48rem wide or 36rem tall the sidebar becomes a short header: the name, the mode, the page
    links in one row that scrolls sideways and a one line status strip that opens the full status.
    Panic and the router Wi-Fi switch sit in a bar pinned to the bottom of the window. The rest of
-   the sidebar footer opens from that bar as the Controls sheet. Wider windows keep the sidebar.
+   the sidebar footer opens from that bar as the Controls sheet. Larger windows keep the sidebar.
    The server adds this file after access.css so that it wins over the earlier phone rules. */
 .status-strip, .controls-toggle { display: none; }
 .safety-bar { display: contents; }
 
-@media (max-width: 48rem) {
+@media (max-width: 48rem), (max-height: 36rem) {
   :root {
     --controls-toggle-width: 4.75rem;
     --phone-bar-height: calc(3.75rem + 1px + env(safe-area-inset-bottom, 0px));
@@ -25,7 +25,8 @@
   .sidebar-brand h1 { font-size: 1.25rem; }
 
   /* Every page stays one tap away. The row scrolls inside itself and never the page. */
-  .sidebar-nav { margin-inline: -1rem; }
+  .sidebar-nav { margin-inline: -1rem; min-height: 0; overflow: visible; }
+  .sidebar-nav[data-more-after] { -webkit-mask-image: none; mask-image: none; }
   .sidebar-nav ul {
     display: flex; gap: 0.35rem; padding: 0.1rem 1rem 0.2rem; overflow-x: auto;
     overscroll-behavior-x: contain; scroll-padding-inline: 1rem; scrollbar-width: none;

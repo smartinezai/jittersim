@@ -104,7 +104,9 @@ def test_floating_dock_and_sticky_bar_are_gone():
 def test_only_the_phone_layout_pins_the_bar_and_the_sheet():
     css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
     css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
-    phone = re.search(r"@media \(max-width: 48rem\) \{(.*?)\n\}", css, re.DOTALL).group(1)
+    phone = re.search(
+        r"@media \(max-width: 48rem\), \(max-height: 36rem\) \{(.*?)\n\}", css, re.DOTALL
+    ).group(1)
     outside = css.replace(phone, "")
     for selector in PHONE_PINNED:
         rule = re.search(r"(?:^|\n)\s*" + re.escape(selector) + r" \{([^{}]*)\}", phone)
