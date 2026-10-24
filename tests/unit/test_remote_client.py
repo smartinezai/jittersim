@@ -192,7 +192,7 @@ def test_the_certificate_is_checked_with_the_given_file(tmp_path):
             wraps=ssl.create_default_context,
         ) as create:
             DashboardClient(Connection(dashboard.url, dashboard.certificate), TEST_TOKEN)
-    create.assert_called_once_with(cafile=str(dashboard.certificate))
+    create.assert_called_once_with(cadata=dashboard.certificate.read_text())
 
 
 def test_a_redirect_is_refused_and_never_followed(tmp_path):

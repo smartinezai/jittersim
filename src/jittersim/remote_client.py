@@ -40,6 +40,7 @@ CA_CERT_ENV = "JITTERSIM_CA_CERT"
 TOKEN_ENV = "JITTERSIM_ADMIN_TOKEN"
 CONFIG_RELATIVE_PATH = Path(".config") / "jittersim" / "cli.json"
 MAX_CONFIG_BYTES = 4096
+MAX_CERTIFICATE_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_BACKUP_BYTES = 64 * 1024 * 1024
 MAX_ERROR_BYTES = 64 * 1024
@@ -262,22 +263,54 @@ def resolve_connection(
 
 
 def checked_certificate(path: Path) -> Path:
-    """The --ca-cert file decides who gets the token: nobody else may be able to change it."""
+    """Check the certificate input before asking for the admin token."""
 
     certificate = path.expanduser()
-    try:
-        info = certificate.stat()
-    except OSError:
-        info = None
-    if info is None or not stat.S_ISREG(info.st_mode):
-        raise RemoteError(f"The certificate file {certificate} does not exist.", exit_code=2)
-    if info.st_uid not in (os.geteuid(), 0) or info.st_mode & 0o022:
-        raise RemoteError(
-            f"The certificate file {certificate} decides where the admin token goes so it must "
-            f"belong to you and must not be writable by others. Run: chmod 644 {certificate}",
-            exit_code=2,
-        )
+    _read_certificate(certificate)
     return certificate
+
+
+def _read_certificate(certificate: Path) -> bytes:
+    """Read bounded CA bytes from the same regular, owner-safe file we check.
+
+    Symlinks to secure certificate targets are allowed. A replaced pathname must never
+    make TLS load a different, unchecked file after the hidden token prompt.
+    """
+
+    try:
+        descriptor = os.open(str(certificate), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError as error:
+        raise RemoteError(
+            f"The certificate file {certificate} does not exist or could not be read.",
+            exit_code=2,
+        ) from error
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise RemoteError(
+                f"The certificate file {certificate} is not a regular file.", exit_code=2
+            )
+        if info.st_uid not in (os.geteuid(), 0) or info.st_mode & 0o022:
+            raise RemoteError(
+                f"The certificate file {certificate} decides where the admin token goes so it "
+                f"must belong to you and must not be writable by others. "
+                f"Run: chmod 644 {certificate}",
+                exit_code=2,
+            )
+        if info.st_size > MAX_CERTIFICATE_BYTES:
+            raise RemoteError("The certificate file is too large.", exit_code=2)
+        # Bound the read as well: the file may have grown since fstat.
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            data = handle.read(MAX_CERTIFICATE_BYTES + 1)
+        if len(data) > MAX_CERTIFICATE_BYTES:
+            raise RemoteError("The certificate file is too large.", exit_code=2)
+        if not data:
+            raise RemoteError("The certificate file is empty.", exit_code=2)
+        return data
+    except OSError as error:
+        raise RemoteError("The certificate file could not be read.", exit_code=2) from error
+    finally:
+        os.close(descriptor)
 
 
 def valid_token(token: str) -> bool:
@@ -647,8 +680,11 @@ class DashboardClient:
         self._secrets = [token or "", *secrets]
         self.host = urlsplit(self.url).hostname or self.url
         try:
-            # Only this file is trusted: no system certificate authorities are loaded.
-            context = ssl.create_default_context(cafile=str(connection.ca_cert))
+            data = _read_certificate(connection.ca_cert.expanduser())
+            # cadata takes PEM as ASCII text and DER as bytes. Never reopen the pathname
+            # or load system authorities; only the checked descriptor's bytes are trusted.
+            cadata = data.decode("ascii") if b"-----BEGIN CERTIFICATE-----" in data else data
+            context = ssl.create_default_context(cadata=cadata)
         except (OSError, ssl.SSLError, ValueError) as error:
             raise RemoteError(
                 f"The certificate file {connection.ca_cert} could not be read as a certificate."
