@@ -743,8 +743,8 @@
     .sidebar .action-message { min-height: 0; padding: 0.4rem 0.55rem; font-size: 0.78rem; }
     .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); border: 0; }
     /* The first Tab stop. It stays off screen until it has keyboard focus. */
-    .skip-link { position: absolute; left: 0.75rem; top: -4rem; z-index: 200; padding: 0.6rem 0.9rem; border: 2px solid var(--accent); border-radius: 0.5rem; background: var(--bg-page); color: var(--tx-bright); font-weight: 600; text-decoration: none; }
-    .skip-link:focus { top: 0.75rem; }
+    .skip-link { position: absolute; left: 0.75rem; top: 0; transform: translateY(-100%); z-index: 200; padding: 0.6rem 0.9rem; border: 2px solid var(--accent); border-radius: 0.5rem; background: var(--bg-page); color: var(--tx-bright); font-weight: 600; text-decoration: none; }
+    .skip-link:focus { top: 0.75rem; transform: none; }
     #content:focus { outline: none; }
     .sidebar .panic-button { min-height: 3rem; font-weight: 600; }
     .content { min-width: 0; max-width: 84rem; padding: 1.5rem 1.75rem 4rem; }

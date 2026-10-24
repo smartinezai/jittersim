@@ -376,6 +376,7 @@ def run():
                         expect(page.locator("#sidebar-action-help")).to_be_hidden()
                     assert not errors, errors
                     context.close()
+                check_skip_matrix(browser, f"http://127.0.0.1:{port}")
                 print("Dashboard navigation browser acceptance passed.")
             finally:
                 browser.close()
