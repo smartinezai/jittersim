@@ -179,6 +179,7 @@ class ConfigRepository:
     def __init__(self, database_path: DatabasePath) -> None:
         self._lock = threading.RLock()
         self._transaction_depth = 0
+        self._access_plan_cache = None
         self._connection = sqlite3.connect(str(database_path), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
@@ -193,6 +194,7 @@ class ConfigRepository:
     def close(self) -> None:
         """Close the database connection owned by this repository."""
 
+        self._access_plan_cache = None
         self._connection.close()
 
     @property
@@ -1900,6 +1902,18 @@ class ConfigRepository:
             mac_policy=self.get_mac_policy(), website_policy=self.get_website_policy(),
             site_blocks=self.list_site_blocks(), access_options=self.get_access_options(),
         )
+
+    def access_plan(self):
+        """Reuse the last validated plan when saved access settings are unchanged."""
+        from jittersim.engine.access import build_access_plan
+
+        settings = self.access_settings()
+        cached = self._access_plan_cache
+        if cached is not None and cached[0] == settings:
+            return cached[1]
+        plan = build_access_plan(settings)
+        self._access_plan_cache = (settings, plan)
+        return plan
 
     def saved_settings(self) -> SavedSettings:
         """Return every setting that an export includes."""

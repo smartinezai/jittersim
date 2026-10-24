@@ -4,7 +4,6 @@ from dataclasses import replace
 
 from jittersim.config.storage import ConfigRepository
 
-from .access import build_access_plan
 from .compiler import compile_plan
 from .eligibility import eligible_clients
 from .general import compile_general_plan
@@ -188,7 +187,7 @@ def _compile_stored_plan(
         protected_mac_addresses=clients.protected_macs,
         unverified_device_ids=clients.unverified_ids,
         mac_policy=repository.get_mac_policy(),
-        access=build_access_plan(repository.access_settings()),
+        access=repository.access_plan(),
         global_blocked_addresses=global_blocked,
         global_allowed_addresses=resolve_domains(domains=website_policy.allowed_domains)
         if website_policy.mode == "allow_only"

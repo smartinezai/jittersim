@@ -42,7 +42,6 @@ from jittersim.networking.helper import HelperClient, HelperClientError
 from jittersim.request_workers import WorkersStillRunning
 from jittersim.router_canary import RouterCanary
 
-from .access import build_access_plan
 from .activity import Source, TargetState, activity_records
 from .codec import PlanCodecError, plan_from_payload, plan_to_payload
 from .compiler import PlanError, compile_plan
@@ -1796,7 +1795,7 @@ class RuntimeScheduler:
             protected_mac_addresses=clients.protected_macs,
             unverified_device_ids=clients.unverified_ids,
             mac_policy=repository.get_mac_policy(),
-            access=build_access_plan(repository.access_settings()),
+            access=repository.access_plan(),
             global_blocked_addresses=global_blocked,
             global_allowed_addresses=resolve_domains(domains=website_policy.allowed_domains)
             if website_policy.mode == "allow_only"
