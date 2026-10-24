@@ -107,7 +107,7 @@ def run_case(checks):
         first = script.index(start)
         return script[first:script.index(end, first)]
 
-    functions = block("async function checkAdminToken()", "// Which parts the next refresh reads:")
+    functions = block("async function checkAdminToken(", "// Which parts the next refresh reads:")
     functions += block('element("admin-token").addEventListener("input",',
                        'element("traffic-device").addEventListener("change",')
     functions += block('element("admin-token-error-link").addEventListener("click",',

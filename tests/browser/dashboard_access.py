@@ -153,6 +153,9 @@ def check_token_form_errors(page):
         page.unroute(access_route, interrupted_access)
         page.unroute("**/api/health", interrupted_health)
 
+    # Restore the original journey choice before phone acceptance closes Credentials.
+    remember.uncheck()
+    duration.select_option("24")
     token.fill("browser-test")
     expect(summary).to_be_hidden()
     expect(token).not_to_have_attribute("aria-invalid", "true")
@@ -162,11 +165,8 @@ def check_token_form_errors(page):
     expect(summary).to_be_hidden()
     expect(token).not_to_have_attribute("aria-invalid", "true")
     expect(token).to_have_value("browser-test")
-    expect(remember).to_be_checked()
-    expect(duration).to_have_value("168")
-    # Leave the original journey's remember choice unchanged until its later reload check.
-    remember.uncheck()
-    duration.select_option("24")
+    expect(remember).not_to_be_checked()
+    expect(duration).to_have_value("24")
 
 
 def run():
