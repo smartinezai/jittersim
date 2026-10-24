@@ -209,7 +209,12 @@ def test_a_partial_write_or_cancellation_leaves_no_backup(
             self.handle.flush()
             raise error
 
-    monkeypatch.setattr("jittersim.remote_cli.os.fdopen", InterruptedWriter)
+    def interrupt_backup_write(descriptor, mode, **kwargs):
+        if mode == "wb":
+            return InterruptedWriter(descriptor, mode)
+        return real_fdopen(descriptor, mode, **kwargs)
+
+    monkeypatch.setattr("jittersim.remote_cli.os.fdopen", interrupt_backup_write)
     dashboard.answer("GET", "/api/backup", BACKUP)
     folder = tmp_path / "backups"
     code, _, _, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
@@ -295,7 +300,9 @@ def test_an_existing_folder_owned_by_someone_else_is_refused(
 
     def owned_by_another_user(descriptor):
         info = real_fstat(descriptor)
-        return types.SimpleNamespace(st_uid=info.st_uid + 1, st_mode=info.st_mode)
+        if stat.S_ISDIR(info.st_mode):
+            return types.SimpleNamespace(st_uid=info.st_uid + 1, st_mode=info.st_mode)
+        return info
 
     monkeypatch.setattr("jittersim.remote_cli.os.fstat", owned_by_another_user)
     code, _, err, _ = run(dashboard, capsys, "backup", "pull", "--directory", str(folder))
