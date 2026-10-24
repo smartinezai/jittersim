@@ -140,7 +140,7 @@ button.danger:hover:not(:disabled) {
   border-color: var(--bad-border-hover);
 }
 button:disabled { box-shadow: none; opacity: 0.5; }
-.card-toggle, .observation-group-header .observation-group-toggle, .traffic-legend button, .sidebar .router-wifi-toggle {
+.card-toggle, .observation-group-header .observation-group-toggle, .traffic-legend button {
   background: none; box-shadow: none;
 }
 .card-toggle:hover:not(:disabled), .traffic-legend button:hover:not(:disabled) { background: none; }

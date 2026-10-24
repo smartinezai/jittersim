@@ -179,8 +179,8 @@ have merged since. The pull requests that are still open and their states are in
     Tab starts at "Skip to main content". The same happens after confirming **Reset Wi-Fi name** on a phone.
     Panic keeps focus. Fix: in `setActionBusy(false)`, if focus is on the body and the button had it when the
     action began, focus the button again. It touches the code that drives Panic-adjacent buttons.
-  - S3: the phone bar cuts "Router Wi-Fi · read only" at 375 px and below (`phone.css` about 104, needs a shorter
-    label or two lines). The sidebar needs a scroll in short or landscape windows (the quick **Reset Wi-Fi name**
+  - S3: the phone bar label truncation at 375 px and below is addressed by the router status label follow-up
+    (`codex/router-status-label`, awaiting review and merge). The sidebar still needs a scroll in short or landscape windows (the quick **Reset Wi-Fi name**
     button is 4 px under the fold at 1366x768). `#connection-notice` is an `aside role="status"` toggled with
     `hidden`. The group select text "Create a group on th..." is cut (tests pin the wording). The "Update
     available" pill wraps to two lines in the desktop nav (a shorter text fixes it). On a phone the Allow

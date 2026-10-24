@@ -108,7 +108,7 @@ function deferred() {
   const promise = new Promise(done => {resolve = done});
   return {promise, resolve};
 }
-const ROUTER_BUTTONS = ["check-router-password", "sync-router-ap", "router-wifi-toggle"];
+const ROUTER_BUTTONS = ["check-router-password", "sync-router-ap"];
 function tick(id, on) {
   element(id).checked = on;
   element(id).dispatchEvent(new Event("change"));
@@ -172,8 +172,8 @@ CASES = {
       assert.deepEqual(
         networkCalls.map(call => JSON.parse(call.options.body).refresh), [true, false]);
       assert.equal(timers.size, 0);
-      assert.equal(element("router-wifi-toggle").disabled, true);
-      assert.match(element("router-wifi-toggle").title, /disabled for recovery safety/);
+      assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
+      assert.equal(element("router-wifi-toggle").textContent, "Off");
     """,
     "failed_explicit_check_does_not_schedule_another_check": r"""
       helperConfigured = true;
@@ -185,7 +185,7 @@ CASES = {
       await pollRouterWifi();
       assert.equal(timers.size, 0);
       assert.equal(networkCalls.length, 1);
-      assert.equal(element("router-wifi-toggle").disabled, true);
+      assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
     """,
     "busy_check_is_bounded_even_when_the_clock_does_not_advance": r"""
       helperConfigured = true;
@@ -209,9 +209,9 @@ CASES = {
       assert.equal(networkCalls.length, 45);
       assert.equal(timers.size, 0);
       assert.match(routerWifiError, /timed out/);
-      assert.equal(element("router-wifi-toggle").disabled, true);
+      assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
     """,
-    "expired_switch_cannot_write_without_a_recent_check": r"""
+    "expired_status_cannot_write_without_a_recent_check": r"""
       helperConfigured = true;
       enter("admin-token", "fixture token");
       adminTokenVerified = true;
@@ -219,15 +219,17 @@ CASES = {
       network = async () => ({ok:true, json:async () => ({result: {
         enabled:true, checked_at:clock/1000, busy:false}})});
       await pollRouterWifi();
-      assert.equal(element("router-wifi-toggle").disabled, true);
-      assert.match(element("router-wifi-toggle").title, /disabled for recovery safety/);
+      assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
+      assert.equal(element("router-wifi-toggle").textContent, "On");
       clock += 46000;
+      renderRouterWifi();
+      assert.equal(element("router-wifi-toggle").textContent, "Unknown");
       const before = networkCalls.length;
-      // The switch is read only: nothing listens for a click, so nothing can write.
+      // The status is read only: nothing listens for a click, so nothing can write.
       assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
       await Promise.resolve();
       assert.equal(networkCalls.length, before);
-      assert.equal(element("router-wifi-toggle").disabled, true);
+      assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
     """,
     "replacing_credentials_during_a_busy_check_keeps_manual_recovery_available": r"""
       for (const field of ["admin-token", "router-admin-password"]) {
@@ -250,7 +252,7 @@ CASES = {
         assert.equal(routerWifiRemoteBusy, false);
         assert.equal(routerWifiRemoteChanging, false);
         assert.equal(element("refresh-router-wifi").disabled, false);
-        assert.equal(element("router-wifi-toggle").disabled, true);
+        assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
       }
     """,
     "old_router_failure_keeps_new_credential_status": r"""
@@ -284,7 +286,7 @@ CASES = {
       assert.equal(element("admin-token").value, "fixture token");
       assert.equal(savedEntry(ADMIN_KEY).value, "fixture token");
     """,
-    "router_switch_tracks_confirmed_state_and_expires": r"""
+    "router_status_tracks_confirmed_state_and_expires": r"""
       helperConfigured = true;
       enter("admin-token", "fixture token");
       adminTokenVerified = true;
@@ -292,14 +294,14 @@ CASES = {
       network = async () => ({ok:true, json:async () => ({result: {
         enabled:false, checked_at:clock/1000, busy:false, changing:false, retry_after:15}})});
       await pollRouterWifi();
-      assert.equal(element("router-wifi-toggle").disabled, true);
-      assert.match(element("router-wifi-toggle").title, /disabled for recovery safety/);
-      assert.equal(element("router-wifi-toggle").getAttribute("aria-checked"), "false");
+      assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
+      assert.equal(element("router-wifi-toggle").textContent, "Off");
       assert.match(element("router-wifi-status").textContent, /^Off/);
       clock += 46000;
       renderRouterWifi();
-      assert.equal(element("router-wifi-toggle").disabled, true);
+      assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
       assert.equal(element("router-wifi-toggle").getAttribute("data-unknown"), "true");
+      assert.equal(element("router-wifi-toggle").textContent, "Unknown");
     """,
     "router_status_rejection_stops_automatic_checks": r"""
       helperConfigured = true;
@@ -312,7 +314,7 @@ CASES = {
       assert.equal(routerPasswordRejected, true);
       await pollRouterWifi();
       assert.equal(networkCalls.length, 1);
-      assert.equal(element("router-wifi-toggle").disabled, true);
+      assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
     """,
     "router_status_ignores_replaced_credentials": r"""
       helperConfigured = true;
@@ -327,7 +329,7 @@ CASES = {
       await polling;
       assert.equal(routerWifiEnabled, null);
       assert.equal(routerPasswordVerified, false);
-      assert.equal(element("router-wifi-toggle").disabled, true);
+      assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
     """,
 
     "panel_and_token_edits": r"""
@@ -411,7 +413,7 @@ CASES = {
       network = () => pending.promise;
       const running = routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
       assert.equal(routerActionPending, true);
-      for (const id of ["sync-router-ap", "router-wifi-toggle"])
+      for (const id of ["sync-router-ap"])
         assert.equal(element(id).disabled, true);
       await routerAction("/api/router/wifi", {enabled:true}, "Enabling", element("router-wifi-toggle"));
       await new Promise(resolve => setImmediate(resolve));
@@ -427,7 +429,7 @@ CASES = {
       assert.equal(element("router-admin-password").value, "fixture password");
       assert.equal(element("credential-router-status").textContent, "fixture failure");
       assert.equal(element("sync-router-ap").disabled, false);
-      assert.equal(element("router-wifi-toggle").disabled, true);
+      assert.equal(element("router-wifi-toggle").listeners.has("click"), false);
       assert.equal(routerActionPending, false);
       enter("router-admin-password", "");
       await routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
@@ -581,7 +583,7 @@ CASES = {
       assert.equal(element("router-credential-state").textContent, "Entered");
       assert.ok(!/accepted/i.test(element("credential-router-status").textContent));
       for (const id of ROUTER_BUTTONS)
-        assert.equal(element(id).disabled, id === "router-wifi-toggle", id);
+        assert.equal(element(id).disabled, false, id);
     """,
     "router_operations_report_the_password_state_and_keep_it": r"""
       enter("admin-token", "fixture token");
