@@ -548,6 +548,12 @@ async function speedTestFinishedOrSay(status, serial) {
   }
 }
 
+// A dashboard run sends its data from the Pi, so its slower-than-cap text leaves out the internet.
+function speedTestVerdictText(result, verdict) {
+  const labels = speedTestState.meta.verdict_labels;
+  return labels[verdict === 'below-cap' && result.provider === 'dashboard' ? 'below-cap-dashboard' : verdict];
+}
+
 function speedTestDirection(result, direction) {
   const values = (result.summary || {})[direction] || {};
   const labels = speedTestState.meta.verdict_labels;
@@ -555,7 +561,7 @@ function speedTestDirection(result, direction) {
   if (values.verdict === 'not-tested') return ['Not tested', labels[values.verdict]];
   const browser = direction === 'download' && (result.summary.browser || {}).download_kbit;
   return [speedTestRate(values.busy_average_kbit),
-    [labels[values.verdict] || '', browser ? 'this browser: ' + speedTestRate(browser) : ''].filter(Boolean).join(' · ')];
+    [speedTestVerdictText(result, values.verdict) || '', browser ? 'this browser: ' + speedTestRate(browser) : ''].filter(Boolean).join(' · ')];
 }
 
 function speedTestRenderHistory(results) {
@@ -729,12 +735,12 @@ async function speedTestCompare() {
   table.append(thead, body);
   const wrap = speedTestNode('div', null, 'speed-test-table-wrap');
   wrap.append(table);
-  const labels = speedTestState.meta.verdict_labels;
   const verdicts = speedTestNode('ul', null, 'speed-test-verdicts');
   ['download', 'upload'].forEach((direction) => {
     const pair = data.verdicts[direction];
     verdicts.append(speedTestNode('li', (direction === 'download' ? 'Download' : 'Upload') + ' against the cap: before ' +
-      (labels[pair.baseline] || '—') + '; after ' + (labels[pair.result] || '—') + '.'));
+      (speedTestVerdictText(data.baseline, pair.baseline) || '—') + '; after ' +
+      (speedTestVerdictText(data.result, pair.result) || '—') + '.'));
   });
   data.warnings.forEach((warning) => verdicts.append(speedTestNode('li', warning, 'speed-test-warning')));
   box.append(wrap, verdicts);

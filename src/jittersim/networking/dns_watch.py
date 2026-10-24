@@ -330,7 +330,8 @@ class ServiceWatcher:
                 self._last_mac_drop_logged = now
                 # No addresses in the log. If this repeats and the Pi's own answers are
                 # missing, the interface address changed and the next plan check follows it.
-                LOGGER.warning("ignored a DNS answer sent from another MAC address than the interface's")
+                LOGGER.warning(
+                    "ignored a DNS answer sent from another MAC address than the interface's")
             return
         if not self._trusted_source(frame):
             return

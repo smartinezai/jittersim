@@ -1129,9 +1129,9 @@ other. Limits:
   limits). The Pi's own data does not pass the shared queue of **Same as
   everyone** or **Everyone else**.
 - When the profile's cap is at or above 90% of what the Pi can send, the result
-  says so instead of judging the cap, unless the speed is clearly above the cap:
-  a Pi 3B+ sends a few tens of Mbit/s over
-  Wi-Fi, so a higher cap cannot show in this test.
+  says so instead of calling the speed at or below the cap: a Pi 3B+ sends a few
+  tens of Mbit/s over Wi-Fi, so a higher cap cannot show in this test. A speed
+  clearly above the cap is still reported as faster than the cap.
 - One dashboard test runs at a time, a device can be tested again 15 seconds
   after its last test, and nothing starts while Panic or a router outage keeps
   profiles stopped.
