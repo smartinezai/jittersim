@@ -12,7 +12,7 @@ fixes, which cure the intermittent check failure named in step 7) have merged. N
 release exist yet, and `docs/releases/registry.json` reserves no version. The facts about the Pi
 and GitHub in section 0 are as read on 16 October and have to be read again before the steps run.
 Main's pinned `helper.py` and `access.py` changed since: they are now `a955a151...` and
-`41a0f6f9...`, which the Pi's old list does not hold either, so step 2 is still needed. Use the
+`41a0f6f9...`, which the Pi's old list did not hold in that historical snapshot. Use the
 short notes file `docs/release-notes-0.2.0-draft.md` for step 5.
 
 **Status on 23 October 2026.** The commands in order, the y/N answers and the evidence wording are in
@@ -20,7 +20,16 @@ short notes file `docs/release-notes-0.2.0-draft.md` for step 5.
 Pi checks a release against the Panic list of the update manager it already runs, so a Panic-pinned
 file that changes after the bootstrap needs a new bootstrap before step 5.
 
-## 0. Facts that decide the order
+**Recorded setup on 24 October 2026.** The final handoff records
+`03fe31d8a1695dd42c9e213540f3127b555e8640` as the Pi bootstrap commit. The frozen
+candidate `ec403d0f` has the same three Panic-pinned files. The older `4b343b6` snapshot
+below does not mean bootstrap must be repeated. Actual installed state, trusted keys and
+online-token state have not been verified on the device in this documentation pass.
+The owner must confirm them before proceeding; matching source files alone do not prove
+the live installation or its configuration. Use section 2 only if the installed updater
+cannot accept the candidate. Save and check a fresh local backup before any Pi update.
+
+## 0. Historical facts recorded on 16 October
 
 | Fact | Evidence |
 |---|---|
@@ -41,8 +50,8 @@ file that changes after the bootstrap needs a new bootstrap before step 5.
    ever installed ("not newer"). Deploy nothing else to the Pi between step 5 starting and the
    release being installed. Other agents and Codex sessions count: tell them.
 2. A development build made **after** the release record PR moved main to 0.2.1 has a higher
-   version number than 0.2.0 and the Pi would refuse 0.2.0 as "an older number". So the
-   bootstrap build is made now, from the current main (0.2.0), before step 5.
+   version number than 0.2.0 and the Pi would refuse 0.2.0 as "an older number". If a
+   bootstrap is needed, make it from the current main (0.2.0) before step 5.
 
 ## 1. Merge the tooling PR first  [OWNER] (done: PR 139 merged on 17 October)
 
@@ -59,7 +68,7 @@ git log --oneline -1
 
 Use this checkout (clean, nobody else edits it) for steps 2 and 5.
 
-## 2. One-time bootstrap of the Pi with the current main  [OWNER, one sudo password]
+## 2. Bootstrap only if the installed updater needs it  [OWNER, one sudo password]
 
 Before this bootstrap, save a **fresh database backup on the Mac** and check the copy with the
 [backup drill](user-guide.md#back-up-to-your-mac-and-check-the-copy). New profiles may have been
