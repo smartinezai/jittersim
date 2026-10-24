@@ -582,8 +582,8 @@ def test_the_profile_messages_name_the_group_and_the_count():
 @NODE
 @pytest.mark.parametrize(
     "blocked, text",
-    [([False, False, False], ""), ([True, False, False], "1 blocked"),
-     ([True, True, False], "2 blocked"), ([True, True, True], "All blocked")],
+    [([False, False, False], ""), ([True, False, False], "1 on global block list"),
+     ([True, True, False], "2 on global block list"), ([True, True, True], "All on global block list")],
 )
 def test_the_group_says_how_many_of_its_names_are_blocked(blocked, text):
     items = [
@@ -941,7 +941,7 @@ def test_the_header_block_button_blocks_every_name_in_one_call_and_turns_into_un
         ["success", "Removed 7 ImmoScout24 names from the global block list. " + ENFORCE],
     ]
     assert out["afterBlock"] == {
-        "header": "Unblock all", "badge": "All blocked", "badgeHidden": False,
+        "header": "Unblock all", "badge": "All on global block list", "badgeHidden": False,
         "rows": ["Unblock"] * 7,
     }
     assert out["last"] == {
@@ -968,7 +968,7 @@ def test_unblocking_one_name_in_a_blocked_group_turns_the_header_into_block_rema
 
     assert out["start"] == "Unblock all"
     assert out["header"] == "Block remaining"
-    assert out["badge"] == "6 blocked"
+    assert out["badge"] == "6 on global block list"
     assert out["rows"][2] == "Block globally"
     assert out["rows"].count("Unblock") == 6
     assert out["calls"][1] == ["request", REMOVE_BLOCK, "POST", {"domain": IMMO_NAMES[2][0]}]
@@ -1661,7 +1661,7 @@ def test_a_partly_blocked_system_group_shows_an_undo_next_to_the_disabled_block_
         "block": ["Block remaining", True],
         "undo": ["Unblock blocked names", False, False, "Unblock blocked names: 2 Google names"],
         "note": False,
-        "badge": "2 blocked",
+        "badge": "2 on global block list",
     }
     assert out["calls"] == [
         ["message", "Removing 2 Google names from the global block list...", "working"],
@@ -1703,7 +1703,7 @@ def test_a_failed_undo_keeps_the_state_and_shows_the_error():
         "last": ["message", "the helper is busy", "error"],
         "undoHidden": False,
         "undoDisabled": False,
-        "badge": "1 blocked",
+        "badge": "1 on global block list",
     }
 
 

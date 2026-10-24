@@ -4042,7 +4042,8 @@
     function groupBlockedText(group) {
       const blocked = group.names.filter((observation) => observation.globally_blocked === true).length;
       if (blocked === 0) return "";
-      return blocked === group.names.length ? "All blocked" : blocked + " blocked";
+      return blocked === group.names.length
+        ? "All on global block list" : blocked + " on global block list";
     }
 
     function groupLimitNote(count) {
@@ -4191,7 +4192,7 @@
           hostName.textContent = parts.domain;
           const badge = document.createElement("span");
           badge.className = "observation-badge";
-          badge.textContent = "Blocked";
+          badge.textContent = "On global block list";
           host.append(hostName, badge);
           domain.appendChild(host);
           const hintLine = document.createElement("div");

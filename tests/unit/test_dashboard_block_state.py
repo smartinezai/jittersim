@@ -197,7 +197,7 @@ def test_each_row_shows_the_badge_and_both_buttons_from_the_state_helpers():
     body = function_body("renderObservations")
     assert "blockButtonState(observation)" in body
     assert 'badge.className = "observation-badge";' in body
-    assert 'badge.textContent = "Blocked";' in body
+    assert 'badge.textContent = "On global block list";' in body
     assert re.search(r"changeGlobalBlock\(\s*observation,\s*blockButton", body)
     assert "profileButtonState(observation.domain, selectedProfile)" in body
     assert "queryCountText(observation.query_count)" in body
@@ -387,14 +387,14 @@ def test_a_blocked_row_shows_its_badge_and_an_unblock_button_at_render():
         {
             "host": "a.example",
             "badgeHidden": True,
-            "badgeText": "Blocked",
+            "badgeText": "On global block list",
             "profile": ["Already in Slow", True, "Already in Slow a.example"],
             "block": ["Block globally", "Block globally a.example"],
         },
         {
             "host": "b.example",
             "badgeHidden": False,
-            "badgeText": "Blocked",
+            "badgeText": "On global block list",
             "profile": ["Add to profile", False, "Add to profile b.example"],
             "block": ["Unblock", "Unblock b.example"],
         },
