@@ -156,6 +156,17 @@ for 2000 names (over the old 64 KiB limit with the other fields), 160 KiB for 50
 rendering change is needed. The DNS observation list marks blocked names on the server with
 a set lookup.
 
+**Access status polling follow-up (24 October).** The dashboard now requests
+`/api/access?summary=1` for status reads. It keeps the MAC rules, options, client targets,
+site-rule metadata and domain counts, and omits domain name arrays. Applied and normal-access
+status are calculated from complete policies before the response is shortened. The default
+`/api/access` and `/api/policies` editor reads still include every domain; polling does not
+replace editor contents or unfinished drafts. An offline fixture with 15 devices, 2000 global
+names of 29 characters, one allowed name and two site rules measures **136163 bytes** for the
+full JSON response and **4085 bytes** for the summary, a **97% reduction**. At a five-second
+interval that is 1633956 versus 49020 response bytes per minute. This measures uncompressed
+response bodies, not server CPU or the helper's status message.
+
 **Browser proxy.** `permits_host` compares a host with every blocked name: 0.37 ms for 2000
 names, 1.1 ms for 5000 (about 4 and 11 ms on a Pi) once per new proxied connection.
 Acceptable. Not changed.

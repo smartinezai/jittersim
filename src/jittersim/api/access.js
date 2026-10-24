@@ -50,7 +50,7 @@ async function loadAccessStatus() {
 
 async function readAccessStatusOnce() {
   try {
-    accessState = await request('/api/access', 'GET');
+    accessState = await request('/api/access?summary=1', 'GET');
     const summary = element('access-summary');
     summary.textContent = !accessState.available ? 'Configuration only. Install the current networking helper on the Pi to enforce access rules.' :
       accessState.error || (accessState.applied ? (accessState.enabled ?
@@ -172,7 +172,7 @@ function deviceAccessText(device) {
   const client = policy.clients.find(item => item.id === device.id);
   const rules = policy.blocks.filter(rule => rule.enabled && ((!rule.device_id && !rule.group_id) || client?.block_ids.includes(rule.id)));
   const descriptions = rules.map(rule => rule.name);
-  if (policy.websites.mode === 'allow_only' || policy.websites.blocked_domains.length) descriptions.unshift('Global website rules');
+  if (policy.websites.mode === 'allow_only' || (policy.websites.blocked_domain_count ?? policy.websites.blocked_domains?.length ?? 0)) descriptions.unshift('Global website rules');
   return (descriptions.length ? 'Site restrictions: ' + descriptions.join(', ') : 'Network access allowed') + pending;
 }
 

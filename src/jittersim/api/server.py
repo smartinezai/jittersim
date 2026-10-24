@@ -1907,7 +1907,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
 
-        access_response = read_access_api(self, path)
+        access_response = read_access_api(self, path, query)
         if access_response is not None:
             return access_response
         workflow = read_workflow(self, path)

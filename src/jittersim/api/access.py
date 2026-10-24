@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 from dataclasses import replace
+from urllib.parse import parse_qs
 
 from jittersim.diagnostic_records import recorded
 from jittersim.config.models import MacPolicy, SiteBlock, normalize_mac_address
@@ -59,7 +60,26 @@ def _definition(plan):
     return value
 
 
-def read_access_api(server, path):
+def _policy_summary(policy):
+    """Keep status and device rules without the domain names used by the editor."""
+    websites = policy["websites"]
+    return {
+        **policy,
+        "websites": {
+            "mode": websites["mode"],
+            "allowed_domain_count": len(websites["allowed_domains"]),
+            "blocked_domain_count": len(websites["blocked_domains"]),
+        },
+        "blocks": [
+            {**{key: value for key, value in rule.items() if key != "domains"},
+             "domain_count": len(rule["domains"])}
+            for rule in policy["blocks"]
+        ],
+    }
+
+
+def read_access_api(server, path, query=""):
+    """Read complete policies by default; summary=1 omits names from status polls."""
     if path != "/api/access":
         return None
     from jittersim.engine.access import access_from_payload
@@ -97,6 +117,13 @@ def read_access_api(server, path):
         and runtime.observed_state == "reset"
         and runtime.last_action == "reset"
     )
+    if parse_qs(query).get("summary") == ["1"]:
+        # Compare the complete policies above. Omitted names must not hide pending changes.
+        result["saved_policy"] = _policy_summary(result["saved_policy"])
+        if result.get("policy") is not None:
+            # Older helpers can omit optional version-1 fields. Use the same
+            # defaults as the validated comparison, leaving the full response intact.
+            result["policy"] = _policy_summary(applied.payload())
     return response(result)
 
 
