@@ -367,24 +367,18 @@ def run_width(browser, base, width, height):
     assert api_calls(requests, "/api/router/wifi") == []
     expect(page.locator("#router-action-message")).to_have_text("")
     sidebar_control(page, "#sync-router-ap")
-    control = page.locator(".router-wifi-control").bounding_box()
     row = page.locator(".router-wifi-copy").bounding_box()
-    switch = page.locator("#router-wifi-toggle").bounding_box()
+    value = page.locator("#router-wifi-toggle").bounding_box()
     action = button.bounding_box()
-    assert abs(action["x"] - row["x"]) <= 1
-    assert abs(action["width"] - row["width"]) <= 1
-    if is_phone(page):
-        bar = page.locator(".safety-bar").bounding_box()
-        assert abs(bar["y"] + bar["height"] - height) <= 1, bar
-        assert switch["y"] >= bar["y"]
-        assert switch["y"] + switch["height"] <= bar["y"] + bar["height"] + 0.5
-        assert row["y"] + row["height"] <= bar["y"] + 0.5, (row, bar)
-    else:
-        assert row["y"] >= control["y"] + control["height"]
-        assert abs(row["x"] - control["x"]) <= 1
-        assert abs(row["width"] - control["width"]) <= 1
-        assert switch["x"] > control["x"] + control["width"] / 2
-        assert switch["y"] >= control["y"]
+    bar = page.locator(".safety-bar").bounding_box()
+    # Controls uses a two-column grid on desktop, above the persistent safety bar.
+    assert action["x"] >= row["x"] - 1
+    assert action["x"] + action["width"] <= row["x"] + row["width"] + 1
+    assert action["width"] >= 44 and action["height"] >= 44
+    assert abs(bar["y"] + bar["height"] - height) <= 1, bar
+    assert value["y"] >= bar["y"]
+    assert value["y"] + value["height"] <= bar["y"] + bar["height"] + 0.5
+    assert row["y"] + row["height"] <= bar["y"] + 0.5, (row, bar)
     page.screenshot(path=f"test-results/router-copy-{width}.png", animations="disabled")
 
     # A status in the sidebar is visible even while another dashboard page is open.
@@ -521,6 +515,8 @@ def check_visible_router_read(browser, base, width, height):
     expect(page.locator("#check-router-wifi-now")).to_be_disabled()
     expect(page.locator("#router-wifi-status")).to_contain_text("Enter router password")
     assert not reads
+    for selector in ("#router-wifi-toggle", "#router-wifi-status"):
+        expect(page.locator(selector)).to_be_in_viewport(ratio=1)
     enter_router_password(page)
     close_controls(page)
     expect(page.locator(".control-utilities")).to_be_hidden()
@@ -545,7 +541,7 @@ def check_visible_router_read(browser, base, width, height):
     assert len(reads) == 2
     box = check.bounding_box()
     assert box and box["height"] >= 44 and box["width"] >= 44, box
-    for selector in ("#panic-button", "#controls-toggle"):
+    for selector in ("#panic-button", "#controls-toggle", "#router-wifi-toggle", "#router-wifi-status"):
         expect(page.locator(selector)).to_be_in_viewport(ratio=1)
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
     page.screenshot(path=f"test-results/router-check-{width}-after.png")
