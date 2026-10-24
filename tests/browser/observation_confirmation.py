@@ -146,7 +146,7 @@ def check_device_collapse(browser, base, width, evidence):
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), narrow
                 target = toggle.bounding_box()
                 assert target and target["width"] >= 44 and target["height"] >= 44, target
-                page.screenshot(path=f"test-results/discovery-devices-long-name-{narrow}.png")
+                card.screenshot(path=f"test-results/discovery-devices-long-name-{narrow}.png")
         assert posts == [], posts
         evidence.append(f"device groups at {width}px: keyboard collapse, focus and state after refresh, "
                         "independent devices, 44px target, no overflow or writes")
