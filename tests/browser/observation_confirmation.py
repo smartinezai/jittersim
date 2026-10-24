@@ -100,6 +100,46 @@ def confirm_dialog(page, accepted):
     expect(dialog).to_have_count(0)
 
 
+def check_device_collapse(browser, base, width, evidence):
+    context = browser.new_context(viewport={"width": width, "height": 900})
+    try:
+        page = context.new_page()
+        authenticate(page, base)
+        page.wait_for_function("() => !dashboardRefresh")
+        cards = page.locator("#observations .observation-device")
+        card = cards.filter(has_text="192.168.50.124").first
+        other = cards.filter(has_text="192.168.50.184").first
+        toggle = card.locator(".observation-device-toggle")
+        body = card.locator(".observation-device-body")
+        posts = []
+        page.on("request", lambda request: posts.append(request.url)
+                if request.method == "POST" else None)
+        expect(toggle).to_have_attribute("aria-expanded", "true")
+        toggle.focus()
+        toggle.press("Enter")
+        expect(body).to_be_hidden()
+        expect(toggle).to_be_focused()
+        expect(toggle).to_have_attribute("aria-expanded", "false")
+        expect(other.locator(".observation-device-body")).to_be_visible()
+        assert toggle.get_attribute("aria-controls") == body.get_attribute("id")
+        page.evaluate("() => loadObservations()")
+        expect(body).to_be_hidden()
+        expect(toggle).to_be_focused()
+        box = toggle.bounding_box()
+        assert box and box["width"] >= 44 and box["height"] >= 44, box
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
+        page.screenshot(path=f"test-results/discovery-devices-collapsed-{width}.png")
+        toggle.press("Space")
+        expect(body).to_be_visible()
+        expect(toggle).to_have_attribute("aria-expanded", "true")
+        page.screenshot(path=f"test-results/discovery-devices-expanded-{width}.png")
+        assert posts == [], posts
+        evidence.append(f"device groups at {width}px: keyboard collapse, focus and state after refresh, "
+                        "independent devices, 44px target, no overflow or writes")
+    finally:
+        context.close()
+
+
 def check_actions(browser, base, kind, width, evidence):
     context = browser.new_context(viewport={"width": width, "height": 1000 if width > 768 else 844})
     context.set_default_timeout(15000)
@@ -259,6 +299,7 @@ def run(*, cases=("single", "group"), widths=(1920, 390)):
             try:
                 evidence = []
                 for width in widths:
+                    check_device_collapse(browser, f"http://127.0.0.1:{port}", width, evidence)
                     for kind in cases:
                         check_actions(browser, f"http://127.0.0.1:{port}", kind, width, evidence)
                 print(json.dumps(

@@ -262,6 +262,7 @@ let profiles = [];
 let observedDomainsByDevice = {};
 let observedNames = new Set();
 const openObservationGroups = new Set();
+const collapsedObservationDevices = new Set();
 const observationProfileChoice = new Map();
 const calls = [];
 const confirmations = [];
