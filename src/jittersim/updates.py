@@ -3526,6 +3526,7 @@ def cleanup_generations(root, budget, *, candidate=None):
     selected = recovery_backup(root)
     generations = []
     preparations = []
+    selector_temporary = None
     scanned = 0
     with os.scandir(root) as entries:
         for entry in entries:
@@ -3533,7 +3534,15 @@ def cleanup_generations(root, budget, *, candidate=None):
             scanned += 1
             if scanned > 64:
                 raise UpdateError("too many update records need inspection")
-            if entry.name.startswith("backup-") and entry.name != "backup-current.json":
+            if entry.name == "backup-current.tmp":
+                # atomic_json can stop after writing any part of the selector.
+                # Its unpublished contents never select a recovery generation.
+                info = entry.stat(follow_symlinks=False)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                        or info.st_mode & 0o077 or info.st_size > 65536):
+                    raise UpdateError("the temporary recovery selector is unsafe")
+                selector_temporary = Path(entry.path)
+            elif entry.name.startswith("backup-") and entry.name != "backup-current.json":
                 if not GENERATION.fullmatch(entry.name):
                     raise UpdateError("an unknown recovery folder needs inspection")
                 generations.append(Path(entry.path))
@@ -3568,6 +3577,11 @@ def cleanup_generations(root, budget, *, candidate=None):
             remove_tree(path, budget)
     for path in preparations:
         remove_tree(path, budget)
+    if selector_temporary is not None:
+        budget.check()
+        selector_temporary.unlink()
+        _fsync_folder(root)
+        budget.check()
 
 
 def _check_preparation(path, budget):
