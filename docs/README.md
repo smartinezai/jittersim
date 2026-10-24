@@ -350,16 +350,17 @@ the first plan (September 2026) and is historical too.
 
 ## Screenshots
 
-The README shows the two overview images and the two new feature images. The user guide shows all
-seven. They use sample data from the browser test fixture: no real phone, Pi or home network. The
-five existing images are unchanged. The two feature images were captured on 2026-10-19 from
+The README shows the overview images and the feature images. The user guide shows all ten. They
+use sample data from the browser test fixture: no real phone, Pi or home network. The
+four of the five older images were retaken on 2026-10-24 and the DNS, outage and address images are
+unchanged. The two feature images of 2026-10-19 were captured from
 `18c3f3d4` (see
 [ui-overhaul-proposal-2026-10-09.md](ui-overhaul-proposal-2026-10-09.md)):
 
 - [experience-overview-desktop.png](screenshots/experience-overview-desktop.png) (1440 by 1000 pixels)
   and [experience-overview-phone.png](screenshots/experience-overview-phone.png) (430 by 1200):
-  the Devices page after **Start**, with the test phone on the slow profile from a device timer.
-  No update is staged in these two so that the sidebar shows every page link.
+  the top of the Devices page after **Start**: the sidebar with Start, Reset network, Panic and
+  Reset Wi-Fi name, then the Everyone and Address changes cards. No update is staged in these two.
 - [dns-failure-controls.png](screenshots/dns-failure-controls.png): the access options of the
   Access and rules page with a DNS failure chance of 20% applied.
 - [router-outage-persistence.png](screenshots/router-outage-persistence.png): the Router outage
@@ -372,11 +373,18 @@ five existing images are unchanged. The two feature images were captured on 2026
   selected and one sample suggestion waiting for review.
 - [device-speed-test-controls.png](screenshots/device-speed-test-controls.png): the speed-test
   window for the sample phone before a test starts, with the site, length, label and start button.
+- [device-speed-test-dashboard.png](screenshots/device-speed-test-dashboard.png): the same window with
+  **This dashboard** selected, as it opens on the device itself.
+- [this-device.png](screenshots/this-device.png): the top of the sample phone's row in Connected
+  clients with the **This device** label.
+- [reset-wifi-name-button.png](screenshots/reset-wifi-name-button.png): the sidebar buttons for the
+  router Wi-Fi, with **Reset Wi-Fi name**. The last three were captured on 2026-10-24 with the
+  fixture's phone as the browser's own device.
 
-`python scripts/docs-screenshots.py` retakes all seven images (add `--out DIR` to write somewhere else first).
+`python scripts/docs-screenshots.py` retakes all ten images (add `--out DIR` to write somewhere else first).
 It starts separate local fixtures for the different sample data and drives the pages with Playwright. It needs
 `pip install 'playwright==1.63.0'` and `python -m playwright install chromium`. Commit only the
-images that changed. The two overview images are about 280 KB and 125 KB because PNGs from
+images that changed. The two overview images are about 280 KB and 134 KB because PNGs from
 Chromium do not recompress losslessly. Earlier versions of these two were reduced to a palette of
 200 colours.
 

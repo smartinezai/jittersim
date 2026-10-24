@@ -9,19 +9,23 @@ the hand-written Unreleased part short.
 
 ## Unreleased
 
-- The global block list holds 2000 names instead of 100. Saving checks the whole household access policy first, and the address lookups renew a long list name by name without stalling a plan.
-- **Test speed** can now run from the dashboard itself, with no outside server: open the dashboard on the device and the Pi sends it test data through its download profile. Upload still needs a speed test site.
-- Open dashboard tabs share one reading of live traffic, the Ethernet details and the helper check, and a quiet time quota no longer writes to the SD card every 5 seconds.
-- Each profile preset now says what it is based on. DSL and Slow 3G (Chrome DevTools) are new presets.
-- The sidebar has a **Reset Wi-Fi name** button, so the Pi's Wi-Fi name can be restored from any page without opening settings. It uses the same confirmation and the same action as the Router and Wi-Fi page. The restart notice now says that every device on the Pi's Wi-Fi, including the one showing the dashboard, disconnects for a short time, and the page names the network to join again.
-- `jittersim backup pull` on a Mac saves the Pi's database backup in a private folder (`~/jittersim-backups/` by default) and never replaces a file. It runs once each time. A schedule is a cron or launchd line.
-
 ### JitterSim 0.2.0
 
-The first signed JitterSim release adds safer updates with a recovery copy and health check, per-device profiles, protected-device dashboard access and router Wi-Fi name following. It also improves accessibility and reliability.
+The first signed JitterSim release adds one-step updates with a recovery copy and a health check, per-device profiles, protected-device dashboard access, router Wi-Fi name following and accessibility and reliability improvements.
+
+What is new:
+
+- **Check connection** sends a burst of ping probes (100 by default) from the Pi to a connected device and compares what comes back with its download profile. It does not judge the upload side or a speed cap. Its pings, like those of Test speed, stay on the test Wi-Fi network.
+- **Test speed** records a device's traffic while you run a speed test on it, to compare before and after a profile. Opened on the device itself, the dashboard can also send it test data with no outside server (download only).
+- **Address changes** asks before moving a saved device's settings when its private Wi-Fi address changes. Automatic and Off can be chosen.
+- **Apply profile** starts one device on its own profile, also while a profile for Everyone runs.
+- A protected device opens the dashboard with the admin token alone.
+- The device you browse with over the test Wi-Fi is marked **This device** in Connected clients.
+- The sidebar has a **Reset Wi-Fi name** button. It restarts the Pi's Wi-Fi, so every device on it, possibly the one showing the dashboard, loses its connection for up to a minute.
+- The global block list holds 2000 names (80000 characters) instead of 100. An older release refuses more than 100 names.
+- Each profile preset says what its numbers are based on. DSL and Slow 3G are new presets.
+- `jittersim backup pull` on a Mac saves the Pi's database backup in `~/jittersim-backups/`.
 
 Security fixes block UDP source-port 53 traffic from test Wi-Fi clients through the Pi and limit each device to 16 of the browser proxy's 32 connection slots.
-
-- The Connected clients list labels the device you are browsing with as **This device**.
 
 See the [complete development changes](https://github.com/smartinezai/jittersim/blob/main/docs/history/0.2.0-development-changes.md).

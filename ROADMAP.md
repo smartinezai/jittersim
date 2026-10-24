@@ -536,13 +536,15 @@ milestones above is one of these:
   [carry-forward list](docs/carry-forward-panic-batch-2026-10-10.md).
 - Planned work that has not started: Milestones 16 to 19 (Deliveries B to F of the erratic
   connection plan) and the website list modes of the [planned features](docs/planned-features.md).
-- Planned work in progress: the draft pull requests listed below (Check connection, security follow-ups, QA follow-ups).
-- Requested on 23 October 2026 and not started (see [planned features](docs/planned-features.md)):
-  show which device the browser in use is in the Devices tab, a speed test that runs from the
-  dashboard alone, a quick button to reset the Pi Wi-Fi name, and protected devices that the
-  global block list does not affect. The larger global block list (2000 names and 80000
-  characters instead of 100 names) is delivered by PR 188. After v0.2.0: a
-  dashboard redesign with components (see [planned features](docs/planned-features.md)).
+- Planned work in progress: the open draft pull requests on GitHub.
+- Delivered on 23 October 2026: the **This device** label (PR 181), the **Reset Wi-Fi name**
+  button in the sidebar (PR 182), **Check connection** (PR 161, 186 and 207), a speed test that
+  runs from the dashboard itself, download only (PR 189), a global block list of 2000 names and
+  80000 characters (PR 188), the preset sources with Slow 3G and DSL (PR 185) and
+  `jittersim backup pull` (PR 179). Requested and not in main yet (see
+  [planned features](docs/planned-features.md)): protected devices that the global block list
+  does not affect, which needs the Panic-pinned `access.py` and waits until after v0.2.0. After
+  v0.2.0: a dashboard redesign with components.
 - The v0.2.0 release itself (Milestone 12), described below.
 
 Hosted CI cannot start jobs (billing limit). Every pull request is gated by
@@ -562,12 +564,12 @@ audit), 160 and 169 (boot Wi-Fi look), 162 (QA leftovers and flaky tests), 164 (
 resource fixes), 163 (write route table), 165 (speed test follow-ups), 166 (mutation testing), 167
 (property tests) and 168 (interrupted apply cleanup).
 
-Open pull requests on 19 October 2026 (all drafts, PR 163 and 165 merged during the day):
+Open pull requests on 19 October 2026 (all drafts, PR 163 and 165 merged during the day). Both below have merged since:
 
 | PR | What it does | State |
 | --- | --- | --- |
-| 161 | A **Check connection** button that sends probes to a device and compares loss and delay with its profile (replaces PR 153) | Draft |
-| 170 | Finish the follow-ups of the PR 159 security audit | Draft |
+| 161 | A **Check connection** button that sends probes to a device and compares loss and delay with its profile (replaces PR 153) | Merged on 23 October |
+| 170 | Finish the follow-ups of the PR 159 security audit | Merged on 19 October |
 
 The first release, v0.2.0, is being prepared. `pyproject.toml` already says `0.2.0`, but no tag, no
 GitHub release and no reserved version exist yet (`docs/releases/registry.json`). The release tooling

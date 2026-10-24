@@ -18,8 +18,9 @@ test. It is for experiments, not a replacement for your home router.
   global block list holds up to 2000 names.
 - Protect a device from every profile. A protected device opens the dashboard
   with the admin token alone and can have ads blocked.
-- Review connected devices and traffic while a test runs. Measure a device's
-  speed before and after a profile (from the dashboard itself, with no outside
+- Review connected devices and traffic while a test runs. The device you browse
+  with over the test Wi-Fi is marked **This device**. Measure a device's speed
+  before and after a profile (download from the dashboard itself, with no outside
   server), or check its packet loss, delay and jitter against the profile.
 - Follow a saved device to its new private Wi-Fi address, with Ask, Automatic and Undo.
 - Choose whether active profiles resume after a router outage.
@@ -31,17 +32,22 @@ test. It is for experiments, not a replacement for your home router.
 ## Screenshots
 
 <div align="center">
-  <img src="docs/screenshots/experience-overview-desktop.png" alt="The Devices page on a desktop screen: the sidebar with Start, Reset network and Panic, and a connected test phone on a slow profile" width="68%" />
-  <img src="docs/screenshots/experience-overview-phone.png" alt="The same page on a phone-sized screen, with Panic, the router Wi-Fi status and a Controls button in a bar at the bottom" width="27%" />
+  <img src="docs/screenshots/experience-overview-desktop.png" alt="The Devices page on a desktop screen: the sidebar with Start, Reset network, Panic and Reset Wi-Fi name, and the Everyone and Address changes cards" width="68%" />
+  <img src="docs/screenshots/experience-overview-phone.png" alt="The same page on a phone-sized screen, with the Everyone and Address changes cards and a bar at the bottom with Panic, the router Wi-Fi status and a Controls button" width="27%" />
 </div>
 
 The Address changes card lets you review a saved device's new private Wi-Fi
 address before moving its settings. The speed-test window lets you choose a
-site and test length before starting a test on the device.
+site and test length before starting a test on the device. On the device itself
+the dashboard can send the test data, with no outside site. The device you browse
+with is marked **This device**, and the sidebar has a **Reset Wi-Fi name** button.
 
 <div align="center">
   <img src="docs/screenshots/address-changes.png" alt="The Address changes card with Ask selected and one sample suggestion for Dad's phone at a new private address" width="100%" />
   <img src="docs/screenshots/device-speed-test-controls.png" alt="The speed-test window for Fixture phone with Cloudflare selected, a 45 second length, the label Before profile and the Start measuring button" width="100%" />
+  <img src="docs/screenshots/device-speed-test-dashboard.png" alt="The speed-test window for Fixture phone with This dashboard selected as the source of the test data, the label Before profile and the Start measuring button" width="100%" />
+  <img src="docs/screenshots/this-device.png" alt="The Fixture phone row in Connected clients with the green label This device next to its name" width="100%" />
+  <img src="docs/screenshots/reset-wifi-name-button.png" alt="The sidebar buttons Check router Wi-Fi, Copy router Wi-Fi to Pi and Reset Wi-Fi name" width="40%" />
 </div>
 
 *Sample data only; no real phone, Pi or home network is shown.*

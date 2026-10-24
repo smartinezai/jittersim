@@ -18,8 +18,8 @@ Stable versions use tested signed packages with owner approval. See the
 ## See it in action
 
 <div align="center">
-  <img src="../docs/screenshots/experience-overview-desktop.png" alt="The Devices page with the sidebar controls and a connected test phone whose active profile is Slow connection, started by a timer" width="68%" />
-  <img src="../docs/screenshots/experience-overview-phone.png" alt="The Devices page on a phone-sized screen: the status line, the Everyone card, the connected test phone and a bar with Panic, the router Wi-Fi status and Controls" width="27%" />
+  <img src="../docs/screenshots/experience-overview-desktop.png" alt="The Devices page with the sidebar controls Start, Reset network, Panic and Reset Wi-Fi name, and the Everyone and Address changes cards" width="68%" />
+  <img src="../docs/screenshots/experience-overview-phone.png" alt="The Devices page on a phone-sized screen: the status line, the Everyone and Address changes cards and a bar with Panic, the router Wi-Fi status and Controls" width="27%" />
 </div>
 
 *Screenshots use sample data. No real phone, Pi or home network is shown.*
@@ -142,6 +142,8 @@ applying access rules, so run `sudo jittersim access apply` after changing it
 (or add `--apply` to the `set` command).
 Run `sudo jittersim --help` for the command list. More examples are in the
 [Pi installation and recovery guide](../deploy/raspberry-pi/README.md).
+
+<img src="../docs/screenshots/reset-wifi-name-button.png" alt="The sidebar buttons Check router Wi-Fi, Copy router Wi-Fi to Pi and Reset Wi-Fi name" width="40%" />
 
 Use **Reset Wi-Fi name** in the sidebar (on a phone, in the Controls sheet) or on Router and
 Wi-Fi, or run `sudo jittersim wifi reset` on the Pi.
@@ -721,9 +723,12 @@ Before a code downgrade, change fresh profiles back to saved patterns or restore
 a compatible private configuration backup. Older releases reject the fresh
 pattern setting. Stop profiles and verify normal traffic before replacing code.
 Also shorten the global block list to 100 names. An older release refuses a
-longer list: its dashboard does not start and the test network stays closed.
-Then open it with `sudo jittersim normal-access` over SSH and install the newer
-release again or shorten the list. **Restore previous installation** is not
+longer list: its dashboard does not start, and the test network is closed at
+boot while the saved access rules hold the longer list. Over SSH,
+`sudo jittersim normal-access` opens the network again. It warns that the
+disabled state could not be saved, which is expected. The dashboard stays down
+until you install the newer release again, because an older release has no
+command that shortens the list. **Restore previous installation** is not
 affected: it also restores the settings from before the update.
 
 Matching is by destination address. A small service on the Pi reads the DNS
@@ -866,6 +871,10 @@ Open **Connected clients** after checking the admin token. This panel shows
 devices on the Pi's test Wi-Fi. Devices on the router's Wi-Fi are outside this
 list. A client needs a verified connection and an IPv4 address before a profile
 or group can be assigned.
+
+<img src="../docs/screenshots/this-device.png" alt="The Fixture phone row in Connected clients with the green label This device next to its name" width="100%" />
+
+The device you browse with over the test Wi-Fi carries a **This device** label.
 
 Choose a profile beside a client then click **Assign profile** or **Apply
 profile**. Choose an existing group then click **Add to group**. For a client
@@ -1101,6 +1110,8 @@ a device saw. An older helper makes the card ask for an update.
 
 **Test speed** on a connected device in **Devices** compares the device's speed
 before and after a profile.
+
+<img src="../docs/screenshots/device-speed-test-dashboard.png" alt="The speed-test window for Fixture phone with This dashboard selected as the source of the test data, the label Before profile and the Start measuring button" width="100%" />
 
 **From the dashboard (no outside server).** Open the dashboard on the device you
 want to test (it needs dashboard access and the admin token), go to **Devices**
