@@ -24,7 +24,7 @@ test. It is for experiments, not a replacement for your home router.
   server), or check its packet loss, delay and jitter against the profile.
 - Follow a saved device to its new private Wi-Fi address, with Ask, Automatic and Undo.
 - Choose whether active profiles resume after a router outage.
-- Restore the Pi's test Wi-Fi to its default name with one sidebar button. The page names the network to join again.
+- Restore the Pi's test Wi-Fi to its default name under **Controls** or on **Router and Wi-Fi**. The page names the network to join again.
 - Update the Pi in one step from the dashboard or a terminal with a signed
   release, a recovery copy and an automatic health check.
 - Save a copy of the Pi's settings database on your Mac with `jittersim backup pull`.
@@ -32,25 +32,37 @@ test. It is for experiments, not a replacement for your home router.
 ## Screenshots
 
 <div align="center">
-  <img src="docs/screenshots/experience-overview-desktop.png" alt="The Devices page on a desktop screen: the sidebar with Start, Reset network, Panic and Reset Wi-Fi name, and the Everyone and Address changes cards" width="68%" />
-  <img src="docs/screenshots/experience-overview-phone.png" alt="The same page on a phone-sized screen, with the Everyone and Address changes cards and a bar at the bottom with Panic, the router Wi-Fi status and a Controls button" width="27%" />
+  <img src="docs/dashboard-operate-redesign/screenshots/desktop-devices.png" alt="The desktop Devices page with page links across the top, compact profile controls and a persistent bottom bar with Panic, read-only router status and Controls" width="68%" />
+  <img src="docs/dashboard-operate-redesign/screenshots/phone-devices.png" alt="The phone Devices page with horizontally scrolling page links and a persistent bottom bar containing Panic, read-only router status and Controls" width="27%" />
 </div>
+
+Use the page links across the top to move between tasks. **Panic**, read-only
+router Wi-Fi status and **Controls** stay at the bottom of every page. Open
+**Controls** for network utilities, including **Reset Wi-Fi name**.
 
 The Address changes card lets you review a saved device's new private Wi-Fi
 address before moving its settings. The speed-test window lets you choose a
 site and test length before starting a test on the device. On the device itself
 the dashboard can send the test data, with no outside site. The device you browse
-with is marked **This device**, and the sidebar has a **Reset Wi-Fi name** button.
+with is marked **This device**.
 
 <div align="center">
   <img src="docs/screenshots/address-changes.png" alt="The Address changes card with Ask selected and one sample suggestion for Dad's phone at a new private address" width="100%" />
   <img src="docs/screenshots/device-speed-test-controls.png" alt="The speed-test window for Fixture phone with Cloudflare selected, a 45 second length, the label Before profile and the Start measuring button" width="100%" />
   <img src="docs/screenshots/device-speed-test-dashboard.png" alt="The speed-test window for Fixture phone with This dashboard selected as the source of the test data, the label Before profile and the Start measuring button" width="100%" />
   <img src="docs/screenshots/this-device.png" alt="The Fixture phone row in Connected clients with the green label This device next to its name" width="100%" />
-  <img src="docs/screenshots/reset-wifi-name-button.png" alt="The sidebar buttons Check router Wi-Fi, Copy router Wi-Fi to Pi and Reset Wi-Fi name" width="40%" />
+  <img src="docs/dashboard-operate-redesign/screenshots/desktop-utilities.png" alt="The open Controls panel with Check router Wi-Fi, Copy router Wi-Fi to Pi, Reset Wi-Fi name and credential controls above the persistent Panic and router-status bar" width="100%" />
 </div>
 
-*Sample data only; no real phone, Pi or home network is shown.*
+**Prepared device profiles** saves a profile choice for a manually entered Wi-Fi
+MAC without changing the network. **Review** shows the current profile settings
+and revisions; **Use profile for this MAC** is a separate confirmed action that
+checks for a fresh same-address client on the Pi’s test Wi-Fi.
+
+<img src="docs/prepared-device-profiles/screenshots/prepared-1440-card.png" alt="Prepared device profiles with manual MAC and saved-profile inputs, Edit, Review and Delete controls, current configuration and pending revisions, complete settings and a separate Use profile for this MAC button" width="100%" />
+
+*Screenshots use synthetic sample data and test-release labels; no real phone,
+Pi or home network is shown. They are not physical network acceptance evidence.*
 
 ## Get started on a Raspberry Pi
 
