@@ -372,4 +372,4 @@ summary::marker { color: var(--tx-muted); }
 #prepared-card .connected-row { display: block; }
 #prepared-card p, #prepared-settings { overflow-wrap: anywhere; }
 #prepared-settings { white-space: pre-wrap; }
-#prepared-card button, #prepared-card input, #prepared-card select { min-height: 44px; }
+.content #page-devices #prepared-card button, #prepared-card input, #prepared-card select { min-height: 44px; }

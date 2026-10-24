@@ -9,6 +9,7 @@ from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.a11y_axe import load_engine
 from tests.browser.device_apply_start import start_fixture
+from tests.browser.fixture import WIDE_FONTS_STYLE
 from tests.browser.protected_clients import HEADERS, MAC_ADDRESS, sign_in
 
 
@@ -33,7 +34,8 @@ def check(browser, base, width, height):
     expect(card).to_be_visible()
     expect(page.locator("#prepared-profile option[value='prepared-test']")).to_have_count(1)
     if width == 320:
-        page.add_style_tag(content="html {font-size: 112.5%;} body {font-family: Verdana, sans-serif;}")
+        page.add_style_tag(content=WIDE_FONTS_STYLE.decode()[7:-8])
+        expect(page.locator("html")).to_have_css("font-size", "18px")
     page.locator("#prepared-mac").fill(MAC_ADDRESS)
     page.locator("#prepared-name").fill("Prepared phone")
     page.locator("#prepared-profile").select_option("prepared-test")
@@ -99,6 +101,47 @@ def check(browser, base, width, height):
     page.locator("#prepared-review details summary").click()
     card.scroll_into_view_if_needed()
     page.screenshot(path=f"test-results/prepared-profiles/prepared-{width}.png")
+    if width == 1440:
+        # A pending Review may be overtaken without leaving its row disabled.
+        held = []
+        def delay_review(route):
+            held.append(route)
+        page.route("**/api/pending-devices/review?*", delay_review)
+        review_button = row.get_by_role("button", name=re.compile("^Review"))
+        review_button.click()
+        expect(review_button).to_be_disabled()
+        page.locator("#panic-button").click()
+        expect(page.locator("#panic-button")).to_have_attribute("aria-busy", "false")
+        assert len(held) == 1
+        held.pop().fulfill(content_type="application/json", body=json.dumps({"profile": {"name": "STALE PRIVATE"}}))
+        expect(review_button).to_be_enabled()
+        expect(page.locator("#prepared-review")).to_be_hidden()
+        expect(page.locator("#prepared-settings")).to_be_empty()
+        # Same-token admission loss must erase drafts and reject a late Review.
+        page.locator("#prepared-mac").fill(MAC_ADDRESS)
+        page.locator("#prepared-name").fill("PRIVATE DRAFT")
+        page.locator("#prepared-profile").select_option("prepared-test")
+        review_button.click()
+        def lose_access(route):
+            route.fulfill(status=403, content_type="application/json", body=json.dumps({
+                "registration_required": True, "error": "Fixture access lost"}))
+        page.route("**/api/pending-devices", lose_access)
+        page.locator("#prepared-refresh").click()
+        expect(page.locator("#private-dashboard")).to_be_hidden()
+        assert len(held) == 1
+        held.pop().fulfill(content_type="application/json", body=json.dumps({"profile": {"name": "STALE PRIVATE"}}))
+        page.unroute("**/api/pending-devices", lose_access)
+        page.unroute("**/api/pending-devices/review?*", delay_review)
+        expect(page.locator("#prepared-mac")).to_have_value("")
+        expect(page.locator("#prepared-name")).to_have_value("")
+        expect(page.locator("#prepared-profile")).to_have_value("")
+        page.locator("#open-admin-credentials").click()
+        page.locator("#check-admin-token").click()
+        expect(page.locator("#private-dashboard")).to_be_visible()
+        page.locator("#close-credentials").click()
+        expect(page.locator("#prepared-mac")).to_have_value("")
+        expect(page.locator("#prepared-name")).to_have_value("")
+        expect(page.locator("#prepared-review")).to_be_hidden()
     row.get_by_role("button", name=re.compile("^Delete")).click()
     page.locator("dialog[open]").get_by_role("button", name="Delete choice").click()
     expect(card.locator("[data-prepared-mac]")).to_have_count(0)
