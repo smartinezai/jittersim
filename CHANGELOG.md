@@ -7,6 +7,34 @@ Changes merged after the newest release are listed under Unreleased until the
 next release takes them over. The Pi shows at most 16 KB of a section, so keep
 the hand-written Unreleased part short.
 
+## v1.0.0 - 2026-10-24
+
+### JitterSim 1.0.0
+
+This release brings together the reviewed dashboard and device-control changes:
+
+- Operate uses full-width navigation, compact controls and a persistent safety bar.
+- Prepared device profiles remain inactive until an explicit Apply. Manual Apply
+  requires fresh verified device identity before saving or starting a profile.
+- Discovery results are easier to scan, notifications preserve newer feedback
+  and profile resets and device controls make the next action clearer.
+- Traffic charts scale from measured rates, identify limits above the chart and
+  offer sampling pause and a bounded table of recent measurements.
+- The local CI harness includes its documented container prerequisites and the
+  prepared-device browser journey. A focused corruption-effect test adds evidence
+  for the existing network effect.
+
+The existing signed stable-release update flow remains available. A dashboard
+workflow for unpublished release candidates is not included.
+
+Real Pi and Safari acceptance of this combined candidate remain outstanding.
+These notes do not establish package creation or physical acceptance.
+
+The documented version policy requires a major release when saved settings
+change or the full installer is required. Prepared choices add saved storage.
+Older-code compatibility was tested but does not waive that policy. PR175 and
+the separately held protected bootstrap changes are not included.
+
 ## v0.2.0 - 2026-10-24
 
 ### JitterSim 0.2.0
