@@ -188,6 +188,7 @@ def check_clearing_and_removal(page, base, headers, width):
         expect(page.locator(f"#{field_id}")).to_have_value(default)
 
     # Validation text stays below the input and reset target without overlapping either.
+    page.evaluate("dismissToast()")
     page.locator("#upload-loss").fill("-1")
     assert not page.locator("#upload-loss").evaluate("node => node.reportValidity()")
     error = page.locator("#upload-loss-error")
