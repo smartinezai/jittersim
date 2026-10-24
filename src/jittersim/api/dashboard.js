@@ -9783,6 +9783,8 @@
     }
 
     function startDashboard() {
+      // Extra scripts install field help before startup and still need the original wrapped labels.
+      setupProfileFieldResets();
       // The admin token gates everything else, so only the public health check
       // and the remembered credentials run before Check token. The restore runs
       // at once so that a token typed meanwhile is never touched.
@@ -10023,7 +10025,5 @@
     savedDevicesHooks.push(followSavedDevices);
 
     groupsLoadedHooks.push(renderTargetMenus);
-
-    setupProfileFieldResets();
 
     startDashboard();
