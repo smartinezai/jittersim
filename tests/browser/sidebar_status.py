@@ -9,6 +9,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.live_regions import speakers
+from tests.browser.notification_wrapping import check_notification_wrapping
 from tests.browser.phone import (
     close_controls,
     is_phone,
@@ -221,6 +222,8 @@ def check_width(browser, width, height):
         page.reload()
         wait_for_automatic_token_check(page)
         check_one_message(page, width, height)
+        if width == 1920:
+            check_notification_wrapping(page)
 
         # signed in with nothing applied yet
         expect(status).to_be_visible()

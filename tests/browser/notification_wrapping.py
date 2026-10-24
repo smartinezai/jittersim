@@ -34,8 +34,16 @@ def check_notification_wrapping(page):
                 })""")
                 assert metrics["scrollWidth"] <= metrics["width"] + 1, (width, font, metrics)
                 assert metrics["scrollHeight"] > metrics["height"], metrics
+                toast = page.locator("#toast").bounding_box()
+                assert toast["x"] >= 0 and toast["y"] >= 0, (width, font, toast)
+                assert toast["x"] + toast["width"] <= width + 1, (width, font, toast)
+                assert toast["height"] <= height * .4 + 1, (width, font, toast)
+                if width == 320:
+                    bar = page.locator(".safety-bar").bounding_box()
+                    assert toast["y"] + toast["height"] <= bar["y"], (font, toast, bar)
                 dismiss = page.locator("#toast-dismiss")
                 expect(dismiss).to_be_in_viewport(ratio=1)
+                page.screenshot(path=f"test-results/notification-{width}-{font[:-1]}.png")
                 page.keyboard.press("Tab")
                 expect(text).to_be_focused()
                 page.keyboard.press("End")
@@ -44,12 +52,17 @@ def check_notification_wrapping(page):
                     return node.scrollTop >= node.scrollHeight - node.clientHeight - 1;
                 }""")
                 expect(dismiss).to_be_in_viewport(ratio=1)
-                page.screenshot(path=f"test-results/notification-{width}-{font[:-1]}.png")
                 page.keyboard.press("Tab")
                 expect(dismiss).to_be_focused()
                 page.keyboard.press("Enter")
                 expect(page.locator("#toast")).to_be_hidden()
                 expect(page.locator("#notification-regression-source")).to_be_focused()
+        # A short result needs no scrolling and adds no message tab stop.
+        page.locator("#notification-regression-source").focus()
+        page.evaluate("showToast('Saved.', 'success')")
+        page.keyboard.press("Tab")
+        expect(page.locator("#toast-dismiss")).to_be_focused()
+        page.keyboard.press("Enter")
     finally:
         page.evaluate("document.getElementById('notification-regression-source').remove()")
         page.evaluate("font => document.documentElement.style.fontSize = font", original_font)
