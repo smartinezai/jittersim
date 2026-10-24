@@ -56,6 +56,10 @@ from jittersim.api.address_follow import (
     write_address_follow,
 )
 from jittersim.api.shared_reading import SharedReading
+from jittersim.api.pending_devices import (
+    PENDING_WRITES, current_pending_profile, pending_target, pending_use_request,
+    read_pending, write_pending,
+)
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.api.connection_checks import (
     CHECK_WRITES,
@@ -308,7 +312,8 @@ RELEASE_UPLOAD_HEADER = "X-Jittersim-Archive-Bytes"
 # dashboard serves one request at a time so a slow sender cannot hold it for longer.
 RELEASE_UPLOAD_SECONDS = 120.0
 WRITE_PATHS = (WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/preview"}
-               | {RELEASE_UPLOAD_PATH} | SPEED_TEST_WRITES | ADDRESS_FOLLOW_WRITES | CHECK_WRITES)
+               | {RELEASE_UPLOAD_PATH} | SPEED_TEST_WRITES | ADDRESS_FOLLOW_WRITES | CHECK_WRITES
+               | PENDING_WRITES)
 ACTION_PATHS = frozenset(
     ("/api/apply", "/api/reset", "/api/observations/scan", "/api/update-preferences",
      "/api/access-point/reset-name", "/api/updates/check-online", "/api/updates/retry")
@@ -1970,6 +1975,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
 
+        pending = read_pending(self.repository, path, query)
+        if pending is not None:
+            return pending
         access_response = read_access_api(self, path, query)
         if access_response is not None:
             return access_response
@@ -2756,6 +2764,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
     def _tracked_write_response_for(self, path: str, payload: Dict[str, Any],
                                     before_replace=None) -> Tuple[int, str, bytes]:
+        pending = write_pending(self.repository, path, payload)
+        if pending is not None:
+            return pending
         if path == "/api/profiles/ranges":
             return self._write_response_for(path, payload)
         # A speed test only reads counters and saves its own rows, so it never waits for an apply.
@@ -5578,7 +5589,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
             if self._reset_requests != resets_at_entry[0]:
                 return overtaken
             try:
+                pending_use = pending_use_request(payload)
                 snapshot = station_snapshot(self.helper_client)
+                if pending_use is not None:
+                    pending = current_pending_profile(self.repository, pending_use)
+                    payload = {**pending_target(snapshot, pending.mac_address),
+                               "profile_id": pending.profile_id}
                 device, existing = _connected_device_from_payload(
                     payload,
                     self.repository,
@@ -5646,6 +5662,18 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
                 def save():
                     with self.repository.transaction():
+                        if pending_use is not None:
+                            current_pending = current_pending_profile(self.repository, pending_use)
+                            if current_pending.profile_id != device.profile_id:
+                                raise ValueError("Pending profile changed. Refresh its review.")
+                            if self._reset_requests != resets_at_entry[0]:
+                                raise ValueError("Reset or Panic ran during pending Apply. Nothing was saved.")
+                            current_device, current_existing = _connected_device_from_payload(
+                                payload, self.repository,
+                                hostname=_snapshot_hostname(snapshot, payload.get("mac_address")),
+                            )
+                            if (current_device, current_existing) != (device, existing):
+                                raise ValueError("Saved device changed. Refresh the pending review.")
                         version = self.repository.get_runtime_state().configuration_version
                         if ran_before is not None and version != ran_before[0].configuration_version:
                             # Another process saved settings after the check above.
