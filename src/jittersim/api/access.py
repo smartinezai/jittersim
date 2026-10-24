@@ -121,7 +121,9 @@ def read_access_api(server, path, query=""):
         # Compare the complete policies above. Omitted names must not hide pending changes.
         result["saved_policy"] = _policy_summary(result["saved_policy"])
         if result.get("policy") is not None:
-            result["policy"] = _policy_summary(result["policy"])
+            # Older helpers can omit optional version-1 fields. Use the same
+            # defaults as the validated comparison, leaving the full response intact.
+            result["policy"] = _policy_summary(applied.payload())
     return response(result)
 
 

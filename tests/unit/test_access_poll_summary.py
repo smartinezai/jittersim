@@ -13,7 +13,7 @@ import pytest
 from jittersim.api.server import ControlServer
 from jittersim.config.models import AccessOptions, Device, MacPolicy, Profile, SiteBlock, WebsitePolicy
 from jittersim.config.storage import ConfigRepository
-from jittersim.engine.access import build_access_plan
+from jittersim.engine.access import access_from_payload, build_access_plan
 from jittersim.networking.helper import HelperClientError
 
 
@@ -78,6 +78,59 @@ def test_summary_preserves_status_and_device_rules_without_any_domain_names(serv
              "domain_count": len(rule["domains"])} for rule in complete["blocks"]]
     assert ".example.test" not in json.dumps(summary)
     assert summary["applied"] is True
+
+
+@pytest.mark.parametrize("policy", [
+    {"version": 1},
+    {"version": 1, "websites": {}},
+    {"version": 1, "websites": {"mode": "allow_only"}},
+    {"version": 1, "websites": {"blocked_domains": ["legacy.example.test"]}},
+    {"version": 1, "websites": {"allowed_domains": ["allowed.example.test"]}},
+    {"version": 1, "options": {"enabled": False}},
+    {"version": 1, "mac": {"mode": "denylist"}},
+    {"version": 1, "blocks": [
+        {"id": "legacy", "name": "Legacy", "domains": ["legacy.example.test"]}]},
+    {"version": 1, "clients": [
+        {"id": "legacy", "address": "192.168.50.22", "mac": None}]},
+])
+def test_valid_partial_helper_policies_get_complete_summary_defaults_without_changing_full_reads(
+    server, policy,
+):
+    helper = server.helper_client.access_status.return_value
+    helper["policy"] = copy.deepcopy(policy)
+    before = copy.deepcopy(helper)
+    full = read(server)
+    canonical = json.loads(json.dumps(access_from_payload(policy).payload()))
+    summary = read(server, "summary=1")
+    assert summary["applied"] == full["applied"]
+    assert summary["normal_access"] == full["normal_access"]
+    assert summary["applied_digest"] == full["applied_digest"]
+    assert summary["available"] == full["available"]
+    for field in ("version", "options", "mac", "clients"):
+        assert summary["policy"][field] == canonical[field]
+    assert summary["policy"]["websites"] == {
+        "mode": canonical["websites"]["mode"],
+        "allowed_domain_count": len(canonical["websites"]["allowed_domains"]),
+        "blocked_domain_count": len(canonical["websites"]["blocked_domains"]),
+    }
+    assert summary["policy"]["blocks"] == [
+        {**{key: value for key, value in rule.items() if key != "domains"},
+         "domain_count": len(rule["domains"])} for rule in canonical["blocks"]]
+    assert helper == before
+    assert read(server)["policy"] == policy
+    assert read(server) == full
+
+
+@pytest.mark.parametrize("policy", [
+    {}, {"version": 2}, {"version": True}, {"version": 1, "websites": None},
+    {"version": 1, "websites": {"blocked_domains": ["https://invalid.test"]}},
+    {"version": 1, "blocks": [{}]},
+])
+def test_summary_keeps_the_full_read_refusal_for_malformed_helper_policies(server, policy):
+    server.helper_client.access_status.return_value["policy"] = policy
+    full = server.response_for("/api/access")
+    assert full[0] == 503
+    assert server.response_for("/api/access", "summary=1") == full
 
 
 def test_summary_does_not_mutate_helper_policy_or_later_full_editor_reads(server):
