@@ -13,8 +13,10 @@ Combine the reviewed local follow-ups in a new isolated branch from main 53ec72b
 | Schedule form fit | a78aad652f93baead93d7d2446158c20bf63719d |
 | Landscape layout and action wrapping | 0bb76516a41c88e269a0699a27b1769efa231f26 |
 | Profile reset controls and budget metadata | 365baac1cb075d7a97e7a33527fb1dd4a6c1174e |
+| New discovery labels | 9a188eb75dc57d697172a378d0a9febac4d9df79 |
+| Current main identity | aa5616232de143a4b825c384f40c8a7d40703921 |
 
-The profile input may be composed last but final freeze waits for the author's final validation and review. Preserve landscape media-query count 14 and the six approved profile metadata entries. Do not add a generic reset change.
+The profile author has completed the final checks and review. The owner explicitly approved keeping the six measured profile records. Preserve those records and landscape media-query count 14. Do not raise any other budget metric without measured evidence and review. Do not add a generic reset change.
 
 ## Procedure
 
@@ -23,8 +25,8 @@ The profile input may be composed last but final freeze waits for the author's f
 3. Merge each exact head in the order above. Stop on source conflicts and report exact hunks plus a narrow proposal.
 4. Record a per-file source manifest with input blob identities and final blob identities. Prove that all input commits remain ancestors.
 5. Compare src/jittersim/panic_guard.py, src/jittersim/networking/helper.py and src/jittersim/networking/access.py against 03fe31d8a1695dd42c9e213540f3127b555e8640.
-6. Check the held ancestry and exclude chart 415d4595, unfinished discovery work and held 175/209/I changes.
-7. Report the candidate head, tree and conflict status. Run no gates until the coordinator approves all final inputs and assigns the combined checks.
+6. Check the held ancestry and exclude chart 415d4595 and held 175/209/I changes. The completed new discovery head is now an approved input.
+7. Merge completed discovery 9a188eb7 and current main aa561623 after the initial composition. Run only the cheap exact-source GUI budget and static assembly probe first. Report the candidate head, tree, conflict status and actual budget result before any broad gate. The coordinator assigns the final combined checks.
 
 ## Boundaries and risk
 
@@ -32,4 +34,4 @@ This task combines existing changes. It adds no new endpoint, stored data, netwo
 
 ## Review state
 
-The coordinator approved this exact composition scope under the existing explicit authorization for ongoing implementation. The initial plan was created before merges. Final input readiness and the combined validation assignment remain pending.
+The coordinator approved this exact composition scope under the existing explicit authorization for ongoing implementation. The initial plan was created before merges. The owner resolved the profile budget approval hold with “Approve the six measured records”. On 24 October 2026 the coordinator authorized adding the completed new discovery head and current main. Current main aa561623 is under the owner delivery freeze. This broad UI composition stays private. No push, pull request or main merge is authorized from this worktree. The final combined validation assignment remains with the coordinator.
