@@ -123,3 +123,80 @@ def test_notes_of_another_release_staged_during_the_read_are_withheld(pi, monkey
     monkeypatch.setattr(updates, "staged_notes", real)
     again = updates.update_status(root=root, code=code, config=config, retry_probe=False)
     assert again["available"] == "0.4.0" and again["notes"] == "## B"
+
+
+def test_release_metadata_reports_only_recorded_identity_and_keeps_raw_version(pi):
+    _, _, root, code, config = pi
+    status = stage(pi, version="0.2.0.dev+03fe31d")
+    record = updates.read_json(root / "staged" / ".jittersim-release.json")
+    expected = {key: record.get(key) for key in ("commit", "signer", "signer_label")}
+    assert status["available_metadata"] == expected
+    assert status["available"] == "0.2.0.dev+03fe31d"
+    assert status["installed_metadata"] is None
+    updates.atomic_json(code / ".jittersim-release.json", {
+        "version": "0.2.0.dev+03fe31d", "commit": "b" * 40, "sequence": 1,
+        "sha256": "c" * 64, "do_not_expose": "private fixture value",
+    })
+    status = updates.update_status(root=root, code=code, config=config, retry_probe=False)
+    assert status["installed_metadata"] == {
+        "commit": "b" * 40, "signer": None, "signer_label": None,
+    }
+    assert status["installed"] == "0.2.0.dev+03fe31d"
+    assert status["installable"] is True
+    assert updates.read_json(root / "staged" / ".jittersim-release.json") == record
+
+
+def test_release_metadata_does_not_fabricate_legacy_fields(pi):
+    _, _, root, code, config = pi
+    updates.atomic_json(code / ".jittersim-release.json", {"version": "old-label"})
+    status = updates.update_status(root=root, code=code, config=config, retry_probe=False)
+    assert status["installed_metadata"] == dict.fromkeys(("commit", "signer", "signer_label"))
+    assert status["available_metadata"] is None
+
+
+def test_metadata_survives_helper_transport_and_stays_private(pi, monkeypatch):
+    import json
+    from email.message import Message
+    from unittest.mock import patch
+
+    from jittersim.api.server import ControlRequestHandler, ControlServer
+    from jittersim.config.storage import ConfigRepository
+    from jittersim.networking import helper
+    from tests.unit.test_api import FakeHelper
+
+    status = stage(pi, version="0.2.0")
+    monkeypatch.setattr(helper, "update_status", lambda: status)
+    transported = helper.HelperService._handle_payload(None, {"action": "update-status"})
+    assert transported == {"ok": True, **status}
+    repository = ConfigRepository(":memory:")
+    server = ControlServer(("127.0.0.1", 0), repository, admin_token="fixture-admin")
+    fake = FakeHelper()
+    fake.release_status = lambda: transported
+    server.helper_client = fake
+
+    def get(path, authorization=None):
+        handler = object.__new__(ControlRequestHandler)
+        handler.server, handler.path = server, path
+        handler.client_address = ("127.0.0.1", 45000)
+        handler.headers = Message()
+        if authorization:
+            handler.headers["Authorization"] = authorization
+        response = {}
+        handler._send_response = lambda **values: response.update(values)
+        with patch.object(handler, "_check_device_access", return_value=True):
+            handler.do_GET()
+        return response
+
+    try:
+        assert get("/api/updates")["status"] == 401
+        assert get("/api/updates", "Bearer wrong")["status"] == 401
+        answer = get("/api/updates", "Bearer fixture-admin")
+        assert answer["status"] == 200
+        assert json.loads(answer["body"])["available_metadata"] == status["available_metadata"]
+        public = get("/api/health")
+        assert public["status"] == 200
+        assert b"metadata" not in public["body"]
+        assert status["available_metadata"]["commit"].encode() not in public["body"]
+    finally:
+        server.server_close()
+        repository.close()

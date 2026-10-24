@@ -2100,6 +2100,11 @@ def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, query
     return {
         "installed": installed.get("version", "Unversioned installation"),
         "available": staged.get("version"),
+        # Display-only identity from the existing records; this does not assert current trust.
+        "installed_metadata": {key: installed.get(key) for key in
+                               ("commit", "signer", "signer_label")} if installed else None,
+        "available_metadata": {key: staged.get(key) for key in
+                               ("commit", "signer", "signer_label")} if staged else None,
         "phase": "failed" if orphaned else status.get("phase", "idle"),
         "message": "The update stopped before it finished. Retry when you are ready." if orphaned else
                    status.get("message", "No approved release has been staged on this Pi."),
