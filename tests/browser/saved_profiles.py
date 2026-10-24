@@ -159,6 +159,129 @@ def check_device_profile_picker(page, base, headers, width):
     assert device["profile_id"] == "slow"
 
 
+def check_clearing_and_removal(page, base, headers, width):
+    """Defaults stay cleared after another edit and removal never drops references."""
+    profile_id = f"clear-values-{width}"
+    original_payload = dict(SLOW, id=profile_id, name="Clear saved values")
+    assert page.request.post(base + "/api/profiles", headers=headers, data=original_payload).ok
+    original = saved(page, base, headers, profile_id)
+    page.evaluate("loadProfiles()")
+    row = page.locator(f'.saved-profile-row[data-profile-id="{profile_id}"]')
+    row.locator('button[data-action="edit"]').click()
+    expect(page.locator("#profile-id")).to_have_value(profile_id)
+    fields = page.locator("#profile-form input, #profile-form select, #profile-form textarea")
+    settings = fields.evaluate_all("nodes => nodes.map(node => node.id).filter(id => !['profile-id', 'profile-name', 'profile-preset'].includes(id))")
+    resets = page.locator("#profile-form button[data-reset-field]")
+    assert resets.count() == len(settings)
+    names = resets.evaluate_all("nodes => nodes.map(node => node.getAttribute('aria-label'))")
+    assert len(names) == len(set(names)), names
+    assert all(name.startswith("Reset ") and name.endswith(" to default") for name in names)
+
+    def reset(field_id, default):
+        button = page.locator(f'button[data-reset-field="{field_id}"]')
+        expect(button).to_be_enabled()
+        box = button.bounding_box()
+        assert box and box["width"] >= 44 and box["height"] >= 44, box
+        button.focus()
+        page.keyboard.press("Enter")
+        expect(button).to_be_focused()
+        expect(page.locator(f"#{field_id}")).to_have_value(default)
+
+    # Validation text stays below the input and reset target without overlapping either.
+    page.evaluate("dismissToast()")
+    page.locator("#upload-loss").fill("-1")
+    assert not page.locator("#upload-loss").evaluate("node => node.reportValidity()")
+    error = page.locator("#upload-loss-error")
+    expect(error).to_be_visible()
+    error_box = error.bounding_box()
+    reset_box = page.locator('button[data-reset-field="upload-loss"]').bounding_box()
+    assert error_box["y"] >= reset_box["y"] + reset_box["height"], (error_box, reset_box)
+    page.locator("#upload-loss").locator("..").locator("..").screenshot(
+        path=f"test-results/profile-field-reset-error-{width}.png"
+    )
+    reset("upload-loss", "0")
+    expect(error).to_have_count(0)
+    reset("upload-bandwidth", "")
+    reset("download-bandwidth", "")
+    page.locator("#profile-advanced").evaluate("node => node.open = true")
+    reset("profile-seed", "")
+    reset("profile-outage-probability", "0")
+    reset("upload-loss", "0")
+    reset("profile-website-mode", "unrestricted")
+    reset("profile-website-domains", "")
+    mode = page.locator("#upload-delay-random-mode")
+    mode.select_option("range")
+    expect(page.locator("#upload-delay-random-bounds")).to_be_visible()
+    expect(page.locator("#upload-delay-random-relative-label")).to_be_hidden()
+    reset("upload-delay-random-mode", "relative")
+    expect(page.locator("#upload-delay-random-bounds")).to_be_hidden()
+    expect(page.locator("#upload-delay-random-relative-label")).to_be_visible()
+    reset("profile-reroll", "0")
+    expect(mode).to_be_disabled()
+    expect(page.locator('button[data-reset-field="upload-delay-random-mode"]')).to_be_disabled()
+    expect(page.locator('button[data-reset-field="profile-website-enabled"]')).to_be_disabled()
+    page.locator("#profile-reroll").fill(str(original["reroll_interval_seconds"]))
+    expect(mode).to_be_enabled()
+    expect(page.locator('button[data-reset-field="upload-delay-random-mode"]')).to_be_enabled()
+    reset("upload-delay-random-enabled", "100")
+    page.locator("#upload-delay-random-card").screenshot(
+        path=f"test-results/profile-field-reset-randomness-{width}.png"
+    )
+    assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
+    # Reset is still a draft and never saves or applies it on its own.
+    assert saved(page, base, headers, profile_id) == original
+    submit = page.locator("#profile-form button[type='submit']")
+    with page.expect_response(is_profile_save):
+        submit.click()
+    expect(submit).to_be_enabled()
+    expected = dict(original, random_seed=None, outage_probability=0,
+                    website_mode="unrestricted", website_domains=[])
+    expected["upload"] = dict(original["upload"], bandwidth_kbit=None, loss_percent=0,
+                              delay_randomness=dict(original["upload"]["delay_randomness"], enabled_probability=100))
+    expected["download"] = dict(original["download"], bandwidth_kbit=None)
+    assert saved(page, base, headers, profile_id) == expected
+    page.locator("#new-profile").click()
+    row.locator('button[data-action="edit"]').click()
+    expect(page.locator("#profile-id")).to_have_value(profile_id)
+    expect(page.locator("#profile-seed")).to_have_value("")
+    expect(page.locator("#upload-bandwidth")).to_have_value("")
+    expect(page.locator("#download-bandwidth")).to_have_value("")
+    expect(page.locator("#profile-website-domains")).to_have_value("")
+    page.locator("#profile-name").fill("Renamed after clearing")
+    with page.expect_response(is_profile_save):
+        submit.click()
+    expect(submit).to_be_enabled()
+    actual = saved(page, base, headers, profile_id)
+    assert actual == dict(expected, name="Renamed after clearing"), actual
+    page.locator("#new-profile").click()
+
+    # A saved device prevents deletion. Removing that device then permits deletion.
+    device_id = f"clear-device-{width}"
+    assert page.request.post(base + "/api/devices", headers=headers, data={
+        "id": device_id, "name": "Clear test device", "ipv4_address": "192.168.50.240",
+        "profile_id": profile_id,
+    }).ok
+    delete = row.locator('button[data-action="delete"]')
+    delete.click()
+    page.get_by_role("dialog").get_by_role("button", name="Cancel", exact=True).click()
+    actual = saved(page, base, headers, profile_id)
+    assert actual == dict(expected, name="Renamed after clearing"), actual
+    delete.click()
+    page.get_by_role("dialog").get_by_role("button", name="Delete profile", exact=True).click()
+    expect(page.locator("#message")).to_contain_text("profile is in use by device Clear test device")
+    expect(row).to_be_visible()
+    actual = saved(page, base, headers, profile_id)
+    assert actual == dict(expected, name="Renamed after clearing"), actual
+    assigned = page.request.get(base + "/api/devices", headers=headers).json()["devices"]
+    assert next(device for device in assigned if device["id"] == device_id)["profile_id"] == profile_id
+    assert page.request.post(base + "/api/devices/delete", headers=headers, data={"id": device_id}).ok
+    delete.click()
+    page.get_by_role("dialog").get_by_role("button", name="Delete profile", exact=True).click()
+    expect(row).to_have_count(0)
+    profiles = page.request.get(base + "/api/profiles", headers=headers).json()["profiles"]
+    assert all(profile["id"] != profile_id for profile in profiles)
+
+
 def run():
     process = subprocess.Popen(
         [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True
@@ -434,6 +557,8 @@ def run():
                         base + "/api/general-profile", headers=headers
                     ).json()
                     assert general["profile"] is None and general["active"] is False
+
+                    check_clearing_and_removal(page, base, headers, width)
 
                     # Edit reloads first so a change made elsewhere is not saved back stale.
                     changed = dict(saved(page, base, headers, "slow"), name="Renamed elsewhere")

@@ -7,8 +7,8 @@ Facts on 24 October (main `174a304e`, later commits change only one test file an
 ## Before you start (all must be true)
 
 1. **Main holds everything for 0.2.0.** Merged: PR 173 (release tooling), 180 and 202 (this page and the notes), and the features and fixes of 23 October: 181 This device, 182 Reset Wi-Fi name button, 161, 186 and 207 Check connection, 189 dashboard speed test, 188 block list of 2000 names, 201 DNS lookup pool and shutdown, 185 presets, 179 backup pull, 199 shared readings, 200, 203, 204, 187 and 208 tests, QA fixes and review follow-ups, 177, 183, 195 to 198 cleanups, runbook and locks, 205 the [acceptance card](owner-acceptance-card-2026-10-24.md), plus the docs and tests only PRs 174, 176, 178, 184, 190 and 206. Not in it: PR 175 (helper.py) waits until after v0.2.0. `gh pr list --repo smartinezai/jittersim --state open` shows nothing you still want in 0.2.0.
-2. **Runbook sections 2 and 3 are done.** Take the fresh backup required by section 2 before any bootstrap update. The Pi runs `0.2.0.dev+<short>` built from origin/main and `jittersim update check` on the Pi says `Online check token: set`.
-3. **The Mac can talk to the dashboard (runbook section 4).** Today `~/.config/jittersim/cli.json` points at a CA file that is gone and there is no `jittersim` command on the Mac. After section 4, `jittersim remote update status` must print the Pi's release. Set `JITTERSIM` to that command, for example `JITTERSIM=$HOME/.venvs/jittersim/bin/jittersim`.
+2. **Confirm the installed updater and online token (runbook sections 2 and 3).** This is a prerequisite, not proof that setup is complete. The final handoff records bootstrap commit `03fe31d8a1695dd42c9e213540f3127b555e8640`, and frozen candidate `ec403d0f` retains its three Panic-pinned files. Actual installed state and token configuration remain unverified here. Repeat bootstrap only if the installed updater cannot accept the candidate, with a fresh checked backup first. The online check must say `Online check token: set`.
+3. **The Mac can talk to the dashboard (runbook section 4).** The recorded Mac check found a connection config but its CA file was absent, with no `jittersim` on PATH or at `~/.venvs/jittersim/bin/jittersim`. This does not establish the current Pi state. After section 4, `jittersim remote update status` must print the Pi's release. Set `JITTERSIM` to that command, for example `JITTERSIM=$HOME/.venvs/jittersim/bin/jittersim`.
 4. **GitHub login.** `gh api user -q .login` prints `smartinezai`.
 5. **Read the notes you sign.** They go into the package before you test it. If the Known limits sentence "Tested on one Raspberry Pi 3 Model B Plus" will not be true after your acceptance, edit `docs/release-notes-0.2.0-draft.md` and merge it first.
 
@@ -24,6 +24,15 @@ COMMIT=$(ssh -i ~/.ssh/jittersim_ed25519 -o IdentitiesOnly=yes jittersim@192.168
 git fetch origin main
 git diff --stat "$COMMIT" origin/main -- src/jittersim/panic_guard.py src/jittersim/networking/helper.py src/jittersim/networking/access.py
 ```
+
+## Owner checklist, in order
+
+- Confirm the recorded setup against the actual device: installed commit, updater compatibility, trusted signing key and online token. Repair only missing setup. Finish the Mac connection setup before trying to take a backup.
+- Save and check a fresh backup before any bootstrap or signed-package installation. Keep it even if an earlier backup exists.
+- Read the notes, confirm the Panic check and freeze other merges/deployments. Start step 3 with the owner signing key. The script runs checks and signs their verification record **before** it builds the package; after the release PR merge it builds and signs the exact package. Signing is therefore required before the install/test pause.
+- First answer **n** at the installed-and-tested prompt. Install that exact signed package and perform the acceptance checks, then resume the same command.
+- All six acceptance fields are mandatory: `physical`, `upgrade`, `recovery`, `saved_settings`, `management_access`, `safety_state`. Use the actual Pi identity and replace sample `SHORT`/`SAY WHAT` text with observed facts. A Restore test may be deferred only if a real failed-install recovery supplies the required recovery evidence; neither a normal upgrade nor “not tested” supplies it.
+- The script signs the acceptance approval, previews publication, asks for permission to publish, then asks to merge the release-record PR. No GitHub release is created merely by passing candidate checks. Extra Docker checks and unrelated backlog work are not prerequisites added by this checklist.
 
 ## Commands, in order
 

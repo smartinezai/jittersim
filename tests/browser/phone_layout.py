@@ -16,6 +16,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.landscape_safety import check_landscape_safety
 from tests.browser.phone import (
     assert_router_status_is_read_only,
     close_controls,
@@ -547,6 +548,7 @@ def run():
                 set_font_stress(page, "")
                 assert not errors, errors
                 context.close()
+                check_landscape_safety(browser, base)
                 print("Phone layout acceptance passed at 390x844, 360x640 and 320x568"
                       " and the full-width desktop shell, including wide fonts.")
             finally:

@@ -18,7 +18,9 @@ CSS = re.sub(
     r"/\*.*?\*/", "", re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1),
     flags=re.DOTALL,
 )
-PHONE = re.search(r"@media \(max-width: 48rem\) \{(.*?)\n\}", CSS, re.DOTALL).group(1)
+PHONE = re.search(
+    r"@media \(max-width: 48rem\), \(max-height: 36rem\) \{(.*?)\n\}", CSS, re.DOTALL
+).group(1)
 SCRIPTS = re.findall(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL)
 SECOND_SCRIPT = SCRIPTS[1]
 NEEDS_NODE = pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
@@ -70,8 +72,10 @@ def block_of(class_name):
 
 def test_the_phone_rules_come_after_the_earlier_narrow_screen_rules():
     style = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
-    assert style.index(".field-tooltip {") < style.index("@media (max-width: 48rem) {")
-    # Phones retain one scrolling row even when desktop links wrap.
+    assert style.index(".field-tooltip {") < style.index(
+        "@media (max-width: 48rem), (max-height: 36rem) {"
+    )
+    # Compact screens retain one scrolling row even when desktop links wrap.
     assert "wrap" not in phone(".sidebar-nav ul").get("flex-wrap", "")
 
 

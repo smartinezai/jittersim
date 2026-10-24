@@ -1269,6 +1269,18 @@
     const collapsedObservationDevices = new Set();
 
     const observationProfileChoice = new Map();
+    let observationListKeys = null;
+    let latestObservationScan = null;
+    let observationViewRevision = 0;
+    let observationReadRevision = 0;
+    privateDataLockHooks.push(() => {
+      observationViewRevision += 1;
+      observationReadRevision += 1;
+      observationListKeys = null;
+      latestObservationScan = null;
+      element("observation-scan-summary").textContent = "Saved results refresh automatically.";
+      document.querySelectorAll(".observation-new-name, .observation-new-group").forEach((node) => node.remove());
+    });
 
     let randomWebsiteAnalyticsRequestVersion = 0;
 
@@ -1985,13 +1997,17 @@
 
     function refreshAfterSuccess(message) {
       showMessage(message, "success");
+      const notice = messageSerial;
+      const revision = adminTokenRevision;
       const written = Array.from(recentWrites);
       recentWrites.clear();
       refresh(readsAfterWrites(written)).then(() => {
+        if (revision !== adminTokenRevision) return;
         if (adminTokenVerified && helperConfigured && !trafficSamplingAllowed) {
           return startTrafficSampling();
         }
       }).catch((error) => {
+        if (notice !== messageSerial || revision !== adminTokenRevision) return;
         showMessage(message + " Dashboard refresh failed: " + error.message, "error");
       });
     }
@@ -3180,7 +3196,15 @@
         groupSelect.setAttribute("aria-label", "Group for " + (device.display_name || device.mac_address));
         const groupPlaceholder = document.createElement("option");
         groupPlaceholder.value = "";
-        groupPlaceholder.textContent = groups.length ? "Choose group..." : "Create a group on the Profiles page";
+        groupPlaceholder.textContent = groups.length ? "Choose group..." : "No groups";
+        if (!groups.length) {
+          const groupHelp = document.createElement("p");
+          groupHelp.id = "connected-group-help-" + device.mac_address;
+          groupHelp.className = "form-note";
+          groupHelp.textContent = "Create a group on the Profiles page.";
+          groupSelect.setAttribute("aria-describedby", groupHelp.id);
+          details.appendChild(groupHelp);
+        }
         groupSelect.appendChild(groupPlaceholder);
         groups.forEach((group) => {
           const option = document.createElement("option");
@@ -4102,12 +4126,42 @@
       };
     }
 
+    function observationNameKey(address, domain) {
+      return address + "|" + domain;
+    }
+
+    function newObservationScanKeys(before, captured) {
+      if (before === null || !Array.isArray(captured)) return null;
+      return new Set(captured.map((item) => observationNameKey(item.ipv4_address, item.domain))
+        .filter((key) => !before.has(key)));
+    }
+
+    function observationNameIsNew(address, domain) {
+      return Boolean(latestObservationScan && latestObservationScan.keys &&
+        latestObservationScan.keys.has(observationNameKey(address, domain)));
+    }
+
+    function newDisplayedObservationCount() {
+      if (observationListKeys === null || !latestObservationScan || latestObservationScan.keys === null) return null;
+      return Array.from(observationListKeys).filter((key) => latestObservationScan.keys.has(key)).length;
+    }
+
     function renderObservations(data) {
       const container = element("observations");
       const count = element("observation-count");
       const focusedDevice = document.activeElement && document.activeElement.dataset.observationDevice;
       observedDomainsByDevice = {};
       observedNames = new Set();
+      observationListKeys = data.available ? new Set((data.devices || []).flatMap((device) =>
+        (device.domains || []).map((item) => observationNameKey(device.ipv4_address, item.domain)))) : null;
+      const summary = element("observation-scan-summary");
+      const added = newDisplayedObservationCount();
+      summary.textContent = "Saved results refresh automatically. New to list compares the latest successful scan " +
+        "with the list shown when it started.";
+      if (latestObservationScan) {
+        summary.textContent += added === null ? " Latest successful scan: new-name comparison unavailable." :
+          " Latest successful scan: " + added + (added === 1 ? " displayed name" : " displayed names") + " new to list.";
+      }
       container.replaceChildren();
       if (!data.available) {
         count.textContent = "Unavailable";
@@ -4231,6 +4285,12 @@
           badge.className = "observation-badge";
           badge.textContent = "On global block list";
           host.append(hostName, badge);
+          if (observationNameIsNew(device.ipv4_address, observation.domain)) {
+            const added = document.createElement("span");
+            added.className = "observation-category observation-new-name";
+            added.textContent = "New to list";
+            host.appendChild(added);
+          }
           domain.appendChild(host);
           const hintLine = document.createElement("div");
           hintLine.className = "observation-hint-line";
@@ -4338,6 +4398,14 @@
           const groupBadge = document.createElement("span");
           groupBadge.className = "observation-badge";
           meta.append(nameCount, groupBadge);
+          const addedCount = group.names.filter((item) => observationNameIsNew(
+            device.ipv4_address, item.domain)).length;
+          if (addedCount > 0) {
+            const added = document.createElement("span");
+            added.className = "observation-category observation-new-group";
+            added.textContent = addedCount + " new to list";
+            meta.appendChild(added);
+          }
           title.append(groupName, meta);
           const totalQueries = document.createElement("span");
           totalQueries.className = "observation-domain-count";
@@ -4527,13 +4595,22 @@
       }
     }
 
-    async function loadObservations() {
+    async function loadObservations(afterScan = false) {
+      if (observationRequestInFlight && !afterScan) return false;
+      const reading = ++observationReadRevision;
+      const revision = observationViewRevision;
+      let available = false;
       try {
-        renderObservations(await request("/api/observations", "GET"));
+        const data = await request("/api/observations", "GET");
+        if (revision !== observationViewRevision || reading !== observationReadRevision) return false;
+        renderObservations(data);
+        available = Boolean(data.available);
       } catch (error) {
+        if (revision !== observationViewRevision || reading !== observationReadRevision) return false;
         renderObservations({ available: false, devices: [], message: error.message });
       }
       renderServiceListObserved();
+      return available;
     }
 
     function formatQuotaBytes(bytes) {
@@ -5264,19 +5341,28 @@
     async function scanObservations() {
       if (!helperConfigured || observationRequestInFlight) return;
       observationRequestInFlight = true;
+      observationReadRevision += 1;
+      const revision = observationViewRevision;
+      const before = observationListKeys === null ? null : new Set(observationListKeys);
       const scanButton = element("scan-observations");
       setButtonBusy(scanButton, true);
       scanButton.textContent = "Scanning...";
       showMessage("Sampling DNS queries from the test network...", "working");
       try {
         const result = await request("/api/observations/scan", "POST", {});
+        if (revision !== observationViewRevision) return;
+        latestObservationScan = { keys: newObservationScanKeys(before, result.observations) };
+        await loadObservations(true);
+        if (revision !== observationViewRevision) return;
+        const added = newDisplayedObservationCount();
+        const comparison = added === null ? "New-name comparison unavailable." :
+          added + (added === 1 ? " displayed name" : " displayed names") + " new to list.";
         showMessage(
-          "Traffic scan complete: " + result.captured_observations + " domain observations captured.",
+          "Traffic scan complete: " + result.captured_observations + " domain observations captured. " + comparison,
           "success"
         );
-        loadObservations();
       } catch (error) {
-        showMessage(error.message, "error");
+        if (revision === observationViewRevision) showMessage(error.message, "error");
       } finally {
         observationRequestInFlight = false;
         scanButton.disabled = !helperConfigured;
@@ -6537,6 +6623,64 @@
         if (isCurrent()) button.disabled = false;
       }
     });
+
+    function resetProfileField(field) {
+      if (field.disabled || field.readOnly) return;
+      field.value = field.tagName === "SELECT"
+        ? (Array.from(field.options).find((option) => option.defaultSelected) || field.options[0]).value
+        : field.defaultValue;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    function setupProfileFieldResets() {
+      const form = element("profile-form");
+      const controls = [];
+      form.querySelectorAll("input, select, textarea").forEach((field) => {
+        if (["profile-id", "profile-name", "profile-preset"].includes(field.id)) return;
+        const label = field.closest("label");
+        if (!label) return;
+        const name = label.cloneNode(true);
+        name.querySelectorAll("input, select, textarea, .help-icon").forEach((node) => node.remove());
+        const direction = field.id.startsWith("upload-") ? "Upload "
+          : field.id.startsWith("download-") ? "Download " : "";
+        const feature = field.id.match(/^(?:upload|download)-(\w+)-random-/);
+        const title = "Reset " + direction + (feature ? feature[1] + " " : "") +
+          name.textContent.trim().replace(/\s+/g, " ") + " to default";
+        const wrapper = document.createElement("div");
+        wrapper.className = "profile-field-reset";
+        label.before(wrapper);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.resetField = field.id;
+        button.setAttribute("aria-label", title);
+        button.title = title;
+        const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        icon.setAttribute("viewBox", "0 0 24 24");
+        icon.setAttribute("aria-hidden", "true");
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", "M3 10a9 9 0 1 1 2.6 8.4M3 4v6h6");
+        icon.appendChild(path);
+        button.appendChild(icon);
+        button.addEventListener("click", () => resetProfileField(field));
+        const controlRow = document.createElement("div");
+        controlRow.className = "profile-field-reset-controls";
+        label.htmlFor = field.id;
+        controlRow.append(field, button);
+        wrapper.append(label, controlRow);
+        controls.push({ field, label, wrapper, button });
+      });
+      const sync = () => controls.forEach(({ field, label, wrapper, button }) => {
+        const disabled = field.disabled || field.readOnly;
+        if (button.disabled !== disabled) button.disabled = disabled;
+        if (wrapper.hidden !== label.hidden) wrapper.hidden = label.hidden;
+      });
+      sync();
+      // Existing range controls toggle disabled fields and hidden labels after edits and resets.
+      new MutationObserver(sync).observe(form, {
+        subtree: true, attributes: true, attributeFilter: ["disabled", "readonly", "hidden"]
+      });
+    }
 
     function profileFormPayload(base) {
       const keep = (field) => base
@@ -9830,6 +9974,8 @@
     }
 
     function startDashboard() {
+      // Extra scripts install field help before startup and still need the original wrapped labels.
+      setupProfileFieldResets();
       // The admin token gates everything else, so only the public health check
       // and the remembered credentials run before Check token. The restore runs
       // at once so that a token typed meanwhile is never touched.

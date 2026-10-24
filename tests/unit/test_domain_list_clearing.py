@@ -249,10 +249,13 @@ def empty_state(data):
         """
 const fake = (tag) => ({tag, children: [], className: "", textContent: "",
   replaceChildren() { this.children = []; }, appendChild(node) { this.children.push(node); return node; }});
-const nodes = {observations: fake("div"), "observation-count": fake("span")};
+const nodes = {observations: fake("div"), "observation-count": fake("span"),
+  "observation-scan-summary": fake("p")};
 const element = (id) => nodes[id];
 const document = {createElement: fake};
 let observedDomainsByDevice = {}; let observedNames = new Set();
+let observationListKeys = null; let latestObservationScan = null;
+function newDisplayedObservationCount() { return null; }
 """
         + function
         + "\nrenderObservations("

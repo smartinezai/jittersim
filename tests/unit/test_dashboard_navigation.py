@@ -105,7 +105,9 @@ def test_floating_dock_and_sticky_bar_are_gone():
 def test_the_phone_sheet_keeps_panic_and_its_toggle_pinned_above_it():
     css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
     css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
-    phone = re.search(r"@media \(max-width: 48rem\) \{(.*?)\n\}", css, re.DOTALL).group(1)
+    phone = re.search(
+        r"@media \(max-width: 48rem\), \(max-height: 36rem\) \{(.*?)\n\}", css, re.DOTALL
+    ).group(1)
     for selector in PHONE_PINNED:
         rule = re.search(r"(?:^|\n)\s*" + re.escape(selector) + r" \{([^{}]*)\}", phone)
         assert rule and "position: fixed" in rule.group(1), selector

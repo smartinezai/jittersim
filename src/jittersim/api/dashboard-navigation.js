@@ -15,9 +15,9 @@
       return fallback !== "closed";
     }
 
-    // The phone layout of phone.css: a short header, a bar pinned to the bottom of the window
+    // The compact layout of phone.css: a short header, a bar pinned to the bottom of the window
     // with Panic and the router Wi-Fi switch and the rest of the sidebar footer in a sheet.
-    const phoneLayout = window.matchMedia("(max-width: 48rem)");
+    const phoneLayout = window.matchMedia("(max-width: 48rem), (max-height: 36rem)");
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
     // A smooth scroll only when the reader has not asked for less motion.
@@ -258,6 +258,12 @@
     });
     document.addEventListener("focusin", (event) => {
       if (controlsOpen() && !keepsControlsOpen(event.target)) setControlsOpen(false, false);
+    });
+    // A resize can hide the focused footer control. Keep the keyboard on its sheet toggle.
+    document.addEventListener("focusout", (event) => {
+      if (phoneLayout.matches && !event.relatedTarget && controlsSheet.contains(event.target) &&
+          !event.target.getClientRects().length && !controlsToggle.disabled &&
+          controlsToggle.getClientRects().length) controlsToggle.focus({ preventScroll: true });
     });
     const leavePhoneLayout = () => {
       if (!phoneLayout.matches) {

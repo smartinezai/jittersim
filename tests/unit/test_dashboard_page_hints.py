@@ -7,7 +7,8 @@ from jittersim.api.server import DASHBOARD_HTML
 
 def test_devices_page_hints_point_at_the_profiles_page():
     # Groups and saved profiles are made on the Profiles page, not further down the Devices page.
-    assert '"Create a group on the Profiles page"' in DASHBOARD_HTML
+    assert '"Create a group on the Profiles page."' in DASHBOARD_HTML
+    assert 'groups.length ? "Choose group..." : "No groups"' in DASHBOARD_HTML
     assert '"Create a saved profile on the Profiles page to use this control."' in DASHBOARD_HTML
     assert "Create a group below" not in DASHBOARD_HTML
     assert "Create a saved profile below" not in DASHBOARD_HTML

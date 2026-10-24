@@ -226,13 +226,16 @@ class FakeNode {
 }
 const document = { createElement: (tag) => new FakeNode(tag) };
 const nodesById = {
-  "observations": new FakeNode("div"), "observation-count": new FakeNode("span")
+  "observations": new FakeNode("div"), "observation-count": new FakeNode("span"),
+  "observation-scan-summary": new FakeNode("p")
 };
 const element = (id) => nodesById[id];
 let observedDomainsByDevice = {};
 let observedNames = new Set();
 const openObservationGroups = new Set();
 const collapsedObservationDevices = new Set();
+let observationListKeys = null;
+let latestObservationScan = null;
 const observationProfileChoice = new Map();
 const profiles = [];
 const deviceDisplayName = () => "Test device";
