@@ -366,3 +366,10 @@ summary::marker { color: var(--tx-muted); }
     .content .page:not(#page-router, #page-updates) button:not(.primary, .danger, .help-icon, .card-toggle, .observation-group-toggle, .panic-button, [data-traffic-series], :focus-visible) { box-shadow: none; }
   }
 }
+
+/* Prepared choices reuse the Operate row and form vocabulary. */
+#prepared-card { min-width: 0; }
+#prepared-card .connected-row { display: block; }
+#prepared-card p, #prepared-settings { overflow-wrap: anywhere; }
+#prepared-settings { white-space: pre-wrap; }
+#prepared-card button, #prepared-card input, #prepared-card select { min-height: 44px; }

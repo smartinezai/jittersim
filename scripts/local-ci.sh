@@ -56,6 +56,7 @@ PI_BROWSER_MODULES=(
   address_follow
   general_profile
   device_apply_start
+  prepared_devices
   saved_profiles
   schedules_timers
   limits_quotas

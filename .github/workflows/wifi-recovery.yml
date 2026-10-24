@@ -78,6 +78,7 @@ jobs:
       - run: python -m tests.browser.address_follow
       - run: python -m tests.browser.general_profile
       - run: python -m tests.browser.device_apply_start
+      - run: python -m tests.browser.prepared_devices
       - run: python -m tests.browser.saved_profiles
       - run: python -m tests.browser.schedules_timers
       - run: python -m tests.browser.limits_quotas

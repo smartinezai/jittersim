@@ -6359,6 +6359,7 @@
           (focused === applyButton || focused === resetButton) && !focused.disabled) {
         actionReturnFocus = {button: focused, revision: adminTokenRevision};
       }
+      if (busy && typeof invalidatePreparedReview === "function") invalidatePreparedReview();
       if (busy) runningActions.add(path);
       else runningActions.delete(path);
       busy = runningActions.size > 0;
@@ -9968,6 +9969,7 @@
       // A save elsewhere leaves them as they were. The first visit to either page reads them.
       if (!wanted("adminTools", loadAdminTools)) adminToolsStale = true;
       if (wanted("profiles", null)) await loadPrivateDataPanel("profiles-json", loadProfiles);
+      if (!preparedLoaded && !preparedBusy && currentPage() === "devices") await loadPreparedChoices();
       if (wanted("health", loadHealth)) await loadHealth();
       if (wanted("observations", loadObservations)) await loadObservations();
       // Device and group names are needed by the schedule list and the device table.
@@ -10341,5 +10343,275 @@
     savedDevicesHooks.push(followSavedDevices);
 
     groupsLoadedHooks.push(renderTargetMenus);
+
+    // Prepared choices are private storage, never a connected-device observation.
+    let preparedRows = [], preparedPage = 0, preparedEdit = null, preparedReview = null;
+    let preparedEpoch = 0, preparedListSerial = 0, preparedReviewSerial = 0;
+    let preparedLoaded = false, preparedBusy = false, preparedDialog = null;
+
+    function preparedOwner() {
+      return {token: adminTokenRevision, epoch: preparedEpoch, intent: actionIntentRevision};
+    }
+    function preparedCurrent(owner) {
+      return adminTokenVerified && owner.token === adminTokenRevision &&
+        owner.epoch === preparedEpoch && owner.intent === actionIntentRevision && currentPage() === "devices";
+    }
+    function invalidatePreparedReview() {
+      preparedReviewSerial += 1;
+      preparedReview = null;
+      element("prepared-review").hidden = true;
+      element("prepared-review-summary").textContent = "";
+      element("prepared-settings").textContent = "";
+      if (preparedDialog && preparedDialog.open) preparedDialog.close("cancel");
+      preparedDialog = null;
+    }
+    function setPreparedFormBusy(busy) {
+      element("prepared-form").querySelectorAll("input, select, button").forEach((control) => { control.disabled = busy; });
+    }
+    function resetPreparedForm() {
+      preparedEdit = null;
+      element("prepared-form").reset();
+      element("prepared-mac").readOnly = false;
+      element("prepared-cancel").hidden = true;
+      element("prepared-save").textContent = "Save choice";
+    }
+    function clearPreparedPrivate() {
+      preparedEpoch += 1;
+      preparedListSerial += 1;
+      preparedRows = [];
+      preparedPage = 0;
+      preparedLoaded = false;
+      preparedBusy = false;
+      setPreparedFormBusy(false);
+      invalidatePreparedReview();
+      resetPreparedForm();
+      element("prepared-profile").replaceChildren(new Option("Choose a saved profile", ""));
+      element("prepared-list").replaceChildren();
+      element("prepared-note").textContent = "Check the admin token to view prepared choices.";
+      element("prepared-previous").disabled = element("prepared-next").disabled = true;
+      element("prepared-save").disabled = false;
+    }
+    function preparedUsePayload(review) {
+      const row = review && review.pending_device;
+      if (!row || row.action !== "profile" || !review.profile || row.profile_id !== review.profile.id ||
+          !/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(row.mac_address) ||
+          !Number.isSafeInteger(row.revision) || row.revision < 1 ||
+          !Number.isSafeInteger(review.configuration_version) || review.configuration_version < 0) {
+        throw new Error("Review is incomplete or its revision cannot be represented safely. Refresh and review again.");
+      }
+      return {pending_mac: row.mac_address, expected_pending_revision: row.revision,
+        expected_configuration_version: review.configuration_version};
+    }
+    function preparedMessage(message, error = false) {
+      element("prepared-note").textContent = message;
+      showMessage(message, error ? "error" : "success");
+    }
+    async function preparedConfirm(button, message, options) {
+      const pending = confirmFromButton(button, message, options);
+      preparedDialog = document.querySelector("dialog.workflow-confirm[open]");
+      try { return await pending; }
+      finally { preparedDialog = null; }
+    }
+    function renderPreparedRows() {
+      const list = element("prepared-list");
+      list.replaceChildren();
+      preparedPage = Math.min(preparedPage, Math.max(0, Math.ceil(preparedRows.length / 20) - 1));
+      const start = preparedPage * 20;
+      element("prepared-note").textContent = preparedRows.length
+        ? "Prepared choices " + (start + 1) + "–" + Math.min(start + 20, preparedRows.length) + " of " + preparedRows.length
+        : "No prepared choices. Saving a choice will not change the network.";
+      element("prepared-previous").disabled = preparedPage === 0;
+      element("prepared-next").disabled = start + 20 >= preparedRows.length;
+      preparedRows.slice(start, start + 20).forEach((row) => {
+        const line = textNode("div", "", "connected-row");
+        line.dataset.preparedMac = row.mac_address;
+        line.append(textNode("p", (row.display_name || row.mac_address) + " · " + row.mac_address + " · " +
+          (row.action === "profile" ? "Prepared profile: " + profileName(row.profile_id) : "Prepared protection — use unavailable") +
+          " · revision " + row.revision));
+        const actions = textNode("div", "", "row-actions");
+        const add = (label, call) => {
+          const button = textNode("button", label);
+          button.type = "button";
+          button.setAttribute("aria-label", label + " prepared choice for " + row.mac_address);
+          button.addEventListener("click", () => { if (!preparedBusy) call(button); });
+          actions.append(button);
+        };
+        if (row.action === "profile") {
+          add("Edit", () => {
+            invalidatePreparedReview();
+            preparedEdit = row;
+            element("prepared-mac").value = row.mac_address;
+            element("prepared-mac").readOnly = true;
+            element("prepared-name").value = row.display_name || "";
+            element("prepared-profile").value = row.profile_id;
+            element("prepared-cancel").hidden = false;
+            element("prepared-save").textContent = "Save edited choice";
+            element("prepared-name").focus();
+          });
+          add("Review", (button) => reviewPreparedChoice(row, button));
+        }
+        add("Delete", (button) => deletePreparedChoice(row, button));
+        line.append(actions); list.append(line);
+      });
+    }
+    async function loadPreparedChoices() {
+      if (!adminTokenVerified || currentPage() !== "devices" || preparedBusy) return;
+      invalidatePreparedReview();
+      const owner = preparedOwner(), serial = ++preparedListSerial;
+      element("prepared-note").textContent = "Loading prepared choices…";
+      try {
+        const result = await request("/api/pending-devices", "GET", undefined,
+          {isResponseCurrent: () => preparedCurrent(owner) && serial === preparedListSerial});
+        if (!preparedCurrent(owner) || serial !== preparedListSerial) return;
+        if (!Array.isArray(result.pending_devices) || result.pending_devices.length > 256) throw new Error("Invalid prepared choice list.");
+        preparedRows = result.pending_devices;
+        preparedLoaded = true;
+        renderPreparedRows();
+      } catch (error) {
+        if (preparedCurrent(owner) && serial === preparedListSerial) {
+          element("prepared-list").replaceChildren();
+          preparedRows = [];
+          preparedMessage("Could not load prepared choices. Refresh to try again. " + error.message, true);
+        }
+      }
+    }
+    async function savePreparedChoice(event) {
+      event.preventDefault();
+      if (preparedBusy || !adminTokenVerified) return;
+      invalidatePreparedReview();
+      const owner = preparedOwner(), edit = preparedEdit;
+      const payload = {mac_address: element("prepared-mac").value.trim().toLowerCase(), action: "profile",
+        profile_id: element("prepared-profile").value, display_name: element("prepared-name").value};
+      if (edit) {
+        if (!Number.isSafeInteger(edit.revision) || edit.revision < 1) { preparedMessage("Refresh before editing this revision.", true); return; }
+        payload.mac_address = edit.mac_address; payload.expected_revision = edit.revision;
+      }
+      let saved = false;
+      preparedBusy = true; setPreparedFormBusy(true); setButtonBusy(element("prepared-save"), true);
+      try {
+        await request("/api/pending-devices", "POST", payload, {isResponseCurrent: () => preparedCurrent(owner)});
+        if (!preparedCurrent(owner)) return;
+        resetPreparedForm();
+        saved = true;
+        preparedMessage("Choice prepared. No network settings changed.");
+      } catch (error) {
+        if (preparedCurrent(owner)) preparedMessage(error.message + " Refresh saved choices before trying again; a lost response can leave the result unknown.", true);
+      } finally {
+        if (owner.token === adminTokenRevision && owner.epoch === preparedEpoch) {
+          preparedBusy = false; setPreparedFormBusy(false); setButtonBusy(element("prepared-save"), false);
+          if (saved && preparedCurrent(owner)) await loadPreparedChoices();
+        }
+      }
+    }
+    async function deletePreparedChoice(row, button) {
+      invalidatePreparedReview();
+      const owner = preparedOwner();
+      if (!Number.isSafeInteger(row.revision) || row.revision < 1) { preparedMessage("Refresh before deleting this revision.", true); return; }
+      preparedBusy = true;
+      try {
+        if (!await preparedConfirm(button, "Delete the prepared choice for " + row.mac_address + "? Active settings stay unchanged.",
+          {title: "Delete prepared choice", confirmLabel: "Delete choice", danger: true}) || !preparedCurrent(owner)) return;
+        await request("/api/pending-devices/delete", "POST", {mac_address: row.mac_address, expected_revision: row.revision},
+          {isResponseCurrent: () => preparedCurrent(owner)});
+        if (!preparedCurrent(owner)) return;
+        preparedMessage("Prepared choice deleted. Active settings stay unchanged.");
+        await loadPreparedAfterWrite();
+        element("prepared-title").focus();
+      } catch (error) {
+        if (preparedCurrent(owner)) preparedMessage(error.message + " Refresh before trying again; the saved result may be unknown.", true);
+      } finally {
+        if (preparedCurrent(owner)) { preparedBusy = false; setButtonBusy(button, false); }
+      }
+    }
+    async function loadPreparedAfterWrite() {
+      preparedBusy = false;
+      await loadPreparedChoices();
+    }
+    async function reviewPreparedChoice(row, button) {
+      invalidatePreparedReview();
+      const owner = preparedOwner(), serial = preparedReviewSerial;
+      setButtonBusy(button, true);
+      try {
+        const review = await request("/api/pending-devices/review?mac=" + encodeURIComponent(row.mac_address), "GET", undefined,
+          {isResponseCurrent: () => preparedCurrent(owner) && serial === preparedReviewSerial});
+        if (!preparedCurrent(owner) || serial !== preparedReviewSerial) return;
+        const payload = preparedUsePayload(review);
+        if (payload.pending_mac !== row.mac_address || payload.expected_pending_revision !== row.revision || review.profile.id !== row.profile_id) {
+          throw new Error("Prepared choice changed. Refresh and review again.");
+        }
+        preparedReview = review;
+        element("prepared-review-summary").textContent = (review.pending_device.display_name || row.mac_address) + " · " + row.mac_address +
+          " · " + review.profile.name + " (" + review.profile.id + ") · " + profileSummary(review.profile) +
+          " · configuration version " + review.configuration_version + " · pending revision " + row.revision +
+          " · prepared " + formatUtcDay(review.pending_device.saved_at);
+        element("prepared-settings").textContent = JSON.stringify(review.profile, null, 2);
+        element("prepared-review").hidden = false;
+        element("prepared-use").disabled = !helperConfigured || networkActionBusy;
+        element("prepared-review-title").focus();
+      } catch (error) {
+        if (preparedCurrent(owner) && serial === preparedReviewSerial) preparedMessage(error.message, true);
+      } finally {
+        if (preparedCurrent(owner)) setButtonBusy(button, false);
+      }
+    }
+    async function usePreparedChoice() {
+      if (preparedBusy || networkActionBusy || !helperConfigured || !preparedReview) return;
+      const review = preparedReview, owner = preparedOwner(), button = element("prepared-use");
+      const serial = preparedReviewSerial;
+      const current = () => preparedCurrent(owner) && serial === preparedReviewSerial && preparedReview === review;
+      preparedBusy = true;
+      try {
+        const payload = preparedUsePayload(review);
+        const allow = review.profile.website_mode === "allow_only" ? " This profile blocks every site outside its allow list." : "";
+        if (!await preparedConfirm(button, "Use " + review.profile.name + " for MAC " + payload.pending_mac + "?" + allow +
+          " The server checks its current Wi-Fi identity before saving and starting the profile.",
+          {title: "Use prepared profile", confirmLabel: "Use profile"}) || !current()) return;
+        invalidatePreparedReview();
+        const intent = ++actionIntentRevision;
+        const appliedCurrent = () => adminTokenVerified && owner.token === adminTokenRevision &&
+          owner.epoch === preparedEpoch && intent === actionIntentRevision && currentPage() === "devices";
+        setActionBusy(true, "/api/apply");
+        try {
+          const result = await request("/api/connected-devices/apply-profile", "POST", payload, {isResponseCurrent: appliedCurrent});
+          if (!appliedCurrent()) return;
+          const outcome = (result.message || (result.live_applied === true ? "Profile saved and applied." : "Profile saved; live application was not confirmed.")) +
+            (result.warning ? " " + result.warning : "") + " Prepared choice retained.";
+          element("prepared-note").textContent = outcome;
+          refreshAfterSuccess(outcome);
+        } catch (error) {
+          if (appliedCurrent()) preparedMessage(error.message + " Check saved and running settings; the result may be unknown. Refresh and review again before another Use.", true);
+        } finally {
+          setActionBusy(false, "/api/apply");
+        }
+      } catch (error) { if (preparedCurrent(owner)) preparedMessage(error.message, true); }
+      finally {
+        if (owner.token === adminTokenRevision && owner.epoch === preparedEpoch) {
+          preparedBusy = false; setButtonBusy(button, false);
+        }
+      }
+    }
+    privateDataLockHooks.push(clearPreparedPrivate);
+    profilesLoadedHooks.push(() => {
+      invalidatePreparedReview();
+      const select = element("prepared-profile"), selected = select.value;
+      select.replaceChildren(new Option("Choose a saved profile", ""));
+      profiles.forEach((profile) => select.add(new Option(profileOptionLabels(profiles).get(profile.id), profile.id)));
+      select.value = selected;
+    });
+    runtimeStateHooks.push((state) => {
+      if (preparedReview && state.configuration_version !== undefined &&
+          state.configuration_version !== preparedReview.configuration_version) invalidatePreparedReview();
+    });
+    new MutationObserver(() => {
+      if (currentPage() !== "devices") { preparedEpoch += 1; invalidatePreparedReview(); preparedBusy = false; setPreparedFormBusy(false); }
+      else if (adminTokenVerified && !preparedLoaded) loadPreparedChoices();
+    }).observe(document.body, {attributes: true, attributeFilter: ["data-section"]});
+    element("prepared-form").addEventListener("submit", savePreparedChoice);
+    element("prepared-form").addEventListener("input", invalidatePreparedReview);
+    element("prepared-refresh").addEventListener("click", loadPreparedChoices);
+    element("prepared-cancel").addEventListener("click", () => { if (!preparedBusy) { resetPreparedForm(); element("prepared-mac").focus(); } });
+    element("prepared-previous").addEventListener("click", () => { if (!preparedBusy) { preparedPage -= 1; invalidatePreparedReview(); renderPreparedRows(); } });
+    element("prepared-next").addEventListener("click", () => { if (!preparedBusy) { preparedPage += 1; invalidatePreparedReview(); renderPreparedRows(); } });
+    element("prepared-use").addEventListener("click", usePreparedChoice);
 
     startDashboard();

@@ -298,6 +298,28 @@
     </p>
     <div id="connected-devices" class="connected-list">Enter the admin token and choose Check token to view connected devices.</div>
   </section>
+  <section class="card" id="prepared-card" aria-labelledby="prepared-title">
+    <h2 id="prepared-title" tabindex="-1">Prepared device profiles</h2>
+    <p class="form-note">Save a profile choice for a Wi-Fi MAC address. Saving does not change the network. Use checks for that exact address on the Pi’s Wi-Fi. This does not establish physical identity or protect the device.</p>
+    <form id="prepared-form">
+      <div class="fields">
+        <label>Wi-Fi MAC address<input id="prepared-mac" required maxlength="17" autocomplete="off" spellcheck="false" pattern="(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}" placeholder="02:00:00:00:00:01"></label>
+        <label>Display name (optional)<input id="prepared-name" maxlength="80" autocomplete="off"></label>
+        <label>Saved profile<select id="prepared-profile" required><option value="">Choose a saved profile</option></select></label>
+      </div>
+      <div class="action-buttons"><button id="prepared-save" type="submit">Save choice</button><button id="prepared-cancel" type="button" hidden>Cancel edit</button></div>
+    </form>
+    <div class="action-buttons"><button id="prepared-refresh" type="button">Refresh prepared choices</button><button id="prepared-previous" type="button" disabled>Previous</button><button id="prepared-next" type="button" disabled>Next</button></div>
+    <p id="prepared-note" class="form-note">Check the admin token to view prepared choices.</p>
+    <div id="prepared-list" class="connected-list"></div>
+    <section id="prepared-review" aria-labelledby="prepared-review-title" hidden>
+      <h3 id="prepared-review-title" tabindex="-1">Review prepared profile</h3>
+      <p id="prepared-review-summary"></p>
+      <details><summary>Complete current profile settings</summary><pre id="prepared-settings"></pre></details>
+      <p class="form-note">Review has not checked the live device. Use verifies a fresh, reachable client with this exact MAC. Private or changed addresses are not matched.</p>
+      <button id="prepared-use" type="button">Use profile for this MAC</button>
+    </section>
+  </section>
   <section class="card" data-collapse="open">
       <div class="section-heading"><h2>Saved devices</h2><p>Assigned test clients and their current conditions</p></div>
       <p id="device-conditions-note" class="policy-note">Conditions load with the token.</p>
