@@ -62,6 +62,10 @@
     </details>
     <div id="router-credentials">
     <h3>Router password</h3>
+    <div id="router-password-errors" class="form-error" tabindex="-1" aria-labelledby="router-password-errors-title" hidden>
+      <p id="router-password-errors-title">Router password check failed</p>
+      <ul><li><a id="router-password-error-link" href="#router-admin-password"></a></li></ul>
+    </div>
     <label>Router admin password
       <input id="router-admin-password" type="password" autocomplete="off" placeholder="Password for 192.168.0.1" aria-describedby="credential-router-status">
     </label>
