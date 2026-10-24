@@ -157,9 +157,9 @@ have merged since. The pull requests that are still open and their states are in
   retry after "Device verification is busy" is manual. The probe with four simultaneous checks has
   not been repeated on an installed Pi. The backlog audit proposes one shared answer per peer
   ([backlog audit](backlog-audit-2026-10-16.md), item 1).
-- Small dashboard defect left by the QA sweep of 17 October (PR 152). The note under **Router outage
-  behavior** says "until you choose Apply" but the button is **Start**. The other findings of that
-  sweep (Revoke all homepage pairings, Clear on the Measurements page, row names on the **Delete**
+- Prepared on `codex/operator-copy-followups`, pending review and merge: the note under
+  **Router outage behavior** now names **Start**. The other findings of the 17 October QA sweep
+  (Revoke all homepage pairings, Clear on the Measurements page, row names on the **Delete**
   and **Edit** buttons and the repeated Restore Wi-Fi name sentence) were fixed in PR 162.
 - Names accept control characters and bidirectional overrides through the API and import.
   This is a log and display hygiene question ([QA report](qa-report-2026-10-09.md)). An
@@ -167,8 +167,9 @@ have merged since. The pull requests that are still open and their states are in
   hermetic for update actions.
 - Loaded Pi capacity was never measured (feature proposal 20 in
   [feature proposals](feature-proposals-2026-10-09.md)).
-- Tooling notes. The usage text of `scripts/local-ci.sh browser` still says 28 Pi browser modules
-  (there are 32 besides the journeys). The advisory checks of local CI report findings
+- Tooling notes. Prepared on `codex/operator-copy-followups`, pending review and merge:
+  local-CI help and documentation refer to configured jobs rather than old module counts.
+  The advisory checks of local CI report findings
   (zizmor 13, pip-audit 21, shellcheck 16 on 17 October) that never gate. The two overengineering
   reviews list further removals ([backend](review-overengineering-backend.md) and
   [front end and tests](review-overengineering-frontend-tests.md)).
