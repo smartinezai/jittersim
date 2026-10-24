@@ -29,7 +29,7 @@ limits. See [local CI](local-ci.md), the
 | Apply a profile to one device | Implemented. After a reset network the device starts alone and everything else stays paused (PR 96, 127, 131). While Everyone runs, a device runs its own profile beside it and Everyone keeps running for every other device (PR 149). Refused before saving while Everyone is saved but not running, while what runs is older than the saved settings, or while Panic is latched ([design addendum](device-apply-start-design-2026-10-09.md)) | Physical check on the Pi with two phones, one on Everyone and one on its own profile. |
 | Random ranges and patterns | Implemented with legacy relative selection preserved | All 40 kernel cases and native packet checks passed on the 4 October candidate. Physical client acceptance remains. |
 | Erratic connections (Delivery A) | Reliability foundations implemented: independent outage choices, service-list behaviour, live queue updates that keep counters, fresh or repeatable patterns (PR 84). Upload corruption runs on an `ifb` device and never toward the router (PR 125, 135) | Deliveries B to F are not started: long delays, condition stages and pauses, connection faults and presets, nearly finished downloads, usage worsening. The limits, counters, restart and rollback gate and independent expiry after a dashboard crash remain ([plan](implementation-plan-erratic-connections-2026-10-03.md)). |
-| Signed and online releases | Implemented. The Pi checks GitHub for a signed release with a read-only token, and the release and local CI tooling is merged (PR 108, 109, 110, 114, 116, 122, 139). The Updates page names the staged release (PR 112). The update status carries the signed release notes, a check a person asks for only checks and stages, and a development-label build that stopped can be retried (PR 111) | Install and physically accept the prepared v0.2.0 package, then publish it (see below). Verify installed signing trust. Do not label unavailable hosted CI green. |
+| Dashboard-only updates from GitHub | Owner-requested workflow is not yet end-to-end accepted. Source has online release download/staging and dashboard install controls, but those are not proof of the complete owner experience | In Updates, **Check for updates** must discover the latest compatible signed GitHub release, download and verify it, then offer **Install**, with clear progress, errors and recovery. Normal use must require no CLI, SSH or manual archive upload. Preserve signature, compatibility, release-order and recovery checks. Do not mark complete until real end-to-end acceptance. The first-release constraint is separate below. |
 | Persistent outage logs | Merged with the dashboard token wait fix (PR 86, 91) and a read-only router health canary (PR 133). An independent Panic-consumer review approved the helper and access modules of that day as a bundle that `PANIC_APPROVED_SOURCES` still lists ([review](review-results-panic-consumers-outage-logging-2026-10-09.json)). The newest entry is the one for PR 138. A review is not approval of deployment | Actual disposable-system reboot proof and the owner's capture of router event times ([outage dossier](outage-dossier-2026-10-04-2026-10-09.md)). Since PR 142 an install or update keeps the journal on disk (`90-jittersim-persistent.conf`), which a reboot on the Pi has to confirm. |
 | Protected-device dashboard access | Merged (PR 92, landed with the combined Panic batch in PR 136). A protected device opens the dashboard with the admin token and no separate Allow this device step, the access list shows the reason, and an emergency device check sits on the Panic path ([plan](implementation-plan-protected-device-dashboard-access-2026-10-04.md)) | Physical check on the Pi with a protected phone. The helper socket still authorizes by group only ([design note](design-helper-action-authorization-2026-10-09.md), proposal only). |
 | Pi Wi-Fi follows the router | Merged (PR 140). After a **Copy router Wi-Fi to Pi** that worked, the Pi records the router's Wi-Fi name and security (no password). Every boot renames a saved Wi-Fi with another name, such as `JitterSim-Recovery`, back to the router name, and a manual Wi-Fi change or a name reset stops the following (`src/jittersim/networking/wifi_follow.py`, [Pi guide](../deploy/raspberry-pi/README.md)) | Physical check on the Pi that a reboot returns from Recovery to the router name. `python -m jittersim.networking.wifi_follow recovery` holds Recovery across reboots when the owner wants that. |
@@ -104,6 +104,24 @@ by the installed Pi's protected-file compatibility, not inferred from an old
 runbook snapshot. See the [owner runbook](release-runbook-2026-10-16.md) and
 [release notes](release-notes-0.2.0-draft.md). The Updates page can show the notes
 of a staged release.
+
+### First-release acceptance constraint
+
+This is separate from the normal dashboard update feature. The installed
+`03fe31d8` and current release use the same online check: it reads GitHub's latest
+published stable release, rejects draft/prerelease entries and downloads the two
+signed assets before staging. The release producer currently requires physical
+acceptance of the exact package before publishing it. With no published release,
+a dashboard-only check cannot obtain that first candidate for its own acceptance.
+The same producer/test-device distinction applies to later unpublished candidates.
+
+Provide a secure, explicit candidate-testing or first-release staging path without
+calling it the normal update flow. Do not publish an untested package, invent
+acceptance or weaken signature/compatibility checks to break this dependency.
+Once trusted release-key/GitHub access is configured and a compatible signed release
+is published, normal owners should use the dashboard without terminal commands.
+Verify that full path on the actual Pi. See [release production](releasing.md) and
+[the owner commands](release-0.2.0-owner-commands.md).
 
 ## Further ideas
 
