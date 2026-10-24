@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import copy
 import gzip
 import hashlib
 import html
@@ -1027,6 +1028,13 @@ class _PendingConnection:
     buffer: bytearray = field(default_factory=bytearray)
 
 
+@dataclass
+class _DeviceAccessFlight:
+    done: threading.Event = field(default_factory=threading.Event)
+    value: Optional[Dict[str, Any]] = None
+    error: Optional[BaseException] = None
+
+
 _RESET_REQUESTS_LOCK = threading.Lock()
 
 # The GET paths ControlServer.response_for answers itself, each with the method that
@@ -1125,6 +1133,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         self._traffic_reading = SharedReading()
         self._uplink_reading = SharedReading()
         self._shared_readings = (self._health_reading, self._traffic_reading, self._uplink_reading)
+        # Identity answers are shared only while unfinished, never kept for a later request.
+        self._device_access_lock = threading.Lock()
+        self._device_access_flights: Dict[str, _DeviceAccessFlight] = {}
         # The connection check shares the speed test manager's run table, limits and shutdown.
         self._connection_check_manager = ConnectionCheckManager(self._speed_test_manager)
         # Protection-derived dashboard access: the last confirmed sync with the root helper.
@@ -1490,6 +1501,50 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     "can_register": False, "mac_address": None}
         if self.helper_client is None:
             raise HelperClientError("Device verification needs the Pi networking helper.")
+        changing = operation not in ("status", "list", "emergency-status")
+        if changing:
+            self._drop_device_access_flights()
+        try:
+            return self._read_dashboard_access(peer, operation, values)
+        finally:
+            if changing:
+                self._drop_device_access_flights()
+
+    def _drop_device_access_flights(self) -> None:
+        # Clearing changes which reads a new caller may join. Existing callers keep
+        # their own flight until it completes, as an unshared request would.
+        with self._device_access_lock:
+            self._device_access_flights.clear()
+
+    def _shared_device_access(self, peer: str) -> Dict[str, Any]:
+        with self._device_access_lock:
+            flight = self._device_access_flights.get(peer)
+            leader = flight is None
+            if leader and len(self._device_access_flights) < MAX_DASHBOARD_WORKERS:
+                flight = self._device_access_flights[peer] = _DeviceAccessFlight()
+        if flight is None:
+            # Capacity is already bounded by HTTP workers. Other callers do not
+            # grow the table or evict a read that somebody is waiting for.
+            return self._read_checked_access("status", peer, {})
+        if leader:
+            try:
+                flight.value = self._read_checked_access("status", peer, {})
+            except BaseException as error:
+                flight.error = error
+            finally:
+                with self._device_access_lock:
+                    if self._device_access_flights.get(peer) is flight:
+                        del self._device_access_flights[peer]
+                    flight.done.set()
+        elif not flight.done.wait(timeout=getattr(self.helper_client, "timeout_seconds",
+                                                self.request_timeout_seconds)):
+            raise HelperClientError("Device verification is busy. Try again.", reason="helper-busy")
+        if flight.error is not None:
+            raise flight.error
+        return copy.deepcopy(flight.value)
+
+    def _read_dashboard_access(self, peer: str, operation: str,
+                               values: Dict[str, Any]) -> Dict[str, Any]:
         result = self._checked_access(operation, peer, values)
         if operation == "emergency-status":
             # Panic and Reset never wait for the routine protection retry.
@@ -1551,6 +1606,12 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         return self.bounded_repository(min(EMERGENCY_REPOSITORY_WAIT_SECONDS, max(0.0, remaining)))
 
     def _checked_access(self, operation: str, peer: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        if operation == "status" and not values and scope_remaining() is None:
+            return self._shared_device_access(peer)
+        return self._read_checked_access(operation, peer, values)
+
+    def _read_checked_access(self, operation: str, peer: str,
+                             values: Dict[str, Any]) -> Dict[str, Any]:
         result = self.helper_client.dashboard_access(operation, peer=peer, **values)
         if (type(result.get("allowed")) is not bool or type(result.get("can_register")) is not bool
                 or result.get("network") not in ("test", "management")):
@@ -1610,6 +1671,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     return ordinary(targets)
         if sync is None or not self._protected_access_lock.acquire(blocking=blocking):
             return self.protected_access_status()
+        self._drop_device_access_flights()
         try:
             self._protected_access_attempted = time.monotonic()
             result = None
@@ -1654,6 +1716,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 LOGGER.warning("dashboard access for protected devices is not confirmed")
             return self.protected_access_status()
         finally:
+            self._drop_device_access_flights()
             self._protected_access_lock.release()
 
     def reconcile_protected_access(self) -> Dict[str, Any]:
