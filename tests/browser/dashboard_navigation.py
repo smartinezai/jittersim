@@ -125,6 +125,10 @@ def check_keyboard_navigation(page):
     page.keyboard.press("Enter")
     only_visible(page, "profiles")
     expect(page.locator("#page-profiles")).to_be_focused()
+    offset = page.evaluate("window.scrollY")
+    if offset > 1:
+        page.screenshot(path=f"test-results/tab-scroll-regression-{page.viewport_size['width']}.png")
+    assert offset <= 1, f"Tab activation unexpectedly scrolled down by {offset}px"
     expect(page.locator("#page-heading")).to_have_text("Profiles")
     expect(page.locator("#page-heading")).to_be_in_viewport(ratio=1)
     page.go_back()
