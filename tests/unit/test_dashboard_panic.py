@@ -44,6 +44,7 @@ let adminTokenRevision = 0;
 let adminTokenChecking = false;
 let pendingFormSubmitButton = null;
 const timers = [];
+const privateDataLockHooks = [];
 const document = {getElementById: (id) => element(id)};
 function renderRuntimeText() {}
 const nativeSetTimeout = setTimeout;

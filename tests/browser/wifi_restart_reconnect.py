@@ -69,6 +69,7 @@ def check_reset_name(page):
     expect(banner).to_contain_text("restored")
     expect(page.locator("#wifi-reset-status")).to_contain_text("Password unchanged")
     expect(page.locator("#access-point-ssid")).to_have_value("TestNet")
+    expect(button).to_be_focused()
     assert len(seen) >= 3
     assert_no_raw_error(page)
     assert_still_signed_in(page)
@@ -121,6 +122,8 @@ def check_quick_reset_name(page):
     expect(banner).to_contain_text("restored")
     expect(quick).to_be_enabled()
     expect(page.locator("#reset-wifi-name")).to_be_enabled()
+    target = page.locator("#controls-toggle") if quick.is_hidden() else quick
+    expect(target).to_be_focused()
     assert len(seen) >= 3
     # One write only. The Pi answers it before the restart and the page then reads the result.
     assert len(writes) == 1 and writes[0]["request_id"], writes
@@ -302,6 +305,7 @@ def run():
                 check_page_loaded_during_the_outage(page)
                 check_late_result_keeps_new_edits_and_page(page)
                 page.set_viewport_size({"width": 390, "height": 844})
+                check_quick_reset_name(page)
                 assert page.evaluate("document.documentElement.scrollWidth") <= 391
                 assert not errors, errors
                 print("Wi-Fi restart reconnect browser acceptance passed.")
