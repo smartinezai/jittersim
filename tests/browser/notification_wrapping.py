@@ -60,12 +60,14 @@ def check_notification_wrapping(page):
                 page.keyboard.press("Enter")
                 expect(page.locator("#toast")).to_be_hidden()
                 expect(page.locator("#notification-regression-source")).to_be_focused()
-        # A short result needs no scrolling and adds no message tab stop.
-        page.locator("#notification-regression-source").focus()
-        page.evaluate("showToast('Saved.', 'success')")
-        page.keyboard.press("Tab")
-        expect(page.locator("#toast-dismiss")).to_be_focused()
-        page.keyboard.press("Enter")
+                # A short result needs no scrolling and adds no message tab stop.
+                page.locator("#notification-regression-source").focus()
+                page.evaluate("showToast('Saved.', 'success')")
+                short_box = page.locator("#toast").bounding_box()
+                assert short_box["height"] < height * .4, (width, font, short_box)
+                page.keyboard.press("Tab")
+                expect(page.locator("#toast-dismiss")).to_be_focused()
+                page.keyboard.press("Enter")
     finally:
         page.evaluate("document.getElementById('notification-regression-source').remove()")
         page.evaluate("font => document.documentElement.style.fontSize = font", original_font)
