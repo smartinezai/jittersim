@@ -933,9 +933,16 @@ docker_pytest() {
       -v "$ROOT:/src:ro" -v "$RUN_DIR:/out" -e PYTHONUNBUFFERED=1 "$image" bash -c '
         set -eu
         mkdir /work
-        tar -C /src --exclude=./.venv-local-ci-* --exclude=./test-results --exclude=./node_modules -cf - . | tar -C /work -xf -
+        tar -C /src --exclude=./.git --exclude=./.venv-local-ci-* --exclude=./test-results --exclude=./node_modules -cf - . | tar -C /work -xf -
         cd /work
-        python -m pip install --quiet ".[dev]"
+        # The slim image has no Git, ssh-keygen or jittersim group, which some tests need. The copy
+        # leaves out the host .git (a worktree file points outside the container) and commits
+        # the files as one snapshot. Node comes from a wheel because Debian'"'"'s nodejs is too old.
+        apt-get update -qq && apt-get install -y -qq --no-install-recommends git openssh-client >/dev/null
+        groupadd -f jittersim
+        git init -q . && git add -A && git -c user.name=ci -c user.email=ci@localhost commit -q -m snapshot
+        python -m pip install --quiet nodejs-wheel-binaries ".[dev]"
+        PATH=$(python -c "import os, nodejs_wheel; print(os.path.dirname(nodejs_wheel.__file__) + os.sep + \"bin\")"):$PATH
         python -m pytest -p no:cacheprovider -ra "--junitxml=/out/$1" "${@:2}"
       ' pytest "$junit" ${target:+"$target"} ${EXTRA[@]+"${EXTRA[@]}"}
 }
