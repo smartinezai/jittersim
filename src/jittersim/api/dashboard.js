@@ -5885,15 +5885,16 @@
     // the dashboard under the second. A call during a check waits for it, then checks once for every
     // caller. A check of an older token is already dead (it drops whatever it finds), so the first
     // call after a token edit does not wait for it, even when it hangs.
-    async function checkAdminToken() {
+    async function checkAdminToken(focusAllow = false) {
       if (!adminTokenCheckRunning || adminTokenCheckRevision !== adminTokenRevision) {
-        return startAdminTokenCheck();
+        return startAdminTokenCheck(focusAllow);
       }
+      adminTokenCheckNextFocusAllow = adminTokenCheckNextFocusAllow || focusAllow;
       if (!adminTokenCheckNext) {
         const queued = adminTokenCheckRunning.catch(() => {}).then(() => {
           // A check that started at once for a newer token has taken this one's place.
           if (adminTokenCheckNext !== queued) return adminTokenCheckRunning;
-          return startAdminTokenCheck();
+          return startAdminTokenCheck(adminTokenCheckNextFocusAllow);
         });
         adminTokenCheckNext = queued;
       }
@@ -5903,18 +5904,20 @@
     let adminTokenCheckRunning = null;
     let adminTokenCheckRevision = -1;
     let adminTokenCheckNext = null;
+    let adminTokenCheckNextFocusAllow = false;
 
-    function startAdminTokenCheck() {
+    function startAdminTokenCheck(focusAllow) {
       adminTokenCheckNext = null;
+      adminTokenCheckNextFocusAllow = false;
       adminTokenCheckRevision = adminTokenRevision;
-      const run = runAdminTokenCheck().finally(() => {
+      const run = runAdminTokenCheck(focusAllow).finally(() => {
         if (adminTokenCheckRunning === run) adminTokenCheckRunning = null;
       });
       adminTokenCheckRunning = run;
       return run;
     }
 
-    async function runAdminTokenCheck() {
+    async function runAdminTokenCheck(focusAllow) {
       const button = element("check-admin-token");
       const status = element("token-check-status");
       const tokenRevision = adminTokenRevision;
@@ -5936,6 +5939,17 @@
       adminTokenVerified = false;
       updateCredentialStatus();
       setPrivateDataPanels("Checking the admin token...", "Checking...");
+      const tokenField = element("admin-token");
+      const credentials = element("credentials-panel");
+      let keepAllowFocus = focusAllow && phoneLayout.matches && !credentials.hidden &&
+        [button, tokenField].includes(document.activeElement);
+      const stopAllowFocus = (event) => {
+        if (event.target !== button && event.target !== tokenField) keepAllowFocus = false;
+      };
+      if (keepAllowFocus) {
+        document.addEventListener("focusin", stopAllowFocus, true);
+        document.addEventListener("pointerdown", stopAllowFocus, true);
+      }
       button.disabled = true;
       button.setAttribute("aria-busy", "true");
       button.textContent = "Checking...";
@@ -5953,6 +5967,12 @@
           status.className = "token-check-status success";
           // The status line is not read out. The toast says it and replaces the working message.
           showMessage(status.textContent, "info");
+          if (access.can_register && keepAllowFocus && !credentials.hidden) {
+            closeCredentials();
+            const allow = element("allow-dashboard-device");
+            allow.scrollIntoView({block: "center", inline: "nearest"});
+            allow.focus({preventScroll: true});
+          }
           return;
         }
         let result = await loadAdminTools();
@@ -6024,6 +6044,10 @@
         showMessage(status.textContent, connectionLost || helperBusy ? "info" : "error");
         if (connectionLost && typeof recheckTokenWhenPiAnswers === "function") recheckTokenWhenPiAnswers();
       } finally {
+        if (focusAllow) {
+          document.removeEventListener("focusin", stopAllowFocus, true);
+          document.removeEventListener("pointerdown", stopAllowFocus, true);
+        }
         if (tokenRevision !== adminTokenRevision) return;
         button.disabled = false;
         button.removeAttribute("aria-busy");
@@ -7188,7 +7212,7 @@
     // Only this button starts a new 24 hours for a remembered token. The check when the page
     // restores a saved token and the other buttons call checkAdminToken directly.
     element("check-admin-token").addEventListener("click", async () => {
-      await checkAdminToken();
+      await checkAdminToken(true);
       syncRememberedCredentials("admin");
     });
     // Enter in the field presses the Check token button, which runs the check above. The form

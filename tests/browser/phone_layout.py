@@ -41,13 +41,14 @@ SHEET_CONTROLS = (
 )
 
 
-def start_fixture():
+def start_fixture(wifi_peer=False):
     # a scheduler like a real install so that the general profile shows as active
     process = subprocess.Popen(
         [sys.executable, "-m", "tests.browser.fixture"],
         stdout=subprocess.PIPE,
         text=True,
-        env={**os.environ, "JITTERSIM_BROWSER_TEST_SCHEDULER": "1"},
+        env={**os.environ, "JITTERSIM_BROWSER_TEST_SCHEDULER": "1",
+             "JITTERSIM_BROWSER_TEST_WIFI_PEER": "1" if wifi_peer else "0"},
     )
     with selectors.DefaultSelector() as selector:
         selector.register(process.stdout, selectors.EVENT_READ)
@@ -199,6 +200,56 @@ def sign_in(page, base):
     page.locator("#remember-admin-token").check()
     page.locator("#close-credentials").click()
     expect(page.locator("#message")).to_contain_text("Token accepted. Diagnostics loaded.")
+
+
+def check_phone_enrolment(browser):
+    """An accepted token leaves the next Allow action reachable on an unregistered phone."""
+
+    for stress, css in STRESSES:
+        for width, height in PHONES:
+            # Each case starts without a saved grant. The ordinary layout fixture uses the
+            # management network and signs in without the separate Allow step.
+            process, port = start_fixture(wifi_peer=True)
+            context = browser.new_context(viewport={"width": width, "height": height})
+            try:
+                page = context.new_page()
+                errors = []
+                page.on("pageerror", lambda error: errors.append(str(error)))
+                page.goto(f"http://127.0.0.1:{port}")
+                set_font_stress(page, css)
+                what = f"enrolment {width}x{height} {stress}"
+                expect(page.locator("#private-dashboard")).to_be_hidden()
+                page.locator("#open-admin-credentials").click()
+                expect(page.locator("#credentials-panel")).to_be_visible()
+                page.locator("#admin-token").fill("browser-test")
+                page.locator("#check-admin-token").click()
+                expect(page.locator("#token-check-status")).to_contain_text("Allow this device")
+                expect(page.locator("#private-dashboard")).to_be_hidden()
+                allow = page.locator("#allow-dashboard-device")
+                expect(allow).to_be_enabled()
+                # Do not close Credentials, force the click or hide any covering element.
+                # Scrolling may bring the target into view but cannot dismiss a fixed sheet.
+                allow.scroll_into_view_if_needed()
+                inside_window(page, "#allow-dashboard-device", what)
+                assert allow.evaluate("""node => {
+                    const box = node.getBoundingClientRect();
+                    const hit = document.elementFromPoint(
+                        box.left + box.width / 2, box.top + box.height / 2);
+                    return hit === node || node.contains(hit);
+                }"""), (what, "Allow this device is covered after token acceptance")
+                allow.click(trial=True, timeout=2000)
+                with page.expect_response(lambda response:
+                        response.url.endswith("/api/dashboard-access/register-self") and
+                        response.request.method == "POST") as registration:
+                    allow.click()
+                assert registration.value.ok, (what, registration.value.status)
+                expect(page.locator("#private-dashboard")).to_be_visible()
+                assert not errors, (what, errors)
+                print(f"{what}: Allow receives the click and dashboard access is granted")
+            finally:
+                context.close()
+                process.terminate()
+                process.wait(timeout=10)
 
 
 def check_first_screen(page, what):
@@ -444,6 +495,7 @@ def run():
                 executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE")
             )
             try:
+                check_phone_enrolment(browser)
                 context = browser.new_context(viewport={"width": 390, "height": 844})
                 page = context.new_page()
                 errors = []
