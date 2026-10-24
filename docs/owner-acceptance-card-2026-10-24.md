@@ -1,6 +1,6 @@
 # v0.2.0 owner acceptance card
 
-Commands and evidence wording: [owner commands page](release-0.2.0-owner-commands.md). Checked against main `c32ae49f`.
+Commands and evidence wording: [owner commands page](release-0.2.0-owner-commands.md). Checked against main `174a304e` (later commits change only one test file and these two pages).
 
 ## Safety first
 
@@ -19,7 +19,7 @@ Commands and evidence wording: [owner commands page](release-0.2.0-owner-command
 
 1. **Boot look.** Needs an earlier **Copy router Wi-Fi to Pi** (from Ethernet), else `not-remembered` shows. With the router Wi-Fi on, power the Pi off and on. Over SSH run `sudo /opt/jittersim/.venv/bin/python -m jittersim.networking.wifi_follow status`. Expect `boot_scan: seen`, not `failed`. If the router name has an umlaut, `seen` also proves it was read right.
 2. **Reset Wi-Fi name.** After check 1 (it forgets the router copy). Press **Reset Wi-Fi name** in the sidebar, then **Restore name** at "Restore the Wi-Fi name?". Expect `TestNet` and a brief drop for test phones. [Details](user-guide.md#pi-and-router-controls).
-3. **This device.** Join a test phone to `TestNet`, open the dashboard, sign in and choose **Allow this device**. Its row in **Devices** shows **This device**.
+3. **This device.** Join a test phone to `TestNet`, open the dashboard, sign in and choose **Allow this device**. Its row under **Connected clients** on the Devices page shows **This device**.
 4. **Test speed.** First press **Reset network**, then **Assign profile** on the phone's row (only that phone starts; do not press **Start**): without a profile of its own the Pi measures nothing. On its own row press **Test speed** (**This dashboard** is selected) and **Start measuring**. Expect a saved download result after about 12 seconds.
 5. **Check connection.** Same phone, screen on: **Check connection**, **Start check**. Expect a saved verdict.
 6. **Panic.** Press **Panic**. Expect `Profiles off` in the sidebar.
