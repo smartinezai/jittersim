@@ -56,6 +56,50 @@ def test_the_script_is_assembled_into_the_page_and_follows_the_speed_test_script
 
 
 @NEEDS_NODE
+def test_opening_the_dialog_explains_the_upload_route_without_starting_a_test():
+    assert CHECK_SCRIPT in assemble_dashboard()
+    outcome = run_node(
+        FAKE_NODES + SPEED_TEST_STUBS + SPEED_TEST_SCRIPT + CHECK_SCRIPT + """
+document.body = fakeNode('body');
+const createNode = document.createElement;
+document.createElement = (tag) => {
+  const node = createNode(tag);
+  node.showModal = () => { node.open = true; };
+  return node;
+};
+function element(id) {
+  const find = (node) => node.id === id ? node :
+    node.children.map(find).find(Boolean);
+  return find(document.body);
+}
+window.open = () => { throw new Error('Opening help must not open an outside site'); };
+globalThis.fetch = () => { throw new Error('Opening help must not fetch test data'); };
+function request(path, method) {
+  if (path !== '/api/connection-checks?mac=aa' || method !== 'GET') {
+    throw new Error('Opening help must only read this device’s saved checks');
+  }
+  pending.push({path, method});
+  return new Promise(() => {});
+}
+connCheckOpen({mac_address: 'aa', display_name: 'Phone'});
+console.log(JSON.stringify({
+  help: element('conn-check-start').querySelector('.speed-test-help').textContent,
+  open: element('conn-check-dialog').open,
+  requests: pending,
+  checkRun: connCheckState.run,
+  speedRun: speedTestState.run,
+}));
+""")
+    assert outcome["open"] is True
+    assert "Only the download side of a profile can be checked this way." in outcome["help"]
+    assert ("For upload, choose Test speed, select an external speed-test site under "
+            "Where the test data comes from and run the test on the actual test device. "
+            "This dashboard tests download only.") in outcome["help"]
+    assert outcome["requests"] == [{"path": "/api/connection-checks?mac=aa", "method": "GET"}]
+    assert outcome["checkRun"] is None and outcome["speedRun"] is None
+
+
+@NEEDS_NODE
 def test_the_start_gets_the_long_browser_timeout_of_the_speed_test():
     start = DASHBOARD_SCRIPT.index("const REQUEST_TIMEOUT_MS")
     end = DASHBOARD_SCRIPT.index("// The requests the Pi has not answered", start)
