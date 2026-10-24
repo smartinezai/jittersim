@@ -336,6 +336,7 @@ def test_a_folder_that_cannot_be_used_is_named(dashboard, capsys, tmp_path):
     assert dashboard.requests == []
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write to a read-only folder")
 def test_a_folder_that_cannot_take_the_file_is_named(dashboard, capsys, tmp_path):
     dashboard.answer("GET", "/api/backup", BACKUP)
     folder = tmp_path / "read-only"
