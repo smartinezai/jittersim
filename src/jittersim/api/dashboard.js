@@ -1977,13 +1977,17 @@
 
     function refreshAfterSuccess(message) {
       showMessage(message, "success");
+      const notice = messageSerial;
+      const revision = adminTokenRevision;
       const written = Array.from(recentWrites);
       recentWrites.clear();
       refresh(readsAfterWrites(written)).then(() => {
+        if (revision !== adminTokenRevision) return;
         if (adminTokenVerified && helperConfigured && !trafficSamplingAllowed) {
           return startTrafficSampling();
         }
       }).catch((error) => {
+        if (notice !== messageSerial || revision !== adminTokenRevision) return;
         showMessage(message + " Dashboard refresh failed: " + error.message, "error");
       });
     }
