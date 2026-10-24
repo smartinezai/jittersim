@@ -38,7 +38,8 @@ def test_traffic_and_access_texts_say_that_subdomains_are_blocked_too():
         "Block globally also blocks every name under a name (example.com also blocks"
         " www.example.com) while household access rules are on." in DASHBOARD_HTML
     )
-    assert "Blocked and Unblock show on the exact name that was blocked." in DASHBOARD_HTML
+    assert "On global block list and Unblock show exact saved entries, not whether a query or request was blocked." in DASHBOARD_HTML
+    assert "Counts are DNS queries observed, not successful website requests." in DASHBOARD_HTML
     access = (ROOT / "src/jittersim/api/access.js").read_text()
     assert "global blocked domains include subdomains while household access rules are on" in access
     # A subdomain listed on its own stays blocked after its parent is unblocked.

@@ -100,6 +100,110 @@ def confirm_dialog(page, accepted):
     expect(dialog).to_have_count(0)
 
 
+def check_device_collapse(browser, base, width, evidence):
+    context = browser.new_context(viewport={"width": width, "height": 900})
+    try:
+        page = context.new_page()
+        authenticate(page, base)
+        page.wait_for_function("() => !dashboardRefresh")
+        cards = page.locator("#observations .observation-device")
+        card = cards.filter(has_text="192.168.50.124").first
+        other = cards.filter(has_text="192.168.50.184").first
+        toggle = card.locator(".observation-device-toggle")
+        body = card.locator(".observation-device-body")
+        posts = []
+        page.on("request", lambda request: posts.append(request.url)
+                if request.method == "POST" else None)
+        expect(toggle).to_have_attribute("aria-expanded", "true")
+        toggle.focus()
+        toggle.press("Enter")
+        expect(body).to_be_hidden()
+        expect(toggle).to_be_focused()
+        expect(toggle).to_have_attribute("aria-expanded", "false")
+        expect(other.locator(".observation-device-body")).to_be_visible()
+        assert toggle.get_attribute("aria-controls") == body.get_attribute("id")
+        page.evaluate("() => loadObservations()")
+        expect(body).to_be_hidden()
+        expect(toggle).to_be_focused()
+        box = toggle.bounding_box()
+        minimum_height = 36 if page.evaluate(
+            "matchMedia('(min-width: 48.01rem) and (pointer: fine)').matches"
+        ) else 44
+        assert box and box["width"] >= 44 and box["height"] >= minimum_height, box
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
+        page.screenshot(path=f"test-results/discovery-devices-collapsed-{width}.png")
+        toggle.press("Space")
+        expect(body).to_be_visible()
+        expect(toggle).to_have_attribute("aria-expanded", "true")
+        page.screenshot(path=f"test-results/discovery-devices-expanded-{width}.png")
+        if width == 1920:
+            page.evaluate("""async () => {
+                const data = await request('/api/observations', 'GET');
+                data.devices.forEach(device => {
+                    device.display_name = 'Living room streaming device belonging to the household';
+                });
+                renderObservations(data);
+            }""")
+            for narrow in (820, 320):
+                page.set_viewport_size({"width": narrow, "height": 900})
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), narrow
+                target = toggle.bounding_box()
+                minimum_height = 36 if page.evaluate(
+                    "matchMedia('(min-width: 48.01rem) and (pointer: fine)').matches"
+                ) else 44
+                assert target and target["width"] >= 44 and target["height"] >= minimum_height, target
+                card.screenshot(path=f"test-results/discovery-devices-long-name-{narrow}.png")
+        assert posts == [], posts
+        evidence.append(f"device groups at {width}px: keyboard collapse, focus and state after refresh, "
+                        "independent devices, 44px target, no overflow or writes")
+    finally:
+        context.close()
+
+
+def check_membership_labels(browser, base, width, evidence):
+    context = browser.new_context(viewport={"width": width, "height": 900})
+    try:
+        page = context.new_page()
+        authenticate(page, base)
+        page.wait_for_function("() => !dashboardRefresh")
+        def membership_response(route):
+            response = route.fetch()
+            data = response.json()
+            for device in data["devices"]:
+                for name in device["domains"]:
+                    name["globally_blocked"] = any(part in name["domain"] for part in (
+                        "netflix.com", "nflxvideo.net", "whatsapp.net"))
+            route.fulfill(response=response, json=data)
+
+        page.route("**/api/observations", membership_response)
+        page.evaluate("() => loadObservations()")
+        card = page.locator('.observation-device').filter(has_text='192.168.50.124').first
+        group = card.locator('.observation-group').filter(has_text='Netflix')
+        badge = group.locator('.observation-group-toggle .observation-badge')
+        expect(badge).to_have_text('All on global block list')
+        expect(group.locator('.observation-group-block-button')).to_have_text('Unblock all')
+        expect(group.locator('.observation-group-toggle .observation-domain-count')).to_have_text(
+            '43 queries')
+        single = card.locator('.observation-domain').filter(has_text='mmx-ds.cdn.whatsapp.net')
+        expect(single.locator('.observation-badge')).to_have_text('On global block list')
+        expect(single.get_by_role('button', name='Unblock mmx-ds.cdn.whatsapp.net', exact=True)).to_be_visible()
+        expect(page.locator('#observation-note')).to_contain_text('not successful website requests')
+        expect(page.locator('#observation-note')).to_contain_text('not whether a query or request was blocked')
+        for check_width in (width, 320) if width == 390 else (width,):
+            page.set_viewport_size({"width": check_width, "height": 900})
+            card.screenshot(path=f'test-results/discovery-membership-{check_width}.png')
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), check_width
+            assert badge.evaluate("""badge => {
+                const count = badge.closest('.observation-group-toggle')
+                    .querySelector('.observation-domain-count').getBoundingClientRect();
+                const box = badge.getBoundingClientRect();
+                return box.right <= count.left || box.bottom <= count.top || box.top >= count.bottom;
+            }"""), f'membership badge overlaps query count at {check_width}px'
+        evidence.append(f'membership labels at {width}px: exact list membership, unchanged counts and actions')
+    finally:
+        context.close()
+
+
 def check_actions(browser, base, kind, width, evidence):
     context = browser.new_context(viewport={"width": width, "height": 1000 if width > 768 else 844})
     context.set_default_timeout(15000)
@@ -258,6 +362,9 @@ def run(*, cases=("single", "group"), widths=(1920, 390)):
             )
             try:
                 evidence = []
+                for width in widths:
+                    check_membership_labels(browser, f"http://127.0.0.1:{port}", width, evidence)
+                    check_device_collapse(browser, f"http://127.0.0.1:{port}", width, evidence)
                 for width in widths:
                     for kind in cases:
                         check_actions(browser, f"http://127.0.0.1:{port}", kind, width, evidence)

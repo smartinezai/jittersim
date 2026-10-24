@@ -60,7 +60,7 @@ def test_traffic_shows_groups_labels_guesses_and_blocked_names(dashboard, capsys
     lines = out.splitlines()
     assert "Labels come from a built-in table. 'Seen with' is a guess." in lines[0]
     assert "Kitchen iPad  (192.168.50.124)" in lines
-    assert "  Netflix  [app]  2 names  43 queries  1 blocked" in lines
+    assert "  Netflix  [app]  2 names  43 queries  1 on global block list" in lines
     assert ("  a1051.dscg4.akamai.net  [CDN] Akamai · Shared CDN  3 queries  "
             "Seen with Netflix (guess)") in lines
     assert "192.168.50.184  (192.168.50.184)" in lines
@@ -74,7 +74,7 @@ def test_traffic_expand_lists_every_name_and_marks_blocked(dashboard, capsys):
     code, out, _, _ = run(dashboard, capsys, "traffic", "--expand", "--device", "kitchen ipad")
     assert code == 0
     lines = out.splitlines()
-    assert "      ipv4-c1.oca.nflxvideo.net  40 queries  Blocked" in lines
+    assert "      ipv4-c1.oca.nflxvideo.net  40 queries  On global block list" in lines
     assert "      logs.dradis.netflix.com  3 queries" in lines
     assert not any("dreame" in line for line in lines)
 
@@ -83,7 +83,7 @@ def test_traffic_blocked_only(dashboard, capsys):
     dashboard.answer("GET", "/api/observations", OBSERVATIONS)
     code, out, _, _ = run(dashboard, capsys, "traffic", "--blocked")
     assert code == 0
-    assert "  ipv4-c1.oca.nflxvideo.net  [app] Netflix · Streaming  40 queries  Blocked" in out
+    assert "  ipv4-c1.oca.nflxvideo.net  [app] Netflix · Streaming  40 queries  On global block list" in out
     assert "akamai" not in out and "dreame" not in out
 
 
@@ -102,7 +102,7 @@ def test_traffic_json_has_every_name_and_marks_the_guess(dashboard, capsys):
     assert data["scan"] is None
     netflix = data["devices"][0]["groups"][0]
     assert (netflix["name"], netflix["kind"], netflix["names_count"], netflix["total_queries"],
-            netflix["blocked_text"]) == ("Netflix", "app", 2, 43, "1 blocked")
+            netflix["blocked_text"]) == ("Netflix", "app", 2, 43, "1 on global block list")
     assert [row["domain"] for row in netflix["names"]] == [
         "logs.dradis.netflix.com", "ipv4-c1.oca.nflxvideo.net"]
     akamai = data["devices"][0]["groups"][1]["names"][0]

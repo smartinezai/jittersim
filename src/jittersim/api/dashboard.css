@@ -463,6 +463,7 @@
     .observation-group-title { flex: 1 1 10rem; min-width: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .observation-group-name { display: block; color: var(--tx-strong); font-size: 0.88rem; font-weight: 650; overflow-wrap: anywhere; }
     .observation-group-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem 0.5rem; margin-top: 0.1rem; color: var(--tx-muted-3); font-size: 0.76rem; font-weight: 400; }
+    .observation-group-meta .observation-badge { white-space: normal; }
     .observation-group-note { margin: 0; padding: 0 0.55rem 0.5rem 1.6rem; color: var(--warn-text); font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 0.78rem; }
     .observation-group-note[hidden], .observation-group-header button[hidden] { display: none; }
     .observation-group-body { margin: 0 0.55rem 0.55rem 1.1rem; padding-left: 0.6rem; border-left: 2px solid var(--bd-subtle); }
