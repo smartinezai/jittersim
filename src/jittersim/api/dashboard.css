@@ -237,7 +237,7 @@
     }
     #toast-message { overflow-wrap: anywhere; max-height: calc(40vh - 2rem); overflow-y: auto; overscroll-behavior: contain; }
     @media (max-width: 30rem) {
-      .toast { grid-template-rows: auto minmax(0, 1fr); }
+      .toast { height: 40vh; max-height: max-content; grid-template-rows: auto minmax(0, 1fr); }
       #toast-message { grid-column: 1 / -1; grid-row: 2; min-height: 0; max-height: none; }
     }
     .toast[hidden] { display: none; }
