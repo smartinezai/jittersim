@@ -1,6 +1,7 @@
 """Navigate dashboard pages and keep emergency actions reachable in every layout."""
 
 import os
+import json
 import selectors
 import subprocess
 import sys
@@ -269,6 +270,58 @@ def check_action_help(page):
     close_controls(page)
 
 
+def check_skip_matrix(browser, base):
+    results, issues = [], []
+    for name, width, height, font, scale in (
+        ("desktop", 1728, 940, 16, 1), ("phone", 320, 568, 16, 1),
+        ("large-text", 320, 568, 32, 1), ("page-scale", 1280, 720, 16, 2),
+    ):
+        context = browser.new_context(viewport={"width": width, "height": height})
+        page = context.new_page()
+        page.goto(base)
+        unlock(page)
+        page.evaluate("size => document.documentElement.style.fontSize = size + 'px'", font)
+        assert page.evaluate("getComputedStyle(document.documentElement).fontSize") == f"{font}px"
+        if scale != 1:
+            context.new_cdp_session(page).send("Emulation.setPageScaleFactor", {"pageScaleFactor": scale})
+        skip = page.get_by_role("link", name="Skip to main content")
+        def state():
+            return page.evaluate("""() => {
+                const link = document.querySelector('.skip-link');
+                const rect = link.getBoundingClientRect();
+                return {top:rect.top,bottom:rect.bottom,width:rect.width,height:rect.height,
+                    focused:document.activeElement===link,focusVisible:link.matches(':focus-visible'),
+                    section:document.body.dataset.section,active:document.activeElement.id,
+                    pageScale:visualViewport.scale,scrollY,root:getComputedStyle(document.documentElement).fontSize};
+            }""")
+        initial = state()
+        if initial["bottom"] > 0:
+            issues.append(name + ": unfocused skip link leaks into viewport")
+        page.screenshot(path=f"test-results/skip-{name}-unfocused.png")
+        page.keyboard.press("Tab")
+        skip.focus()
+        focused = state()
+        page.screenshot(path=f"test-results/skip-{name}-focused.png")
+        if focused["bottom"] <= 0:
+            issues.append(name + ": focused skip link is unavailable")
+        page.locator('[data-page-link="profiles"]').click()
+        after_pointer = state()
+        if after_pointer["focused"] or after_pointer["bottom"] > 0:
+            issues.append(name + ": skip link remains onscreen after pointer navigation")
+        page.keyboard.press("Tab")
+        skip.focus()
+        page.keyboard.press("Enter")
+        page.evaluate("async () => { await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame); }")
+        activated = state()
+        if activated["section"] != "profiles":
+            issues.append(name + ": activating skip link changes the selected page")
+        results.append({"case":name,"initial":initial,"focused":focused,"after_pointer":after_pointer,"activated":activated})
+        context.close()
+    Path("test-results/skip-link-matrix.json").write_text(json.dumps({"results":results,"issues":issues},indent=2)+"\n")
+    print(json.dumps({"results":results,"issues":issues},indent=2))
+    assert not issues, issues
+
+
 def run():
     process = subprocess.Popen(
         [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True,
@@ -286,6 +339,9 @@ def run():
                 executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE")
             )
             try:
+                if os.environ.get("JITTERSIM_SKIP_LINK_AUDIT") == "1":
+                    check_skip_matrix(browser, f"http://127.0.0.1:{port}")
+                    return
                 for width, height in ((1440, 900), (1280, 720)):
                     context = browser.new_context(viewport={"width": width, "height": height})
                     page = context.new_page()
@@ -320,6 +376,7 @@ def run():
                         expect(page.locator("#sidebar-action-help")).to_be_hidden()
                     assert not errors, errors
                     context.close()
+                check_skip_matrix(browser, f"http://127.0.0.1:{port}")
                 print("Dashboard navigation browser acceptance passed.")
             finally:
                 browser.close()

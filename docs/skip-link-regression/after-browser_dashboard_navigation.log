@@ -1,0 +1,230 @@
+$ /Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/skip-link-worktree/.venv-local-ci-3.12/bin/python -m tests.browser.dashboard_navigation
+# started 2026-10-24 23:51:45 +0200
+Unfinished-form navigation browser acceptance passed.
+{
+  "results": [
+    {
+      "case": "desktop",
+      "initial": {
+        "top": -47.1875,
+        "bottom": 0,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "devices",
+        "active": "controls-toggle",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "focused": {
+        "top": 12,
+        "bottom": 59.1875,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": true,
+        "focusVisible": true,
+        "section": "devices",
+        "active": "",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "after_pointer": {
+        "top": -47.1875,
+        "bottom": 0,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "page-profiles",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "activated": {
+        "top": -274.1875,
+        "bottom": -227,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "content",
+        "pageScale": 1,
+        "scrollY": 227,
+        "root": "16px"
+      }
+    },
+    {
+      "case": "phone",
+      "initial": {
+        "top": -47.1875,
+        "bottom": 0,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "devices",
+        "active": "controls-toggle",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "focused": {
+        "top": 12,
+        "bottom": 59.1875,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": true,
+        "focusVisible": true,
+        "section": "devices",
+        "active": "",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "after_pointer": {
+        "top": -47.1875,
+        "bottom": 0,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "page-profiles",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "activated": {
+        "top": -300.1875,
+        "bottom": -253,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "content",
+        "pageScale": 1,
+        "scrollY": 253,
+        "root": "16px"
+      }
+    },
+    {
+      "case": "large-text",
+      "initial": {
+        "top": -138.375,
+        "bottom": 0,
+        "width": 296,
+        "height": 138.375,
+        "focused": false,
+        "focusVisible": false,
+        "section": "devices",
+        "active": "controls-toggle",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "32px"
+      },
+      "focused": {
+        "top": 24,
+        "bottom": 162.375,
+        "width": 296,
+        "height": 138.375,
+        "focused": true,
+        "focusVisible": true,
+        "section": "devices",
+        "active": "",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "32px"
+      },
+      "after_pointer": {
+        "top": -138.375,
+        "bottom": 0,
+        "width": 296,
+        "height": 138.375,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "page-profiles",
+        "pageScale": 1,
+        "scrollY": 0,
+        "root": "32px"
+      },
+      "activated": {
+        "top": -6782.375,
+        "bottom": -6644,
+        "width": 296,
+        "height": 138.375,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "content",
+        "pageScale": 1,
+        "scrollY": 6644,
+        "root": "32px"
+      }
+    },
+    {
+      "case": "page-scale",
+      "initial": {
+        "top": -47.1875,
+        "bottom": 0,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "devices",
+        "active": "controls-toggle",
+        "pageScale": 2,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "focused": {
+        "top": 12,
+        "bottom": 59.1875,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": true,
+        "focusVisible": true,
+        "section": "devices",
+        "active": "",
+        "pageScale": 2,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "after_pointer": {
+        "top": -47.1875,
+        "bottom": 0,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "page-profiles",
+        "pageScale": 2,
+        "scrollY": 0,
+        "root": "16px"
+      },
+      "activated": {
+        "top": -47.1875,
+        "bottom": 0,
+        "width": 188.421875,
+        "height": 47.1875,
+        "focused": false,
+        "focusVisible": false,
+        "section": "profiles",
+        "active": "content",
+        "pageScale": 2,
+        "scrollY": 0,
+        "root": "16px"
+      }
+    }
+  ],
+  "issues": []
+}
+Dashboard navigation browser acceptance passed.
+# finished with status 0 after 19.2 seconds

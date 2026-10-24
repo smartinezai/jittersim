@@ -1,0 +1,11 @@
+{
+  "tested_head": "a0575b5ade3629af6f87c81c3a3c7af11c40a3c0",
+  "src_tree": "d297b72d1af0768930e4372c66618562bf380141",
+  "context": "synthetic Chromium fixture, not owner screenshot/live Pi; 320x568 with root32px text, separate2xvisualpage-scale case",
+  "captures": {
+    "before-focused.png": "4cbed097daaee6e8a49bfe65f454c46fc163d89e4f8d852fd5e0508d576d1a53",
+    "before-unfocused.png": "b2790a9dfc9d154557aba837ed8d9ce97f7a48e2c8b47deba88546249afae51f",
+    "after-focused.png": "4cbed097daaee6e8a49bfe65f454c46fc163d89e4f8d852fd5e0508d576d1a53",
+    "after-unfocused.png": "1db2521019813b4cf1fdb532f980b40a7a71a9b36433a30a90a2be3588e395d8"
+  }
+}
