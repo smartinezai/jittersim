@@ -1,7 +1,7 @@
 """Use the dashboard on phone-sized windows and check that laptop windows keep the sidebar.
 
 On a phone the sidebar is a short header (the name, the mode, one row of page links and one line
-of status). Panic and the router Wi-Fi switch sit in a bar pinned to the bottom of the window and
+of status). Panic and the router Wi-Fi status sit in a bar pinned to the bottom of the window and
 the rest of the sidebar footer opens from that bar as the Controls sheet. Each check runs with the
 normal fonts and with a wider face like the fonts of another machine. The journey prints what it
 measured so that a run documents the layout.
@@ -16,7 +16,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
-from tests.browser.phone import close_controls, open_controls, open_status, sidebar_control
+from tests.browser.phone import assert_router_status_is_read_only, close_controls, open_controls, open_status, sidebar_control
 
 PHONES = ((390, 844), (360, 640), (320, 568))
 DESKTOPS = ((1280, 800), (1920, 1000))
@@ -210,6 +210,7 @@ def check_first_screen(page, what):
     assert found and found["y"] + 40 < bar_top(page), (what, "no page content on the first screen", found)
     for selector in ("#panic-button", "#router-wifi-toggle", "#controls-toggle"):
         inside_window(page, selector, what)
+    assert_router_status_is_read_only(page)
     return found
 
 
@@ -254,7 +255,7 @@ def check_navigation(page, what):
 
 
 def check_longest_page(page, what):
-    """At the end of the longest page Panic and the router switch are still in view."""
+    """At the end of the longest page Panic and the router status are still in view."""
 
     page.locator(f'[data-page-link="{LONGEST_PAGE}"]').click()
     for _ in range(3):
@@ -318,7 +319,7 @@ def check_sheet(page, what):
     expect(toggle).to_have_attribute("aria-expanded", "false")
 
 
-def check_router_switch(page, what):
+def check_router_status(page, what):
     sidebar_control(page, "#open-router-credentials").click()
     page.locator("#router-admin-password").fill("browser-router-password")
     page.locator("#check-router-password").click()
@@ -334,9 +335,9 @@ def check_router_switch(page, what):
     sidebar_control(page, "#refresh-router-wifi").click()
     close_controls(page)
     switch = page.locator("#router-wifi-toggle")
-    # Router Wi-Fi switching is refused for recovery safety. The switch only shows the state.
-    expect(switch).to_have_attribute("aria-checked", "true", timeout=10000)
-    expect(switch).to_be_disabled()
+    # Router Wi-Fi switching is refused for recovery safety. The label only shows the state.
+    expect(switch).to_have_text("On", timeout=10000)
+    assert_router_status_is_read_only(page)
     inside_window(page, "#router-wifi-toggle", what)
     writes = []
     page.on("request", lambda request: writes.append(request)
@@ -424,7 +425,7 @@ def check_desktop(page, width, height):
              ("#active-profile-select", "#active-profile-button", "#apply-button", "#reset-button",
               "#panic-button", "#router-wifi-toggle", "#sync-router-ap")]
     assert order == sorted(order), order
-    # The whole switch, Panic and copy button on a laptop screen, not a sliver of them.
+    # The whole status, Panic and copy button on a laptop screen, not a sliver of them.
     for selector in ("#router-wifi-toggle", "#panic-button", "#sync-router-ap"):
         expect(page.locator(selector)).to_be_in_viewport(ratio=1)
     scrolled = page.evaluate("document.querySelector('.sidebar').scrollTop")
@@ -453,7 +454,7 @@ def run():
                         check_phone(page, base, width, height, stress, css, index == 0)
                 set_font_stress(page, "")
                 page.set_viewport_size({"width": 360, "height": 640})
-                check_router_switch(page, "360x640")
+                check_router_status(page, "360x640")
                 check_active_profile(page, base, "360x640")
                 page.emulate_media(reduced_motion="reduce")
                 assert page.evaluate("scrollBehavior()") == "auto"

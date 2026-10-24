@@ -2,9 +2,11 @@
 
 Up to 48rem (768px) the sidebar footer (Active profile, Start, Reset, the status and message
 lines, the copy buttons and the credential buttons) sits in the Controls sheet. Panic and the
-router Wi-Fi switch stay in the bar pinned to the bottom of the window. Wider windows show the
+router Wi-Fi status stay in the bar pinned to the bottom of the window. Wider windows show the
 sidebar as before, so these steps do nothing there.
 """
+
+import re
 
 from playwright.sync_api import expect
 
@@ -49,3 +51,27 @@ def sidebar_control(page, selector):
     if control.is_hidden():
         open_controls(page)
     return control
+
+
+def assert_router_status_is_read_only(page):
+    """The visible router value is text and cannot take keyboard focus."""
+
+    value = page.locator("#router-wifi-toggle")
+    assert value.evaluate("""node => {
+        const before = document.activeElement;
+        node.focus();
+        return node.tagName === 'SPAN' && node.tabIndex === -1 &&
+            !node.hasAttribute('role') && !node.hasAttribute('aria-checked') &&
+            !node.hasAttribute('aria-label') && !node.hasAttribute('aria-labelledby') &&
+            document.activeElement === before && document.activeElement !== node;
+    }""")
+    expect(value).to_have_text(re.compile(r"^(On|Off|Unknown)$"))
+
+    label = page.locator("#router-wifi-label")
+    expect(label).to_have_text("Router Wi-Fi")
+    # Neither the label nor its explanation is cut off by the bottom bar.
+    for selector in ("#router-wifi-label", "#router-wifi-status"):
+        rect = page.locator(selector).bounding_box()
+        assert rect and rect["y"] >= 0 and rect["y"] + rect["height"] <= page.viewport_size["height"], (
+            selector, page.viewport_size, rect,
+        )

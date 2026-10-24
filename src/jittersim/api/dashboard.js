@@ -7530,7 +7530,7 @@
     resetWifiButtons().forEach((each) => each.addEventListener("click", resetWifiName));
 
     function renderRouterWifi() {
-      const button = element("router-wifi-toggle");
+      const value = element("router-wifi-toggle");
       const status = element("router-wifi-status");
       const password = element("router-admin-password").value;
       const fresh = routerWifiCheckedAt && Date.now() / 1000 - routerWifiCheckedAt < 45;
@@ -7545,11 +7545,8 @@
       element("check-router-password").disabled = busy || routerCheckWaiting();
       element("refresh-router-wifi").disabled = !helperConfigured || !adminTokenVerified ||
         !password || routerPasswordRejected || busy;
-      button.disabled = true;
-      button.title = "Router Wi-Fi switching is disabled for recovery safety. Use the router controls.";
-      button.setAttribute("aria-checked", String(known && routerWifiEnabled));
-      button.setAttribute("data-unknown", String(!known));
-      button.setAttribute("aria-busy", String(busy));
+      value.textContent = known ? (routerWifiEnabled ? "On" : "Off") : "Unknown";
+      value.setAttribute("data-unknown", String(!known));
       status.textContent = !adminTokenVerified ? "Check admin token" : !helperConfigured ? "Needs Pi helper" :
         !password ? "Enter router password" : routerPasswordRejected ? "Password rejected" :
         routerActionPending || routerWifiRemoteChanging ? "Changing…" : busy ? "Checking…" :
@@ -7679,7 +7676,7 @@
       if (routerPasswordBlocked(button)) return;
       routerActionPending = true;
       if (path === "/api/router/wifi") routerWifiMinimumCheck = Date.now() / 1000;
-      ["sync-router-ap", "router-wifi-toggle"].forEach((id) => { element(id).disabled = true; });
+      element("sync-router-ap").disabled = true;
       setButtonBusy(button, true);
       updateCredentialStatus();
       status.textContent = message;
@@ -7744,7 +7741,7 @@
       } finally {
         if (stillCurrent() && typeof clearReconnectFlag === "function") clearReconnectFlag();
         routerActionPending = false;
-        ["sync-router-ap", "router-wifi-toggle"].forEach((id) => { element(id).disabled = false; });
+        element("sync-router-ap").disabled = false;
         setButtonBusy(button, false);
         updateCredentialStatus();
       }
@@ -7778,12 +7775,11 @@
       }
       if (routerPasswordBlocked(button)) return;
       if (routerCheckWaiting()) return;
-      const routerButtons = ["sync-router-ap", "router-wifi-toggle"];
       const wasVerified = routerPasswordVerified;
       routerPasswordChecking = true;
       routerPasswordVerified = false;
       routerPasswordRejected = false;
-      routerButtons.forEach((id) => { element(id).disabled = true; });
+      element("sync-router-ap").disabled = true;
       setButtonBusy(button, true);
       button.textContent = "Checking...";
       updateCredentialStatus();
@@ -7810,7 +7806,7 @@
         showMessage(error.message, tooSoon ? "info" : "error");
       } finally {
         routerPasswordChecking = false;
-        routerButtons.forEach((id) => { element(id).disabled = false; });
+        element("sync-router-ap").disabled = false;
         setButtonBusy(button, false);
         button.textContent = "Check password";
         updateCredentialStatus();

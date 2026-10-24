@@ -16,7 +16,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.confirm_dialogs import answer_confirm, cancel_with_button, cancel_with_escape
-from tests.browser.phone import is_phone, sidebar_control
+from tests.browser.phone import assert_router_status_is_read_only, is_phone, sidebar_control
 
 ADMIN_TOKEN = "browser-test"
 ROUTER_PASSWORD = "browser-router-password"
@@ -255,8 +255,8 @@ def run_width(browser, base, width, height):
     enter_router_password(page)
     check_again_is_refused_with_a_wait(page, requests, responses)
     expect(button).to_be_enabled()
-    expect(page.locator("#router-wifi-toggle")).to_be_disabled()
-    expect(page.locator("#router-wifi-label")).to_contain_text("read only")
+    assert_router_status_is_read_only(page)
+    expect(page.locator("#router-wifi-label")).to_have_text("Router Wi-Fi")
     assert api_calls(requests, "/api/router/wifi") == []
     expect(page.locator("#router-action-message")).to_have_text("")
     sidebar_control(page, "#sync-router-ap")
@@ -297,7 +297,7 @@ def run_width(browser, base, width, height):
     page.route("**" + PREVIEW_PATH, lambda route: held.append(route))
     sidebar_control(page, "#sync-router-ap").click()
     expect(button).to_be_disabled()
-    expect(page.locator("#router-wifi-toggle")).to_be_disabled()
+    assert_router_status_is_read_only(page)
     for _ in range(100):
         if held:
             break
