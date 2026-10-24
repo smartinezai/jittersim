@@ -3,11 +3,13 @@
 The exact October2 fix list is preserved in [the historical archive](history/2026-10-02-backlog-and-ux/planned-fixes.md).
 New feature ideas are in [feature proposals](feature-proposals-2026-10-09.md).
 
-Baseline: candidate `afa7d222` on `origin/main`, checked on 24 October 2026.
-The open fixes below were reconciled with that source and its merged pull requests.
-The six local candidate gates passed; the unit gate covered Python 3.12 only. Hosted
-CI is billing-blocked, and the Python 3.9, 3.11 and 3.13 matrix has not been run on
-this candidate. Pi and phone acceptance remain outstanding. See [local CI](local-ci.md).
+Source status reconciled on 24 October 2026. This revision contains the reviewed
+follow-ups listed below. Original candidate `afa7d222` and its evidence remain
+preserved. Validation results apply only to their recorded commit and do not
+transfer automatically between revisions. Run local gates for the selected
+exact release head. The official Python 3.9, 3.11 and 3.13 matrix remains
+outside the current evidence. Physical acceptance, signing, publication and
+installation remain separate. Hosted CI is billing-blocked. See [local CI](local-ci.md).
 
 ## Changes after the 4 October candidate (9 to 19 October 2026)
 
@@ -127,10 +129,10 @@ new tickets. The archived list retains all details and proposed fixes.
 
 ## Open fixes
 
-Open against candidate `afa7d222` on 24 October 2026. PR 161, PR 170 and their
-review follow-ups are merged. PR 175 is held until v0.2.0 is installed; the PR 209
-Docker test-harness follow-up is held until publication. Their states are in the
-[roadmap](../ROADMAP.md) and on GitHub.
+Open against reviewed source composition `309be4d7` on 24 October 2026. PR 161,
+PR 170 and their review follow-ups are merged. PR 175 is held until v0.2.0 is
+installed; the PR 209 Docker test-harness follow-up is held until publication.
+Their states are in the [roadmap](../ROADMAP.md) and on GitHub.
 
 - Two owner decisions from the review of PR 138 ([review results](review-results-carry-forward-2026-10-16.md)).
   The recommended default applies until the owner decides.
@@ -157,35 +159,34 @@ Docker test-harness follow-up is held until publication. Their states are in the
   retry after "Device verification is busy" is manual. The probe with four simultaneous checks has
   not been repeated on an installed Pi. The backlog audit proposes one shared answer per peer
   ([backlog audit](backlog-audit-2026-10-16.md), item 1).
-- Prepared on `codex/operator-copy-followups`, pending review and merge: the note under
-  **Router outage behavior** now names **Start**. The other findings of the 17 October QA sweep
+- The router outage note now names **Start** (PR 223). The other findings of the 17 October QA sweep
   (Revoke all homepage pairings, Clear on the Measurements page, row names on the **Delete**
   and **Edit** buttons and the repeated Restore Wi-Fi name sentence) were fixed in PR 162.
 - Names accept control characters and bidirectional overrides through the API and import.
   This is a log and display hygiene question ([QA report](qa-report-2026-10-09.md)). An
-  HTTP/0.9 request still gets an answer with no status line. The browser fixture is not
-  hermetic for update actions.
+  HTTP/0.9 request still gets an answer with no status line. Browser fixture release operations
+  are isolated by PR 228 (`666f7b04`); the composed release head still needs its own gates.
 - Loaded Pi capacity was never measured (feature proposal 20 in
   [feature proposals](feature-proposals-2026-10-09.md)).
-- Tooling notes. Prepared on `codex/operator-copy-followups`, pending review and merge:
-  local-CI help and documentation refer to configured jobs rather than old module counts.
+- Tooling notes: local-CI help and documentation refer to configured jobs rather than old module counts
+  (PR 223). Docker checks use the immutable image ID built by that invocation (PR 213).
   The advisory checks of local CI report findings
   (zizmor 13, pip-audit 21, shellcheck 16 on 17 October) that never gate. The two overengineering
   reviews list further removals ([backend](review-overengineering-backend.md) and
   [front end and tests](review-overengineering-frontend-tests.md)).
 - Dashboard QA sweep of 23 October 2026 (main `3afb48d5`, 601 controls pressed at 1440 and 375 px, no
-  uncaught error or failed request). Four S3 findings were fixed in PR 204. Left open:
-  - **S2, keyboard focus is dropped to the page after Start or Reset network.** Both buttons are disabled
-    while the action runs (`setActionBusy`, `dashboard.js` about 6042) and nothing gives focus back, so the next
-    Tab starts at "Skip to main content". The same happens after confirming **Reset Wi-Fi name** on a phone.
-    Panic keeps focus. Fix: in `setActionBusy(false)`, if focus is on the body and the button had it when the
-    action began, focus the button again. It touches the code that drives Panic-adjacent buttons.
-  - S3: the phone bar label truncation at 375 px and below is addressed by the router status label follow-up
-    (`codex/router-status-label`, awaiting review and merge). The sidebar still needs a scroll in short or landscape windows (the quick **Reset Wi-Fi name**
+  uncaught error or failed request). Four S3 findings were fixed in PR 204. PR 218 fixed the S2 where
+  focus could fall to the page after Start or Reset network, including **Reset Wi-Fi name**. Remaining
+  S3 findings:
+  - The phone bar label truncation at 375 px and below is addressed by PR 220.
+    The sidebar still needs a scroll in short or landscape windows (the quick **Reset Wi-Fi name**
     button is 4 px under the fold at 1366x768). `#connection-notice` is an `aside role="status"` toggled with
     `hidden`. The group select text "Create a group on th..." is cut (tests pin the wording). The "Update
     available" pill wraps to two lines in the desktop nav (a shorter text fixes it). On a phone the Allow
-    button sits under the Credentials sheet. The help icons are 20x20 px, under the 24 px minimum of WCAG 2.2.
+    button sits under the Credentials sheet. A separate local fixture check found that the old help-icon
+    size report measured the visual box rather than the effective target: pseudo-element targets measured
+    32 px on desktop and 44 px on phone or coarse input. Sixty cardinal-hit checks opened help correctly
+    with no clipping. This is bounded Chromium fixture evidence, not general phone acceptance.
     The Schedules form wraps its End field alone at 1366x768. Panic is behind the backdrop while a window is open
     (by design, Close and Escape work).
   - Triage of the Codex dark-theme findings: the scrolling page-link row at 375 px is intended
@@ -195,18 +196,15 @@ Docker test-harness follow-up is held until publication. Their states are in the
     should not report it again. The "Token accepted. Diagnostics loaded." toast covering content at 375 px is
     intended (it leaves after 6 seconds and has Dismiss). Optional polish: skip it for the automatic sign-in on
     page load.
-- Follow-ups of PR 189 (dashboard speed test) that PR 208 did not close: a script with the admin token can park
-  several workers for 1 second each while the first part streams, so allow one waiter per run. The brcmfmac
-  behaviour of the priority reset is not yet checked on a Pi. PR 208 added the order test for the two socket
-  options, the Linux value 12 for `SO_PRIORITY` and the label without the internet.
-- Follow-ups of PR 188 (2000-name block list, from the reviews and the measurements) that PR 208 did not close:
-  measured at 2000 names of 29 characters, the `/api/access` answer grows from
-  9.9 KB to 135 to 179 KB and is polled every 5 seconds (leave the names out of the poll), compiling a plan
-  takes 9.3 ms instead of 0.7 ms on a Mac (about ten times that on a Pi 3B+, cache the plan by configuration
-  version), and the 4096-address cap shows only in a log line. PR 208 closed the delete-rule check and the
-  history restore test. The DNS follow-up caps background submissions at 8 unfinished lookups atomically
-  and keeps successful old addresses after renewal errors within their original 600-second stale window,
-  with 30 seconds between retries. Successful empty answers still replace the old addresses.
+- Source follow-ups in the reviewed composition: dashboard speed-test streams allow one waiting request
+  per run; Pi-specific priority behavior still needs physical verification. Access-plan reuse is keyed by
+  content and rereads settings each time, with only three engine paths using it. API reads still build and
+  validate their own saved or applied policies. Summary polling omits domain arrays while default and
+  editor API reads remain full. DNS renewal submits at most eight unfinished lookups, retains good stale
+  answers only for the original 600-second window after errors and retries after 30 seconds. A successful
+  empty answer replaces the old addresses. The 4096-address cap is still shown only in a log line.
+  The earlier DNS-branch enrollment failure remains unexplained.
+  PR 224 fixes a separately reproduced token-refresh race with an established cause.
 
 ## Observed accessibility improvements
 
