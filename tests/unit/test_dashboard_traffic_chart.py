@@ -276,8 +276,8 @@ def test_paused_sampling_stays_quiet_on_visibility_and_page_changes():
 def test_a_response_from_before_pause_cannot_modify_the_snapshot(reject):
     assert run_chart(
         "let trafficPausedAt=null;let trafficSamplingAllowed=true;"
-        "let trafficRequestInFlight=false;let trafficFailures=0;"
-        "let adminTokenRevision=1;let adminTokenVerified=true;let trafficSamplingRevision=0;"
+        "let trafficRequestInFlight=false;let trafficReadingInFlight=null;let trafficFailures=0;"
+        "let previousTrafficSample=null;let adminTokenRevision=1;let adminTokenVerified=true;let trafficSamplingRevision=0;"
         "function trafficGraphShown(){return true;}let finish;"
         "function readTraffic(){return new Promise((resolve,reject)=>{finish="
         + ("reject" if reject else "resolve") + ";});}"
@@ -301,3 +301,134 @@ def test_reset_clears_sample_text_and_offscale_text_even_when_canvas_is_hidden()
         "latest:nodes['traffic-latest-rates'].textContent,baseline:previousTrafficSample}));"
     ) == {"rows": 0, "offscale": "", "hidden": True,
           "latest": "Waiting for a measured traffic interval.", "baseline": None}
+
+
+
+POLL_STATE = DOM + """
+let trafficPausedAt=null, trafficSamplingAllowed=true, trafficSamplingRevision=0;
+let trafficRequestInFlight=false, trafficReadingInFlight=null, latestTrafficReading=null;
+let adminTokenRevision=1, adminTokenVerified=true, trafficFailures=0;
+let previousTrafficSample=null, trafficSamples=[], now=0, frame, requests=0;
+const TRAFFIC_MAX_POINTS=30, TRAFFIC_FAILURES_BEFORE_CLEARING=3;
+const EVERYONE_ELSE_TRAFFIC='__everyone_else__';
+const performance={now:()=>now};
+element('traffic-device').value='phone';
+function trafficGraphShown(){return true;}
+function trafficReferencesFromResponse(){return {};}
+function resetTrafficHistory(){trafficSamples=[];previousTrafficSample=null;}
+function drawTrafficChart(){}
+function stopTrafficSampling(message){throw new Error(message);}
+let respond=()=>Promise.resolve(frame);
+function request(){requests++;return respond();}
+""" + "\n".join(function_source(name) for name in (
+    "readTraffic", "formatPacketRate", "mergedTrafficCounters",
+    "selectedTrafficTotals", "selectedQueueTotals"
+)) + "\nasync " + function_source("pollTraffic")
+
+
+def counter_frame(browser_ms, sampled_at, counter=None):
+    if counter is None:
+        counter = round(sampled_at * 1_000_000)
+    return {"browser_ms": browser_ms, "sampled_at": sampled_at, "available": True,
+            "devices": {"phone": {"upload_bytes": counter, "download_bytes": counter,
+                                    "upload_packets": counter / 1000,
+                                    "download_packets": counter / 1000}}, "queues": {}}
+
+
+def polled_frames(frames):
+    return run_chart(
+        POLL_STATE + "const frames=" + json.dumps(frames) + ";"
+        "(async()=>{for(frame of frames){now=frame.browser_ms;await pollTraffic();}"
+        "console.log(JSON.stringify({samples:trafficSamples,baseline:previousTrafficSample,"
+        "status:nodes['traffic-status'].textContent,"
+        "latest:nodes['traffic-latest-rates']?.textContent,requests}));})();"
+    )
+
+
+@pytest.mark.parametrize("server_gap", [1.1, 2, 2.9])
+def test_rate_interval_uses_server_samples_despite_different_receipt_gaps(server_gap):
+    result = polled_frames([counter_frame(0, 100), counter_frame(2000, 100 + server_gap)])
+    sample, = result["samples"]
+    assert sample["upload"] == pytest.approx(8)
+    assert sample["download"] == pytest.approx(8)
+    assert sample["intervalSeconds"] == pytest.approx(server_gap)
+    assert sample["recordedAt"] == pytest.approx((100 + server_gap) * 1000)
+    assert sample["time"] == 2000  # Plot position stays in the browser's monotonic clock.
+
+
+def test_a_repeated_server_sample_keeps_rates_and_the_counter_baseline():
+    result = polled_frames([
+        counter_frame(0, 100), counter_frame(2000, 102), counter_frame(4000, 102),
+        counter_frame(6000, 104),
+    ])
+    assert [sample["upload"] for sample in result["samples"]] == [8, 8]
+    assert [sample["time"] for sample in result["samples"]] == [2000, 6000]
+    assert result["samples"][-1]["intervalSeconds"] == 2
+
+
+def test_clock_reversal_restarts_instead_of_drawing_a_spike():
+    result = polled_frames([
+        counter_frame(0, 100, 0), counter_frame(2000, 102, 2_000_000),
+        counter_frame(4000, 90, 3_000_000), counter_frame(6000, 92, 5_000_000),
+    ])
+    sample, = result["samples"]
+    assert sample["upload"] == 8
+    assert sample["time"] == 6000
+    assert sample["intervalSeconds"] == 2
+
+
+@pytest.mark.parametrize("invalid", [None, "102", True])
+def test_invalid_sample_time_clears_the_baseline_until_a_new_valid_pair(invalid):
+    result = polled_frames([
+        counter_frame(0, 100), counter_frame(2000, 102),
+        counter_frame(4000, invalid, 103_000_000), counter_frame(6000, 106),
+        counter_frame(8000, 108),
+    ])
+    sample, = result["samples"]
+    assert sample["upload"] == 8
+    assert sample["time"] == 8000
+
+
+def test_counter_reset_still_restarts_with_server_timestamps():
+    result = polled_frames([
+        counter_frame(0, 100, 10_000_000), counter_frame(2000, 102, 12_000_000),
+        counter_frame(4000, 104, 0), counter_frame(6000, 106, 2_000_000),
+    ])
+    sample, = result["samples"]
+    assert sample["upload"] == 8
+    assert sample["time"] == 6000
+
+
+def test_server_clock_does_not_change_the_thirty_sample_browser_retention_bound():
+    result = polled_frames([counter_frame(i * 2000, 1_000_000 + i * 2) for i in range(35)])
+    assert len(result["samples"]) == 30
+    assert result["samples"][0]["time"] == 10000
+    assert result["samples"][-1]["time"] == 68000
+    assert all(sample["upload"] == 8 for sample in result["samples"])
+
+
+@pytest.mark.parametrize("older_failed", [False, True])
+def test_fresh_graph_waits_for_an_older_workspace_flight_then_requests_a_new_baseline(older_failed):
+    result = run_chart(
+        POLL_STATE + "let finish;respond=()=>requests===1?new Promise((resolve,reject)=>"
+        "{finish=" + ("reject" if older_failed else "resolve") + ";}):Promise.resolve(frame);"
+        "(async()=>{const workspace=readTraffic(0);workspace.catch(()=>null);"
+        "frame=" + json.dumps(counter_frame(10000, 112)) + ";now=10000;"
+        "const resumed=pollTraffic();const before=requests;finish("
+        + ("new Error('older workspace read failed')" if older_failed
+           else json.dumps(counter_frame(5000, 105))) + ");await resumed;"
+        "const baseline=previousTrafficSample.sampledAt;frame="
+        + json.dumps(counter_frame(12000, 114)) + ";now=12000;await pollTraffic();"
+        "console.log(JSON.stringify({before,requests,baseline,rate:trafficSamples[0].download}));})();"
+    )
+    assert result == {"before": 1, "requests": 3, "baseline": 112, "rate": 8}
+
+
+def test_pausing_again_while_waiting_for_a_workspace_flight_starts_no_new_request():
+    assert run_chart(
+        POLL_STATE + "let finish;respond=()=>new Promise(resolve=>{finish=resolve;});"
+        "(async()=>{const workspace=readTraffic(0);const resumed=pollTraffic();"
+        "trafficPausedAt=10000;trafficSamplingRevision++;finish("
+        + json.dumps(counter_frame(5000, 105)) + ");await resumed;await workspace;"
+        "console.log(JSON.stringify({requests,baseline:previousTrafficSample,inFlight:trafficRequestInFlight}));})();"
+    ) == {"requests": 1, "baseline": None, "inFlight": False}

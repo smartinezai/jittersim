@@ -14,8 +14,8 @@ paused interval. Neither the API nor packet handling changes.
 At ec403d0f the axis includes every reference and rounds to powers of ten.
 The existing chart retains 30 samples for 60 seconds and supports hover, legend
 focus, pinning and Escape. It has no manual pause or sample table. This work
-implements item 2 of the 16 October backlog audit under the owner's current
-independent implementation authorization.
+implements item 2 of the 16 October backlog audit. The owner authorized
+independent implementation. D4 option b still needs owner approval to merge.
 
 ## Decisions
 
@@ -63,7 +63,24 @@ The local lint gate, JavaScript syntax check and whitespace check passed.
 The chart tests include a 2 Mbit/s measurement using 40 percent of its 5 Mbit/s
 axis while the 100 Mbit/s ISP reference remains explicit.
 
-Browser verification waits for the shared hardware coordinator. The page-size
-budget needs regeneration during composition because this feature exceeds the
-remaining allowance. No new colors, font sizes or margin values were added.
+Browser verification waits for the shared hardware coordinator. The intended page-size
+growth was measured and the existing updater refreshed four non-strict limits.
+Strict counters and all other limits remain unchanged. No new colors, font sizes or margin values were added.
 This checkpoint is not a claim of completed browser or full release testing.
+
+
+## Focused correction after independent review
+
+A new baseline must wait for any older shared device-workspace request to finish
+then request fresh counters. Check the pause, sign-in and sampling revision again
+before that new request. This prevents Resume from using counters obtained
+during the paused interval and prevents a second Pause from starting a request.
+
+Use the API's sampled_at timestamp for rate intervals and the text table's
+recording time. Keep browser monotonic time for chart positions and retention.
+Ignore repeated server timestamps. Reset the baseline on reversed or invalid
+timestamps while preserving counter-reset behavior. Tests must exercise the
+served poll function with delayed responses and repeated or reversed timestamps.
+
+The backlog's D4 option b still needs the owner's approval before merge. Current
+authorization covers implementation and concrete verification, not that merge.

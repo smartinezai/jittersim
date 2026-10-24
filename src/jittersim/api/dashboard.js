@@ -1959,6 +1959,12 @@
       const samplingRevision = trafficSamplingRevision;
       trafficRequestInFlight = true;
       try {
+        // A fresh graph must not use a workspace reading started before Resume.
+        if (!previousTrafficSample && trafficReadingInFlight) {
+          await trafficReadingInFlight.catch(() => null);
+          if (revision !== adminTokenRevision || !adminTokenVerified || !trafficSamplingAllowed ||
+              samplingRevision !== trafficSamplingRevision || trafficPausedAt !== null) return;
+        }
         const data = await readTraffic(0);
         trafficFailures = 0;
         if (revision !== adminTokenRevision || !adminTokenVerified || !trafficSamplingAllowed ||
@@ -1982,29 +1988,41 @@
           element("traffic-status").textContent = "No counters yet. Assign a profile and choose Start.";
           return;
         }
-        const sampledAt = performance.now();
+        const receivedAt = performance.now();
+        const sampledAt = data.sampled_at;
+        if (!Number.isFinite(sampledAt)) {
+          resetTrafficHistory();
+          element("traffic-status").textContent = "Traffic sample time is unavailable. Waiting for fresh counters.";
+          return;
+        }
         if (previousTrafficSample) {
-          const elapsedSeconds = (sampledAt - previousTrafficSample.time) / 1000;
+          const elapsedSeconds = sampledAt - previousTrafficSample.sampledAt;
           const fields = Object.keys(totals);
           const countersReset = fields.some((field) => totals[field] < previousTrafficSample.totals[field]);
-          if (countersReset || elapsedSeconds <= 0) {
+          if (countersReset || elapsedSeconds < 0) {
             resetTrafficHistory();
-            element("traffic-status").textContent = "Counters changed. Starting a fresh graph...";
+            element("traffic-status").textContent = countersReset
+              ? "Counters changed. Starting a fresh graph..."
+              : "Sample time changed. Starting a fresh graph...";
+          } else if (elapsedSeconds === 0) {
+            element("traffic-status").textContent = "Waiting for a new traffic sample. Last rates are kept.";
+            drawTrafficChart();
+            return;
           } else {
             const upload = Math.max(0, totals.upload_bytes - previousTrafficSample.totals.upload_bytes) * 8 / elapsedSeconds / 1000000;
             const download = Math.max(0, totals.download_bytes - previousTrafficSample.totals.download_bytes) * 8 / elapsedSeconds / 1000000;
             const uploadPackets = Math.max(0, totals.upload_packets - previousTrafficSample.totals.upload_packets) / elapsedSeconds;
             const downloadPackets = Math.max(0, totals.download_packets - previousTrafficSample.totals.download_packets) / elapsedSeconds;
             trafficSamples.push({
-              time: sampledAt,
-              recordedAt: Date.now(),
+              time: receivedAt,
+              recordedAt: sampledAt * 1000,
               intervalSeconds: elapsedSeconds,
               upload: upload,
               download: download,
               ...latestTrafficReferences
             });
             trafficSamples = trafficSamples
-              .filter((sample) => sampledAt - sample.time <= TRAFFIC_WINDOW_MS)
+              .filter((sample) => receivedAt - sample.time <= TRAFFIC_WINDOW_MS)
               .slice(-TRAFFIC_MAX_POINTS);
             element("traffic-upload-rate").textContent = formatTrafficRate(upload);
             element("traffic-download-rate").textContent = formatTrafficRate(download);
@@ -2019,7 +2037,7 @@
         } else {
           element("traffic-status").textContent = "Collecting the first sample...";
         }
-        previousTrafficSample = { time: sampledAt, totals: totals, queues: queueTotals };
+        previousTrafficSample = { time: receivedAt, sampledAt: sampledAt, totals: totals, queues: queueTotals };
         updateTrafficText();
         drawTrafficChart();
       } catch (error) {
