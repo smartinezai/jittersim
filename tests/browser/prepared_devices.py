@@ -95,7 +95,7 @@ def check(browser, base, width, height):
         box = button.bounding_box()
         assert box and box["height"] >= 44, box
     engine, _ = load_engine()
-    page.add_script_tag(content=engine)
+    page.evaluate(engine)
     violations = page.evaluate("async () => (await axe.run(document.querySelector('#prepared-card'), {runOnly:{type:'tag',values:['wcag2a','wcag2aa','wcag21aa']}})).violations")
     assert not violations, violations
     page.locator("#prepared-review details summary").click()
