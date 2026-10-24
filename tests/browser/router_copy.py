@@ -506,16 +506,19 @@ def fixture_server():
 def check_visible_router_read(browser, base, width, height):
     context = browser.new_context(viewport={"width": width, "height": height})
     page = context.new_page()
-    reads = []
+    reads, pending = [], []
     def read_status(route):
         reads.append(route.request.post_data_json)
-        route.fulfill(content_type="application/json", body=json.dumps({"result": {
+        pending.append(route)
+    def answer_read():
+        pending.pop(0).fulfill(content_type="application/json", body=json.dumps({"result": {
             "enabled": True, "checked_at": int(time.time()), "busy": False, "changing": False}}))
     page.route("**/api/router/status", read_status)
     page.goto(base)
     sign_in(page)
     close_controls(page)
     expect(page.locator("#refresh-router-wifi")).to_be_disabled()
+    expect(page.locator("#check-router-wifi-now")).to_be_disabled()
     expect(page.locator("#router-wifi-status")).to_contain_text("Enter router password")
     assert not reads
     enter_router_password(page)
@@ -527,12 +530,17 @@ def check_visible_router_read(browser, base, width, height):
     expect(check).to_be_visible(timeout=2000)
     expect(check).to_be_enabled()
     check.click()
+    expect(check).to_be_disabled()
+    expect(page.locator("#refresh-router-wifi")).to_be_disabled()
+    answer_read()
     expect(page.locator("#router-wifi-toggle")).to_have_text("On")
     assert len(reads) == 1
     assert set(reads[0]) == {"admin_password", "refresh"}
     assert_router_status_is_read_only(page)
     check.focus()
     page.keyboard.press("Enter")
+    expect(check).to_be_disabled()
+    answer_read()
     expect(check).to_be_enabled()
     assert len(reads) == 2
     box = check.bounding_box()
@@ -560,6 +568,9 @@ def run():
                 # The Pi spaces router password checks apart, so each width gets its own Pi.
                 with fixture_server() as port:
                     run_width(browser, f"http://127.0.0.1:{port}", width, height)
+            for width, height in ((1440, 900), (375, 844), (320, 568)):
+                with fixture_server() as port:
+                    check_visible_router_read(browser, f"http://127.0.0.1:{port}", width, height)
             print("Router Wi-Fi import acceptance passed at desktop and 375px widths.")
         finally:
             browser.close()
