@@ -169,21 +169,43 @@ def check_clearing_and_removal(page, base, headers, width):
     row = page.locator(f'.saved-profile-row[data-profile-id="{profile_id}"]')
     row.locator('button[data-action="edit"]').click()
     expect(page.locator("#profile-id")).to_have_value(profile_id)
-    page.locator("#upload-bandwidth").fill("")
-    page.locator("#download-bandwidth").fill("")
+    fields = page.locator("#profile-form input, #profile-form select, #profile-form textarea")
+    settings = fields.evaluate_all("nodes => nodes.map(node => node.id).filter(id => !['profile-id', 'profile-name', 'profile-preset'].includes(id))")
+    resets = page.locator("#profile-form button[data-reset-field]")
+    assert resets.count() == len(settings)
+    names = resets.evaluate_all("nodes => nodes.map(node => node.getAttribute('aria-label'))")
+    assert len(names) == len(set(names)), names
+    assert all(name.startswith("Reset ") and name.endswith(" to default") for name in names)
+
+    def reset(field_id, default):
+        button = page.locator(f'button[data-reset-field="{field_id}"]')
+        expect(button).to_be_enabled()
+        box = button.bounding_box()
+        assert box and box["width"] >= 44 and box["height"] >= 44, box
+        button.focus()
+        page.keyboard.press("Enter")
+        expect(button).to_be_focused()
+        expect(page.locator(f"#{field_id}")).to_have_value(default)
+
+    reset("upload-bandwidth", "")
+    reset("download-bandwidth", "")
     page.locator("#profile-advanced").evaluate("node => node.open = true")
-    page.locator("#profile-seed").fill("")
-    page.locator("#profile-outage-probability").fill("0")
-    page.locator("#upload-loss").fill("0")
-    page.locator("#profile-website-mode").select_option("unrestricted")
-    page.locator("#profile-website-domains").fill("")
+    reset("profile-seed", "")
+    reset("profile-outage-probability", "0")
+    reset("upload-loss", "0")
+    reset("profile-website-mode", "unrestricted")
+    reset("profile-website-domains", "")
+    reset("upload-delay-random-enabled", "100")
+    # Reset is still a draft and never saves or applies it on its own.
+    assert saved(page, base, headers, profile_id) == original
     submit = page.locator("#profile-form button[type='submit']")
     with page.expect_response(is_profile_save):
         submit.click()
     expect(submit).to_be_enabled()
     expected = dict(original, random_seed=None, outage_probability=0,
                     website_mode="unrestricted", website_domains=[])
-    expected["upload"] = dict(original["upload"], bandwidth_kbit=None, loss_percent=0)
+    expected["upload"] = dict(original["upload"], bandwidth_kbit=None, loss_percent=0,
+                              delay_randomness=dict(original["upload"]["delay_randomness"], enabled_probability=100))
     expected["download"] = dict(original["download"], bandwidth_kbit=None)
     assert saved(page, base, headers, profile_id) == expected
     page.locator("#new-profile").click()
@@ -213,6 +235,9 @@ def check_clearing_and_removal(page, base, headers, width):
     page.get_by_role("dialog").get_by_role("button", name="Delete profile", exact=True).click()
     expect(page.locator("#message")).to_contain_text("profile is in use by device Clear test device")
     expect(row).to_be_visible()
+    assert saved(page, base, headers, profile_id) == dict(expected, name="Renamed after clearing")
+    assigned = page.request.get(base + "/api/devices", headers=headers).json()["devices"]
+    assert next(device for device in assigned if device["id"] == device_id)["profile_id"] == profile_id
     assert page.request.post(base + "/api/devices/delete", headers=headers, data={"id": device_id}).ok
     delete.click()
     page.get_by_role("dialog").get_by_role("button", name="Delete profile", exact=True).click()

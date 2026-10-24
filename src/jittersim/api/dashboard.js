@@ -6463,6 +6463,60 @@
       }
     });
 
+    function resetProfileField(field) {
+      if (field.disabled || field.readOnly) return;
+      field.value = field.tagName === "SELECT"
+        ? (Array.from(field.options).find((option) => option.defaultSelected) || field.options[0]).value
+        : field.defaultValue;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    function setupProfileFieldResets() {
+      const form = element("profile-form");
+      const controls = [];
+      form.querySelectorAll("input, select, textarea").forEach((field) => {
+        if (["profile-id", "profile-name", "profile-preset"].includes(field.id)) return;
+        const label = field.closest("label");
+        if (!label) return;
+        const name = label.cloneNode(true);
+        name.querySelectorAll("input, select, textarea, .help-icon").forEach((node) => node.remove());
+        const direction = field.id.startsWith("upload-") ? "Upload "
+          : field.id.startsWith("download-") ? "Download " : "";
+        const feature = field.id.match(/^(?:upload|download)-(\w+)-random-/);
+        const title = "Reset " + direction + (feature ? feature[1] + " " : "") +
+          name.textContent.trim().replace(/\s+/g, " ") + " to default";
+        const wrapper = document.createElement("div");
+        wrapper.className = "profile-field-reset";
+        label.before(wrapper);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.resetField = field.id;
+        button.setAttribute("aria-label", title);
+        button.title = title;
+        const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        icon.setAttribute("viewBox", "0 0 24 24");
+        icon.setAttribute("aria-hidden", "true");
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", "M3 10a9 9 0 1 1 2.6 8.4M3 4v6h6");
+        icon.appendChild(path);
+        button.appendChild(icon);
+        button.addEventListener("click", () => resetProfileField(field));
+        wrapper.append(label, button);
+        controls.push({ field, label, wrapper, button });
+      });
+      const sync = () => controls.forEach(({ field, label, wrapper, button }) => {
+        const disabled = field.disabled || field.readOnly;
+        if (button.disabled !== disabled) button.disabled = disabled;
+        if (wrapper.hidden !== label.hidden) wrapper.hidden = label.hidden;
+      });
+      sync();
+      // Existing range controls toggle disabled fields and hidden labels after edits and resets.
+      new MutationObserver(sync).observe(form, {
+        subtree: true, attributes: true, attributeFilter: ["disabled", "readonly", "hidden"]
+      });
+    }
+
     function profileFormPayload(base) {
       const keep = (field) => base
         ? Object.assign({}, base[field])
@@ -9965,5 +10019,7 @@
     savedDevicesHooks.push(followSavedDevices);
 
     groupsLoadedHooks.push(renderTargetMenus);
+
+    setupProfileFieldResets();
 
     startDashboard();
