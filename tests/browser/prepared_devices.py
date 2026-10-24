@@ -29,6 +29,8 @@ def check(browser, base, width, height):
                                  data={"mac_address": row["mac_address"], "expected_revision": row["revision"]}).ok
     assert page.request.post(base + "/api/profiles", headers=HEADERS,
                              data={"id": "prepared-test", "name": "Prepared test", "upload": {"delay_ms": 30}}).ok
+    # Each viewport has an explicit clean Start after the previous viewport's Panic.
+    assert page.request.post(base + "/api/apply", headers=HEADERS, data={}).ok
     sign_in(page, base)
     card = page.locator("#prepared-card")
     expect(card).to_be_visible()
