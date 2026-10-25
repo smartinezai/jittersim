@@ -180,7 +180,7 @@ def destination_allowed(
     if plan is None:
         return True
     destination = ip_address(address)
-    if destination in plan.global_blocked_addresses:
+    if destination in plan.global_blocked_addresses and client_mac not in plan.protected_mac_addresses:
         return False
     if (
         plan.global_allowed_addresses is not None
@@ -307,14 +307,14 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
             if self.server.require_access_policy and access_generation is None:
                 raise ProxyError("access rules are unavailable")
             policy = read_access(access_path)
-            if not policy.permits_host(str(client_ip), host):
-                raise ProxyError("this destination is blocked by an access rule")
             active_mac_rules = policy.options.enabled and policy.mac.mode != "disabled"
-            needs_mac = self.server.ad_blocking.enabled() or active_mac_rules or bool(
+            needs_mac = bool(policy.protected_mac_addresses) or self.server.ad_blocking.enabled() or active_mac_rules or bool(
                 plan and (plan.protected_mac_addresses or plan.general_profile is not None
                           or plan.mac_policy.mode != "disabled")
             )
             client_mac = self.server.identify_mac(peer_ip) if needs_mac else None
+            if not policy.permits_host(str(client_ip), host, client_mac=client_mac):
+                raise ProxyError("this destination is blocked by an access rule")
             if active_mac_rules:
                 _check_mac_access(policy.mac, client_mac)
             mark, assignment_id = select_mark(

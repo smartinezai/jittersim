@@ -427,7 +427,7 @@ def test_filtering_keeps_household_rules_in_views_and_one_shared_advertising_tre
     server, views = config.split("forward-zone:", 1)
     assert server.count('local-zone: "advert.test." always_nxdomain') == 1
     assert 'local-zone: "global.test." always_transparent' in server
-    assert 'local-zone: "global.test." always_nxdomain' in views
+    assert 'local-zone: "global.test." always_nxdomain' not in views
     assert 'local-zone: "private.test." always_nxdomain' in views
     assert 'local-zone: "." always_nxdomain' in views
     assert 'local-zone: "content.test." noview' in views

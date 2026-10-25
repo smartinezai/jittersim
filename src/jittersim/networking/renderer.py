@@ -346,12 +346,6 @@ def _render_nft_script(
             f"ether saddr != {_render_set(plan.mac_policy.allowlist)} drop "
             'comment "allow only listed test clients"'
         )
-    if plan.global_blocked_addresses:
-        lines.append(
-            f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
-            f"ip daddr {_render_set(plan.global_blocked_addresses)} drop "
-            'comment "block global website destinations"'
-        )
     if plan.global_allowed_addresses is not None:
         match = (
             f"ip daddr != {_render_set(plan.global_allowed_addresses)} "
@@ -375,6 +369,12 @@ def _render_nft_script(
         lines.append(
             f"add rule netdev {DOWNLOAD_TABLE} download ether daddr {macs} "
             'meta mark set 0 return comment "unaffected by profiles"'
+        )
+    if plan.global_blocked_addresses:
+        lines.append(
+            f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
+            f"ip daddr {_render_set(plan.global_blocked_addresses)} drop "
+            'comment "block global website destinations"'
         )
     if plan.general_profile is not None:
         general = plan.general_profile

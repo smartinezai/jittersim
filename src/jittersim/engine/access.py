@@ -6,6 +6,7 @@ from hashlib import sha256
 from ipaddress import IPv4Address, IPv4Network
 from typing import Optional, Tuple
 
+from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt_mac
 from jittersim.config.models import (
     MAX_BLOCK_DOMAINS,
     MAX_SITE_BLOCKS,
@@ -57,10 +58,14 @@ class AccessPlan:
     websites: WebsitePolicy = WebsitePolicy()
     blocks: Tuple[SiteBlock, ...] = ()
     clients: Tuple[AccessClient, ...] = ()
+    protected_mac_addresses: Tuple[str, ...] = ()
 
-    def blocked_domains(self, client_id: Optional[str] = None) -> tuple:
-        domains = set(self.websites.blocked_domains)
-        selected = next((client.block_ids for client in self.clients if client.id == client_id), ())
+    def blocked_domains(self, client_id: Optional[str] = None, *, client_mac=None) -> tuple:
+        client = next((client for client in self.clients if client.id == client_id), None)
+        mac = client_mac if client_mac is not None else client.mac if client else None
+        domains = (set() if mac in self.protected_mac_addresses
+                   else set(self.websites.blocked_domains))
+        selected = client.block_ids if client else ()
         for rule in self.blocks:
             if rule.enabled and (
                 rule.device_id is None and rule.group_id is None or rule.id in selected
@@ -68,14 +73,14 @@ class AccessPlan:
                 domains.update(rule.domains)
         return tuple(sorted(domains))
 
-    def permits_host(self, address: str, host: str) -> bool:
+    def permits_host(self, address: str, host: str, *, client_mac=None) -> bool:
         if not self.options.enabled:
             return True
         host = normalize_domain(host)
         client = next((client for client in self.clients if client.address == address), None)
         if any(
             domain_matches(host, domain)
-            for domain in self.blocked_domains(client.id if client else None)
+            for domain in self.blocked_domains(client.id if client else None, client_mac=client_mac or "")
         ):
             return False
         return self.websites.mode != "allow_only" or any(
@@ -83,7 +88,10 @@ class AccessPlan:
         )
 
     def payload(self) -> dict:
-        return {"version": 1, **asdict(self)}
+        payload = {"version": 1, **asdict(self)}
+        if not self.protected_mac_addresses:
+            payload.pop("protected_mac_addresses")
+        return payload
 
     def digest(self) -> str:
         return sha256(json.dumps(self.payload(), sort_keys=True).encode()).hexdigest()
@@ -115,6 +123,7 @@ def access_from_payload(value: object) -> AccessPlan:
         raw_clients = value.get("clients", [])
         if not isinstance(raw_clients, (list, tuple)) or len(raw_clients) > MAX_ACCESS_CLIENTS:
             raise ValidationError("too many access clients")
+        raw_protected = value.get("protected_mac_addresses", [])
         clients = []
         rule_ids = {rule.id for rule in blocks}
         for value in raw_clients:
@@ -145,9 +154,15 @@ def access_from_payload(value: object) -> AccessPlan:
         if len({c.mac for c in clients if c.mac}) != len([c for c in clients if c.mac]):
             raise ValidationError("access clients must have distinct MAC addresses")
         validate_blocks(blocks, {c.id for c in clients}, {r.group_id for r in blocks if r.group_id})
-        plan = AccessPlan(options, mac, websites, blocks, tuple(clients))
+        if (not isinstance(raw_protected, (list, tuple))
+                or len(raw_protected) > MAX_UNAFFECTED_DEVICES):
+            raise ValidationError("too many protected access clients")
+        protected = tuple(sorted({normalize_exempt_mac(mac) for mac in raw_protected}))
+        plan = AccessPlan(options, mac, websites, blocks, tuple(clients), protected)
         # Equivalent clients share a DNS view. Bound worst-case distinct views too.
         views = {plan.blocked_domains(c.id) for c in clients} | {plan.blocked_domains()}
+        if protected:
+            views.add(plan.blocked_domains(client_mac=protected[0]))
         if sum(len(view) + len(websites.allowed_domains) for view in views) > MAX_EXPANDED_DOMAINS:
             raise ValidationError(
                 "too many different device and site rule combinations: each one repeats the "
@@ -180,5 +195,6 @@ def build_access_plan(settings: SavedSettings) -> AccessPlan:
         settings.website_policy,
         settings.site_blocks,
         tuple(clients),
+        tuple(device.mac_address for device in settings.unaffected_devices),
     )
     return access_from_payload(json.loads(json.dumps(plan.payload())))

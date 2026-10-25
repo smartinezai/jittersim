@@ -606,7 +606,7 @@ class HouseholdReleaseTests(unittest.TestCase):
         # O6: the private resolver port stays closed to everything but the test
         # Wi-Fi and loopback, and the table that holds that rule is the last one.
         privacy = ('add rule inet jittersim_access input iifname != "wlan0" iifname != "lo" '
-                   "meta l4proto { tcp, udp } th dport 5335 drop")
+                   "meta l4proto { tcp, udp } th dport { 5335, 5400-5656 } drop")
         self.assertIn(privacy, removal)
         lines = removal.splitlines()
         self.assertNotIn("delete table inet jittersim_access", lines[lines.index(privacy):])

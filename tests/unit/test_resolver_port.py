@@ -2,6 +2,7 @@
 
 import re
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from jittersim.config.models import AccessOptions, SiteBlock
@@ -39,6 +40,7 @@ class ResolverPortTests(unittest.TestCase):
             AccessPlan(),
             AccessPlan(options=AccessOptions(enabled=False)),
             BLOCKED,
+            replace(BLOCKED, protected_mac_addresses=("02:00:00:00:50:0a",)),
             AccessPlan(options=AccessOptions(dns_failure_percent=100)),
         ):
             rules = render_access_firewall(plan, TOPOLOGY)
@@ -46,7 +48,7 @@ class ResolverPortTests(unittest.TestCase):
             # The private resolver port stays closed to everything but the test
             # interface and loopback.
             self.assertIn(
-                'iifname != "wlan0" iifname != "lo" meta l4proto { tcp, udp } th dport 5335 drop',
+                'iifname != "wlan0" iifname != "lo" meta l4proto { tcp, udp } th dport { 5335, 5400-5656 } drop',
                 rules,
             )
 
