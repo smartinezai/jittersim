@@ -1,6 +1,7 @@
 """Producer wiring keeps household replies private and ad DNS logging disabled."""
 
 import re
+import shlex
 from dataclasses import replace
 from pathlib import Path
 
@@ -57,3 +58,21 @@ def test_dns_unit_runs_private_producer_with_existing_restrictions():
         assert restriction in unit.splitlines()
     assert "AF_PACKET" not in unit
     assert "StandardError=journal" not in unit
+
+
+def test_root_startup_creates_only_private_receiver_child():
+    lines = (ROOT / "deploy/raspberry-pi/jittersim-dns.service").read_text().splitlines()
+    commands = [line.split("=", 1)[1] for line in lines if line.startswith("ExecStartPre=")]
+    assert [shlex.split(command) for command in commands] == [[
+        "/usr/bin/install", "-d", "-o", "jittersim", "-g", "jittersim",
+        "-m0700", "/run/jittersim/dns-observations",
+    ]]
+    assert not any(line.startswith("User=") and line != "User=root" for line in lines)
+    assert not any(line.startswith("RuntimeDirectoryMode=") for line in lines)
+
+
+def test_dns_unit_writable_exception_is_only_existing_runtime_parent():
+    lines = (ROOT / "deploy/raspberry-pi/jittersim-dns.service").read_text().splitlines()
+    writable = [line.split("=", 1)[1].split() for line in lines if line.startswith("ReadWritePaths=")]
+    assert writable == [["/run/jittersim"]]
+    assert "ProtectSystem=strict" in lines
