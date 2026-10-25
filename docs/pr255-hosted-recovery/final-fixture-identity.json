@@ -1,0 +1,9 @@
+{
+  "source_commit": "40019c28e06e5f443d1012e9c2db186e99601553",
+  "files": {
+    "tests/browser/traffic_chart.py": "172e121c07eced74e9fded5524d249d4b926b3732fd4e6e275701b230ecaaa14",
+    "tests/unit/test_release_upload.py": "070e144b5ecb17f420e6fad31d3636ec7e55c4bc3fa0b681d71424362e4bbdfd"
+  },
+  "tests": "22uploadPASS, affectedchartmodulePASS, no sourcechangesafterverification",
+  "review": "independentreview_pr255_recovery CLEAR; all mutation/privacy/signature/assertions retained"
+}
