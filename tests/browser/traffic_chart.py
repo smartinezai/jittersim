@@ -19,7 +19,7 @@ SERIES = (
 STARTED = time.monotonic()
 BACKGROUND_READ_PATHS = frozenset({
     "/api/traffic", "/api/connected-devices", "/api/connected-device-labels",
-    "/api/general-profile", "/api/state", "/api/health", "/api/observations",
+    "/api/general-profile", "/api/state", "/api/health", "/api/system-health", "/api/observations",
 })
 
 

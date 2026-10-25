@@ -366,13 +366,21 @@ class ReleaseUploadTests(unittest.TestCase):
 
     def test_an_upload_that_stops_early_stages_nothing_and_the_dashboard_goes_on(self):
         archive, signature = self.release()
-        self.raw(self.head(f"Content-Length: {len(archive) + len(signature)}",
-                           f"{HEADER}: {len(archive)}"), archive[:1000], wait=False)
-        # The dashboard notices the closed connection, drops the partial file and goes on.
-        for _ in range(100):
-            if not (self.spool.exists() and any(self.spool.iterdir())):
-                break
-            time.sleep(0.05)
+        finished = threading.Event()
+        handle = api.handle_release_upload
+
+        def finish_partial_request(handler):
+            try:
+                return handle(handler)
+            finally:
+                # An empty spool before this request starts is not completion.
+                # Include unwind/lock cleanup before the next real upload.
+                finished.set()
+
+        with patch.object(api, "handle_release_upload", finish_partial_request):
+            self.raw(self.head(f"Content-Length: {len(archive) + len(signature)}",
+                               f"{HEADER}: {len(archive)}"), archive[:1000], wait=False)
+            self.assertTrue(finished.wait(5), "the partial upload did not finish cleanup")
         self.assertEqual(self.helper.calls, 0)
         self.assert_nothing_left()
         status, _ = self.upload(*self.release(sequence=210, version="v3"))
