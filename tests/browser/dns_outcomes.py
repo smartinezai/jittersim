@@ -55,6 +55,9 @@ def check_dns_outcomes(browser, base, width, evidence):
         expect(page.locator("#private-dashboard")).to_be_visible()
         page.locator("#close-credentials").click()
         close_controls(page)
+        if page.locator("#toast-dismiss").is_visible():
+            expect(page.locator("#toast-message")).to_have_text("Token accepted. Diagnostics loaded.")
+            page.locator("#toast-dismiss").click()
         toggle = page.get_by_role("button", name="Traffic discovery", exact=True)
         if toggle.get_attribute("aria-expanded") == "false":
             toggle.click()
