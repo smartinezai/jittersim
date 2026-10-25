@@ -443,6 +443,7 @@ def filtering_config(domains, allowances, access, dns_user="jittersim"):
         .replace('username: "unbound"', f'username: "{dns_user}"')
         .replace('logfile: ""', 'logfile: "/dev/null"')
         .replace("log-replies: yes", "log-replies: no")
+        .replace("log-tag-queryreply: yes", "log-tag-queryreply: no")
         .replace("log-local-actions: yes", "log-local-actions: no")
     )
     existing = set(re.findall(r'local-zone: "([^"]+)\." ', server))

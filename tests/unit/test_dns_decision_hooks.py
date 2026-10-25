@@ -39,6 +39,7 @@ def test_ad_dns_never_inherits_household_reply_stream():
     assert "  use-syslog: no\n" in config
     assert "  log-queries: no\n" in config
     assert "  log-replies: no\n" in config
+    assert "  log-tag-queryreply: no\n" in config
     assert "  log-local-actions: no\n" in config
     assert '  logfile: ""' not in config
 
