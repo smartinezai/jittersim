@@ -189,11 +189,14 @@ async function connCheckOpen(device) {
 async function connCheckLoad() {
   const device = connCheckState.device;
   const serial = connCheckState.serial;
+  const probes = element('conn-check-probes');
+  const begin = element('conn-check-begin');
+  probes.disabled = true;
+  begin.disabled = true;
   const data = await request('/api/connection-checks?mac=' + encodeURIComponent(device.mac_address), 'GET');
   if (serial !== connCheckState.serial) return;
   const firstLoad = !connCheckState.meta;
   connCheckState.meta = data;
-  const probes = element('conn-check-probes');
   probes.min = String(data.limits.min_probes);
   probes.max = String(data.limits.max_probes);
   if (firstLoad || !probes.value) probes.value = String(data.limits.default_probes);
@@ -206,9 +209,12 @@ async function connCheckLoad() {
     connCheckShowRunning(data.active[0]);
     connCheckPoll();
   }
+  probes.disabled = false;
+  begin.disabled = false;
 }
 
 async function connCheckStart() {
+  if (element('conn-check-probes').disabled) return;
   const device = connCheckState.device;
   const serial = connCheckState.serial;
   const probes = Number(element('conn-check-probes').value);

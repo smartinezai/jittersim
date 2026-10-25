@@ -84,12 +84,48 @@ def check_width(browser, width, height):
         expect(open_button).to_be_enabled(timeout=LIMIT)
         # The two buttons sit side by side on one line.
         expect(row.locator(".speed-test-line").get_by_role("button")).to_have_count(2)
-        open_button.click()
+        check_reads = []
+
+        def hold_check_read(route):
+            check_reads.append(route)
+
+        check_pattern = "**/api/connection-checks?mac=*"
+        page.route(check_pattern, hold_check_read)
+        with page.expect_request(check_pattern):
+            open_button.click()
 
         dialog = page.locator("#conn-check-dialog")
         history = page.locator("#conn-check-history tbody tr")
         result = page.locator("#conn-check-result")
         expect(dialog).to_be_visible()
+        expect(page.locator("#conn-check-probes")).to_be_disabled()
+        expect(page.locator("#conn-check-begin")).to_be_disabled()
+        expect(page.locator("#conn-check-close")).to_be_enabled()
+        expect(page.locator("#conn-check-history")).to_contain_text("Loading checks")
+        dialog.screenshot(path=f"test-results/connection-check-loading-{width}.png")
+        assert len(check_reads) == 1
+        check_reads.pop().fulfill(
+            status=503, content_type="application/json",
+            body='{"error":"Check settings are unavailable. Reopen to try again."}',
+        )
+        expect(page.locator("#conn-check-error")).to_contain_text("Reopen to try again")
+        expect(page.locator("#conn-check-probes")).to_be_disabled()
+        expect(page.locator("#conn-check-begin")).to_be_disabled()
+        dialog.screenshot(path=f"test-results/connection-check-load-error-{width}.png")
+        page.locator("#conn-check-close").focus()
+        page.keyboard.press("Enter")
+        expect(dialog).to_be_hidden()
+        expect(open_button).to_be_focused()
+        with page.expect_request(check_pattern):
+            open_button.click()
+        expect(dialog).to_be_visible()
+        expect(page.locator("#conn-check-probes")).to_be_disabled()
+        expect(page.locator("#conn-check-begin")).to_be_disabled()
+        assert len(check_reads) == 1
+        check_reads.pop().continue_()
+        page.unroute(check_pattern, hold_check_read)
+        expect(page.locator("#conn-check-probes")).to_be_enabled()
+        expect(page.locator("#conn-check-begin")).to_be_enabled()
         expect(page.locator("#conn-check-title")).to_have_text(f"Check connection: {NAME}")
         expect(page.locator("#conn-check-title")).to_be_focused()
         expect(page.locator("#conn-check-probes")).to_have_value("100")
@@ -98,9 +134,15 @@ def check_width(browser, width, height):
         expect(result).to_be_hidden()
 
         def run_check(label):
+            expect(page.locator("#conn-check-probes")).to_be_enabled()
+            expect(page.locator("#conn-check-begin")).to_be_enabled()
             page.locator("#conn-check-probes").fill(PROBES)
+            expect(page.locator("#conn-check-probes")).to_have_value(PROBES)
             page.locator("#conn-check-label").fill(label)
-            page.locator("#conn-check-begin").click()
+            page.locator("#conn-check-begin").focus()
+            with page.expect_request("**/api/connection-checks/start") as started:
+                page.keyboard.press("Enter")
+            assert started.value.post_data_json["probes"] == int(PROBES)
             expect(page.locator("#conn-check-progress")).to_contain_text("probes", timeout=LIMIT)
             expect(page.locator("#conn-check-running")).to_be_visible()
             expect(page.locator("#conn-check-start")).to_be_hidden()
@@ -251,7 +293,16 @@ def check_width(browser, width, height):
             timeout=LIMIT)
         expect(open_button).to_be_enabled()
         expect(row).to_contain_text("plain Wi-Fi path")
-        open_button.click()
+        page.route(check_pattern, hold_check_read)
+        with page.expect_request(check_pattern):
+            open_button.click()
+        expect(dialog).to_be_visible()
+        expect(page.locator("#conn-check-probes")).to_be_disabled()
+        expect(page.locator("#conn-check-begin")).to_be_disabled()
+        expect(page.locator("#conn-check-close")).to_be_enabled()
+        assert len(check_reads) == 1
+        check_reads.pop().continue_()
+        page.unroute(check_pattern, hold_check_read)
         run_check("Protected")
         expect(history.first).to_contain_text("Baseline")
         expect(result).to_contain_text("no profile applies")
