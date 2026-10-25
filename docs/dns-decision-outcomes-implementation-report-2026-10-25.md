@@ -96,3 +96,25 @@ write access to the root PID record's runtime directory. No pinned helper change
 is needed. These hooks require independent review with this bridge before use.
 No installation, signing, merge to the release branch or real device action is
 included in this backend work.
+
+## Corrections from independent review of 00d29ba6
+
+The actual helper emits neighbor_state. The eligibility check now uses that
+exact US spelling. Positive test identities are produced by the real helper
+merge function from synthetic iw/neighbor output. A British alias and an alias
+that conflicts with a stale US field are rejected.
+
+The private receiver now catches SQLite errors when another connection holds a
+write transaction. Telemetry disconnects and becomes unavailable while ordinary
+Traffic observations still return. A Linux credential-backed receiver/API test
+holds an actual second SQLite connection to prove that behavior. The prior
+frozen run passed 527 native tests with three Linux-only skips, but those results
+did not detect the helper field mismatch and do not establish real Pi success.
+
+The same review also found that a repeated MAC with no IPv4 address could escape
+the duplicate count. MAC claims are now counted before skipping absent IP data.
+A real-helper-shaped duplicate regression fails closed. The actual resolver
+fixture now feeds captured bytes through the shipped DecisionLines parser and
+DnsOutcomeStore and asserts explicit block, NOERROR and ordinary NXDOMAIN counts.
+Its owned loopback identity is a fixture-only store input. Production admission
+continues to reject loopback, with no relaxed test-network identity rule.

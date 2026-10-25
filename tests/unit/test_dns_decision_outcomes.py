@@ -31,19 +31,36 @@ SESSION = "c" * 32
 
 
 def snapshot(**changes):
-    result = {
-        "association_status_available": True,
-        "devices": [
-            {
-                "ipv4_address": IP,
-                "mac_address": MAC,
-                "association_verified": True,
-                "neighbour_state": "reachable",
-            }
-        ],
-    }
+    from jittersim.networking.helper import _merge_connected_device_output
+
+    # Exercise the real helper producer rather than a hand-invented identity row.
+    devices = _merge_connected_device_output(
+        f"Station {MAC} (on wlan0)\n\tsignal: -40 dBm\n",
+        f"{IP} dev wlan0 lladdr {MAC} REACHABLE\n",
+        "",
+        observed_at=100,
+    )
+    result = {"association_status_available": True, "devices": devices}
     result.update(changes)
     return result
+
+
+def test_actual_helper_payload_is_eligible_and_british_alias_is_not():
+    actual = snapshot()
+    assert actual["devices"][0]["neighbor_state"] == "reachable"
+    assert "neighbour_state" not in actual["devices"][0]
+    assert eligible_dns_identities(actual, set()) == {IP: MAC}
+    alias = dict(actual["devices"][0])
+    alias["neighbour_state"] = alias.pop("neighbor_state")
+    assert eligible_dns_identities(snapshot(devices=[alias]), set()) == {}
+    alias["neighbor_state"] = "stale"
+    assert eligible_dns_identities(snapshot(devices=[alias]), set()) == {}
+
+
+def test_duplicate_mac_without_an_ip_cannot_make_the_other_row_unique():
+    actual = snapshot()
+    duplicate = dict(actual["devices"][0], ipv4_address=None, neighbor_state=None)
+    assert eligible_dns_identities(snapshot(devices=actual["devices"] + [duplicate]), set()) == {}
 
 
 def action(name="blocked.example", address=IP, generation=GENERATION):
@@ -139,7 +156,7 @@ def test_partial_lines_limits_and_reset_never_reinterpret_a_truncated_suffix():
                     "ipv4_address": IP,
                     "mac_address": MAC,
                     "association_verified": True,
-                    "neighbour_state": "stale",
+                    "neighbor_state": "stale",
                 }
             ]
         },

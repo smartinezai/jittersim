@@ -131,6 +131,34 @@ forward-zone:
         assert any('missing.example. A IN NXDOMAIN' in line for line in replies)
         assert not any('missing.example' in line for line in blocks)
         assert any('answer.example. A IN NOERROR' in line and ' 1 ' in line for line in replies)
+        # Feed the ACTUAL captured bytes through the shipped parser and RAM store.
+        # This fixture owns its loopback clients. Production identity admission still
+        # refuses loopback and is tested separately with real helper-shaped rows.
+        from jittersim.config.dns_outcomes import DnsOutcomeStore
+        from jittersim.networking.dns_decisions import DecisionLines
+        from jittersim.networking.helper import _merge_connected_device_output
+        parsed = DecisionLines().feed(raw)
+        assert parsed and all(item.generation == 'a' * 64 for item in parsed)
+        helper_rows = _merge_connected_device_output(
+            "Station 02:00:00:00:00:01 (on wlan0)\n",
+            "127.0.0.1 dev wlan0 lladdr 02:00:00:00:00:01 REACHABLE\n",
+            "", observed_at=int(time.time()))
+        assert helper_rows[0]['neighbor_state'] == 'reachable'
+        fixture_identities = {row['ipv4_address']: row['mac_address'] for row in helper_rows}
+        store = DnsOutcomeStore()
+        window_start = min(item.event.observed_at for item in parsed)
+        window_end = max(item.event.observed_at for item in parsed)
+        store.begin(epoch='e' * 32, session='f' * 32, generation='a' * 64,
+                    producer_started_ns=time.monotonic_ns(), version=0,
+                    identities=fixture_identities, now=window_start)
+        store.add([item.event for item in parsed], epoch='e' * 32, session='f' * 32,
+                  generation='a' * 64, version=0, identities=fixture_identities, now=window_end)
+        counted, health = store.snapshot(version=0, identities=fixture_identities, now=window_end)
+        assert counted[('127.0.0.1', '02:00:00:00:00:01', 'blocked.example')]['blocked_decisions'] == 1
+        assert counted[('127.0.0.1', '02:00:00:00:00:01', 'answer.example')]['answered_noerror'] == 2
+        assert counted[('127.0.0.1', '02:00:00:00:00:01', 'missing.example')]['other_dns_errors'] == 1
+        assert not any(key[0] == '127.0.0.2' for key in counted)
+        assert health['coverage_complete'] is False and health['dropped_events'] is None
         def nonblocking_child_stderr():
             content = Path(f'/proc/{process.pid}/fdinfo/2').read_text()
             flags = next(line.split()[1] for line in content.splitlines() if line.startswith('flags:'))
@@ -177,6 +205,7 @@ forward-zone:
                           'protected_raw_stream_presence': any('127.0.0.2' in line for line in lines),
                           'protected_events_retained': 0, 'nonblocking_pipe': True,
                           'raw_lines_retained_on_disk': False,
+                          'actual_bytes_real_parser_ram_counter_pipeline': 'passed',
                           'saturated_pipe_queries_answered': 500,
                           'sender_loss_count': None,
                           'collector_kill_does_not_stop_dns': True,
@@ -236,7 +265,7 @@ with tempfile.TemporaryDirectory() as directory, ConfigRepository(":memory:") as
                                start_new_session=True)
     fresh = {'association_status_available': True, 'devices': [{
         'ipv4_address': '192.168.50.10', 'mac_address': '02:00:00:00:00:01',
-        'association_verified': True, 'neighbour_state': 'reachable',
+        'association_verified': True, 'neighbor_state': 'reachable',
     }]}
     try:
         deadline = time.monotonic() + 5

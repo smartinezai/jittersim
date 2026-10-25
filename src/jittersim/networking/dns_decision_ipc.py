@@ -11,6 +11,7 @@ import json
 import os
 import secrets
 import socket
+import sqlite3
 import stat
 import struct
 import time
@@ -306,7 +307,7 @@ class DecisionReceiver:
                     self.repository._dns_outcomes.available = True
                 if time.monotonic() - self.last_packet > 3:
                     self._disconnect()
-        except (OSError, ValueError, RuntimeError):
+        except (OSError, ValueError, RuntimeError, sqlite3.Error):
             self._disconnect()
 
     def close(self):

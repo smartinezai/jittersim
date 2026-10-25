@@ -40,6 +40,13 @@ def eligible_dns_identities(snapshot, protected):
     for row in rows:
         if not isinstance(row, dict):
             return {}
+        # Missing IP data must not hide a second claim for the same MAC.
+        try:
+            mac = normalize_exempt_mac(row.get("mac_address"))
+        except ValueError:
+            mac = None
+        if mac is not None:
+            macs[mac] += 1
         address = row.get("ipv4_address")
         try:
             address = str(_parse_test_address(address))
@@ -48,18 +55,15 @@ def eligible_dns_identities(snapshot, protected):
                 return {}
             continue
         addresses[address] += 1
-        try:
-            mac = normalize_exempt_mac(row.get("mac_address"))
-        except ValueError:
+        if mac is None:
             checked.append((address, None, False))
             continue
-        macs[mac] += 1
         checked.append(
             (
                 address,
                 mac,
                 row.get("association_verified") is True
-                and row.get("neighbour_state") == "reachable",
+                and row.get("neighbor_state") == "reachable",
             )
         )
     return {

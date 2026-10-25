@@ -1,8 +1,10 @@
 """The root event bridge accepts no public payload or passed descriptor."""
 
 import array
+import json
 import os
 import socket
+import sqlite3
 import struct
 import time
 
@@ -221,3 +223,51 @@ def test_socket_single_owner_and_cleanup_never_remove_foreign_paths(tmp_path):
     directory.chmod(0o777)
     with ConfigRepository(":memory:") as repository, pytest.raises(ValueError):
         DecisionReceiver(repository, path)
+
+
+@LINUX
+def test_receiver_sqlite_contention_keeps_private_traffic_read_available(tmp_path):
+    from jittersim.api.server import ControlServer
+    from jittersim.config.models import DomainObservation
+
+    path = tmp_path / "settings.db"
+    with ConfigRepository(path) as repository, sqlite3.connect(path) as external:
+        repository.save_domain_observations(
+            [DomainObservation(IP, "ordinary.example", 7, 100, 100, MAC)], now=100
+        )
+        receiver, client, nonce, record, generation = client_fixture(tmp_path, repository)
+        server = ControlServer.__new__(ControlServer)
+        server.repository = repository
+        server._dns_outcome_receiver = receiver
+        server.helper_client = type(
+            "Helper", (), {"connected_device_snapshot": lambda self: snapshot()}
+        )()
+        try:
+            external.execute("BEGIN IMMEDIATE")
+            client.send(
+                encode_packet(
+                    {
+                        "type": "event",
+                        "nonce": nonce,
+                        "session": record["session"],
+                        "generation": generation,
+                        "sequence": 1,
+                        "client": IP,
+                        "name": "ordinary.example",
+                        "kind": "answered_noerror",
+                        "at": 100,
+                    }
+                )
+            )
+            status, _, body = server._get_observations("")
+            result = json.loads(body)
+            assert status == 200
+            row = result["devices"][0]["domains"][0]
+            assert row["domain"] == "ordinary.example" and row["query_count"] == 7
+            assert row["dns_outcomes"] is None
+            assert result["dns_outcome_collection"]["status"] == "unavailable"
+            assert not receiver.active
+        finally:
+            external.rollback()
+            client.close()
+            receiver.close()
