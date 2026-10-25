@@ -4618,7 +4618,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("After device data", DASHBOARD_HTML)
         self.assertIn("/api/progressions", DASHBOARD_HTML)
         self.assertIn("/api/observations", DASHBOARD_HTML)
-        self.assertIn("Scan now", DASHBOARD_HTML)
+        self.assertIn("Start scanning", DASHBOARD_HTML)
         self.assertIn("Device data limit", DASHBOARD_HTML)
         self.assertIn("Service data limit", DASHBOARD_HTML)
         self.assertIn("Service time limit", DASHBOARD_HTML)

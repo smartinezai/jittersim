@@ -511,6 +511,7 @@
 
     function setDashboardUnlocked(allowed) {
       element("private-dashboard").hidden = !allowed;
+      if (typeof syncObservationScanning === "function") syncObservationScanning();
       element("dashboard-access-list").hidden = !allowed;
       if (typeof applyBrand === "function") applyBrand(allowed);
       element("trust-pi").hidden = !allowed;
@@ -1278,6 +1279,9 @@
     privateDataLockHooks.push(() => {
       observationViewRevision += 1;
       observationReadRevision += 1;
+      if (typeof stopObservationScanning === "function") stopObservationScanning(
+        "Scanning off. Check the admin token and choose Start scanning to capture again."
+      );
       observationListKeys = null;
       latestObservationScan = null;
       element("observation-scan-summary").textContent = "Saved results refresh automatically.";
@@ -2252,7 +2256,7 @@
       element("apply-button").disabled = networkActionBusy || !helperConfigured;
       element("reset-button").disabled = networkActionBusy || !helperConfigured;
       element("panic-button").disabled = !helperConfigured;
-      element("scan-observations").disabled = !helperConfigured;
+      if (typeof syncObservationScanning === "function") syncObservationScanning();
       resetWifiButtons().forEach((each) => { each.disabled = !helperConfigured || wifiResetPending; });
       updateGeneralProfileControls();
     }
@@ -5515,38 +5519,127 @@
       renderServiceListObserved();
     }
 
+    const OBSERVATION_SCAN_INTERVAL_MS = 30000;
+    const OBSERVATION_SCAN_MAX_RETRY_MS = 120000;
+    let observationScanning = false;
+    let observationScanTimer = null;
+    let observationScanRevision = 0;
+    let observationScanFailures = 0;
+    let observationCaptureOwner = null;
+
+    function observationScanEligible() {
+      return adminTokenVerified && helperConfigured && !document.hidden &&
+        currentPage() === "traffic" && !element("private-dashboard").hidden;
+    }
+
+    function updateObservationScanButton() {
+      const button = element("scan-observations");
+      button.textContent = observationScanning ? "Stop scanning" : "Start scanning";
+      button.setAttribute("aria-pressed", String(observationScanning));
+      button.disabled = !observationScanning && (!observationScanEligible() || observationRequestInFlight);
+      button.title = observationScanning ? "Stop future captures; a capture already running may finish."
+        : observationRequestInFlight ? "Wait for the previous capture to finish before starting again."
+        : "Start captures on the visible Traffic page after checking the admin token in hardware mode.";
+    }
+
+    function stopObservationScanning(message) {
+      observationScanning = false;
+      observationScanRevision += 1;
+      observationReadRevision += 1;
+      if (observationScanTimer !== null) window.clearTimeout(observationScanTimer);
+      observationScanTimer = null;
+      element("observation-capture-status").textContent = message ||
+        "Scanning stopped. No further captures will start. A capture already running may finish within its existing deadline.";
+      updateObservationScanButton();
+    }
+
+    function syncObservationScanning() {
+      if (observationScanning && !observationScanEligible()) {
+        stopObservationScanning("Scanning stopped because Traffic is hidden or access is unavailable. Choose Start scanning to restart.");
+      } else updateObservationScanButton();
+    }
+
+    function observationScanCurrent(owner) {
+      return observationCaptureOwner === owner && observationScanning &&
+        owner.run === observationScanRevision && owner.view === observationViewRevision &&
+        owner.token === adminTokenRevision && observationScanEligible();
+    }
+
+    function scheduleObservationScan(delay) {
+      if (observationScanTimer !== null) window.clearTimeout(observationScanTimer);
+      observationScanTimer = null;
+      if (!observationScanning) return;
+      if (!observationScanEligible()) { syncObservationScanning(); return; }
+      const revision = observationScanRevision;
+      observationScanTimer = window.setTimeout(() => {
+        observationScanTimer = null;
+        if (revision === observationScanRevision) scanObservations();
+      }, delay);
+    }
+
+    function toggleObservationScanning() {
+      if (observationScanning) { stopObservationScanning(); return; }
+      if (!observationScanEligible() || observationRequestInFlight) return;
+      observationScanning = true;
+      observationScanRevision += 1;
+      observationScanFailures = 0;
+      updateObservationScanButton();
+      return scanObservations();
+    }
+
     async function scanObservations() {
-      if (!helperConfigured || observationRequestInFlight) return;
+      if (!observationScanning || observationRequestInFlight) return;
+      if (!observationScanEligible()) { syncObservationScanning(); return; }
+      if (observationScanTimer !== null) window.clearTimeout(observationScanTimer);
+      observationScanTimer = null;
+      const owner = {run: observationScanRevision, view: observationViewRevision, token: adminTokenRevision};
+      observationCaptureOwner = owner;
       observationRequestInFlight = true;
       observationReadRevision += 1;
-      const revision = observationViewRevision;
       const before = observationListKeys === null ? null : new Set(observationListKeys);
-      const scanButton = element("scan-observations");
-      setButtonBusy(scanButton, true);
-      scanButton.textContent = "Scanning...";
-      showMessage("Sampling DNS queries from the test network...", "working");
+      let delay = OBSERVATION_SCAN_INTERVAL_MS;
+      element("observation-capture-status").textContent =
+        "Capturing DNS queries now. Stop prevents further captures; this capture may still finish.";
+      updateObservationScanButton();
       try {
         const result = await request("/api/observations/scan", "POST", {});
-        if (revision !== observationViewRevision) return;
+        if (!observationScanCurrent(owner)) return;
         latestObservationScan = { keys: newObservationScanKeys(before, result.observations) };
-        await loadObservations(true);
-        if (revision !== observationViewRevision) return;
+        const available = await loadObservations(true);
+        if (!observationScanCurrent(owner)) return;
+        if (!available) throw new Error("Capture finished, but saved results could not be loaded.");
+        observationScanFailures = 0;
         const added = newDisplayedObservationCount();
         const comparison = added === null ? "New-name comparison unavailable." :
           added + (added === 1 ? " displayed name" : " displayed names") + " new to list.";
-        showMessage(
-          "Traffic scan complete: " + result.captured_observations + " domain observations captured. " + comparison,
-          "success"
-        );
+        element("observation-capture-status").textContent = "Capture complete: " +
+          result.captured_observations + " domain observations captured. " + comparison +
+          " Next capture in 30 seconds.";
       } catch (error) {
-        if (revision === observationViewRevision) showMessage(error.message, "error");
+        if (!observationScanCurrent(owner)) return;
+        observationScanFailures += 1;
+        if (error.status === 401 || error.status === 403 || observationScanFailures >= 3) {
+          stopObservationScanning("Scanning stopped. " + error.message +
+            " Check access and the connection, then choose Start scanning to retry.");
+        } else {
+          delay = Math.min(OBSERVATION_SCAN_INTERVAL_MS * 2 ** observationScanFailures,
+            OBSERVATION_SCAN_MAX_RETRY_MS);
+          element("observation-capture-status").textContent = "Capture failed: " + error.message +
+            " Retrying in " + delay / 1000 + " seconds. Stop scanning to cancel.";
+        }
       } finally {
-        observationRequestInFlight = false;
-        scanButton.disabled = !helperConfigured;
-        scanButton.removeAttribute("aria-busy");
-        scanButton.textContent = "Scan now";
+        const repeat = observationScanCurrent(owner);
+        if (observationCaptureOwner === owner) {
+          observationCaptureOwner = null;
+          observationRequestInFlight = false;
+          syncObservationScanning();
+          if (repeat) scheduleObservationScan(delay);
+        }
       }
     }
+
+    document.addEventListener("visibilitychange", syncObservationScanning);
+    window.addEventListener("pagehide", () => stopObservationScanning());
 
     async function loadHealth() {
       const data = await request("/api/health", "GET");
@@ -6582,7 +6675,7 @@
 
     element("general-profile-stop").addEventListener("click", () => runGeneralProfileAction(true));
 
-    element("scan-observations").addEventListener("click", scanObservations);
+    element("scan-observations").addEventListener("click", toggleObservationScanning);
 
     // Active profile control in the sidebar: it names the general profile above the Start button
     // and applies or stops one with the same requests and messages as the saved profiles list.
