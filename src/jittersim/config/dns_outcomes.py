@@ -113,7 +113,8 @@ class DnsOutcomeStore:
 
     def invalidate(self, reason="privacy_revision_changed"):
         # A source born before this barrier cannot relabel in-flight bytes into a new epoch.
-        self.minimum_started_ns = time.monotonic_ns()
+        if reason != "window_expired":
+            self.minimum_started_ns = time.monotonic_ns()
         self.epoch = self.session = self.version = self.generation = None
         self.rows.clear()
         self.identities.clear()

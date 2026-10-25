@@ -345,3 +345,47 @@ def test_reopen_and_backup_never_retain_outcome_history(tmp_path):
             assert not repository._connection.execute(
                 "SELECT name FROM sqlite_master WHERE name LIKE '%dns_outcome%'"
             ).fetchall()
+
+
+def test_expired_window_renews_same_source_without_weakening_privacy_barrier():
+    with ConfigRepository(":memory:") as repository:
+        started_ns = time.monotonic_ns()
+        common = dict(
+            session=SESSION,
+            generation=repository.access_plan().digest(),
+            expected_version=repository.get_runtime_state().configuration_version,
+        )
+        first = dict(common, epoch=EPOCH)
+        repository.begin_dns_outcome_epoch(
+            **first, producer_started_ns=started_ns, snapshot=snapshot(), now=100
+        )
+        record(repository, first)
+        barrier = repository._dns_outcomes.minimum_started_ns
+        rows, health = repository.dns_outcome_snapshot(snapshot=snapshot(), now=401)
+        assert rows == {} and health["status"] == "unavailable"
+        assert repository._dns_outcomes.minimum_started_ns == barrier
+        second = dict(common, epoch="d" * 32)
+        repository.begin_dns_outcome_epoch(
+            **second, producer_started_ns=started_ns, snapshot=snapshot(), now=401
+        )
+        record(repository, first, [event(1)], now=401)  # Old nonce cannot become the new epoch.
+        record(repository, second, [event(1)], now=401)  # Old timestamps cannot be retagged either.
+        assert not repository._dns_outcomes.rows
+        record(repository, second, [event(2, observed_at=402)], now=402)
+        counted, health = repository.dns_outcome_snapshot(snapshot=snapshot(), now=402)
+        assert counted[(IP, MAC, "blocked.example")]["blocked_decisions"] == 1
+        assert health["window_start"] == 401 and health["epoch"] == second["epoch"]
+        repository.save_unaffected_device(UnaffectedDevice(MAC))
+        repository.delete_unaffected_device(MAC)
+        assert repository._dns_outcomes.minimum_started_ns > started_ns
+        with pytest.raises(ValueError, match="restart"):
+            repository.begin_dns_outcome_epoch(
+                **dict(
+                    second,
+                    epoch="e" * 32,
+                    expected_version=repository.get_runtime_state().configuration_version,
+                ),
+                producer_started_ns=started_ns,
+                snapshot=snapshot(),
+                now=403,
+            )
