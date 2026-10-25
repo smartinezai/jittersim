@@ -8,6 +8,17 @@ from playwright.sync_api import expect
 SCAN = "/api/observations/scan"
 
 
+def drain_gets(page, open_gets):
+    """Pump both finish and failure callbacks within the existing real-time bound."""
+    deadline = time.monotonic() + 15
+    while open_gets and time.monotonic() < deadline:
+        # A single requestfinished wait can miss a completion or wait forever
+        # for a request that instead emitted requestfailed. The registered
+        # lifecycle callbacks maintain the authoritative outstanding set.
+        page.wait_for_timeout(10)
+    assert not open_gets, [request.url for request in open_gets]
+
+
 def check_recurring_scan(browser, base, width, evidence, authenticate):
     context = browser.new_context(viewport={"width": width, "height": 900})
     try:
@@ -46,15 +57,7 @@ def check_recurring_scan(browser, base, width, evidence, authenticate):
             for _ in range(seconds):
                 page.clock.run_for(1000)
                 page.wait_for_timeout(5)
-                deadline = time.monotonic() + 15
-                while open_gets:
-                    request = next(iter(open_gets))
-                    remaining = max(1, (deadline - time.monotonic()) * 1000)
-                    page.wait_for_event(
-                        "requestfinished", predicate=lambda done: done == request,
-                        timeout=remaining,
-                    )
-                assert not open_gets, [request.url for request in open_gets]
+                drain_gets(page, open_gets)
 
         page.route("**" + SCAN, scan)
         authenticate(page, base)

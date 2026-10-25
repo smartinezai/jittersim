@@ -96,7 +96,10 @@ def test_unsafe_anchor_is_refused_before_mutation(root, kind):
             pytest.fail("a replaceable or shared anchor is unsafe")
 
 
-def test_unknown_leaf_keeps_kernel_lock_after_parent_scope_exits(root, monkeypatch, tmp_path):
+@pytest.mark.parametrize("cleanup_exit_race", [False, True])
+def test_unknown_leaf_keeps_kernel_lock_after_parent_scope_exits(
+    root, monkeypatch, tmp_path, cleanup_exit_race
+):
     processes = []
     spawn = updates.subprocess.Popen
     kill = updates.os.killpg
@@ -123,7 +126,15 @@ def test_unknown_leaf_keeps_kernel_lock_after_parent_scope_exits(root, monkeypat
     finally:
         for process in processes:
             if process.poll() is None:
-                kill(process.pid, signal.SIGKILL)
+                if cleanup_exit_race:
+                    # Deterministically model natural exit after poll(): the
+                    # kernel-lock assertions above still use a live child.
+                    process.kill()
+                    process.wait(timeout=5)
+                try:
+                    kill(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # The fixture child exited between poll and killpg.
             process.wait(timeout=5)
 
 
