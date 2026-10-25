@@ -16,16 +16,19 @@ Do not write production UI until root relays its stable reviewed contract.
 
 - Keep observed query/retry counts as queries. Keep the existing saved global
   block-list badge and Block/Unblock controls separate from recorded outcomes.
-- Display authenticated producer-reported resolver outcomes as Blocked, Allowed
-  and Unknown with their explicit measured scope/window. Allowed means permitted
-  by the observed resolver policy, never successful website access or download.
+- Display separate authenticated observed-decision aggregates: local-zone policy
+  block actions, NOERROR DNS answers and other DNS errors, with their measured
+  scope/window. Unbound logs have no transaction ID: do not force these onto
+  individual query attempts or call answers Allowed/successful website access.
+  Categories may overlap; never sum/subtract them to invent an unknown count.
 - Use a plain quiet coverage/status line in the existing discovery summary, and
   compact plain text per domain row using existing classes. No new announcer,
   CSS, width redesign, toggle, toast on polling or outcome-derived action.
 - Represent historical/missing outcomes, absent responses and unavailable
   telemetry truthfully. Never backfill legacy query_count or globally_blocked
-  into an outcome. Distinguish unknown counts from zero, partial coverage from
-  complete observation, and saved policy from the generation that produced an
+  into an outcome. Historical/unavailable evidence stays unknown/null, never zero.
+  Coverage is always partial and counts lower bounds until sender-loss proof.
+  Distinguish saved policy from the generation that produced an
   observation. Root must define policy generation type and count/health semantics.
 - Show coverage health and policy generation from authenticated server data,
   never infer them from current UI settings. State that encrypted/bypassing DNS
@@ -47,9 +50,11 @@ ownership tests; do not duplicate their group/action/focus/private-state suite.
 
 ## Contract-dependent acceptance matrix
 
-1. Authenticated blocked/allowed/unknown counts reflect only producer evidence;
-   membership true with allowed evidence and membership false with blocked
-   evidence remain distinct. Retries count as queries, not verified block events.
+1. Authenticated block-action, NOERROR-answer and error aggregates reflect only
+   observed producer evidence; membership true with DNS answers and membership
+   false with block actions remain distinct. Retries stay query counts, not
+   verified block events. Never impose per-attempt pairing or sum overlapping
+   aggregates; unmatched/historical outcomes stay unknown.
 2. Legacy records show unknown/historical; missing response, unavailable producer
    and partial/stale coverage have explicit text, never implied zeros/success.
 3. Current and historical policy generation remain explicit. No relabelling old
@@ -73,3 +78,23 @@ package/version, networking, helper, storage/API, pinned/security file or signin
 write here. No owner Pi/network action. Do not invent a new observation producer,
 extension, candidate feature or endpoint. Keep the 2% allowance floor, no reset.
 Rollback is reverting the isolated UI commit; data migrations are backend-owned.
+
+## Confirmed contract, 25 October
+
+Root confirmed production UI may proceed. Per-domain dns_outcomes is null or
+{blocked_decisions, answered_noerror, other_dns_errors, last_observed_at}. The
+three counts are nonnegative safe integers; last_observed_at is Unix seconds.
+Only the first two counts are displayed in v1. They are independent lower-bound
+observed events, never an exclusive partition of query_count.
+
+Top-level dns_outcome_collection supplies status unavailable|partial, opaque
+nullable epoch, nullable safe-integer policy_revision, nullable Unix-second
+window_start/window_end/last_event_at, lower_bound:true,
+coverage_complete:false, collector_available:boolean, nullable safe-integer
+dropped_events and enum coverage_reason. Unknown coverage reasons receive generic
+plain text. A receiver-drop zero never establishes complete/sender-loss coverage.
+
+No client accumulation or historical relabelling: every render replaces rows and
+coverage text, including epoch changes. Null/invalid/missing evidence stays
+unknown, not zero. The existing discovery lock hook will remove new outcome row
+nodes and reset its existing summary; read-revision guards remain unchanged.
