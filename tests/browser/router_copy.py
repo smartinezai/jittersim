@@ -29,6 +29,22 @@ CREDENTIALS_PATH = "/api/router/wifi-credentials"
 CHECK_PATH = "/api/router/check"
 
 
+def missing_helper_health_handler(page, base):
+    # Read the complete real fixture response before registering interception.
+    # The handler must not yield to a network fetch while reload/cleanup proceeds.
+    response = page.request.get(
+        base + "/api/health", headers={"Authorization": "Bearer " + ADMIN_TOKEN}
+    )
+    assert response.ok, response.status
+    body = response.json()
+    body["helper_configured"] = False
+
+    def without_helper(route):
+        route.fulfill(json=body)
+
+    return without_helper
+
+
 def sign_in(page):
     expect(page.locator("#private-dashboard")).to_be_hidden()
     sidebar_control(page, "#open-admin-credentials").click()
@@ -455,13 +471,7 @@ def run_width(browser, base, width, height):
     page.locator("#close-credentials").click()
 
     # A missing helper is reported as unavailable without calling the router.
-    def without_helper(route):
-        response = route.fetch()
-        body = response.json()
-        body["helper_configured"] = False
-        route.fulfill(response=response, json=body)
-
-    page.route("**/api/health", without_helper)
+    page.route("**/api/health", missing_helper_health_handler(page, base))
     page.reload()
     sign_in(page)
     expect(button).to_be_disabled()
