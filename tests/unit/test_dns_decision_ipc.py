@@ -271,3 +271,72 @@ def test_receiver_sqlite_contention_keeps_private_traffic_read_available(tmp_pat
             external.rollback()
             client.close()
             receiver.close()
+
+
+@LINUX
+def test_elapsed_epoch_requires_new_nonce_and_rejects_old_queued_packets(tmp_path):
+    with ConfigRepository(":memory:") as repository:
+        receiver, client, old_nonce, record, generation = client_fixture(tmp_path, repository)
+        old_packet = {
+            "type": "event",
+            "nonce": old_nonce,
+            "session": record["session"],
+            "generation": generation,
+            "sequence": 1,
+            "client": IP,
+            "name": "blocked.example",
+            "kind": "blocked_decisions",
+            "at": 100,
+        }
+        try:
+            client.send(encode_packet(old_packet))
+            receiver.poll(snapshot(), 100)
+            receiver.poll(snapshot(), 401)
+            assert not receiver.active and not repository._dns_outcomes.rows
+            client.close()
+
+            def handshake(now):
+                connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+                connection.settimeout(0.5)
+                connection.connect(str(receiver.path))
+                connection.send(
+                    encode_packet(
+                        {
+                            "type": "hello",
+                            "session": record["session"],
+                            "started_ns": record["started_ns"],
+                            "generation": generation,
+                        }
+                    )
+                )
+                receiver.poll(snapshot(), now)
+                challenge = decode_packet(connection.recv(1024))
+                connection.send(
+                    encode_packet(
+                        {
+                            "type": "ack",
+                            "nonce": challenge["nonce"],
+                            "session": record["session"],
+                            "generation": generation,
+                        }
+                    )
+                )
+                receiver.poll(snapshot(), now)
+                assert receiver.active and challenge["nonce"] != old_nonce
+                return connection, challenge["nonce"]
+
+            client, _ = handshake(401)
+            client.send(encode_packet(old_packet))
+            receiver.poll(snapshot(), 401)
+            assert not receiver.active and not repository._dns_outcomes.rows
+            client.close()
+            client, nonce = handshake(402)
+            client.send(encode_packet(dict(old_packet, nonce=nonce)))
+            receiver.poll(snapshot(), 402)
+            assert not repository._dns_outcomes.rows
+            client.send(encode_packet(dict(old_packet, nonce=nonce, sequence=2, at=402)))
+            receiver.poll(snapshot(), 402)
+            assert next(iter(repository._dns_outcomes.rows.values()))["blocked_decisions"] == 1
+        finally:
+            client.close()
+            receiver.close()

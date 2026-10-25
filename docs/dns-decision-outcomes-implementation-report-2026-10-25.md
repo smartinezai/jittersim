@@ -118,3 +118,20 @@ fixture now feeds captured bytes through the shipped DecisionLines parser and
 DnsOutcomeStore and asserts explicit block, NOERROR and ordinary NXDOMAIN counts.
 Its owned loopback identity is a fixture-only store input. Production admission
 continues to reject loopback, with no relaxed test-network identity rule.
+
+## Finite-window renewal
+
+A later self-check found that elapsed windows also raised the privacy birth
+barrier. That unnecessarily required a DNS service restart after five minutes.
+Expiry now clears the aggregate and connection while preserving the existing
+privacy/configuration barrier. The same approved producer must complete a fresh
+nonce and empty-pipe acknowledgement before its next epoch. Old nonce packets,
+old timestamps and replayed sequences cannot refill the new window. Actual
+configuration or protection changes still raise the birth barrier and require a
+producer restart. Fake-clock model and real Linux socket tests cover renewal
+past 300 seconds without a DNS restart.
+
+The preceding ff272b95 frozen receipts remain: 529 native tests passed with four
+Linux-only skips, 45 Linux tests passed without skips and the actual isolated
+192.168.50 client/parser/repository proof passed. These results are retained
+separately from the narrow renewal successor checks.

@@ -304,7 +304,10 @@ class DecisionReceiver:
                     self.repository.record_dns_decisions(
                         events, **context, snapshot=snapshot, now=now
                     )
-                    self.repository._dns_outcomes.available = True
+                    if self.repository._dns_outcomes.epoch is None:
+                        self._disconnect()
+                    else:
+                        self.repository._dns_outcomes.available = True
                 if time.monotonic() - self.last_packet > 3:
                     self._disconnect()
         except (OSError, ValueError, RuntimeError, sqlite3.Error):
