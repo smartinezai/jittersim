@@ -1,0 +1,12 @@
+$ /private/tmp/js-pr255-recovery/.venv-local-ci-3.12/bin/python -m tests.browser.traffic_chart
+# started 2026-10-25 14:53:37 +0100
+Visible legend targets: 6, minimum height 44px, width 1440px, coarse pointer False
+Visible legend targets: 6, minimum height 44px, width 375px, coarse pointer False
+Visible legend targets: 4, minimum height 44px, width 375px, coarse pointer False
+Visible legend targets: 6, minimum height 44px, width 1440px, coarse pointer False
+Visible legend targets: 6, minimum height 44px, width 375px, coarse pointer False
+Visible legend targets: 6, minimum height 44px, width 1440px, coarse pointer False
+Visible legend targets: 6, minimum height 44px, width 375px, coarse pointer True
+Visible legend targets: 6, minimum height 44px, width 1440px, coarse pointer True
+Traffic chart interaction passed at desktop, phone and high-density sizes.
+# finished with status 0 after 68.7 seconds

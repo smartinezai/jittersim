@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional, Sequence, Tuple, Union
 
 from .adblocking import allowed_domains, blocking_macs
+from .dns_outcomes import DnsOutcomeStore, dns_outcome_transaction, eligible_dns_identities
 from .device_labels import (
     MAX_SAVED_CONNECTED_DEVICE_LABELS,
     normalize_device_display_name,
@@ -190,6 +191,7 @@ class ConfigRepository:
         self._lock = threading.RLock()
         self._transaction_depth = 0
         self._access_plan_cache = None
+        self._dns_outcomes = DnsOutcomeStore()
         self._connection = sqlite3.connect(str(database_path), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
@@ -1422,6 +1424,7 @@ class ConfigRepository:
     def _bump_configuration_version(self) -> None:
         # Keep the last network action: startup recovery uses it to re-apply
         # a plan or keep an explicit reset after later settings changes.
+        self._dns_outcomes.invalidate()
         self._connection.execute(
             """
             UPDATE runtime_state
@@ -2014,6 +2017,7 @@ class ConfigRepository:
             devices=self.list_devices(), groups=self.list_device_groups(),
             mac_policy=self.get_mac_policy(), website_policy=self.get_website_policy(),
             site_blocks=self.list_site_blocks(), access_options=self.get_access_options(),
+            unaffected_devices=self.list_unaffected_devices(),
         )
 
     def access_plan(self):
@@ -3718,6 +3722,50 @@ class ConfigRepository:
         )
         self._bump_configuration_version()
         self._commit()
+
+    def begin_dns_outcome_epoch(
+        self, *, epoch, session, generation, producer_started_ns, expected_version, snapshot, now
+    ):
+        """Admit an authenticated fresh producer. This is never an HTTP input route."""
+        with dns_outcome_transaction(self):
+            version = self.get_runtime_state().configuration_version
+            if version != expected_version or generation != self.access_plan().digest():
+                raise StorageError("DNS producer policy changed")
+            identities = eligible_dns_identities(
+                snapshot, {item.mac_address for item in self.list_unaffected_devices()})
+            if not identities:
+                raise StorageError("fresh unprotected DNS client identity is unavailable")
+            self._dns_outcomes.begin(
+                epoch=epoch, session=session, generation=generation,
+                producer_started_ns=producer_started_ns, version=version,
+                identities=identities, now=now,
+            )
+
+    def record_dns_decisions(
+        self, events, *, epoch, session, generation, expected_version, snapshot, now
+    ):
+        """Aggregate at most one finite source batch under the cross-process write fence."""
+        with dns_outcome_transaction(self):
+            version = self.get_runtime_state().configuration_version
+            if version != expected_version or generation != self.access_plan().digest():
+                self._dns_outcomes.invalidate()
+                return
+            identities = eligible_dns_identities(
+                snapshot, {item.mac_address for item in self.list_unaffected_devices()})
+            self._dns_outcomes.add(
+                events, epoch=epoch, session=session, generation=generation,
+                version=version, identities=identities, now=now,
+            )
+
+    def dns_outcome_snapshot(self, *, snapshot, now):
+        """Recheck current protection and identity before returning any private counters."""
+        with dns_outcome_transaction(self):
+            identities = eligible_dns_identities(
+                snapshot, {item.mac_address for item in self.list_unaffected_devices()})
+            return self._dns_outcomes.snapshot(
+                version=self.get_runtime_state().configuration_version,
+                identities=identities, now=now,
+            )
 
     def save_domain_observations(
         self,

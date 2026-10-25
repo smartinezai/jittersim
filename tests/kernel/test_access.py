@@ -35,6 +35,7 @@ from tests.kernel.lab import (
     CLIENT_MAC,
     OTHER_CLIENT,
     OTHER_CLIENT_ADDRESSES,
+    OTHER_CLIENT_MAC,
     PI,
     ROUTER,
     TOPOLOGY,
@@ -154,6 +155,109 @@ class AccessDatapathTests(unittest.TestCase):
             check=False,
         )
         return result.stdout
+
+    def test_protected_mac_skips_global_dns_blocks_but_keeps_allow_only(self):
+        plan = AccessPlan(
+            websites=WebsitePolicy("allow_only", ("news.example.com",), ("news.example.com",)),
+            protected_mac_addresses=(OTHER_CLIENT_MAC,),
+        )
+        self.manager.apply(plan)
+        for tcp in (False, True):
+            self.assertIn("203.0.113.7", self.query("news.example.com", OTHER_CLIENT, tcp=tcp))
+            self.assertIn("status: NXDOMAIN", self.query("news.example.com", tcp=tcp))
+            for namespace in (CLIENT, OTHER_CLIENT):
+                self.assertIn("status: NXDOMAIN", self.query("notvideo.example.com", namespace, tcp=tcp))
+        # Removing protection changes DNS routes even for existing UDP sockets.
+        self.manager.apply(replace(plan, protected_mac_addresses=()))
+        self.assertIn("status: NXDOMAIN", self.query("news.example.com", OTHER_CLIENT))
+
+    def test_protected_dns_reuses_no_stale_ip_grant_and_private_views_refuse_direct_queries(self):
+        from jittersim.networking.access import _dns_views
+
+        plan = AccessPlan(
+            websites=WebsitePolicy(blocked_domains=("news.example.com",)),
+            # This saved address now belongs to the protected MAC, not to this
+            # stale ordinary record. The exemption must use the MAC on the wire.
+            clients=(AccessClient("stale", OTHER_CLIENT_ADDRESSES[0], CLIENT_MAC),),
+            protected_mac_addresses=(OTHER_CLIENT_MAC,),
+        )
+        self.manager.apply(plan)
+        for tcp in (False, True):
+            self.assertIn("203.0.113.7", self.query("news.example.com", OTHER_CLIENT, tcp=tcp))
+            self.assertIn("status: NXDOMAIN", self.query("news.example.com", tcp=tcp))
+        _, ports = _dns_views(plan)
+        port = ports[plan.blocked_domains(client_mac=OTHER_CLIENT_MAC)]
+        run_in(ROUTER, "ip", "route", "add", "192.168.50.0/24", "via", "192.168.0.2")
+        for namespace in (CLIENT, OTHER_CLIENT, ROUTER):
+            for listener in (5335, port):
+                for tcp in (False, True):
+                    response = run_in(namespace, "dig", "@192.168.50.1", "-p", str(listener),
+                                      "news.example.com", "+time=1", "+tries=1",
+                                      *(("+tcp",) if tcp else ()), check=False)
+                    self.assertNotIn("status: NOERROR", response.stdout)
+                    self.assertNotIn("203.0.113.7", response.stdout)
+
+    def test_protected_dns_keeps_site_rules_mac_denies_and_dns_failures(self):
+        plan = replace(self.plan, protected_mac_addresses=(CLIENT_MAC,),
+                       websites=WebsitePolicy(blocked_domains=("news.example.com",)))
+        self.manager.apply(plan)
+        self.assertIn("203.0.113.7", self.query("news.example.com"))
+        self.assertIn("status: NXDOMAIN", self.query("video.example.com"))
+        for changed in (replace(plan, options=AccessOptions(dns_failure_percent=100)),
+                        replace(plan, mac=MacPolicy("denylist", (), (CLIENT_MAC,)))):
+            self.manager.apply(changed)
+            for tcp in (False, True):
+                response = self.query("news.example.com", tcp=tcp)
+                self.assertNotIn("203.0.113.7", response)
+
+    def test_protected_optional_ads_keep_allow_only_and_remove_only_global_site_blocks(self):
+        from jittersim.networking.adblocking import AdRouting, filtering_config
+
+        plan = AccessPlan(
+            websites=WebsitePolicy("allow_only", ("news.example.com", "video.example.com"),
+                                   ("news.example.com",)),
+            protected_mac_addresses=(OTHER_CLIENT_MAC,),
+        )
+        self.manager.apply(plan)
+        config = self.directory / "ads.conf"
+        config.write_bytes(filtering_config(("video.example.com",), (), plan, dns_user="unbound"))
+        process = subprocess.Popen(["ip", "netns", "exec", PI, "unbound", "-d", "-c", str(config)],
+                                   stdout=self.executor.log, stderr=self.executor.log)
+        self.addCleanup(lambda: process.wait(timeout=5))
+        self.addCleanup(process.terminate)
+        routing = AdRouting(TOPOLOGY.test_interface, executor=self.executor)
+        routing.initialize()
+        routing.refresh((OTHER_CLIENT_MAC,))
+        deadline = time.monotonic() + 5
+        while True:
+            response = self.query("news.example.com", OTHER_CLIENT, resolver="192.168.50.1")
+            if "203.0.113.7" in response or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        self.assertIn("203.0.113.7", response)
+        for tcp in (False, True):
+            self.assertIn("status: NXDOMAIN", self.query("video.example.com", OTHER_CLIENT,
+                                                        tcp=tcp, resolver="192.168.50.1"))
+            self.assertIn("status: NXDOMAIN", self.query("notvideo.example.com", OTHER_CLIENT,
+                                                        tcp=tcp, resolver="192.168.50.1"))
+            self.assertIn("status: NXDOMAIN", self.query("news.example.com", tcp=tcp))
+
+    def test_protected_reaches_blocked_address_but_never_an_address_outside_allow_only(self):
+        from ipaddress import IPv4Address
+
+        for address in ("203.0.113.8", "203.0.113.9"):
+            run_in(ROUTER, "ip", "addr", "add", address + "/32", "dev", "lo")
+            run_in(PI, "ip", "route", "add", address + "/32", "via", "192.168.0.1")
+        plan = compile_plan(devices=(), profiles={}, protected_mac_addresses=(OTHER_CLIENT_MAC,),
+                            global_blocked_addresses=(IPv4Address("203.0.113.8"),),
+                            global_allowed_addresses=(IPv4Address("203.0.113.8"),))
+        applier = NetworkApplier(executor=self.executor, topology=TOPOLOGY)
+        applier.apply(plan=plan)
+        for namespace, address, allowed in ((OTHER_CLIENT, "203.0.113.8", True),
+                                             (CLIENT, "203.0.113.8", False),
+                                             (OTHER_CLIENT, "203.0.113.9", False)):
+            response = run_in(namespace, "ping", "-c", "1", "-W", "1", address, check=False)
+            self.assertEqual(response.returncode == 0, allowed, response.stdout + response.stderr)
 
     def test_targets_subdomains_tcp_external_dns_shared_address_and_reset(self):
         self.manager.apply(self.plan)

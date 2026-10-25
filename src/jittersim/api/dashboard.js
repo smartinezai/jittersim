@@ -511,6 +511,7 @@
 
     function setDashboardUnlocked(allowed) {
       element("private-dashboard").hidden = !allowed;
+      if (typeof syncObservationScanning === "function") syncObservationScanning();
       element("dashboard-access-list").hidden = !allowed;
       if (typeof applyBrand === "function") applyBrand(allowed);
       element("trust-pi").hidden = !allowed;
@@ -1278,10 +1279,13 @@
     privateDataLockHooks.push(() => {
       observationViewRevision += 1;
       observationReadRevision += 1;
+      if (typeof stopObservationScanning === "function") stopObservationScanning(
+        "Scanning off. Check the admin token and choose Start scanning to capture again."
+      );
       observationListKeys = null;
       latestObservationScan = null;
       element("observation-scan-summary").textContent = "Saved results refresh automatically.";
-      document.querySelectorAll(".observation-new-name, .observation-new-group").forEach((node) => node.remove());
+      document.querySelectorAll(".observation-new-name, .observation-new-group, .observation-dns-outcomes").forEach((node) => node.remove());
     });
 
     let randomWebsiteAnalyticsRequestVersion = 0;
@@ -1377,6 +1381,7 @@
     }
 
     function formatTrafficRate(megabitsPerSecond) {
+      if (!Number.isFinite(megabitsPerSecond)) return "unavailable";
       if (megabitsPerSecond < 1) {
         return (megabitsPerSecond * 1000).toFixed(1) + " kbit/s";
       }
@@ -1420,6 +1425,7 @@
     }
 
     function formatPacketRate(packetsPerSecond) {
+      if (!Number.isFinite(packetsPerSecond)) return "—";
       return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(packetsPerSecond) + " pkt/s";
     }
 
@@ -2021,20 +2027,22 @@
           const elapsedSeconds = sampledAt - previousTrafficSample.sampledAt;
           const fields = Object.keys(totals);
           const countersReset = fields.some((field) => totals[field] < previousTrafficSample.totals[field]);
-          if (countersReset || elapsedSeconds < 0) {
+          if (elapsedSeconds < 0) {
             resetTrafficHistory();
-            element("traffic-status").textContent = countersReset
-              ? "Counters changed. Starting a fresh graph..."
-              : "Sample time changed. Starting a fresh graph...";
+            element("traffic-status").textContent = "Sample time changed. Starting a fresh graph...";
           } else if (elapsedSeconds === 0) {
             element("traffic-status").textContent = "Waiting for a new traffic sample. Last rates are kept.";
             drawTrafficChart();
             return;
           } else {
-            const upload = Math.max(0, totals.upload_bytes - previousTrafficSample.totals.upload_bytes) * 8 / elapsedSeconds / 1000000;
-            const download = Math.max(0, totals.download_bytes - previousTrafficSample.totals.download_bytes) * 8 / elapsedSeconds / 1000000;
-            const uploadPackets = Math.max(0, totals.upload_packets - previousTrafficSample.totals.upload_packets) / elapsedSeconds;
-            const downloadPackets = Math.max(0, totals.download_packets - previousTrafficSample.totals.download_packets) / elapsedSeconds;
+            // A replaced counter invalidates only its interval, not earlier measurements.
+            // Null breaks that direction's line; zero would invent measured idle traffic.
+            const rate = (field, scale = 1) => totals[field] < previousTrafficSample.totals[field]
+              ? null : (totals[field] - previousTrafficSample.totals[field]) * scale / elapsedSeconds;
+            const upload = rate("upload_bytes", 8 / 1000000);
+            const download = rate("download_bytes", 8 / 1000000);
+            const uploadPackets = rate("upload_packets");
+            const downloadPackets = rate("download_packets");
             trafficSamples.push({
               time: receivedAt,
               recordedAt: sampledAt * 1000,
@@ -2051,10 +2059,12 @@
             element("traffic-upload-packets").textContent = formatPacketRate(uploadPackets);
             element("traffic-download-packets").textContent = formatPacketRate(downloadPackets);
             // Drops restart from zero when a plan is applied.
-            const dropped = Math.max(0, queueTotals.dropped - previousTrafficSample.queues.dropped);
-            element("traffic-drop-rate").textContent = formatPacketRate(dropped / elapsedSeconds);
+            const dropped = queueTotals.dropped - previousTrafficSample.queues.dropped;
+            element("traffic-drop-rate").textContent = formatPacketRate(dropped < 0 ? null : dropped / elapsedSeconds);
             element("traffic-queued").textContent = queueTotals.queued + " packets";
-            element("traffic-status").textContent = "Sampling live traffic every 2 seconds.";
+            element("traffic-status").textContent = countersReset
+              ? "Counters restarted. Affected rates are unavailable for this interval; earlier history is kept."
+              : "Sampling live traffic every 2 seconds.";
           }
         } else {
           element("traffic-status").textContent = "Collecting the first sample...";
@@ -2246,7 +2256,7 @@
       element("apply-button").disabled = networkActionBusy || !helperConfigured;
       element("reset-button").disabled = networkActionBusy || !helperConfigured;
       element("panic-button").disabled = !helperConfigured;
-      element("scan-observations").disabled = !helperConfigured;
+      if (typeof syncObservationScanning === "function") syncObservationScanning();
       resetWifiButtons().forEach((each) => { each.disabled = !helperConfigured || wifiResetPending; });
       updateGeneralProfileControls();
     }
@@ -4269,6 +4279,49 @@
       return Array.from(observationListKeys).filter((key) => latestObservationScan.keys.has(key)).length;
     }
 
+    function dnsOutcomeTime(value) {
+      if (!Number.isFinite(value) || value < 0 || value > 8640000000000) return null;
+      return new Date(value * 1000).toLocaleString();
+    }
+
+    function dnsOutcomeCount(value) {
+      return Number.isSafeInteger(value) && value >= 0;
+    }
+
+    function hasDnsOutcomeWindow(collection) {
+      return Boolean(collection && collection.status === "partial" &&
+        collection.lower_bound === true && collection.coverage_complete === false &&
+        dnsOutcomeTime(collection.window_start) && dnsOutcomeTime(collection.window_end) &&
+        collection.window_end >= collection.window_start);
+    }
+
+    function dnsOutcomeCollectionText(collection) {
+      if (!hasDnsOutcomeWindow(collection)) return "DNS outcomes: unknown; collection telemetry unavailable.";
+      const policy = dnsOutcomeCount(collection.policy_revision) ? String(collection.policy_revision) : "unknown";
+      const health = collection.collector_available === true ? "Collector available."
+        : collection.collector_available === false ? "Collector unavailable; retained events only."
+        : "Collector health unknown.";
+      const loss = dnsOutcomeCount(collection.dropped_events)
+        ? "Known receiver drops: " + collection.dropped_events + "; sender loss unknown."
+        : "Event loss unknown.";
+      // Unknown coverage_reason values never become HTML or an invented complete-coverage claim.
+      return "DNS outcomes: partial coverage, lower-bound events. Window: " +
+        dnsOutcomeTime(collection.window_start) + " – " + dnsOutcomeTime(collection.window_end) +
+        ". Policy revision: " + policy + ". " + health + " " + loss;
+    }
+
+    function dnsOutcomeRowText(observation, collection) {
+      const outcomes = observation.dns_outcomes;
+      if (outcomes === null || outcomes === undefined) return "DNS outcomes: Unknown/no outcome recorded.";
+      if (!hasDnsOutcomeWindow(collection)) return "DNS outcomes: Unknown (collection telemetry unavailable).";
+      if (![outcomes.blocked_decisions, outcomes.answered_noerror, outcomes.other_dns_errors].every(dnsOutcomeCount) ||
+          !dnsOutcomeTime(outcomes.last_observed_at) || outcomes.last_observed_at < collection.window_start ||
+          outcomes.last_observed_at > collection.window_end) return "DNS outcomes: Unknown (invalid outcome evidence).";
+      return "Blocked decisions observed: " + outcomes.blocked_decisions +
+        " · DNS answers observed: " + outcomes.answered_noerror +
+        " · Last observed: " + dnsOutcomeTime(outcomes.last_observed_at) + ".";
+    }
+
     function renderObservations(data) {
       const container = element("observations");
       const count = element("observation-count");
@@ -4285,6 +4338,7 @@
         summary.textContent += added === null ? " Latest successful scan: new-name comparison unavailable." :
           " Latest successful scan: " + added + (added === 1 ? " displayed name" : " displayed names") + " new to list.";
       }
+      summary.textContent += " " + dnsOutcomeCollectionText(data.dns_outcome_collection);
       container.replaceChildren();
       if (!data.available) {
         count.textContent = "Unavailable";
@@ -4434,6 +4488,10 @@
             hintLine.appendChild(link);
           }
           if (hintLine.childNodes.length > 0) domain.appendChild(hintLine);
+          const outcomes = document.createElement("p");
+          outcomes.className = "observation-hint observation-dns-outcomes";
+          outcomes.textContent = dnsOutcomeRowText(observation, data.dns_outcome_collection);
+          domain.appendChild(outcomes);
           const queryCount = document.createElement("span");
           queryCount.className = "observation-domain-count";
           queryCount.textContent = queryCountText(observation.query_count);
@@ -5461,38 +5519,127 @@
       renderServiceListObserved();
     }
 
+    const OBSERVATION_SCAN_INTERVAL_MS = 30000;
+    const OBSERVATION_SCAN_MAX_RETRY_MS = 120000;
+    let observationScanning = false;
+    let observationScanTimer = null;
+    let observationScanRevision = 0;
+    let observationScanFailures = 0;
+    let observationCaptureOwner = null;
+
+    function observationScanEligible() {
+      return adminTokenVerified && helperConfigured && !document.hidden &&
+        currentPage() === "traffic" && !element("private-dashboard").hidden;
+    }
+
+    function updateObservationScanButton() {
+      const button = element("scan-observations");
+      button.textContent = observationScanning ? "Stop scanning" : "Start scanning";
+      button.setAttribute("aria-pressed", String(observationScanning));
+      button.disabled = !observationScanning && (!observationScanEligible() || observationRequestInFlight);
+      button.title = observationScanning ? "Stop future captures; a capture already running may finish."
+        : observationRequestInFlight ? "Wait for the previous capture to finish before starting again."
+        : "Start captures on the visible Traffic page after checking the admin token in hardware mode.";
+    }
+
+    function stopObservationScanning(message) {
+      observationScanning = false;
+      observationScanRevision += 1;
+      observationReadRevision += 1;
+      if (observationScanTimer !== null) window.clearTimeout(observationScanTimer);
+      observationScanTimer = null;
+      element("observation-capture-status").textContent = message ||
+        "Scanning stopped. No further captures will start. A capture already running may finish within its existing deadline.";
+      updateObservationScanButton();
+    }
+
+    function syncObservationScanning() {
+      if (observationScanning && !observationScanEligible()) {
+        stopObservationScanning("Scanning stopped because Traffic is hidden or access is unavailable. Choose Start scanning to restart.");
+      } else updateObservationScanButton();
+    }
+
+    function observationScanCurrent(owner) {
+      return observationCaptureOwner === owner && observationScanning &&
+        owner.run === observationScanRevision && owner.view === observationViewRevision &&
+        owner.token === adminTokenRevision && observationScanEligible();
+    }
+
+    function scheduleObservationScan(delay) {
+      if (observationScanTimer !== null) window.clearTimeout(observationScanTimer);
+      observationScanTimer = null;
+      if (!observationScanning) return;
+      if (!observationScanEligible()) { syncObservationScanning(); return; }
+      const revision = observationScanRevision;
+      observationScanTimer = window.setTimeout(() => {
+        observationScanTimer = null;
+        if (revision === observationScanRevision) scanObservations();
+      }, delay);
+    }
+
+    function toggleObservationScanning() {
+      if (observationScanning) { stopObservationScanning(); return; }
+      if (!observationScanEligible() || observationRequestInFlight) return;
+      observationScanning = true;
+      observationScanRevision += 1;
+      observationScanFailures = 0;
+      updateObservationScanButton();
+      return scanObservations();
+    }
+
     async function scanObservations() {
-      if (!helperConfigured || observationRequestInFlight) return;
+      if (!observationScanning || observationRequestInFlight) return;
+      if (!observationScanEligible()) { syncObservationScanning(); return; }
+      if (observationScanTimer !== null) window.clearTimeout(observationScanTimer);
+      observationScanTimer = null;
+      const owner = {run: observationScanRevision, view: observationViewRevision, token: adminTokenRevision};
+      observationCaptureOwner = owner;
       observationRequestInFlight = true;
       observationReadRevision += 1;
-      const revision = observationViewRevision;
       const before = observationListKeys === null ? null : new Set(observationListKeys);
-      const scanButton = element("scan-observations");
-      setButtonBusy(scanButton, true);
-      scanButton.textContent = "Scanning...";
-      showMessage("Sampling DNS queries from the test network...", "working");
+      let delay = OBSERVATION_SCAN_INTERVAL_MS;
+      element("observation-capture-status").textContent =
+        "Capturing DNS queries now. Stop prevents further captures; this capture may still finish.";
+      updateObservationScanButton();
       try {
         const result = await request("/api/observations/scan", "POST", {});
-        if (revision !== observationViewRevision) return;
+        if (!observationScanCurrent(owner)) return;
         latestObservationScan = { keys: newObservationScanKeys(before, result.observations) };
-        await loadObservations(true);
-        if (revision !== observationViewRevision) return;
+        const available = await loadObservations(true);
+        if (!observationScanCurrent(owner)) return;
+        if (!available) throw new Error("Capture finished, but saved results could not be loaded.");
+        observationScanFailures = 0;
         const added = newDisplayedObservationCount();
         const comparison = added === null ? "New-name comparison unavailable." :
           added + (added === 1 ? " displayed name" : " displayed names") + " new to list.";
-        showMessage(
-          "Traffic scan complete: " + result.captured_observations + " domain observations captured. " + comparison,
-          "success"
-        );
+        element("observation-capture-status").textContent = "Capture complete: " +
+          result.captured_observations + " domain observations captured. " + comparison +
+          " Next capture in 30 seconds.";
       } catch (error) {
-        if (revision === observationViewRevision) showMessage(error.message, "error");
+        if (!observationScanCurrent(owner)) return;
+        observationScanFailures += 1;
+        if (error.status === 401 || error.status === 403 || observationScanFailures >= 3) {
+          stopObservationScanning("Scanning stopped. " + error.message +
+            " Check access and the connection, then choose Start scanning to retry.");
+        } else {
+          delay = Math.min(OBSERVATION_SCAN_INTERVAL_MS * 2 ** observationScanFailures,
+            OBSERVATION_SCAN_MAX_RETRY_MS);
+          element("observation-capture-status").textContent = "Capture failed: " + error.message +
+            " Retrying in " + delay / 1000 + " seconds. Stop scanning to cancel.";
+        }
       } finally {
-        observationRequestInFlight = false;
-        scanButton.disabled = !helperConfigured;
-        scanButton.removeAttribute("aria-busy");
-        scanButton.textContent = "Scan now";
+        const repeat = observationScanCurrent(owner);
+        if (observationCaptureOwner === owner) {
+          observationCaptureOwner = null;
+          observationRequestInFlight = false;
+          syncObservationScanning();
+          if (repeat) scheduleObservationScan(delay);
+        }
       }
     }
+
+    document.addEventListener("visibilitychange", syncObservationScanning);
+    window.addEventListener("pagehide", () => stopObservationScanning());
 
     async function loadHealth() {
       const data = await request("/api/health", "GET");
@@ -6528,7 +6675,7 @@
 
     element("general-profile-stop").addEventListener("click", () => runGeneralProfileAction(true));
 
-    element("scan-observations").addEventListener("click", scanObservations);
+    element("scan-observations").addEventListener("click", toggleObservationScanning);
 
     // Active profile control in the sidebar: it names the general profile above the Start button
     // and applies or stops one with the same requests and messages as the saved profiles list.

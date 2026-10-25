@@ -19,7 +19,7 @@ SERIES = (
 STARTED = time.monotonic()
 BACKGROUND_READ_PATHS = frozenset({
     "/api/traffic", "/api/connected-devices", "/api/connected-device-labels",
-    "/api/general-profile", "/api/state", "/api/health", "/api/observations",
+    "/api/general-profile", "/api/state", "/api/health", "/api/system-health", "/api/observations",
 })
 
 
@@ -387,6 +387,62 @@ def check_low_rate_chart(browser, base, width):
         context.close()
 
 
+def check_counter_restarts(browser, base, width):
+    """Synthetic counter replacement keeps old points and leaves a truthful gap."""
+    context, page, _, errors = prepare_page(browser, base, width, 1, False)
+    try:
+        page.evaluate("""() => {
+          clearTrafficTimer(); trafficSamplingAllowed = false;
+        }""")
+        page.wait_for_function("!trafficRequestInFlight && !trafficReadingInFlight")
+        state = {"bytes": 10_000_000, "packets": 10_000, "at": 100}
+
+        def reply(route):
+            data = traffic_response(False)
+            data["sampled_at"] = state["at"]
+            data["devices"]["phone"] = {
+                "upload_bytes": state["bytes"], "download_bytes": state["bytes"],
+                "upload_packets": state["packets"], "download_packets": state["packets"],
+            }
+            route.fulfill(json=data)
+
+        page.unroute("**/api/traffic")
+        page.route("**/api/traffic", reply)
+        page.evaluate("() => {resetTrafficHistory(); trafficSamplingAllowed = true;}")
+        page.evaluate("() => pollTraffic()")
+        state.update(bytes=12_000_000, packets=12_000, at=102)
+        page.evaluate("() => pollTraffic()")
+        assert page.evaluate("trafficSamples.map(s => s.upload)") == [8]
+        # Restart packets only: byte rates and their history remain valid.
+        state.update(bytes=14_000_000, packets=0, at=104)
+        page.evaluate("() => pollTraffic()")
+        assert page.evaluate("trafficSamples.map(s => s.upload)") == [8, 8]
+        expect(page.locator("#traffic-upload-packets")).to_have_text("—")
+        # Restart bytes too: an unavailable interval, never a fabricated zero/spike.
+        state.update(bytes=0, packets=0, at=106)
+        page.evaluate("() => pollTraffic()")
+        expect(page.locator("#traffic-upload-rate")).to_have_text("unavailable")
+        expect(page.locator("#traffic-latest-rates")).to_contain_text("unavailable")
+        expect(page.locator("#traffic-status")).to_contain_text("earlier history is kept")
+        page.locator(".traffic-samples summary").click()
+        expect(page.locator("#traffic-sample-rows tr")).to_have_count(3)
+        expect(page.locator("#traffic-sample-rows tr").first).to_contain_text("unavailable")
+        state.update(bytes=2_000_000, packets=2_000, at=108)
+        page.evaluate("() => pollTraffic()")
+        assert page.evaluate("trafficSamples.map(s => s.upload)") == [8, 8, None, 8]
+        # The null point breaks both measured lines; it is not joined across the restart.
+        assert page.evaluate("""() => trafficSeriesGeometry(trafficSamples, {},
+          {left:0,right:600,top:0,bottom:100},10,performance.now(),'device')
+          .filter(s => ['upload','download'].includes(s.field))
+          .every(s => s.points.length === 3 && s.segments.length === 1)""")
+        expect(page.locator("#traffic-status")).to_have_text("Sampling live traffic every 2 seconds.")
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        page.screenshot(path=f"test-results/traffic-counter-{width}.png", full_page=True)
+        assert not errors, errors
+    finally:
+        context.close()
+
+
 def run():
     check_background_request_classification()
     Path("test-results").mkdir(exist_ok=True)
@@ -398,6 +454,11 @@ def run():
                 executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE")
             )
             try:
+                for width in (1440, 375):
+                    check_counter_restarts(browser, base, width)
+                if os.environ.get("JITTERSIM_TRAFFIC_COUNTER_AUDIT") == "1":
+                    print("Traffic counter restart checks passed at desktop and phone sizes.")
+                    return
                 for width, dpr, active, touch in (
                     (1440, 1, True, False), (375, 1, False, False),
                     (375, 3, True, False), (375, 3, True, True)

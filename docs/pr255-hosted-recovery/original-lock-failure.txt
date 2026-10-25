@@ -1,0 +1,3 @@
+2026-10-25T13:14:45.7990400Z             assert marker.exists()
+2026-10-25T13:14:45.7995435Z E                   ProcessLookupError: [Errno 3] No such process
+2026-10-25T13:14:45.7998030Z FAILED tests/unit/test_update_operation_lock.py::test_unknown_leaf_keeps_kernel_lock_after_parent_scope_exits - ProcessLookupError: [Errno 3] No such process

@@ -1349,10 +1349,11 @@
       </div>
       <div class="observation-actions">
         <span id="observation-count" class="count-badge">No scan yet</span>
-        <button id="scan-observations" type="button">Scan now</button>
+        <button id="scan-observations" type="button" aria-pressed="false" aria-describedby="observation-capture-status" disabled>Start scanning</button>
       </div>
     </div>
-    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits. Counts are DNS queries observed, not successful website requests. Protected devices never appear here. Optional ad blocking checks domain names without saving history. Block globally also blocks every name under a name (example.com also blocks www.example.com) while household access rules are on. On global block list and Unblock show exact saved entries, not whether a query or request was blocked.</p>
+    <p id="observation-note" class="observation-note">Scanning starts only when you choose Start scanning. Results are local aggregates, not exact page visits. Counts are DNS queries observed, not successful website requests. Protected devices never appear here. Optional ad blocking checks domain names without saving history. Block globally also blocks every name under a name (example.com also blocks www.example.com) while household access rules are on. On global block list and Unblock show exact saved entries, not whether a query or request was blocked. Outcome counts are separate observed resolver events, not matched query attempts or successful website requests. DNS answers mean NOERROR replies. Encrypted or bypassing DNS is outside this evidence.</p>
+    <p id="observation-capture-status" class="observation-note">Scanning off. Start scanning captures now, then 30 seconds after each completed capture while Traffic stays visible. Stop prevents new captures; an existing capture may finish within its deadline.</p>
     <p id="observation-scan-summary" class="observation-note">Saved results refresh automatically.</p>
     <div id="observations" class="observation-list">No observations yet.</div>
   </section>

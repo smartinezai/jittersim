@@ -1,7 +1,6 @@
 """The global block list at its limits: the helper request size and the address cap.
 
-Also records how the list reaches protected devices today (see
-docs/implementation-plan-larger-block-list-2026-10-23.md).
+Protected-device exemptions are covered in test_protected_global_block.py.
 """
 
 import json
@@ -23,10 +22,7 @@ from jittersim.engine import compiler
 from jittersim.engine.access import AccessClient, AccessPlan
 from jittersim.engine.codec import plan_from_payload, plan_to_payload
 from jittersim.engine.compiler import MAX_DEVICES_PER_PLAN, MAX_GLOBAL_BLOCKED_ADDRESSES, compile_plan
-from jittersim.networking.access import render_access_firewall, render_dns
-from jittersim.networking.adblocking import filtering_config
 from jittersim.networking.helper import MAX_MESSAGE_BYTES
-from jittersim.networking.renderer import render_command_plan
 from jittersim.networking.topology import Topology
 
 TOPOLOGY = Topology("eth0", "wlan0")
@@ -104,42 +100,6 @@ class GlobalBlockListLimitTests(unittest.TestCase):
         self.assertFalse(compiler._address_cap_logged)
 
 
-class ProtectedDevicesTodayTests(unittest.TestCase):
-    """Protected devices are not exempt from the global block list today.
-
-    The owner asked on 23 October 2026 that they should be. The follow-up change
-    inverts these checks (design in the plan named in the module docstring).
-    """
-
-    def test_global_block_list_reaches_protected_devices_today(self) -> None:
-        plan = compile_plan(
-            devices=[Device("a", "a", "192.168.50.10", "p")],
-            profiles={"p": PROFILE},
-            protected_mac_addresses=(PROTECTED_MAC,),
-            global_blocked_addresses=(IPv4Address("203.0.113.9"),),
-        )
-        script = next(
-            command.stdin for command in render_command_plan(plan=plan, topology=TOPOLOGY)
-            if command.stdin and "block global website destinations" in command.stdin
-        ).splitlines()
-        drop = next(i for i, line in enumerate(script) if "block global website" in line)
-        returns = [i for i, line in enumerate(script) if "unaffected by profiles" in line
-                   and ("inet jittersim input" in line or "inet jittersim forward" in line)]
-        # 1. The address drop (forward chain) comes before the protected devices' returns.
-        self.assertEqual(len(returns), 2)
-        self.assertLess(drop, min(returns))
-
-        access = AccessPlan(websites=WebsitePolicy(blocked_domains=("news.example.com",)))
-        dns = render_dns(access, local_name="testbox.local")
-        firewall = render_access_firewall(access, TOPOLOGY)
-        # 2. Every test Wi-Fi client's DNS goes to the filtered resolver, whose view for
-        # the whole test network refuses the blocked name.
-        self.assertIn('access-control-view: 192.168.50.0/24 "everyone"', dns)
-        self.assertIn('local-zone: "news.example.com." always_nxdomain', dns)
-        self.assertIn('dns iifname "wlan0" udp dport 53 redirect', firewall)
-        # 3. The ad-blocking resolver of protected devices keeps the household refusal.
-        ads = filtering_config(("ads.example.net",), (), access).decode()
-        self.assertIn('local-zone: "news.example.com." always_nxdomain', ads)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,9 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.dns_outcomes import check_dns_outcomes
 from tests.browser.phone import close_controls, sidebar_control
+from tests.browser.recurring_discovery import check_recurring_scan
 
 ADD_PATH = "/api/observations/add-to-profile"
 HEADERS = {"Authorization": "Bearer browser-test"}
@@ -250,7 +252,9 @@ def check_new_scan_names(browser, base, width, evidence):
         expect(summary).to_contain_text("Saved results refresh automatically")
         page.locator("#scan-observations").click()
         expect(summary).to_contain_text("2 displayed names new to list")
-        expect(page.locator("#scan-observations")).to_be_enabled()
+        expect(page.locator("#observation-capture-status")).to_contain_text("Capture complete")
+        page.locator("#scan-observations").click()
+        expect(page.locator("#scan-observations")).to_have_text("Start scanning")
         card = page.locator(".observation-device").filter(has_text="192.168.50.124").first
         group = card.locator(".observation-group").filter(has_text="Netflix")
         expect(group.locator(".observation-new-group")).to_have_text("1 new to list")
@@ -269,10 +273,14 @@ def check_new_scan_names(browser, base, width, evidence):
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
         state["fail"] = True
         page.locator("#scan-observations").click()
-        expect(page.locator("#message")).to_contain_text("scan unavailable")
+        expect(page.locator("#observation-capture-status")).to_contain_text("scan unavailable")
         expect(summary).to_contain_text("2 displayed names new to list")
-        page.locator("#scan-observations").click()
+        page.locator("#scan-observations").click()  # Stop cancels the retry.
+        page.locator("#scan-observations").click()  # Deliberate restart captures once.
+
         expect(summary).to_contain_text("0 displayed names new to list")
+        expect(page.locator("#observation-capture-status")).to_contain_text("Capture complete")
+        page.locator("#scan-observations").click()  # Stop before the next deliberate scan.
         expect(page.locator(".observation-new-name")).to_have_count(0)
         assert state["posts"] == 3, state
         state["phase"] = 0
@@ -449,6 +457,16 @@ def run(*, cases=("single", "group"), widths=(1920, 390)):
             )
             try:
                 evidence = []
+                for width in (1440, 375):
+                    check_recurring_scan(browser, f"http://127.0.0.1:{port}", width, evidence, authenticate)
+                if os.environ.get("JITTERSIM_RECURRING_SCAN_AUDIT") == "1":
+                    print(json.dumps({"result": "passed", "evidence": evidence}, indent=2))
+                    return
+                for width in (1440, 375):
+                    check_dns_outcomes(browser, f"http://127.0.0.1:{port}", width, evidence)
+                if os.environ.get("JITTERSIM_DNS_OUTCOME_AUDIT") == "1":
+                    print(json.dumps({"result": "passed", "evidence": evidence}, indent=2))
+                    return
                 for width in widths:
                     check_membership_labels(browser, f"http://127.0.0.1:{port}", width, evidence)
                     check_device_collapse(browser, f"http://127.0.0.1:{port}", width, evidence)

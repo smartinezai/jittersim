@@ -189,6 +189,7 @@ class BrowserProxyTests(unittest.TestCase):
                     ),
                     replace(plan, protected_mac_addresses=()),
                     replace(plan, global_blocked_addresses=(IPv4Address("127.0.0.1"),)),
+                    replace(plan, global_allowed_addresses=(IPv4Address("8.8.8.8"),)),
                 ):
                     publish(plan)
                     with socket.create_connection(proxy.server_address, timeout=3) as client:
@@ -197,7 +198,7 @@ class BrowserProxyTests(unittest.TestCase):
                         self.assertEqual(marks[-2:], [0, 0])
                         publish(change)
                         client.sendall(b"after-plan-change")
-                        if change.protected_mac_addresses and not change.global_blocked_addresses:
+                        if change.protected_mac_addresses and change.global_allowed_addresses is None:
                             self.assertEqual(client.recv(4096), b"after-plan-change")
                         else:
                             self.assertEqual(client.recv(4096), b"")

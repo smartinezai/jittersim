@@ -66,7 +66,9 @@ from jittersim.engine.plan import (
     ServiceQuotaRule,
     WebsiteFilter,
 )
-from jittersim.networking.access import AccessManager
+from jittersim.networking.access import (
+    DNS_PORT, DNS_VIEW_PORT_FIRST, DNS_VIEW_PORT_LAST, AccessManager,
+)
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.commands import CommandResult
 from jittersim.networking.executor import CommandExecutionError
@@ -266,6 +268,39 @@ TRAFFIC_EVERY = 3
 NORMAL_RTT_MS = 10.0
 
 
+def household_restrictions(access):
+    """Ignore only the neutral resolver privacy guard left by household release."""
+
+    privacy_guard = (
+        f'iifname != "{TOPOLOGY.test_interface}" iifname != "lo" '
+        f'meta l4proto {{ tcp, udp }} th dport {{ {DNS_PORT}, '
+        f'{DNS_VIEW_PORT_FIRST}-{DNS_VIEW_PORT_LAST} }} drop'
+    )
+    return [line.strip() for line in access.splitlines()
+            if re.search(r"\b(drop|reject|redirect|accept|mark set)\b", line)
+            and "policy accept" not in line and line.strip() != privacy_guard]
+
+
+class ResolverPrivacyGuardTests(unittest.TestCase):
+    guard = ('iifname != "wlan0" iifname != "lo" meta l4proto { tcp, udp } '
+             'th dport { 5335, 5400-5656 } drop')
+
+    def test_only_the_exact_neutral_guard_is_ignored(self):
+        self.assertEqual(household_restrictions("  " + self.guard + "\n"), [])
+
+    def test_a_guard_that_can_drop_test_or_loopback_traffic_is_not_ignored(self):
+        for condition in ('iifname != "wlan0" ', 'iifname != "lo" '):
+            with self.subTest(condition=condition):
+                rule = self.guard.replace(condition, "")
+                self.assertEqual(household_restrictions(rule), [rule])
+
+    def test_redirects_drops_and_direct_view_guards_still_count_as_restrictions(self):
+        rules = ['iifname "wlan0" udp dport 53 redirect to :5335',
+                 'ether saddr 02:00:00:00:50:98 drop',
+                 'iifname "wlan0" th dport 5400 ct original proto-dst != 53 drop']
+        self.assertEqual(household_restrictions("\n".join([self.guard, *rules])), rules)
+
+
 @unittest.skipUnless(ENABLED, "needs root on Linux with JITTERSIM_KERNEL_TESTS=1")
 class PanicCrashMatrixTests(unittest.TestCase):
     maxDiff = None
@@ -355,9 +390,7 @@ class PanicCrashMatrixTests(unittest.TestCase):
         if household:
             access = _in(PI, "nft", "list", "table", "inet", "jittersim_access", check=False).stdout
             # The release keeps the resolver port private. Nothing else may remain.
-            rules = [line.strip() for line in access.splitlines()
-                     if re.search(r"\b(drop|reject|redirect|accept|mark set)\b", line)
-                     and "policy accept" not in line and "th dport 5335 drop" not in line]
+            rules = household_restrictions(access)
             found += [f"household rule: {rule}" for rule in rules]
             netdev = _in(PI, "nft", "list", "table", "netdev", "jittersim_access",
                          check=False).stdout
