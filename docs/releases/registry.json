@@ -10,6 +10,11 @@
       "sequence": 1792873845,
       "state": "reserved",
       "version": "1.0.0"
+    },
+    {
+      "sequence": 1792925245,
+      "state": "reserved",
+      "version": "1.0.1"
     }
   ],
   "sequence_floor": 1792860081

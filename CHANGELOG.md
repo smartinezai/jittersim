@@ -7,6 +7,18 @@ Changes merged after the newest release are listed under Unreleased until the
 next release takes them over. The Pi shows at most 16 KB of a section, so keep
 the hand-written Unreleased part short.
 
+## v1.0.1 - 2026-10-25
+
+This compatibility update prepares an existing 1.0.0 installation to accept the exact reviewed networking consumers in the forthcoming 1.1.0 update. The bridge retains the existing Panic guard, privileged helper and network-access code. Its updater adds one complete reviewed hash tuple while retaining all previous approved tuples.
+
+It also includes the fixes already merged after the 1.0.0 candidate: page tabs preserve the header and navigation, the keyboard skip link stays hidden when unfocused at enlarged text sizes, the router Wi-Fi Check action is visible, and CSV exports preserve embedded carriage returns on Python 3.9. Documentation and the corresponding test fixtures have been corrected.
+
+Install this bridge before 1.1.0 and confirm that the bridge is running. A 1.0.0 updater cannot skip directly to the new networking consumers; it refuses that package before changing the running installation. Rolling back to the older updater can require installing this bridge again.
+
+Packages remain signed and verified. Check for updates downloads and stages the latest published stable release; Install remains a separate confirmed action. An unpublished acceptance candidate is not discoverable through the latest-release check.
+
+This release does not diagnose or enable unavailable upload-corruption kernel capabilities on the Pi. No new real-device acceptance is claimed by these notes; approval requires evidence for this exact signed package.
+
 ## v1.0.0 - 2026-10-24
 
 ### JitterSim 1.0.0
