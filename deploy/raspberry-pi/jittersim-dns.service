@@ -4,7 +4,7 @@ After=local-fs.target
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/unbound -d -c /var/lib/jittersim-access/unbound.conf
+ExecStart=/opt/jittersim/.venv/bin/python -m jittersim.networking.dns_decisions --config /var/lib/jittersim-access/unbound.conf --socket /run/jittersim/dns-observations/events.sock --pid-file /run/jittersim/dns-producer.json
 Restart=on-failure
 RestartSec=2
 ProtectHome=true

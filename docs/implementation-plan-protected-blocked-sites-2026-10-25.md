@@ -42,3 +42,20 @@ live network settings, secrets, signing, main merge or release action.
 Rollback is reverting this local feature before deployment. Current process keeps
 the running release and source checkout untouched. Publication and any two-stage
 approved-source transition remain coordinator/owner decisions. Stop at2%reserve.
+
+## Allocated DNS outcome producer hooks
+
+Coordinator's concrete contract extends this lane to the DNS service unit and
+access configuration. Disable syslog/query logging, route tagged replies and
+local actions to the backend-owned private nonblocking producer and identify the
+session with the exact access-plan digest. Never put raw queries in the journal.
+The wrapper and authenticated receiver remain backend-owned. Preserve all unit
+restrictions. Root-owned startup must create the private socket child without
+widening the existing runtime parent's permissions. Review that exact startup
+change before adding it. Metadata contains no queries and belongs to root/jittersim.
+
+Add focused generated-config and unit tests, freeze the hooks for independent
+review and run applicable final-source kernel checks. Earlier82cf results remain
+labelled with their actual source. No helper, bundle or updates.py edit here.
+The explicit publication override covers reviewed pinned source and the reviewed
+trust bridge only. No Pi, signing or deployment action follows from it.
