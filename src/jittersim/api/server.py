@@ -90,6 +90,7 @@ from jittersim.config.device_names import (
     saved_device_title,
 )
 from jittersim.config.domain_labels import group_domain, label_domain, seen_with
+from jittersim.config.dns_outcomes import unavailable_dns_outcomes
 from jittersim.config.exemptions import AddressMove, UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.payloads import profile_payload
 from jittersim.engine.randomizer import impairment_range_preview
@@ -915,12 +916,15 @@ def _domains_from_payload(payload: Dict[str, Any]) -> Tuple[str, ...]:
     return tuple(dict.fromkeys(normalize_domain(item) for item in raw))
 
 
-def _domain_observation_payload(observation: DomainObservation) -> Dict[str, Any]:
+def _domain_observation_payload(
+    observation: DomainObservation, dns_outcomes=None
+) -> Dict[str, Any]:
     return {
         "domain": observation.domain,
         "query_count": observation.query_count,
         "first_seen": observation.first_seen,
         "last_seen": observation.last_seen,
+        "dns_outcomes": dns_outcomes,
     }
 
 
@@ -947,7 +951,7 @@ def _domain_list_cleared_payload(repository: ConfigRepository) -> Optional[dict]
 
 
 def _labelled_domain_payloads(
-    rows: Sequence[DomainObservation], blocked_domains: Collection[str] = ()
+    rows: Sequence[DomainObservation], blocked_domains: Collection[str] = (), dns_outcomes=None
 ) -> List[Dict[str, Any]]:
     """Add a label and a group and a seen-with guess and the global block state to observed names.
 
@@ -960,7 +964,8 @@ def _labelled_domain_payloads(
     hints = seen_with([(row.domain, row.first_seen) for row in rows])
     return [
         {
-            **_domain_observation_payload(row),
+            **_domain_observation_payload(row, (dns_outcomes or {}).get(
+                (str(row.ipv4_address), row.mac_address, row.domain))),
             "label": label_domain(row.domain).as_dict(),
             "group": group_domain(row.domain),
             "seen_with": hints.get(row.domain, []),
@@ -1196,6 +1201,14 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                 if 'store' in locals():
                     store.close()
                 LOGGER.warning("Homepage pairing listener unavailable. Dashboard controls remain available.")
+        self._dns_outcome_receiver = None
+        if helper_client is not None and hasattr(socket, "SO_PASSCRED"):
+            from jittersim.networking.dns_decision_ipc import DecisionReceiver
+            try:
+                self._dns_outcome_receiver = DecisionReceiver(repository)
+            except (OSError, ValueError):
+                # Missing private telemetry never prevents dashboard or DNS service startup.
+                pass
         self.dashboard_page_html = DASHBOARD_HTML.replace(
             "@@EASY_ADDRESS@@", html.escape(easy_address(self), quote=True)
         )
@@ -1896,13 +1909,13 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         data["dashboard_access"] = {**self.protected_access_status(), "message": message}
         return status, content_type, _json_bytes(data)
 
-    def _station_devices(self) -> list:
+    def _station_devices(self, snapshot: Optional[dict] = None) -> list:
         """Return the helper's current client list or nothing when it cannot be read."""
 
         if self.helper_client is None:
             return []
         try:
-            stations = station_snapshot(self.helper_client)["devices"]
+            stations = (station_snapshot(self.helper_client) if snapshot is None else snapshot)["devices"]
             return [
                 station
                 for station in stations
@@ -2407,7 +2420,22 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         assignments_by_address = {
             str(device.ipv4_address): device for device in self.repository.list_devices()
         }
-        station_devices = self._station_devices()
+        snapshot = station_snapshot(self.helper_client) if self.helper_client is not None else {}
+        station_devices = self._station_devices(snapshot)
+        receiver = getattr(self, "_dns_outcome_receiver", None)
+        if receiver is None and self.helper_client is not None and hasattr(socket, "SO_PASSCRED"):
+            from jittersim.networking.dns_decision_ipc import DecisionReceiver
+            try:
+                receiver = self._dns_outcome_receiver = DecisionReceiver(self.repository)
+            except (OSError, ValueError):
+                pass
+        if receiver is not None:
+            receiver.poll(snapshot, int(time.time()))
+        try:
+            outcomes, collection = self.repository.dns_outcome_snapshot(
+                snapshot=snapshot, now=int(time.time()))
+        except (StorageError, sqlite3.Error):
+            outcomes, collection = {}, unavailable_dns_outcomes("repository_busy")
         blocked = protected_addresses(self.repository, station_devices)
         protected = set(protected_macs(self.repository))
         grouped = {}
@@ -2443,7 +2471,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     if address in assignments_by_address
                     else None
                 ),
-                "domains": _labelled_domain_payloads(rows, blocked_names),
+                "domains": _labelled_domain_payloads(rows, blocked_names, outcomes),
             }
             for address, rows in sorted(grouped.items())
         ]
@@ -2456,6 +2484,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
                     "devices": devices,
                     "total_domains": sum(len(rows) for rows in grouped.values()),
                     "list_cleared": _domain_list_cleared_payload(self.repository),
+                    "dns_outcome_collection": collection,
                     "message": (
                         None
                         if self.helper_client is not None
@@ -3779,6 +3808,9 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         return status, content_type, body
 
     def server_close(self) -> None:
+        receiver = getattr(self, "_dns_outcome_receiver", None)
+        if receiver is not None:
+            receiver.close()
         deadline = time.monotonic() + self.shutdown_timeout_seconds
         # Speed test windows read the helper and write the repository. Stop them first, because
         # the caller closes the repository right after this returns.
