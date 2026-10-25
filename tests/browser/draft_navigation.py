@@ -1,5 +1,7 @@
 """Return to unfinished editors without saving or replacing their values."""
 
+from urllib.parse import urlsplit
+
 from playwright.sync_api import expect
 
 from tests.browser.phone import open_controls, sidebar_control
@@ -10,6 +12,8 @@ def check_draft_navigation(page):
     writes = []
 
     def record_write(request):
+        if request.method == "POST" and urlsplit(request.url).path == "/api/profiles/ranges":
+            return  # Computing the debounced range preview does not save profile changes.
         if request.method != "GET":
             writes.append(request.url)
 
