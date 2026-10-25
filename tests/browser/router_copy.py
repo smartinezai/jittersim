@@ -10,13 +10,14 @@ import re
 import selectors
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.confirm_dialogs import answer_confirm, cancel_with_button, cancel_with_escape
-from tests.browser.phone import assert_router_status_is_read_only, is_phone, sidebar_control
+from tests.browser.phone import assert_router_status_is_read_only, close_controls, is_phone, sidebar_control
 
 ADMIN_TOKEN = "browser-test"
 ROUTER_PASSWORD = "browser-router-password"
@@ -366,24 +367,18 @@ def run_width(browser, base, width, height):
     assert api_calls(requests, "/api/router/wifi") == []
     expect(page.locator("#router-action-message")).to_have_text("")
     sidebar_control(page, "#sync-router-ap")
-    control = page.locator(".router-wifi-control").bounding_box()
     row = page.locator(".router-wifi-copy").bounding_box()
-    switch = page.locator("#router-wifi-toggle").bounding_box()
+    value = page.locator("#router-wifi-toggle").bounding_box()
     action = button.bounding_box()
-    assert abs(action["x"] - row["x"]) <= 1
-    assert abs(action["width"] - row["width"]) <= 1
-    if is_phone(page):
-        bar = page.locator(".safety-bar").bounding_box()
-        assert abs(bar["y"] + bar["height"] - height) <= 1, bar
-        assert switch["y"] >= bar["y"]
-        assert switch["y"] + switch["height"] <= bar["y"] + bar["height"] + 0.5
-        assert row["y"] + row["height"] <= bar["y"] + 0.5, (row, bar)
-    else:
-        assert row["y"] >= control["y"] + control["height"]
-        assert abs(row["x"] - control["x"]) <= 1
-        assert abs(row["width"] - control["width"]) <= 1
-        assert switch["x"] > control["x"] + control["width"] / 2
-        assert switch["y"] >= control["y"]
+    bar = page.locator(".safety-bar").bounding_box()
+    # Controls uses a two-column grid on desktop, above the persistent safety bar.
+    assert action["x"] >= row["x"] - 1
+    assert action["x"] + action["width"] <= row["x"] + row["width"] + 1
+    assert action["width"] >= 44 and action["height"] >= 44
+    assert abs(bar["y"] + bar["height"] - height) <= 1, bar
+    assert value["y"] >= bar["y"]
+    assert value["y"] + value["height"] <= bar["y"] + bar["height"] + 0.5
+    assert row["y"] + row["height"] <= bar["y"] + 0.5, (row, bar)
     page.screenshot(path=f"test-results/router-copy-{width}.png", animations="disabled")
 
     # A status in the sidebar is visible even while another dashboard page is open.
@@ -502,6 +497,57 @@ def fixture_server():
         process.wait(timeout=10)
 
 
+def check_visible_router_read(browser, base, width, height):
+    context = browser.new_context(viewport={"width": width, "height": height})
+    page = context.new_page()
+    reads, pending = [], []
+    def read_status(route):
+        reads.append(route.request.post_data_json)
+        pending.append(route)
+    def answer_read():
+        pending.pop(0).fulfill(content_type="application/json", body=json.dumps({"result": {
+            "enabled": True, "checked_at": int(time.time()), "busy": False, "changing": False}}))
+    page.route("**/api/router/status", read_status)
+    page.goto(base)
+    sign_in(page)
+    close_controls(page)
+    expect(page.locator("#refresh-router-wifi")).to_be_disabled()
+    expect(page.locator("#check-router-wifi-now")).to_be_disabled()
+    expect(page.locator("#router-wifi-status")).to_contain_text("Enter router password")
+    assert not reads
+    for selector in ("#router-wifi-toggle", "#router-wifi-status"):
+        expect(page.locator(selector)).to_be_in_viewport(ratio=1)
+    enter_router_password(page)
+    close_controls(page)
+    expect(page.locator(".control-utilities")).to_be_hidden()
+    expect(page.locator("#refresh-router-wifi")).to_be_enabled()
+    page.screenshot(path=f"test-results/router-check-{width}-before.png")
+    check = page.locator(".safety-bar .router-wifi-control").get_by_role("button", name="Check router Wi-Fi", exact=True)
+    expect(check).to_be_visible(timeout=2000)
+    expect(check).to_be_enabled()
+    check.click()
+    expect(check).to_be_disabled()
+    expect(page.locator("#refresh-router-wifi")).to_be_disabled()
+    answer_read()
+    expect(page.locator("#router-wifi-toggle")).to_have_text("On")
+    assert len(reads) == 1
+    assert set(reads[0]) == {"admin_password", "refresh"}
+    assert_router_status_is_read_only(page)
+    check.focus()
+    page.keyboard.press("Enter")
+    expect(check).to_be_disabled()
+    answer_read()
+    expect(check).to_be_enabled()
+    assert len(reads) == 2
+    box = check.bounding_box()
+    assert box and box["height"] >= 44 and box["width"] >= 44, box
+    for selector in ("#panic-button", "#controls-toggle", "#router-wifi-toggle", "#router-wifi-status"):
+        expect(page.locator(selector)).to_be_in_viewport(ratio=1)
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+    page.screenshot(path=f"test-results/router-check-{width}-after.png")
+    context.close()
+
+
 def run():
     Path("test-results").mkdir(exist_ok=True)
     with sync_playwright() as playwright:
@@ -509,10 +555,18 @@ def run():
             executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE")
         )
         try:
+            if os.environ.get("JITTERSIM_ROUTER_CHECK_AUDIT") == "1":
+                for width, height in ((1440, 900), (375, 844), (320, 568)):
+                    with fixture_server() as port:
+                        check_visible_router_read(browser, f"http://127.0.0.1:{port}", width, height)
+                return
             for width, height in ((1920, 1000), (375, 844)):
                 # The Pi spaces router password checks apart, so each width gets its own Pi.
                 with fixture_server() as port:
                     run_width(browser, f"http://127.0.0.1:{port}", width, height)
+            for width, height in ((1440, 900), (375, 844), (320, 568)):
+                with fixture_server() as port:
+                    check_visible_router_read(browser, f"http://127.0.0.1:{port}", width, height)
             print("Router Wi-Fi import acceptance passed at desktop and 375px widths.")
         finally:
             browser.close()

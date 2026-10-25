@@ -13,6 +13,14 @@ from tests.browser.phone import sidebar_control
 from tests.browser.protected_clients import HEADERS, sign_in
 
 
+def dismiss_saved_group_toast(page, members):
+    noun = "device" if members == 1 else "devices"
+    expect(page.locator("#toast")).to_have_class("toast success")
+    expect(page.locator("#toast-message")).to_have_text(
+        f"Device group saved and applied. {members} {noun}.")
+    page.locator("#toast-dismiss").click()
+
+
 def check_connected_group_help(page):
     """Keep the empty instruction readable without changing saved group choices."""
     page.locator('[data-page-link="devices"]').first.click()
@@ -132,6 +140,8 @@ def check_width(browser, base, width, height):
     row = page.locator("#group-list .quota-row").filter(has_text=name)
     expect(row).to_contain_text("2 devices:")
     expect(row).to_contain_text("Profile: Slow")
+    # The saved-result toast can cover the phone's next group action.
+    dismiss_saved_group_toast(page, 2)
 
     row.get_by_role("button", name="Edit devices").click()
     expect(form.locator("#group-id")).to_have_js_property("readOnly", True)
@@ -158,6 +168,7 @@ def check_width(browser, base, width, height):
         page.unroute("**/api/groups", reject_save)
     form.locator("#group-save").click()
     expect(row).to_contain_text("1 device:")
+    dismiss_saved_group_toast(page, 1)
     devices = page.request.get(base + "/api/devices", headers=HEADERS).json()["devices"]
     assert next(device for device in devices if device["id"] == prefix + "-1")["profile_id"] == "normal"
 
@@ -217,6 +228,7 @@ def check_width(browser, base, width, height):
     form.locator("#group-save").click()
     connected_row = page.locator("#group-list .quota-row").filter(has_text="Connected group")
     expect(connected_row).to_be_visible()
+    dismiss_saved_group_toast(page, 1)
     device = next(device for device in page.request.get(base + "/api/devices", headers=HEADERS).json()["devices"]
                   if device.get("mac_address") == "02:00:00:00:00:01")
     assert device["profile_id"] == "slow"

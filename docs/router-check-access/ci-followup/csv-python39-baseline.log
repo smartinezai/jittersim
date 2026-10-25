@@ -1,0 +1,1 @@
+{"python": "3.9.6 (default, Aug 25 2026, 21:26:21) \n[Clang 21.0.0 (clang-2100.3.34.2)]", "baseline_result": "FAILED", "error": "new-line character seen in unquoted field - do you need to open the file in universal-newline mode?"}

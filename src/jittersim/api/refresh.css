@@ -373,3 +373,9 @@ summary::marker { color: var(--tx-muted); }
 #prepared-card p, #prepared-settings { overflow-wrap: anywhere; }
 #prepared-settings { white-space: pre-wrap; }
 .content #page-devices #prepared-card button, #prepared-card input, #prepared-card select { min-height: 44px; }
+
+/* A real read action is available beside the plain router state at every width. */
+#check-router-wifi-now { flex: 0 0 auto; min-width: 44px; min-height: 44px; margin: 0; padding: 0.3rem; font-size: 0.75rem; text-align: center; }
+.safety-bar .router-wifi-label, .safety-bar .router-wifi-value { display: inline; }
+.safety-bar .router-wifi-control > div { font-size: 0.78rem; line-height: 1.15; }
+.safety-bar .router-wifi-status { margin-top: 0; -webkit-line-clamp: 1; }

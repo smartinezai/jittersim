@@ -129,6 +129,18 @@ def test_csv_neutralizes_each_formula_prefix(prefix):
     assert rows[0]["profile_name"] == ""
 
 
+@pytest.mark.parametrize("label, expected", [
+    ("\r1", "'\r1"), ("before\rafter", "before\rafter"),
+    ("before\r\nafter", "before\r\nafter"),
+])
+def test_csv_preserves_carriage_returns_inside_one_quoted_record(label, expected):
+    exported = check.check_export_csv([{"label": label}])
+    rows = list(csv.DictReader(io.StringIO(exported, newline="")))
+    assert len(rows) == 1
+    assert rows[0]["label"] == expected
+    assert rows[0]["profile_name"] == ""
+
+
 def test_summary_carries_probe_numbers_expected_settings_and_runtime_metadata():
     setting = {"loss_percent": 10, "delay_ms": 40, "jitter_ms": 7,
                "duplicate_percent": 8, "reorder_percent": 9, "corrupt_percent": 2,
