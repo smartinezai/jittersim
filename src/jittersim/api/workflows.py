@@ -99,12 +99,14 @@ def read_workflow(server, path):
                 for item in server.repository.list_group_data_limits()
             ),
         )
-        if key not in cache:
+        timeline = cache.get(key)
+        if timeline is None:
             if len(cache) >= 16:
                 cache.clear()
-            cache[key] = device_timeline(server.repository, device, now=now)
+            timeline = device_timeline(server.repository, device, now=now)
+            cache[key] = timeline
             server._workspace_timelines = cache
-        result = {"timeline": cache[key], "checked_at": now}
+        result = {"timeline": timeline, "checked_at": now}
         group = next(
             (
                 item
