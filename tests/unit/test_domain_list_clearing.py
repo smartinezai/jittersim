@@ -18,6 +18,7 @@ from jittersim.api.server import DASHBOARD_HTML, ControlServer
 from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import DomainObservation
 from jittersim.config.storage import ConfigRepository
+from tests.dashboard_script import function_source
 
 PROTECTED = "02:00:00:00:00:09"
 NOW = 1_800_000_000
@@ -257,6 +258,9 @@ let observedDomainsByDevice = {}; let observedNames = new Set();
 let observationListKeys = null; let latestObservationScan = null;
 function newDisplayedObservationCount() { return null; }
 """
+        + "\n".join(function_source(name) for name in (
+            "dnsOutcomeTime", "dnsOutcomeCount", "hasDnsOutcomeWindow", "dnsOutcomeCollectionText"
+        ))
         + function
         + "\nrenderObservations("
         + json.dumps(data)

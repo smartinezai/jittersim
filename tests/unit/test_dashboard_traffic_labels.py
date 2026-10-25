@@ -279,6 +279,11 @@ def find_all(node, class_name):
     return found
 
 
+def hint_spans(node):
+    """Guess hints are semantic spans; outcome paragraphs reuse their visual class."""
+    return [hint for hint in find_all(node, "observation-hint") if hint["tag"] == "span"]
+
+
 def host_of(row):
     return one(row, "observation-domain-host")["children"][0]["text"]
 
@@ -350,8 +355,8 @@ def test_the_hint_is_rendered_in_its_own_line():
     by_host = {host_of(row): row for row in rows}
     shared = by_host["a1051.dscg4.akamai.net"]
     own = by_host["mmx-ds.cdn.whatsapp.net"]
-    assert one(shared, "observation-hint")["text"] == "Seen with WhatsApp (guess)"
-    assert find_all(own, "observation-hint") == []
+    assert [hint["text"] for hint in hint_spans(shared)] == ["Seen with WhatsApp (guess)"]
+    assert hint_spans(own) == []
     assert find_all(own, "observation-hint-line") == []
 
 
@@ -372,4 +377,4 @@ def test_hostile_text_is_only_ever_assigned_as_text():
     }])
     label_line = one(row, "observation-label")
     assert [child["text"] for child in label_line["children"]] == [hostile, hostile]
-    assert one(row, "observation-hint")["text"] == "Seen with " + hostile + " (guess)"
+    assert [hint["text"] for hint in hint_spans(row)] == ["Seen with " + hostile + " (guess)"]
