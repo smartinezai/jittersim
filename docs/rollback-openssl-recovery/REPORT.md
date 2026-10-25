@@ -25,3 +25,5 @@ Gating Ruff E9,F63,F7,F82,F811 and git diff --check passed. No global install, f
 ## Final review and freeze
 
 Parent independently reviewed the actual runtime diff CLEAR, then requested test-only open/read variants and unknown EIO propagation. Final unique regression:7PASS,0failures/errors/skips. Includes both open/read ESRCH followed by a live group member, both all-disappeared cases, PermissionError and generic OSError(EIO) propagation, malformed stat fail-closed. Only these changed tests were rerun after the earlier57case run; unchanged broader tests were not repeated. Runtime remains the exact reviewed one-line change. Gating Ruff/diffcheck passed again. Local commit only; no push or merge. Retained receipts and narrow3.9probe are in this report directory; full hosted trace stays in the private /tmp receipt described above.
+
+Integration note: the committed baseline log has trailing whitespace removed for the repository diff check; its manifest hash records that presentation. The original unmodified log remains in the isolated worker receipt. No failure text or result was removed.
