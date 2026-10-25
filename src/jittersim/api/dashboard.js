@@ -1281,7 +1281,7 @@
       observationListKeys = null;
       latestObservationScan = null;
       element("observation-scan-summary").textContent = "Saved results refresh automatically.";
-      document.querySelectorAll(".observation-new-name, .observation-new-group").forEach((node) => node.remove());
+      document.querySelectorAll(".observation-new-name, .observation-new-group, .observation-dns-outcomes").forEach((node) => node.remove());
     });
 
     let randomWebsiteAnalyticsRequestVersion = 0;
@@ -4275,6 +4275,49 @@
       return Array.from(observationListKeys).filter((key) => latestObservationScan.keys.has(key)).length;
     }
 
+    function dnsOutcomeTime(value) {
+      if (!Number.isFinite(value) || value < 0 || value > 8640000000000) return null;
+      return new Date(value * 1000).toLocaleString();
+    }
+
+    function dnsOutcomeCount(value) {
+      return Number.isSafeInteger(value) && value >= 0;
+    }
+
+    function hasDnsOutcomeWindow(collection) {
+      return Boolean(collection && collection.status === "partial" &&
+        collection.lower_bound === true && collection.coverage_complete === false &&
+        dnsOutcomeTime(collection.window_start) && dnsOutcomeTime(collection.window_end) &&
+        collection.window_end >= collection.window_start);
+    }
+
+    function dnsOutcomeCollectionText(collection) {
+      if (!hasDnsOutcomeWindow(collection)) return "DNS outcomes: unknown; collection telemetry unavailable.";
+      const policy = dnsOutcomeCount(collection.policy_revision) ? String(collection.policy_revision) : "unknown";
+      const health = collection.collector_available === true ? "Collector available."
+        : collection.collector_available === false ? "Collector unavailable; retained events only."
+        : "Collector health unknown.";
+      const loss = dnsOutcomeCount(collection.dropped_events)
+        ? "Known receiver drops: " + collection.dropped_events + "; sender loss unknown."
+        : "Event loss unknown.";
+      // Unknown coverage_reason values never become HTML or an invented complete-coverage claim.
+      return "DNS outcomes: partial coverage, lower-bound events. Window: " +
+        dnsOutcomeTime(collection.window_start) + " – " + dnsOutcomeTime(collection.window_end) +
+        ". Policy revision: " + policy + ". " + health + " " + loss;
+    }
+
+    function dnsOutcomeRowText(observation, collection) {
+      const outcomes = observation.dns_outcomes;
+      if (outcomes === null || outcomes === undefined) return "DNS outcomes: Unknown/no outcome recorded.";
+      if (!hasDnsOutcomeWindow(collection)) return "DNS outcomes: Unknown (collection telemetry unavailable).";
+      if (![outcomes.blocked_decisions, outcomes.answered_noerror, outcomes.other_dns_errors].every(dnsOutcomeCount) ||
+          !dnsOutcomeTime(outcomes.last_observed_at) || outcomes.last_observed_at < collection.window_start ||
+          outcomes.last_observed_at > collection.window_end) return "DNS outcomes: Unknown (invalid outcome evidence).";
+      return "Blocked decisions observed: " + outcomes.blocked_decisions +
+        " · DNS answers observed: " + outcomes.answered_noerror +
+        " · Last observed: " + dnsOutcomeTime(outcomes.last_observed_at) + ".";
+    }
+
     function renderObservations(data) {
       const container = element("observations");
       const count = element("observation-count");
@@ -4291,6 +4334,7 @@
         summary.textContent += added === null ? " Latest successful scan: new-name comparison unavailable." :
           " Latest successful scan: " + added + (added === 1 ? " displayed name" : " displayed names") + " new to list.";
       }
+      summary.textContent += " " + dnsOutcomeCollectionText(data.dns_outcome_collection);
       container.replaceChildren();
       if (!data.available) {
         count.textContent = "Unavailable";
@@ -4440,6 +4484,10 @@
             hintLine.appendChild(link);
           }
           if (hintLine.childNodes.length > 0) domain.appendChild(hintLine);
+          const outcomes = document.createElement("p");
+          outcomes.className = "observation-hint observation-dns-outcomes";
+          outcomes.textContent = dnsOutcomeRowText(observation, data.dns_outcome_collection);
+          domain.appendChild(outcomes);
           const queryCount = document.createElement("span");
           queryCount.className = "observation-domain-count";
           queryCount.textContent = queryCountText(observation.query_count);
