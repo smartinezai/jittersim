@@ -135,3 +135,12 @@ The preceding ff272b95 frozen receipts remain: 529 native tests passed with four
 Linux-only skips, 45 Linux tests passed without skips and the actual isolated
 192.168.50 client/parser/repository proof passed. These results are retained
 separately from the narrow renewal successor checks.
+
+The first Linux renewal test passed the expiry-to-fresh-nonce transition but
+incorrectly expected a third epoch immediately after deliberately sending a
+wrong nonce in the second active window. The receiver correctly rejected that
+attempt while its valid second window remained present. The test now verifies
+the required two windows: an old timestamp retag is dropped, a fresh event is
+accepted, then an old nonce disconnects without increasing the valid count.
+No additional production change was needed for this test correction. The failed
+receipt is preserved as final-59cf723f-renewal.log.

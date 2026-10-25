@@ -325,17 +325,16 @@ def test_elapsed_epoch_requires_new_nonce_and_rejects_old_queued_packets(tmp_pat
                 assert receiver.active and challenge["nonce"] != old_nonce
                 return connection, challenge["nonce"]
 
-            client, _ = handshake(401)
-            client.send(encode_packet(old_packet))
-            receiver.poll(snapshot(), 401)
-            assert not receiver.active and not repository._dns_outcomes.rows
-            client.close()
-            client, nonce = handshake(402)
+            client, nonce = handshake(401)
             client.send(encode_packet(dict(old_packet, nonce=nonce)))
-            receiver.poll(snapshot(), 402)
+            receiver.poll(snapshot(), 401)
             assert not repository._dns_outcomes.rows
             client.send(encode_packet(dict(old_packet, nonce=nonce, sequence=2, at=402)))
             receiver.poll(snapshot(), 402)
+            assert next(iter(repository._dns_outcomes.rows.values()))["blocked_decisions"] == 1
+            client.send(encode_packet(old_packet))
+            receiver.poll(snapshot(), 402)
+            assert not receiver.active
             assert next(iter(repository._dns_outcomes.rows.values()))["blocked_decisions"] == 1
         finally:
             client.close()
