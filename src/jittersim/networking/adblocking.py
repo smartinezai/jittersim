@@ -441,7 +441,10 @@ def filtering_config(domains, allowances, access, dns_user="jittersim"):
     server = (
         server.replace("@5335", f"@{DNS_PORT}")
         .replace('username: "unbound"', f'username: "{dns_user}"')
-        .replace("use-syslog: yes", 'use-syslog: no\n  logfile: "/dev/null"')
+        .replace('logfile: ""', 'logfile: "/dev/null"')
+        .replace("log-replies: yes", "log-replies: no")
+        .replace("log-tag-queryreply: yes", "log-tag-queryreply: no")
+        .replace("log-local-actions: yes", "log-local-actions: no")
     )
     existing = set(re.findall(r'local-zone: "([^"]+)\." ', server))
     lines = [f'  local-zone: "{HEALTH_DOMAIN}." always_nxdomain']
