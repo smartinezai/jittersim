@@ -57,8 +57,8 @@ jobs:
   browser:
     name: Pi browser journeys
     runs-on: ubuntu-latest
-    # The phone layout journey checks three phone sizes twice (normal and wide fonts).
-    timeout-minutes: 15
+    # Allow the full suite to finish its desktop and phone checks.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
