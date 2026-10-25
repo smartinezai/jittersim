@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.browser import recurring_discovery as scan
+from tests import recurring_get_drain as scan
 
 
 @pytest.mark.parametrize("terminal", ["requestfinished", "requestfailed"])

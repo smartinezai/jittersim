@@ -1,22 +1,11 @@
 """Check real dashboard scan POSTs with synthetic replies and a browser fake clock."""
 
-import time
-
 from playwright.sync_api import expect
+
+from tests.recurring_get_drain import drain_gets
 
 
 SCAN = "/api/observations/scan"
-
-
-def drain_gets(page, open_gets):
-    """Pump both finish and failure callbacks within the existing real-time bound."""
-    deadline = time.monotonic() + 15
-    while open_gets and time.monotonic() < deadline:
-        # A single requestfinished wait can miss a completion or wait forever
-        # for a request that instead emitted requestfailed. The registered
-        # lifecycle callbacks maintain the authoritative outstanding set.
-        page.wait_for_timeout(10)
-    assert not open_gets, [request.url for request in open_gets]
 
 
 def check_recurring_scan(browser, base, width, evidence, authenticate):
