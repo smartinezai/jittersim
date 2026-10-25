@@ -135,6 +135,8 @@ function reviewDraft(id) {
     return;
   }
   if (draft.deviceId) {
+    workspaceViewRevision += 1;
+    previousWorkspaceTraffic = null;
     workspaceDevice = draft.deviceId;
     element('device-workspace').hidden = false;
     renderWorkspaceState();
@@ -362,6 +364,16 @@ function renderSystemHealth(data) {
 let workspaceDevice = null;
 let workspaceRequest = null;
 let previousWorkspaceTraffic = null;
+let workspaceViewRevision = 0;
+let workspaceTrafficRequest = null;
+function workspaceContextCurrent(context) {
+  return context.device === workspaceDevice && context.view === workspaceViewRevision &&
+    context.token === adminTokenRevision && adminTokenVerified && currentPage() === 'devices';
+}
+privateDataLockHooks.push(() => {
+  workspaceViewRevision += 1;
+  previousWorkspaceTraffic = null;
+});
 function renderDeviceCards() {
   const container = element('device-cards');
   if (!container) return;
@@ -403,26 +415,29 @@ async function openDevice(id) {
     ['workspace-timer-form', 'workspace-scenario-form'].forEach(key => { formDrafts.delete(key); element(key).reset(); });
     renderDraftNotice();
   }
+  workspaceViewRevision += 1;
   workspaceDevice = id;
   previousWorkspaceTraffic = null;
+  element('workspace-traffic').textContent = 'Waiting for traffic samples.';
   ['workspace-runs', 'workspace-usage', 'workspace-timeline'].forEach(key => delete element(key).dataset.renderKey);
   showTab('devices');
   element('device-workspace').hidden = false;
   populateWorkflowMenus();
   renderWorkspaceState();
+  const context = {device:id, view:workspaceViewRevision, token:adminTokenRevision};
   await loadWorkspace();
+  if (!workspaceContextCurrent(context)) return;
   const title = element('workspace-title');
   title.style.scrollMarginTop = '16px';
   title.focus({preventScroll:true}); title.scrollIntoView({block:'start'});
 }
 async function loadWorkspace() {
-  if (!workspaceDevice || workspaceRequest || currentPage() !== 'devices') return;
+  if (!workspaceDevice || workspaceRequest || !adminTokenVerified || currentPage() !== 'devices') return;
   const id = workspaceDevice;
+  const context = {device:id, view:workspaceViewRevision, token:adminTokenRevision};
   workspaceRequest = (async () => {
     const data = await request('/api/device-workspace/' + encodeURIComponent(id), 'GET');
-    // The graph page reads the counters every 2 seconds, so a fresh reading is reused here.
-    const traffic = await readTraffic(1500);
-    if (id !== workspaceDevice) return;
+    if (!workspaceContextCurrent(context)) return;
     const list = element('workspace-runs');
     replaceIfChanged(list, JSON.stringify([data.timers, data.runs, data.progressions]), () => {
       list.replaceChildren();
@@ -452,20 +467,42 @@ async function loadWorkspace() {
       element('workspace-later').hidden = entries.length <= 6;
     });
     element('timeline-note').textContent = (deviceConditions.applied ? '' : 'Saved rules preview. These settings are not confirmed active. ') + data.timeline.note + (data.timeline.truncated ? ' Showing the first 32 changes.' : ' Next 24 hours.');
-    const counters = traffic.devices && traffic.devices[id];
-    const now = traffic.sampled_at;
-    let text = 'Waiting for traffic samples.';
-    if (counters && previousWorkspaceTraffic && now > previousWorkspaceTraffic.at) {
-      const seconds = now - previousWorkspaceTraffic.at;
-      const upload = Math.max(0, counters.upload_bytes - previousWorkspaceTraffic.counters.upload_bytes) * 8 / seconds / 1000000;
-      const download = Math.max(0, counters.download_bytes - previousWorkspaceTraffic.counters.download_bytes) * 8 / seconds / 1000000;
-      text = 'At the Pi: ↑ ' + upload.toFixed(2) + ' Mbit/s · ↓ ' + download.toFixed(2) + ' Mbit/s. Measured before any profile effects.';
-    }
-    if (counters) previousWorkspaceTraffic = {at:now,counters};
-    element('workspace-traffic').textContent = text;
+    loadWorkspaceTraffic(context);
   })();
   try { await workspaceRequest; } finally { workspaceRequest = null; }
 }
+function loadWorkspaceTraffic(context) {
+  // Keep one optional completion while controls continue using the existing poll.
+  if (workspaceTrafficRequest || !workspaceContextCurrent(context)) return;
+  const owner = {};
+  workspaceTrafficRequest = owner;
+  (async () => {
+    try {
+      // Reuse the graph reader and its single in-flight counter request.
+      const traffic = await readTraffic(1500);
+      if (!workspaceContextCurrent(context)) return;
+      const id = context.device;
+      const counters = traffic.devices && traffic.devices[id];
+      const now = traffic.sampled_at;
+      let text = 'Waiting for traffic samples.';
+      if (counters && previousWorkspaceTraffic && now > previousWorkspaceTraffic.at) {
+        const seconds = now - previousWorkspaceTraffic.at;
+        const upload = Math.max(0, counters.upload_bytes - previousWorkspaceTraffic.counters.upload_bytes) * 8 / seconds / 1000000;
+        const download = Math.max(0, counters.download_bytes - previousWorkspaceTraffic.counters.download_bytes) * 8 / seconds / 1000000;
+        text = 'At the Pi: ↑ ' + upload.toFixed(2) + ' Mbit/s · ↓ ' + download.toFixed(2) + ' Mbit/s. Measured before any profile effects.';
+      }
+      if (counters) previousWorkspaceTraffic = {at:now,counters};
+      element('workspace-traffic').textContent = text;
+    } catch (error) {
+      if (!workspaceContextCurrent(context)) return;
+      previousWorkspaceTraffic = null;
+      element('workspace-traffic').textContent = 'Traffic unavailable. Retrying automatically.';
+    } finally {
+      if (workspaceTrafficRequest === owner) workspaceTrafficRequest = null;
+    }
+  })();
+}
+
 function populateWorkflowMenus() {
   [['workspace-profile', profiles], ['workspace-scenario', savedScenarios]].forEach(([id, items]) => {
     const select = element(id);
@@ -504,9 +541,9 @@ function installDeviceWorkflows() {
     const device=devices.find(item => item.id === workspaceDevice);
     if (!device || !await confirmWorkflow('Delete ' + deviceTitle(device) + ' and its schedules, temporary runs and limits? A group with only this device is also deleted.')) return;
     await request('/api/devices/delete', 'POST', {id:device.id});
-    workspaceDevice=null; workspace.hidden=true; refreshAfterSuccess('Device deleted.');
+    workspaceViewRevision += 1; workspaceDevice=null; previousWorkspaceTraffic=null; workspace.hidden=true; refreshAfterSuccess('Device deleted.');
   }));
-  workspace.append(actionButton('Close device controls', () => { workspace.hidden = true; workspaceDevice = null; }));
+  workspace.append(actionButton('Close device controls', () => { workspace.hidden = true; workspaceViewRevision += 1; workspaceDevice = null; previousWorkspaceTraffic = null; }));
   element('workspace-timer-form').addEventListener('submit', async event => {
     event.preventDefault();
     try {
