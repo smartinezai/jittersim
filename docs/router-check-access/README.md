@@ -36,3 +36,8 @@ replies and a fixture credential acknowledgement, not owner credentials, actual
 router evidence or physical acceptance. No live Pi/router or extension changes.
 All wrapper jobs terminated and this lane's slots were released. No broad release
 matrix or new screenshot-polishing loop was run.
+
+Subsequent hosted jobs did execute and found CI failures. See the
+[executed CI follow-up](ci-followup/README.md) for the bounded fixture corrections,
+the separately committed Python 3.9 CSV correction, and their local results.
+Earlier raw receipts above are preserved as historical evidence.

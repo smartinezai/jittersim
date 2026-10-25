@@ -61,7 +61,10 @@ async function runCase(browser, base, item, width) {
     await page.locator("#check-admin-token").click();
     await expect(page.locator("#token-check-status")).toContainText("Token accepted", { timeout: 20000 });
     if (await page.locator("#private-dashboard").isHidden()) {
-      await page.locator("#close-credentials").click();
+      // Phone admission already closes credentials to focus Allow this device.
+      if (await page.locator("#credentials-panel").isVisible()) {
+        await page.locator("#close-credentials").click();
+      }
       await page.locator("#allow-dashboard-device").click();
     }
     await expect(page.locator("#private-dashboard")).toBeVisible({ timeout: 20000 });
