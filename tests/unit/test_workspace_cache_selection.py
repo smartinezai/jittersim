@@ -9,6 +9,8 @@ from jittersim.api.workflows import read_workflow
 
 
 class Repository:
+    _connection = None
+
     def get_device(self, device_id):
         return SimpleNamespace(id=device_id)
 
@@ -26,10 +28,7 @@ class Repository:
 
 
 def workspace_server(cache):
-    server = SimpleNamespace(
-        repository=Repository(), _workspace_timelines=cache
-    )
-    server.repository._connection = None
+    server = SimpleNamespace(repository=Repository(), _workspace_timelines=cache)
     payload = {
         field: []
         for field in (
@@ -46,9 +45,9 @@ def workspace_server(cache):
     return server
 
 
-def run_workspace(server, failures):
+def run_workspace(server, failures, device_id="device-a"):
     try:
-        status, _, body = read_workflow(server, "/api/device-workspace/device-a")
+        status, _, body = read_workflow(server, f"/api/device-workspace/{device_id}")
         assert status == 200
         return json.loads(body)["timeline"]
     except BaseException as error:
@@ -61,14 +60,23 @@ def test_cached_timeline_selection_survives_another_request_clearing_cache():
     selected = {"cached": True}
     ready_to_clear = threading.Event()
     cleared = threading.Event()
+    computing = threading.Event()
+    allow_computation = threading.Event()
 
     class PausingCache(dict):
-        def get(self, requested_key, default=None):
-            value = super().get(requested_key, default)
+        def pause_after_selection(self, requested_key, selected):
             if requested_key == key and threading.current_thread().name == "selected":
                 ready_to_clear.set()
                 assert cleared.wait(3)
-            return value
+            return selected
+
+        def __contains__(self, requested_key):
+            present = super().__contains__(requested_key)
+            return self.pause_after_selection(requested_key, present)
+
+        def get(self, requested_key, default=None):
+            value = super().get(requested_key, default)
+            return self.pause_after_selection(requested_key, value)
 
     cache = PausingCache({key: selected})
     cache.update({("other", index): {} for index in range(15)})
@@ -76,8 +84,13 @@ def test_cached_timeline_selection_survives_another_request_clearing_cache():
     failures = []
     results = {}
 
+    def compute_timeline(*args, **kwargs):
+        computing.set()
+        assert allow_computation.wait(3)
+        return {"timeline": "computed"}
+
     with patch("jittersim.api.workflows.time.time", return_value=120), patch(
-        "jittersim.api.workflows.device_timeline", return_value={"timeline": "computed"}
+        "jittersim.api.workflows.device_timeline", side_effect=compute_timeline
     ):
         first = threading.Thread(
             name="selected",
@@ -85,10 +98,18 @@ def test_cached_timeline_selection_survives_another_request_clearing_cache():
         )
         first.start()
         assert ready_to_clear.wait(3)
-        cache.clear()
-        results["second"] = run_workspace(server, failures)
+        second = threading.Thread(
+            name="evictor",
+            target=lambda: results.setdefault(
+                "second", run_workspace(server, failures, "device-b")
+            ),
+        )
+        second.start()
+        assert computing.wait(3)
         cleared.set()
         first.join(3)
+        allow_computation.set()
+        second.join(3)
 
     assert not first.is_alive()
     assert failures == []
