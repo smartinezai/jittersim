@@ -11,6 +11,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.dns_outcomes import check_dns_outcomes
 from tests.browser.phone import close_controls, sidebar_control
 
 ADD_PATH = "/api/observations/add-to-profile"
@@ -449,6 +450,11 @@ def run(*, cases=("single", "group"), widths=(1920, 390)):
             )
             try:
                 evidence = []
+                for width in (1440, 375):
+                    check_dns_outcomes(browser, f"http://127.0.0.1:{port}", width, evidence)
+                if os.environ.get("JITTERSIM_DNS_OUTCOME_AUDIT") == "1":
+                    print(json.dumps({"result": "passed", "evidence": evidence}, indent=2))
+                    return
                 for width in widths:
                     check_membership_labels(browser, f"http://127.0.0.1:{port}", width, evidence)
                     check_device_collapse(browser, f"http://127.0.0.1:{port}", width, evidence)
