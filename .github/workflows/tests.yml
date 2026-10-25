@@ -27,7 +27,8 @@ jobs:
   linux:
     name: Linux datapath
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The full crash-recovery suite can take more than sixteen minutes.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:

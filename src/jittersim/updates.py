@@ -2280,7 +2280,7 @@ def command_group_running(group, deadline):
                     fields = handle.read(4096).rsplit(")", 1)[1].split()
                 if fields[0] != "Z" and int(fields[2]) == group:
                     return True
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 continue
             except (ValueError, IndexError) as error:
                 raise UpdateError("command completion could not be confirmed") from error
