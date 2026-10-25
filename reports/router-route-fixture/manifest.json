@@ -1,0 +1,12 @@
+{
+  "base": "6e4157649ba30d9ad3203a13e32426e9ddaa6b6f",
+  "tested_head": "28c2c45710a364aa151845bb0bbd36188e6d7d03",
+  "source_tree": "b77d9e2279b7f78df5e94c3a6ff1a21faa8d288e",
+  "tests_tree": "a0a39137fc8837b8a1b2c90bc5c08a555eaccdd7",
+  "receipt": "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-route-fixture/test-results/local-ci-20261025-160209",
+  "sha256": {
+    "test-results/local-ci-20261025-160209/browser_router_copy.log": "2f7ddcadb69d174a68344b48df3cbb901512920ad9ae37178c4b8248ffc03529",
+    "test-results/local-ci-20261025-160209/summary.md": "2da4bf247613fa476df4c980ab39dd22a2f3f5ed7fa73555035502c721eef090",
+    "test-results/router-route/hosted-original-failure.txt": "8de2e94c8e3e72c84fba8e5585e6fb827e2d336f6940ece62632130b8e1066c0"
+  }
+}
