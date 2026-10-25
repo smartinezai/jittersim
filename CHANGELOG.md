@@ -7,6 +7,20 @@ Changes merged after the newest release are listed under Unreleased until the
 next release takes them over. The Pi shows at most 16 KB of a section, so keep
 the hand-written Unreleased part short.
 
+## v1.1.0 - 2026-10-25
+
+Traffic charts preserve bounded history when the Pi reports decreasing counters. An affected metric shows a gap until a fresh rate can be calculated; a packet-counter reset no longer removes valid byte-rate history. This fixes presentation of resets without claiming the underlying Pi counter cause is known.
+
+Traffic now shows independently observed DNS block decisions and NOERROR answers from the household resolver, with the collection window, policy revision and partial-coverage status. These are lower-bound event counts, separate from observed queries and saved block-list membership. They do not prove website success or match every query to a response. Historical or unavailable evidence stays unknown. Counts are kept in bounded memory, and protected, stale, unknown and ambiguous client identities are excluded before aggregation.
+
+Start scanning begins repeated bounded discovery captures without repeated Scan now clicks. Stop scanning prevents future captures and suppresses late results; an already-running bounded capture may finish. Captures do not overlap. Navigation, a hidden page, access loss or helper loss stops the loop without automatic resumption. Saved-results refresh remains separate from capture.
+
+Protected devices are exempt from global Blocked Sites in both DNS and address blocking. Allow-only restrictions, other access rules and separately opted-in ad blocking retain their existing behavior.
+
+Upgrade from the reviewed 1.0.1 bridge, not directly from the original 1.0.0 updater. Normal Check for updates downloads and verifies the latest published stable package, then offers a separately confirmed Install. The final release must not become latest until the bridge is running on the supported installation.
+
+The Pi's upload-corruption capability warning remains an unresolved platform diagnosis; synthetic Linux tests are not proof that the Pi supports that path. Real Pi installation, recovery, settings, management-access and safety acceptance must be recorded against this exact signed package before publication.
+
 ## v1.0.1 - 2026-10-25
 
 This compatibility update prepares an existing 1.0.0 installation to accept the exact reviewed networking consumers in the forthcoming 1.1.0 update. The bridge retains the existing Panic guard, privileged helper and network-access code. Its updater adds one complete reviewed hash tuple while retaining all previous approved tuples.
