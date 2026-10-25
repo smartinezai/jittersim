@@ -270,7 +270,9 @@ def test_proxy_general_profile_covers_unassigned_clients_and_bypasses_protected(
     assert not destination_allowed(allowed, address, "8.8.8.8", AFFECTED)
     assert destination_allowed(allowed, address, "8.8.8.8", PROTECTED)
     blocked = replace(allowed, global_blocked_addresses=(IPv4Address("8.8.8.8"),))
-    assert not destination_allowed(blocked, address, "8.8.8.8", PROTECTED)
+    assert destination_allowed(blocked, address, "8.8.8.8", PROTECTED)
+    assert not destination_allowed(replace(blocked, global_allowed_addresses=()),
+                                   address, "8.8.8.8", PROTECTED)
     with pytest.raises(ProxyError):
         select_mark(plan, client_ip=address, host="example.com")
     no_protection = replace(

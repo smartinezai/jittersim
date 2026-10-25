@@ -11,6 +11,7 @@ from pathlib import Path
 
 from jittersim.api.server import WRITE_PATHS, ControlServer
 from jittersim.config.storage import ConfigRepository
+from jittersim.networking.access import AccessManager
 from jittersim.networking.dashboard_access import AccessStore
 from jittersim.networking.helper import (
     HelperClient,
@@ -18,6 +19,8 @@ from jittersim.networking.helper import (
     HelperService,
     UnixHelperServer,
 )
+from jittersim.networking.topology import Topology
+from tests.access_support import AccessExecutor
 from tests.unit.test_dashboard_access import MAC, PEER, PeerApplier
 
 
@@ -27,7 +30,15 @@ def dashboard(tmp_path, configure=None, service_class=HelperService):
     store = AccessStore(tmp_path / "access.json")
     socket_directory = Path(tempfile.mkdtemp(prefix="js-access-", dir="/tmp"))
     socket_path = socket_directory / "helper.sock"
-    helper = UnixHelperServer(socket_path, service_class(applier, access_store=store))
+    service = service_class(applier, access_store=store)
+    if service._access_manager is None:
+        # Protection changes refresh household policy through the real socket.
+        # Keep custom managers and avoid running host networking commands.
+        directory = tmp_path / "household"
+        service._access_manager = AccessManager(
+            executor=AccessExecutor(directory), topology=Topology("eth0", "wlan0"),
+            directory=directory, runtime_path=directory / "runtime.json")
+    helper = UnixHelperServer(socket_path, service)
     worker = threading.Thread(target=helper.serve_forever)
     worker.start()
     ready = queue.Queue()
