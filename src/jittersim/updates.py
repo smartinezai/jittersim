@@ -1025,6 +1025,12 @@ PANIC_APPROVED_SOURCES = ({
     "src/jittersim/panic_guard.py": "041cf171875d7b85d1c0664c2acff262542a3ac3c2b2e8fe51f80d2d59d6d639",
     "src/jittersim/networking/helper.py": "f1d0e704b8ad61b4ef677e25d4b1c3f40ea1e16dfceb67246568f8ca35366587",
     "src/jittersim/networking/access.py": "41a0f6f96cf2a20616d7ac613dd95acf2cd31085a13018ce14667dea2e11e1f3",
+}, {
+    # See docs/exact-updater-trust-bridge-2026-10-25.md. Exact reviewed protected
+    # access and query-outcome consumers at d605cf19; guard and helper are unchanged.
+    "src/jittersim/panic_guard.py": "041cf171875d7b85d1c0664c2acff262542a3ac3c2b2e8fe51f80d2d59d6d639",
+    "src/jittersim/networking/helper.py": "f1d0e704b8ad61b4ef677e25d4b1c3f40ea1e16dfceb67246568f8ca35366587",
+    "src/jittersim/networking/access.py": "5c335f3b72b90e8eb7bff3cef135fe4f6986402fa529261f1af0ebe53eb4a219",
 },)
 
 
