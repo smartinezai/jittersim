@@ -138,6 +138,7 @@
         else link.removeAttribute("aria-current");
       });
       document.body.dataset.section = id;
+      if (typeof syncObservationScanning === "function") syncObservationScanning();
       if (typeof updatePageTitle === "function") updatePageTitle(adminTokenVerified);
       if (userInitiated) {
         // The full-width navigation hands focus to the selected page at every size.
