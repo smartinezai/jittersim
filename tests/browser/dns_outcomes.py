@@ -126,7 +126,7 @@ def check_dns_outcomes(browser, base, width, evidence):
         state["hold"] = True
         with page.expect_request("**/api/observations"):
             page.evaluate("() => { window.outcomeReadForTest = loadObservations(); }")
-        page.wait_for_function("window.outcomeRouteHeldForTest === true")
+        page.wait_for_function("() => window.outcomeRouteHeldForTest === true")
         assert pending
         page.evaluate("() => lockDashboardAccess('Locked for synthetic outcome fixture')")
         expect(page.locator(".observation-dns-outcomes")).to_have_count(0)
