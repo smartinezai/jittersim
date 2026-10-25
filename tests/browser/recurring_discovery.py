@@ -1,5 +1,7 @@
 """Check real dashboard scan POSTs with synthetic replies and a browser fake clock."""
 
+import time
+
 from playwright.sync_api import expect
 
 
@@ -38,15 +40,20 @@ def check_recurring_scan(browser, base, width, evidence, authenticate):
                 route.fulfill(json=capture)
 
         def advance(seconds):
-            # Let ordinary status GETs finish between fake seconds so their request
-            # deadlines do not become an unrelated fast-forward failure.
+            # Fence actual network completion before advancing the fake clock
+            # again. A fixed 100 x 10ms spin imposed an unrelated one-second
+            # wall-clock deadline on healthy GETs on a busy hosted runner.
             for _ in range(seconds):
                 page.clock.run_for(1000)
                 page.wait_for_timeout(5)
-                for _ in range(100):
-                    if not open_gets:
-                        break
-                    page.wait_for_timeout(10)
+                deadline = time.monotonic() + 15
+                while open_gets:
+                    request = next(iter(open_gets))
+                    remaining = max(1, (deadline - time.monotonic()) * 1000)
+                    page.wait_for_event(
+                        "requestfinished", predicate=lambda done: done == request,
+                        timeout=remaining,
+                    )
                 assert not open_gets, [request.url for request in open_gets]
 
         page.route("**" + SCAN, scan)
