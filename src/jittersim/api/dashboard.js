@@ -1377,6 +1377,7 @@
     }
 
     function formatTrafficRate(megabitsPerSecond) {
+      if (!Number.isFinite(megabitsPerSecond)) return "unavailable";
       if (megabitsPerSecond < 1) {
         return (megabitsPerSecond * 1000).toFixed(1) + " kbit/s";
       }
@@ -1420,6 +1421,7 @@
     }
 
     function formatPacketRate(packetsPerSecond) {
+      if (!Number.isFinite(packetsPerSecond)) return "—";
       return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(packetsPerSecond) + " pkt/s";
     }
 
@@ -2021,20 +2023,22 @@
           const elapsedSeconds = sampledAt - previousTrafficSample.sampledAt;
           const fields = Object.keys(totals);
           const countersReset = fields.some((field) => totals[field] < previousTrafficSample.totals[field]);
-          if (countersReset || elapsedSeconds < 0) {
+          if (elapsedSeconds < 0) {
             resetTrafficHistory();
-            element("traffic-status").textContent = countersReset
-              ? "Counters changed. Starting a fresh graph..."
-              : "Sample time changed. Starting a fresh graph...";
+            element("traffic-status").textContent = "Sample time changed. Starting a fresh graph...";
           } else if (elapsedSeconds === 0) {
             element("traffic-status").textContent = "Waiting for a new traffic sample. Last rates are kept.";
             drawTrafficChart();
             return;
           } else {
-            const upload = Math.max(0, totals.upload_bytes - previousTrafficSample.totals.upload_bytes) * 8 / elapsedSeconds / 1000000;
-            const download = Math.max(0, totals.download_bytes - previousTrafficSample.totals.download_bytes) * 8 / elapsedSeconds / 1000000;
-            const uploadPackets = Math.max(0, totals.upload_packets - previousTrafficSample.totals.upload_packets) / elapsedSeconds;
-            const downloadPackets = Math.max(0, totals.download_packets - previousTrafficSample.totals.download_packets) / elapsedSeconds;
+            // A replaced counter invalidates only its interval, not earlier measurements.
+            // Null breaks that direction's line; zero would invent measured idle traffic.
+            const rate = (field, scale = 1) => totals[field] < previousTrafficSample.totals[field]
+              ? null : (totals[field] - previousTrafficSample.totals[field]) * scale / elapsedSeconds;
+            const upload = rate("upload_bytes", 8 / 1000000);
+            const download = rate("download_bytes", 8 / 1000000);
+            const uploadPackets = rate("upload_packets");
+            const downloadPackets = rate("download_packets");
             trafficSamples.push({
               time: receivedAt,
               recordedAt: sampledAt * 1000,
@@ -2051,10 +2055,12 @@
             element("traffic-upload-packets").textContent = formatPacketRate(uploadPackets);
             element("traffic-download-packets").textContent = formatPacketRate(downloadPackets);
             // Drops restart from zero when a plan is applied.
-            const dropped = Math.max(0, queueTotals.dropped - previousTrafficSample.queues.dropped);
-            element("traffic-drop-rate").textContent = formatPacketRate(dropped / elapsedSeconds);
+            const dropped = queueTotals.dropped - previousTrafficSample.queues.dropped;
+            element("traffic-drop-rate").textContent = formatPacketRate(dropped < 0 ? null : dropped / elapsedSeconds);
             element("traffic-queued").textContent = queueTotals.queued + " packets";
-            element("traffic-status").textContent = "Sampling live traffic every 2 seconds.";
+            element("traffic-status").textContent = countersReset
+              ? "Counters restarted. Affected rates are unavailable for this interval; earlier history is kept."
+              : "Sampling live traffic every 2 seconds.";
           }
         } else {
           element("traffic-status").textContent = "Collecting the first sample...";
