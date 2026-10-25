@@ -17,6 +17,10 @@ SERIES = (
     "upload", "download", "isp_upload", "isp_download", "profile_upload", "profile_download"
 )
 STARTED = time.monotonic()
+BACKGROUND_READ_PATHS = frozenset({
+    "/api/traffic", "/api/connected-devices", "/api/connected-device-labels",
+    "/api/general-profile", "/api/state", "/api/health", "/api/observations",
+})
 
 
 def start_fixture():
@@ -94,6 +98,30 @@ def expect_emphasis(page, series):
 
 def is_traffic_poll(url):
     return urlsplit(url).path == "/api/traffic"
+
+
+def is_background_read(method, url, base):
+    """Only the fixture's finite existing same-origin status polls are unrelated."""
+    target, origin = urlsplit(url), urlsplit(base)
+    return (method == "GET" and target.scheme == origin.scheme and target.netloc == origin.netloc
+            and target.path in BACKGROUND_READ_PATHS and not target.query and not target.fragment)
+
+
+def check_background_request_classification():
+    """Keep background classification from hiding mutations or unexpected reads."""
+    base = "http://127.0.0.1:33053"
+    for path in BACKGROUND_READ_PATHS:
+        assert is_background_read("GET", base + path, base)
+        for method in ("POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
+            assert not is_background_read(method, base + path, base), (method, path)
+        for suffix in ("/", "?refresh=1", "#unexpected"):
+            assert not is_background_read("GET", base + path + suffix, base), (path, suffix)
+    for url in (
+        base + "/api/observations/scan", base + "/api/unknown", base + "/api/traffic-settings",
+        "http://127.0.0.1:33054/api/health", "https://127.0.0.1:33053/api/health",
+        "http://localhost:33053/api/health", "https://example.org/api/traffic",
+    ):
+        assert not is_background_read("GET", url, base), url
 
 
 def prepare_page(browser, base, width, dpr, general_active, touch=False, low_rate=False):
@@ -230,7 +258,8 @@ def check_chart(browser, base, width, dpr, general_active, touch=False):
             expect(detail).to_contain_text("Shared profile download limit")
             expect(detail).to_contain_text("5.00 Mbit/s")
 
-            # Pointer interaction must be local. Exclude the already-running bounded poll.
+            # Pointer interaction must be local. Existing traffic/status polls may finish
+            # during these actions; no mutation or unknown request is exempted.
             request_mark = len(requests)
             choose_plot_point(page, 30)
             if touch:
@@ -251,7 +280,8 @@ def check_chart(browser, base, width, dpr, general_active, touch=False):
                 expect(selected).to_have_attribute("aria-pressed", "false")
                 selected.click()
             expect(selected).to_have_attribute("aria-pressed", "true")
-            unrelated = [item for item in requests[request_mark:] if not is_traffic_poll(item[1])]
+            unrelated = [item for item in requests[request_mark:]
+                         if not is_background_read(item[0], item[1], base)]
             assert not unrelated, f"Inspecting a chart line issued requests: {unrelated}"
             if width == 1440:
                 for _ in range(3):
@@ -358,6 +388,7 @@ def check_low_rate_chart(browser, base, width):
 
 
 def run():
+    check_background_request_classification()
     Path("test-results").mkdir(exist_ok=True)
     process, port = start_fixture()
     try:

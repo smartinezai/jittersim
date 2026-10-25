@@ -297,12 +297,13 @@ def check_navigation(page, what):
         expect(page.locator(f"#page-{name}")).to_be_focused()
         expect(page.locator(f'[data-page-link="{name}"]')).to_have_attribute("aria-current", "page")
         assert page.url.endswith("#" + name), page.url
-        start = box(page, f"#page-{name}")
-        # The page starts at the top of the window unless it is too short to scroll that far.
-        at_end = page.evaluate(
-            "window.scrollY >= document.documentElement.scrollHeight - window.innerHeight - 1"
-        )
-        assert -1 <= start["y"] <= 9 or at_end, (what, name, "page start", start)
+        # Access starts with dashboard sign-in/access management before network rules.
+        first_content = "#dashboard-access-panel" if name == "access" else f"#page-{name}"
+        start = box(page, first_content)
+        # Navigation keeps the document header visible; the section starts below it.
+        assert page.evaluate("window.scrollY") <= 1, (what, name, "document top", start)
+        inside_window(page, ".sidebar-brand", what)
+        inside_window(page, ".sidebar-nav", what)
         assert start["y"] + 40 < bar_top(page), (what, name, "page start is under the bar", start)
         no_sideways_overflow(page, f"{what} on {name}")
     # The colliding ids are gone: a hash that names a page never scrolls to another element.

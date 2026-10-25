@@ -82,7 +82,10 @@ def check_compact(page, name):
     panic_reachable(page)
     page.locator('[data-page-link="schedules"]').click()
     expect(page.locator("#page-schedules")).to_be_focused()
-    assert page.locator("#page-schedules").bounding_box()["y"] < 10
+    # Page navigation preserves the document header, including in short windows.
+    assert page.evaluate("window.scrollY") <= 1
+    inside(page, ".sidebar-brand")
+    inside(page, ".sidebar-nav")
     panic_reachable(page)
     toggle.click()
     expect(toggle).to_have_attribute("aria-expanded", "true")
