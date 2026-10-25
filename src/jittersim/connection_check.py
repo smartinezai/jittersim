@@ -978,7 +978,7 @@ def _csv_cell(value: Any) -> Any:
 
 def check_export_csv(results: Sequence[Dict[str, Any]]) -> str:
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=CHECK_EXPORT_COLUMNS, lineterminator="\n")
+    writer = csv.DictWriter(output, fieldnames=CHECK_EXPORT_COLUMNS, lineterminator="\r\n")
     writer.writeheader()
     for result in results:
         writer.writerow({key: _csv_cell(value) for key, value in check_export_row(result).items()})

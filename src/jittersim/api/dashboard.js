@@ -8056,15 +8056,19 @@
         routerPasswordRejected ? "Router password rejected. Enter it again." : busy ? "Working…" :
         !password ? "Enter the router password first" : "Copy the router Wi-Fi name, password and security to the Pi";
       element("check-router-password").disabled = busy || routerCheckWaiting();
-      element("refresh-router-wifi").disabled = !helperConfigured || !adminTokenVerified ||
-        !password || routerPasswordRejected || busy;
+      ["refresh-router-wifi", "check-router-wifi-now"].forEach((id) => {
+        element(id).disabled = !helperConfigured || !adminTokenVerified ||
+          !password || routerPasswordRejected || busy;
+      });
       value.textContent = known ? (routerWifiEnabled ? "On" : "Off") : "Unknown";
       value.setAttribute("data-unknown", String(!known));
       status.textContent = !adminTokenVerified ? "Check admin token" : !helperConfigured ? "Needs Pi helper" :
         !password ? "Enter router password" : routerPasswordRejected ? "Password rejected" :
         routerActionPending || routerWifiRemoteChanging ? "Changing…" : busy ? "Checking…" :
-        known ? (routerWifiEnabled ? "On" : "Off") + " · " + new Date(routerWifiCheckedAt * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}) : routerWifiError ? "Status unavailable" : "Check router Wi-Fi";
-      status.title = routerWifiError || (known ? "Last checked " + new Date(routerWifiCheckedAt * 1000).toLocaleTimeString() : "Automatic router checks are paused. Choose Check router Wi-Fi.");
+        known ? (routerWifiEnabled ? "On" : "Off") + " · " + new Date(routerWifiCheckedAt * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}) : routerWifiError ? "Status unavailable" : "Not checked";
+      const checkNow = element("check-router-wifi-now");
+      checkNow.title = checkNow.disabled ? status.textContent : "Read whether the router Wi-Fi is on or off";
+      status.title = routerWifiError || (known ? "Last checked " + new Date(routerWifiCheckedAt * 1000).toLocaleTimeString() : "Automatic router checks are paused. Use Check to read the current router Wi-Fi status.");
     }
 
     // The Pi spaces router sign-ins apart. When it refuses a password check the button counts
@@ -8353,7 +8357,7 @@
       element("router-admin-password").focus();
     });
     element("check-router-password").addEventListener("click", checkRouterPassword);
-    element("refresh-router-wifi").addEventListener("click", pollRouterWifi);
+    ["refresh-router-wifi", "check-router-wifi-now"].forEach((id) => element(id).addEventListener("click", pollRouterWifi));
 
     element("sync-router-ap").addEventListener("click", (event) => {
       routerAction("/api/router/sync-ap", {}, "Checking the router Wi-Fi security...", event.currentTarget);

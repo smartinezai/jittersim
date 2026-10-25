@@ -1,0 +1,27 @@
+{
+  "pr_head_before_repairs": "80029b962370c26b646ac68cc74f2ce44e3a9c2c",
+  "pr_base": "b061d2d84439bf906f1da8ca9ae306cfa0b27f52",
+  "csv_source_commit": "86828a3e6e1da67cc998b4d8553d18eb033e032b",
+  "hosted_runs": [
+    40137197832,
+    40137197807
+  ],
+  "hosted_failed_jobs": [
+    121001120139,
+    121001120534,
+    121001119731
+  ],
+  "files": {
+    "src/jittersim/connection_check.py": "f854e40a13312ace0c9b2fcb0826a97ba587bf7fd186c11b4e32455e6357f169",
+    "tests/unit/test_connection_check_mutation.py": "9965417087da543808453b101d656cb8a4a0d02ee1ae7f58149801793d88aae8",
+    "tests/unit/test_floating_credentials.py": "4ba8f067bb6de8cfeb37a0fbeeed91a226b7e72fbbb9afde5afb9cc858b47a87",
+    "tests/browser/group_devices.py": "2e87017f1f7f93e07c4dc77339e5b1acc4db84a1a08f67cb59a008422d46c9e2",
+    "tests/browser/homepage-live/dashboard.cjs": "7d719d07cd4a66a068cb100da2896a4ac86a483d34069f5df22290d388bf1d38"
+  },
+  "fixture_runtime": "synthetic loopback; no physical router or owner credential",
+  "runtime_package_source": "/Users/samantha.martinez/Documents/Codex/2026-10-24/task/router-ci-fixture-repairs/.venv-local-ci-3.12/lib/python3.12/site-packages/jittersim/connection_check.py",
+  "csv_installed_matches_source": true,
+  "baseline_auth_toast_prefix_sha256": "b385e68904818321137be7b4a5dbe4228f40b6a7d91cb307db71b45a1dc110a3",
+  "baseline_csv_blob": "e23ea216b75ee80bf888d94d44d08112ffcbabd9",
+  "baseline_csv_sha256": "c027ee8fb9e1f121c1dce16ff0d98437e76af54f96e91447baa2560e5a536240"
+}

@@ -1,0 +1,12 @@
+{
+  "transport": "real dashboard HTTP with explicitly substituted homepage responses",
+  "identity": "simulated fixture Wi-Fi commands",
+  "checks": [],
+  "failures": [
+    {
+      "check": "390px existing token",
+      "error": "TimeoutError: locator.click: Timeout 12000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('#close-credentials')\u001b[22m\n\u001b[2m    - locator resolved to <button type=\"button\" id=\"close-credentials\" aria-label=\"Close credentials panel\">Close</button>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m      - element is not visible\u001b[22m\n\u001b[2m    - retrying click action\u001b[22m\n\u001b[2m    - waiting 20ms\u001b[22m\n\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m      - element is not visible\u001b[22m\n\u001b[2m    - retrying click action\u001b[22m\n\u001b[2m      - waiting 100ms\u001b[22m\n\u001b[2m    23 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m       - element is not visible\u001b[22m\n\u001b[2m     - retrying click action\u001b[22m\n\u001b[2m       - waiting 500ms\u001b[22m\n"
+    }
+  ],
+  "browser": "153.0.8010.12"
+}

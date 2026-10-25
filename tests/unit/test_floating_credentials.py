@@ -154,7 +154,7 @@ CASES = {
       }
       assert.equal(timers.size, 0);
       assert.equal(networkCalls.length, 0);
-      assert.match(element("router-wifi-status").textContent, /Check router Wi-Fi/);
+      assert.equal(element("router-wifi-status").textContent, "Not checked");
     """,
     "explicit_check_requests_one_refresh_then_only_reads_its_result": r"""
       helperConfigured = true;

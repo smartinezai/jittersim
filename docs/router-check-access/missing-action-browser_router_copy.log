@@ -1,0 +1,191 @@
+$ /Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/.venv-local-ci-3.12/bin/python -m tests.browser.router_copy
+# started 2026-10-24 23:57:34 +0200
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/tests/browser/router_copy.py", line 569, in <module>
+    run()
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/tests/browser/router_copy.py", line 557, in run
+    check_visible_router_read(browser, f"http://127.0.0.1:{port}", width, height)
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/tests/browser/router_copy.py", line 527, in check_visible_router_read
+    expect(check).to_be_visible(timeout=2000)
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/.venv-local-ci-3.12/lib/python3.12/site-packages/playwright/sync_api/_generated.py", line 23501, in to_be_visible
+    self._sync(
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/.venv-local-ci-3.12/lib/python3.12/site-packages/playwright/_impl/_sync_base.py", line 115, in _sync
+    return task.result()
+           ^^^^^^^^^^^^^
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/.venv-local-ci-3.12/lib/python3.12/site-packages/playwright/_impl/_assertions.py", line 852, in to_be_visible
+    await self._expect_impl(
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/.venv-local-ci-3.12/lib/python3.12/site-packages/playwright/_impl/_assertions.py", line 128, in _expect_impl
+    _record_soft_or_raise(
+  File "/Users/samantha.martinez/Documents/Codex/2026-10-24/task-12/router-check-worktree/.venv-local-ci-3.12/lib/python3.12/site-packages/playwright/_impl/_assertions.py", line 60, in _record_soft_or_raise
+    raise error
+AssertionError: Locator expected to be visible
+Actual value: None
+Error: element(s) not found 
+Call log:
+  - Expect "to_be_visible" locator("#check-router-wifi-now") with timeout 2000ms
+  - waiting for locator("#check-router-wifi-now")
+
+Aria snapshot:
+- link "Skip to main content":
+  - /url: "#content"
+- status: Router password accepted. Nothing on the router was changed.
+- alert
+- text: Router password accepted. Nothing on the router was changed.
+- button "Dismiss message": Dismiss
+- complementary "JitterSim":
+  - paragraph: JitterSim
+  - text: Hardware mode
+  - paragraph: Version 1.0.0
+  - navigation "Sections":
+    - list:
+      - listitem:
+        - link "Devices 1":
+          - /url: "#devices"
+      - listitem:
+        - link "Profiles":
+          - /url: "#profiles"
+      - listitem:
+        - link "Schedules and limits":
+          - /url: "#schedules"
+      - listitem:
+        - link "Router and Wi-Fi":
+          - /url: "#router"
+      - listitem:
+        - link "Traffic":
+          - /url: "#traffic"
+      - listitem:
+        - link "Measurements":
+          - /url: "#measurements"
+      - listitem:
+        - link "Activity":
+          - /url: "#activity"
+      - listitem:
+        - link "Access and rules":
+          - /url: "#access"
+      - listitem:
+        - link "Diagnostics":
+          - /url: "#diagnostics"
+      - listitem:
+        - link "Updates":
+          - /url: "#updates"
+  - 'button "Everyone: none · Not running +"'
+  - button "Controls"
+  - text: Active profile
+  - combobox "Active profile" [disabled]:
+    - option "None selected" [selected]
+  - button "Apply to all devices" [disabled]
+  - paragraph: No saved profiles yet.
+  - link "Create one on the Profiles page":
+    - /url: "#profiles"
+  - button "Start"
+  - img "Start help": "?"
+  - status: No device profiles or service lists saved yet
+  - button "Reset network"
+  - img "Reset network help": "?"
+  - paragraph: Nothing is running. Choose Start.
+  - button "Panic Turn profiles and blocking off"
+  - text: Router Wi-Fi
+  - paragraph: Check router Wi-Fi
+  - text: Unknown
+- main:
+  - heading "Devices" [level=1]
+  - paragraph: Hardware mode is active. Network actions can update the live test network.
+  - region "Devices":
+    - button "Manage device and site access"
+    - heading "Getting started" [level=2]
+    - list:
+      - listitem:
+        - text: "1"
+        - link "Create a profile, or start from a preset":
+          - /url: "#profiles"
+      - listitem: ✓ Connect a device to the test Wi-Fi
+      - listitem:
+        - text: "3"
+        - link "Give it a profile, or choose one for everyone else":
+          - /url: "#devices"
+      - listitem: 4 Start
+    - region "Everyone":
+      - heading "Everyone" [level=2]
+      - paragraph: Apply a saved profile to every device on the test Wi-Fi except Protected devices. New arrivals are included.
+      - text: Saved profile
+      - combobox "Saved profile" [disabled]:
+        - option "Choose a saved profile" [selected]
+      - button "Apply to all" [disabled]
+      - button "Stop for everyone" [disabled]
+      - paragraph: Create a saved profile on the Profiles page to use this control.
+      - paragraph: The speed limit is shared only by affected devices. Protected devices bypass it completely. A device you apply its own profile to on Connected clients runs that profile instead of this one while this one keeps running for every other device. Start or Apply to all puts that device back on this profile. Stopping this profile resumes saved device rules. Panic turns all profiles off.
+    - region "Address changes":
+      - heading "Address changes" [level=2]
+      - paragraph: Phones and laptops can change their private Wi-Fi address. The Pi then sees a new device and its saved settings stop applying. This finds saved devices that came back with a new address.
+      - text: Follow private address changes
+      - combobox "Follow private address changes":
+        - option "Ask before moving" [selected]
+        - option "Automatic for strong evidence"
+        - option "Off"
+      - button "Save setting"
+      - paragraph: Ask moves nothing until you choose Yes. Automatic moves only a device's profile and name, and only on strong evidence. Protection and dashboard access never move automatically. Every move can be undone for 7 days. Off keeps no device names.
+      - paragraph: No saved device has come back with a new address.
+      - group: Address change history
+    - heading "Connected clients" [level=2]
+    - paragraph: Devices on the Pi’s Wi-Fi. Devices on the router’s Wi-Fi are not listed here.
+    - status: 1 connected
+    - button "Check for devices"
+    - paragraph: Updated 23:57:37. Refreshes every 5 seconds.
+    - paragraph: 192.168.50.184
+    - paragraph: 192.168.50.184 · 02:00:00:00:00:01
+    - paragraph: "Type: Unknown"
+    - paragraph: "Profile: None"
+    - paragraph: Normal connection
+    - button "Test speed of 192.168.50.184": Test speed
+    - button "Check connection of 192.168.50.184": Check connection
+    - group: Edit name and type
+    - paragraph: Create a group on the Profiles page.
+    - text: Connected
+    - combobox "Profile for 192.168.50.184":
+      - option "No profiles saved" [selected]
+    - button "Assign profile for 192.168.50.184" [disabled]: Assign profile
+    - combobox "Group for 192.168.50.184" [disabled]:
+      - option "No groups" [selected]
+    - button "Add to group for 192.168.50.184" [disabled]: Add to group
+    - button "Protect for 192.168.50.184": Protect
+    - region "Prepared device profiles":
+      - heading "Prepared device profiles" [level=2]
+      - paragraph: Save a profile choice for a Wi-Fi MAC address. Saving does not change the network. Use checks for that exact address on the Pi’s Wi-Fi. This does not establish physical identity or protect the device.
+      - text: Wi-Fi MAC address
+      - textbox "Wi-Fi MAC address":
+        - /placeholder: 02:00:00:00:00:01
+      - text: Display name (optional)
+      - textbox "Display name (optional)"
+      - text: Saved profile
+      - combobox "Saved profile":
+        - option "Choose a saved profile" [selected]
+      - button "Save choice"
+      - button "Refresh prepared choices"
+      - button "Previous" [disabled]
+      - button "Next" [disabled]
+      - paragraph: No prepared choices. Saving a choice will not change the network.
+    - heading "Saved devices" [level=2]:
+      - button "Saved devices" [expanded]
+    - paragraph: Assigned test clients and their current conditions
+    - paragraph: Conditions show the saved settings. The network does not apply them yet.
+    - text: No devices assigned yet.
+    - heading "Everyone else" [level=2]:
+      - button "Everyone else" [expanded]
+    - paragraph: Choose a profile for every test Wi-Fi client that isn't a saved device or on the protected list. They share one connection, so a speed limit in this profile is shared by all of them. A profile set for Everyone covers these clients too, so the two cannot be used at the same time.
+    - text: Profile for everyone else
+    - combobox "Profile for everyone else":
+      - 'option "None: normal connection" [selected]'
+    - button "Save everyone-else profile"
+    - region "Protected devices":
+      - heading "Protected devices" [level=2]:
+        - button "Protected devices"
+    - heading "Connection and Pi health" [level=2]
+    - paragraph: Dashboard connected
+    - paragraph: Network helper connected
+    - paragraph: "Version: 1.0.0"
+    - paragraph: "Free disk: 422.1 GB"
+    - paragraph: "Checked: 11:57:37 PM"
+    - paragraph: "Ethernet: Checking..."
+# finished with status 1 after 6.1 seconds
