@@ -1,0 +1,5 @@
+2026-10-25T13:09:17.0833567Z   File "/home/runner/work/jittersim/jittersim/tests/browser/observation_confirmation.py", line 496, in <module>
+2026-10-25T13:09:17.0835704Z   File "/home/runner/work/jittersim/jittersim/tests/browser/observation_confirmation.py", line 461, in run
+2026-10-25T13:09:17.0837273Z   File "/home/runner/work/jittersim/jittersim/tests/browser/recurring_discovery.py", line 70, in check_recurring_scan
+2026-10-25T13:09:17.0838248Z   File "/home/runner/work/jittersim/jittersim/tests/browser/recurring_discovery.py", line 53, in advance
+2026-10-25T13:09:17.0847664Z playwright._impl._errors.TimeoutError: Timeout 14999.99518300001ms exceeded while waiting for event "requestfinished"

@@ -1,0 +1,15 @@
+# PR255 hosted fixture recovery
+
+Frozen tested source8c3aa11ff4da91e357f20ab2d998b6c7a29e3225, based on68138f960134cd29d7cd642e8afeadb5b5b770e4. Test-only changes; production src/deploy/version/registry and signed1.0.1 artifact untouched.
+
+Executed hosted failures are preserved, not billing failures: run40195471940 PiBrowserjob121175256234 recurring_discovery.py53 waited15s for requestfinished; Python3.13job121175256421 test_unknown_leaf_keeps_kernel_lock_after_parent_scope_exits raised ProcessLookupError during cleanup.
+
+The fixture tracked both finished and failed requests but waited for only a future requestfinished event. Failed terminal events or completion between selecting and installing the waiter could leave that wait with no matching future event. The drain now pumps the registered callback-maintained outstanding set within the SAME15s monotonic bound. Outstanding GETs still fail with their URLs. It does not ignore network requests, skip captures, change runtime timers or extend the deadline. All18 original recurring capture/privacy/count/geometry assertion ASTs are unchanged; independent reviewer checked this.
+
+Process cleanup poll()/killpg() has an ordinary exit race. Catch only ProcessLookupError and still wait/reap. Parameterized cleanup_exit_race deterministically ends the fixture child AFTER the original real live-FD kernel-lock assertions and before killpg, proving the missing-group cleanup case without weakening ownership checks.
+
+Exact-head verification:38nativechecks,0failures/errors/skips onPython3.12; full affected observation_confirmation browsermodule PASS26s through unchanged sharedbrowserwrapper(privatecopiedvenv/offline package setup). Browserreceipt states clean8c3aa11f. Earlier prefreeze fullmodulePASS29s retained under test-results; not rerun beyond exactheadverification. Gating Ruff and git diff --check passed. Python3.13 was not on localPATH; no install attempted or native3.13pass claimed. The cleanup race is deterministic on local3.12; hosted3.13 follow-through is separate.
+
+Commands: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src .venv-local-ci-3.12/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_recurring_get_drain_recovery.py tests/unit/test_update_operation_lock.py --junitxml=/tmp/js-pr255-recovery-final-native.xml`; `PIP_NO_INDEX=1 PIP_NO_BUILD_ISOLATION=0 /private/tmp/claude-501/jittersim-heavy.sh browser --only observation_confirmation --step-timeout 120 --results-dir test-results/hosted-recovery-final`.
+
+Independent source review CLEAR by review_pr255_recovery; reviewer ran no duplicate tests or writes. New focused helper tests model both terminal set-removal callbacks, >1s healthy completion and finite15s stuck-request failure. ActualPlaywright fullmodule provides browser verification. Generated summary's blanket 'Hosted did not run' line is stale: actual681hosted runs DIDexecute, with failures recorded above. No successful replacement hostedrun is claimed by these local receipts. Evidence-only successor preserves frozen source/test identity.
