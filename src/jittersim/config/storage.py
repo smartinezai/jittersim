@@ -2014,6 +2014,7 @@ class ConfigRepository:
             devices=self.list_devices(), groups=self.list_device_groups(),
             mac_policy=self.get_mac_policy(), website_policy=self.get_website_policy(),
             site_blocks=self.list_site_blocks(), access_options=self.get_access_options(),
+            unaffected_devices=self.list_unaffected_devices(),
         )
 
     def access_plan(self):

@@ -4299,7 +4299,7 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
         )
 
     def _apply_household_block_list(self, *, control_intent=None) -> Optional[Tuple[int, str, bytes]]:
-        """Bring the filtered resolver in line with a changed global block list.
+        """Bring the filtered resolver in line with blocked sites or saved protection.
 
         Block globally and Unblock act at once like main's device quick action. Main's
         resolver otherwise kept refusing an unblocked name and the names under it until
@@ -5094,6 +5094,11 @@ class ControlServer(SafeServerErrors, socketserver.ThreadingMixIn, HTTPServer):
 
     def _address_saved_response(self, fields: dict):
         try:
+            failed = self._apply_household_block_list()
+            if failed is not None:
+                status, content_type, body = failed
+                return status, content_type, _json_bytes(
+                    {**fields, **json.loads(body), "live_applied": False})
             self._sync_ad_blocking()
             return self._saved_control_response(fields)
         except (HelperClientError, PlanError, StorageError, sqlite3.Error):
