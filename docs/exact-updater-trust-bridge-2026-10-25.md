@@ -45,4 +45,53 @@ installations or physical acceptance.
 
 Prior mechanism evidence `/tmp/js-pinned-bridge-review.md` and its provisional
 `82cf49e5` tuple are historical only; that provisional tuple is not added here.
-Focused execution results will be recorded after independent source review.
+## Executed focused checks
+
+Root independently cleared the six-line production tuple addition before the
+checks below. The frozen source/test commit is
+`966fa89c69622c053913c4930d4665717f28ce9e`, tree
+`18e3ea2ed62c4bb583d3b3aab5ea975ab82bec15`. Only evidence documentation was added
+after those checks; updater and test bytes remain unchanged.
+
+The private installed Python 3.12 updater matched that frozen source byte for
+byte. The shared wrapper ran:
+
+```sh
+PIP_NO_INDEX=1 PIP_FIND_LINKS=/tmp/jittersim-fixture-build-wheels \
+  /private/tmp/claude-501/jittersim-heavy.sh rerun --python 3.12 --no-advisory \
+  --results-dir test-results/exact-updater-trust-bridge/native --echo \
+  tests/unit/test_exact_updater_trust_bridge.py tests/unit/test_update_panic_source.py
+```
+
+Result: **17 passed**, zero failures/errors/skips: five unique bridge cases and
+12 existing before-stop/refusal/after-stop preservation cases. This run's native
+launcher was PID 19099; it exited with status 0. Local summary and XML are under
+`test-results/exact-updater-trust-bridge/native/local-ci-20261025-105016-rerun`.
+Gating lint (`--no-advisory`) passed separately, and `git diff --check` passed.
+The prior provisional proof and existing 12-test receipts are not relabelled as
+this exact bridge's execution.
+
+The real source admission proof ran without modifying either approval list:
+
+```sh
+.venv-local-ci-3.12/bin/python docs/exact-updater-trust-bridge-proof.py \
+  b061d2d84439bf906f1da8ca9ae306cfa0b27f52 \
+  966fa89c69622c053913c4930d4665717f28ce9e \
+  d605cf19aaf387260cf09426642d463058dab056
+```
+
+The [exact proof result](exact-updater-trust-bridge-proof-2026-10-25.json) records
+all three refs, three observed bundles and both executing updater digests.
+The actual installed-source manager from `2b101abd` has the same updater digest
+as `b061d2d8` (`21c57752dbe2d4512bfbffb9daee1d3d32c589d84b8cece8d62ab43053d1f129`).
+The bridge updater digest is
+`e0cb9bc8cc5629bb5516058dd190759988a883d09751bea69fc70af68b6a84da`.
+The old manager admitted the old-consumer bridge and refused the final bundle;
+the real bridge manager admitted old, bridge and final. Established clear and
+latched guard bytes stayed unchanged through inspection/provision. The bridge's
+actual three pinned files were checked again against the baseline after execution.
+
+These are bounded offline source/intent checks, not a signed update installation,
+physical acceptance or full test matrix. No version/order reservation, signature,
+package, Pi/router, service, network or remote action was performed. Independent
+full review remains a publication gate owned by the coordinator.
