@@ -473,8 +473,13 @@ def test_service_and_timed_fallbacks_are_skipped_without_losing_global_rules(con
         assert plan_from_payload(payload) == plan
         script = render_command_plan(plan=plan, topology=Topology("eth0", "wlan0"))[0].stdin
         assert (
-            script.index("block global website")
-            < script.index("unaffected by profiles")
+            (
+                plan.global_allowed_addresses is None
+                or script.index("enforce global website allowlist")
+                < script.index("unaffected by profiles")
+            )
+            and script.index("unaffected by profiles")
+            < script.index("block global website")
             < script.index("usage-device bob")
         )
         assert "ether daddr { " + ALICE + " } meta mark set 0 return" in script
