@@ -389,14 +389,42 @@ def test_invalid_sample_time_clears_the_baseline_until_a_new_valid_pair(invalid)
     assert sample["time"] == 8000
 
 
-def test_counter_reset_still_restarts_with_server_timestamps():
+def test_counter_reset_keeps_history_and_marks_the_unknown_interval():
     result = polled_frames([
         counter_frame(0, 100, 10_000_000), counter_frame(2000, 102, 12_000_000),
         counter_frame(4000, 104, 0), counter_frame(6000, 106, 2_000_000),
     ])
-    sample, = result["samples"]
-    assert sample["upload"] == 8
-    assert sample["time"] == 6000
+    assert [sample["upload"] for sample in result["samples"]] == [8, None, 8]
+    assert [sample["time"] for sample in result["samples"]] == [2000, 4000, 6000]
+    assert result["samples"][1]["download"] is None
+
+
+@pytest.mark.parametrize("field", ["upload_packets", "download_packets"])
+def test_packet_counter_restart_does_not_discard_valid_byte_rates(field):
+    frames = [counter_frame(0, 100), counter_frame(2000, 102), counter_frame(4000, 104)]
+    frames[-1]["devices"]["phone"][field] = 0
+    result = polled_frames(frames)
+    assert [sample["upload"] for sample in result["samples"]] == [8, 8]
+    assert [sample["download"] for sample in result["samples"]] == [8, 8]
+    assert "earlier history is kept" in result["status"]
+
+
+def test_only_the_restarted_byte_direction_is_unavailable():
+    frames = [counter_frame(0, 100), counter_frame(2000, 102), counter_frame(4000, 104)]
+    frames[-1]["devices"]["phone"]["upload_bytes"] = 0
+    result = polled_frames(frames)
+    assert [sample["upload"] for sample in result["samples"]] == [8, None]
+    assert [sample["download"] for sample in result["samples"]] == [8, 8]
+    assert "unavailable" in result["latest"]
+
+
+def test_repeated_restarts_still_obey_history_bounds_without_inventing_zero_rates():
+    result = polled_frames([counter_frame(i * 2000, 100 + i * 2, (i % 2) * 2_000_000)
+                            for i in range(36)])
+    assert len(result["samples"]) == 30
+    assert result["samples"][0]["time"] == 12000
+    assert all(sample["upload"] in (8, None) for sample in result["samples"])
+    assert sum(sample["upload"] is None for sample in result["samples"]) == 15
 
 
 def test_server_clock_does_not_change_the_thirty_sample_browser_retention_bound():
@@ -432,3 +460,17 @@ def test_pausing_again_while_waiting_for_a_workspace_flight_starts_no_new_reques
         + json.dumps(counter_frame(5000, 105)) + ");await resumed;await workspace;"
         "console.log(JSON.stringify({requests,baseline:previousTrafficSample,inFlight:trafficRequestInFlight}));})();"
     ) == {"requests": 1, "baseline": None, "inFlight": False}
+
+
+def test_unavailable_interval_is_explicit_in_the_sample_table():
+    result = run_chart(
+        DOM + "const TRAFFIC_MAX_POINTS=30;"
+        "const trafficSamples=[{recordedAt:100000,intervalSeconds:2,upload:null,download:8}];"
+        "updateTrafficText();console.log(JSON.stringify({"
+        "upload:nodes['traffic-sample-rows'].children[0].children[1].textContent,"
+        "latest:nodes['traffic-latest-rates'].textContent}));"
+    )
+    assert result["upload"] == "unavailable"
+    assert result["latest"] == (
+        "Latest interval at the Pi: upload unavailable, download 8.00 Mbit/s."
+    )
