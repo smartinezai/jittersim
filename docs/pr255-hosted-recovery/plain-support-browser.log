@@ -1,0 +1,47 @@
+$ /private/tmp/js-pr255-recovery/.venv-local-ci-3.12/bin/python -m tests.browser.observation_confirmation
+# started 2026-10-25 14:28:33 +0100
+dashboard response status=409
+dashboard response status=409
+dashboard response status=409
+dashboard response status=409
+{
+  "result": "passed",
+  "checks": 34,
+  "evidence": [
+    "recurring capture 1440px: default OFF despite saved GETs, actual authenticated POST/body counts, immediate Start, completion+30s cadence, non-overlap, usable Stop during a delayed reply, no late completion, navigation/simulated visibility stop, same-token lock+recheck remains OFF, touch size and no horizontal overflow",
+    "recurring capture 375px: default OFF despite saved GETs, actual authenticated POST/body counts, immediate Start, completion+30s cadence, non-overlap, usable Stop during a delayed reply, no late completion, navigation/simulated visibility stop, same-token lock+recheck remains OFF, touch size and no horizontal overflow",
+    "resolver outcomes 1440px: independent lower-bound counts, unknown history, membership/query distinction, window/policy/health, epoch replacement, keyboard focus/collapse, unavailable telemetry, private clearing and late reply",
+    "resolver outcomes 375px: independent lower-bound counts, unknown history, membership/query distinction, window/policy/health, epoch replacement, keyboard focus/collapse, unavailable telemetry, private clearing and late reply",
+    "membership labels at 1920px: exact list membership, unchanged counts and actions",
+    "device groups at 1920px: keyboard collapse, focus and state after refresh, independent devices, 44px target, no overflow or writes",
+    "new names at 1920px: repeat/device-pair distinction, collapsed groups, poll and navigation persistence, failed scan retention, next-scan replacement, private lock clearing",
+    "membership labels at 390px: exact list membership, unchanged counts and actions",
+    "device groups at 390px: keyboard collapse, focus and state after refresh, independent devices, 44px target, no overflow or writes",
+    "new names at 390px: repeat/device-pair distinction, collapsed groups, poll and navigation persistence, failed scan retention, next-scan replacement, private lock clearing",
+    "single at 1920px: stale conflict preserves settings and updates the page cache without replay",
+    "single at 1920px: the next deliberate click asks and declining sends no request",
+    "single at 1920px: explicit confirmation permits the restrictive transition",
+    "single at 1920px: a current unrestricted profile requires confirmation before its first request",
+    "single at 1920px: an existing allow list remains usable without another question",
+    "single at 1920px: transport failure restores the action without retrying its request",
+    "group at 1920px: stale conflict preserves settings and updates the page cache without replay",
+    "group at 1920px: the next deliberate click asks and declining sends no request",
+    "group at 1920px: explicit confirmation permits the restrictive transition",
+    "group at 1920px: a current unrestricted profile requires confirmation before its first request",
+    "group at 1920px: an existing allow list remains usable without another question",
+    "group at 1920px: transport failure restores the action without retrying its request",
+    "single at 390px: stale conflict preserves settings and updates the page cache without replay",
+    "single at 390px: the next deliberate click asks and declining sends no request",
+    "single at 390px: explicit confirmation permits the restrictive transition",
+    "single at 390px: a current unrestricted profile requires confirmation before its first request",
+    "single at 390px: an existing allow list remains usable without another question",
+    "single at 390px: transport failure restores the action without retrying its request",
+    "group at 390px: stale conflict preserves settings and updates the page cache without replay",
+    "group at 390px: the next deliberate click asks and declining sends no request",
+    "group at 390px: explicit confirmation permits the restrictive transition",
+    "group at 390px: a current unrestricted profile requires confirmation before its first request",
+    "group at 390px: an existing allow list remains usable without another question",
+    "group at 390px: transport failure restores the action without retrying its request"
+  ]
+}
+# finished with status 0 after 26.3 seconds
