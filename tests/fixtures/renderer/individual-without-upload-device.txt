@@ -22,11 +22,11 @@ $ nft -f -  # replace project-owned traffic rules atomically
 | add rule inet jittersim output oifname "wlan0" meta mark and 0xff != 0 ct mark set meta mark and 0xff
 | add rule inet jittersim input iifname "wlan0" ether saddr { aa:bb:cc:dd:ee:02, aa:bb:cc:dd:ee:01 } drop comment "deny listed test client"
 | add rule inet jittersim forward iifname "wlan0" ether saddr { aa:bb:cc:dd:ee:02, aa:bb:cc:dd:ee:01 } drop comment "deny listed test client"
-| add rule inet jittersim forward iifname "wlan0" ip daddr { 203.0.113.7, 203.0.113.8 } drop comment "block global website destinations"
 | add rule inet jittersim forward iifname "wlan0" ip daddr != { 203.0.113.100, 203.0.113.101 } drop comment "enforce global website allowlist"
 | add rule inet jittersim input iifname "wlan0" ether saddr { 02:00:00:00:00:01, 02:00:00:00:00:02, 02:00:00:00:00:aa, 02:00:00:00:00:bb } meta mark set 0 return comment "unaffected by profiles"
 | add rule inet jittersim forward iifname "wlan0" ether saddr { 02:00:00:00:00:01, 02:00:00:00:00:02, 02:00:00:00:00:aa, 02:00:00:00:00:bb } meta mark set 0 return comment "unaffected by profiles"
 | add rule netdev jittersim_download download ether daddr { 02:00:00:00:00:01, 02:00:00:00:00:02, 02:00:00:00:00:aa, 02:00:00:00:00:bb } meta mark set 0 return comment "unaffected by profiles"
+| add rule inet jittersim forward iifname "wlan0" ip daddr { 203.0.113.7, 203.0.113.8 } drop comment "block global website destinations"
 | add rule inet jittersim forward iifname "wlan0" ip saddr 192.168.50.10 ip daddr != @svc_8 ip daddr != @svc_9 ip daddr != { 203.0.113.20, 203.0.113.21 } drop comment "enforce profile website allowlist"
 | add rule inet jittersim forward iifname "wlan0" ip saddr 192.168.50.10 ip daddr != @svc_8 ip daddr != @svc_9 ip daddr { 203.0.113.30 } drop comment "block progression website destinations"
 | add rule inet jittersim forward iifname "wlan0" ip saddr 192.168.50.11 ip daddr != @svc_8 ip daddr != @svc_9 drop comment "profile website allowlist has no resolved addresses"

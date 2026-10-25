@@ -38,6 +38,10 @@ ACCESS_RUNTIME = Path("/run/jittersim/access-policy.json")
 # publisher answers `<pi-name>.local` there and the access table must never
 # close it.
 DNS_PORT = 5335
+# At most 256 client views plus the protected default. Each uses UDP and TCP on
+# the existing resolver process; 5353 (mDNS) and 5354 (optional ads) stay separate.
+DNS_VIEW_PORT_FIRST = 5400
+DNS_VIEW_PORT_LAST = DNS_VIEW_PORT_FIRST + 256
 # Test clients keep reaching the dashboard sign-in whatever the MAC lists say. The
 # application checks the token and the saved device permission itself and a
 # blocked device must still be able to learn why. The experiment table has the
@@ -99,6 +103,19 @@ def _local_name_records(name: str) -> list:
     return records
 
 
+def _dns_views(plan):
+    views = {plan.blocked_domains() if plan.options.enabled else (): "everyone"}
+    if plan.options.enabled:
+        for client in plan.clients:
+            views.setdefault(plan.blocked_domains(client.id), f"group{len(views)}")
+        if plan.protected_mac_addresses:
+            views.setdefault(plan.blocked_domains(client_mac=plan.protected_mac_addresses[0]),
+                             f"group{len(views)}")
+    ports = {blocked: DNS_PORT if index == 0 else DNS_VIEW_PORT_FIRST + index - 1
+             for index, blocked in enumerate(views)}
+    return views, ports
+
+
 def render_dns(plan: AccessPlan, local_name: Optional[str] = None) -> str:
     """Use Unbound views to check each client's rules before answering from cache."""
     local = validate_local_name(local_name) if local_name else read_local_name()
@@ -134,11 +151,21 @@ def render_dns(plan: AccessPlan, local_name: Optional[str] = None) -> str:
         '  access-control-view: 192.168.50.0/24 "everyone"',
     ]
     lines += _local_name_records(local)
-    views = {plan.blocked_domains() if plan.options.enabled else (): "everyone"}
-    if plan.options.enabled:
+    views, ports = _dns_views(plan)
+    if plan.options.enabled and plan.protected_mac_addresses:
+        # Source ACLs override interface-view. Select every view by listener in
+        # this mode; nft chooses it using the client's MAC and (for site rules) IP.
+        lines = [line for line in lines if not line.startswith("  access-control")]
+        lines += ["  access-control: 127.0.0.1/32 allow"]
+        for blocked, name in views.items():
+            listener = f"192.168.50.1@{ports[blocked]}"
+            if ports[blocked] != DNS_PORT:
+                lines.append(f"  interface: {listener}")
+            lines += [f"  interface-action: {listener} allow",
+                      f'  interface-view: {listener} "{name}"']
+    elif plan.options.enabled:
         for client in plan.clients:
-            blocked = plan.blocked_domains(client.id)
-            name = views.setdefault(blocked, f"group{len(views)}")
+            name = views[plan.blocked_domains(client.id)]
             if name != "everyone":
                 lines.append(f'  access-control-view: {client.address}/32 "{name}"')
     # The existing shared-network DNS service retains DHCP names and upstream
@@ -184,6 +211,15 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
     lines.append(_resolver_privacy_rule(topology))
     if not plan.options.enabled:
         return "\n".join(lines) + "\n"
+    if plan.protected_mac_addresses:
+        ports = f"{{ {DNS_PORT}, {DNS_VIEW_PORT_FIRST}-{DNS_VIEW_PORT_LAST} }}"
+        lines += [
+            f'add rule inet {table} input iifname "{interface}" ip saddr != {TEST_NETWORK} '
+            f'meta l4proto {{ tcp, udp }} th dport {ports} drop',
+            f'add rule inet {table} input iifname "{interface}" '
+            f'meta l4proto {{ tcp, udp }} th dport {ports} '
+            'ct original proto-dst != 53 drop',
+        ]
     # Before every drop below. Replies leave through the output hook and the
     # egress chain so they carry the mark that the experiment table uses.
     lines.append(
@@ -194,6 +230,8 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
         f'add rule inet {table} input iifname "{interface}" ip daddr 192.168.50.1 '
         'tcp dport 8443 accept comment "allow verified homepage policy reads"'
     )
+    dns_ports = (f"{{ {DNS_PORT}, {DNS_VIEW_PORT_FIRST}-{DNS_VIEW_PORT_LAST} }}"
+                 if plan.protected_mac_addresses else str(DNS_PORT))
     if plan.options.dns_failure_percent:
         # nftables' random generator returns values from 0 to 99. At 100%,
         # reject directly instead of comparing against an invalid value.
@@ -206,14 +244,14 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
         # DNS redirected from test Wi-Fi, before it reaches the filtered resolver.
         lines.append(
             f'add rule inet {table} input iifname "{interface}" '
-            f"ip saddr {TEST_NETWORK} udp dport {DNS_PORT} {chance}"
+            f"ip saddr {TEST_NETWORK} udp dport {dns_ports} {chance}"
             "counter reject with icmpx type port-unreachable"
         )
         lines.append(
             f'add rule inet {table} input iifname "{interface}" '
             # Decide once per TCP connection. A later segment is part of the
             # same request and must not reset it part-way.
-            f"ip saddr {TEST_NETWORK} tcp dport {DNS_PORT} ct state new {chance}"
+            f"ip saddr {TEST_NETWORK} tcp dport {dns_ports} ct state new {chance}"
             "counter reject with tcp reset"
         )
         # Optional ad filtering must preserve the household DNS failure choice.
@@ -288,6 +326,25 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
                 lines.append(
                     prefix + f"ip saddr {client.address} ether saddr != {client.mac} counter drop"
                 )
+        if plan.protected_mac_addresses:
+            _, ports = _dns_views(plan)
+            selectors = []
+            for client in plan.clients:
+                if client.mac in plan.protected_mac_addresses:
+                    selectors.append((f"ether saddr {client.mac} ip saddr {client.address} ",
+                                      ports[plan.blocked_domains(client.id)]))
+            protected = "{ " + ", ".join(plan.protected_mac_addresses) + " }"
+            selectors.append((f"ether saddr {protected} ", ports[plan.blocked_domains(
+                client_mac=plan.protected_mac_addresses[0])]))
+            for client in plan.clients:
+                if client.mac not in plan.protected_mac_addresses:
+                    mac_match = f"ether saddr {client.mac} " if client.mac else ""
+                    selectors.append((mac_match + f"ip saddr {client.address} ",
+                                      ports[plan.blocked_domains(client.id)]))
+            for selector, port in selectors:
+                for protocol in ("udp", "tcp"):
+                    lines.append(f'add rule inet {table} dns iifname "{interface}" '
+                                 f'{selector}{protocol} dport 53 redirect to :{port}')
         for protocol in ("udp", "tcp"):
             lines.append(
                 f'add rule inet {table} dns iifname "{interface}" '
@@ -309,7 +366,7 @@ def _resolver_privacy_rule(topology: Topology) -> str:
     # answer on it while a release waits for old DNS mappings to clear.
     return (
         f'add rule inet jittersim_access input iifname != "{topology.test_interface}" iifname != "lo" '
-        f"meta l4proto {{ tcp, udp }} th dport {DNS_PORT} drop"
+        f"meta l4proto {{ tcp, udp }} th dport {{ {DNS_PORT}, {DNS_VIEW_PORT_FIRST}-{DNS_VIEW_PORT_LAST} }} drop"
     )
 
 

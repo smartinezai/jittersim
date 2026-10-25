@@ -23,10 +23,10 @@ $ nft -f -  # replace project-owned traffic rules atomically
 | add rule inet jittersim output oifname "wlan0" meta mark and 0xff != 0 ct mark set meta mark and 0xff
 | add rule inet jittersim input iifname "wlan0" ether saddr != { aa:bb:cc:dd:ee:01 } drop comment "allow only listed test clients"
 | add rule inet jittersim forward iifname "wlan0" ether saddr != { aa:bb:cc:dd:ee:01 } drop comment "allow only listed test clients"
-| add rule inet jittersim forward iifname "wlan0" ip daddr { 203.0.113.8 } drop comment "block global website destinations"
 | add rule inet jittersim input iifname "wlan0" ether saddr { 02:00:00:00:00:aa, 02:00:00:00:00:bb } meta mark set 0 return comment "unaffected by profiles"
 | add rule inet jittersim forward iifname "wlan0" ether saddr { 02:00:00:00:00:aa, 02:00:00:00:00:bb } meta mark set 0 return comment "unaffected by profiles"
 | add rule netdev jittersim_download download ether daddr { 02:00:00:00:00:aa, 02:00:00:00:00:bb } meta mark set 0 return comment "unaffected by profiles"
+| add rule inet jittersim forward iifname "wlan0" ip daddr { 203.0.113.8 } drop comment "block global website destinations"
 | add rule inet jittersim forward iifname "wlan0" oifname "eth0" ip saddr != { 192.168.50.11, 192.168.50.12 } ip daddr != @svc_2 ip daddr != @svc_3 ip daddr != { 203.0.113.9, 203.0.113.3 } drop comment "general profile website allowlist"
 | add rule inet jittersim forward oifname "wlan0" ip daddr != { 192.168.50.11, 192.168.50.12 } meta mark set 1073741824 comment "identify forwarded test downloads"
 | add rule inet jittersim forward oifname "wlan0" meta nfproto ipv6 meta mark set 1073741824 comment "identify forwarded IPv6 test downloads"
